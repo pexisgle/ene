@@ -121,21 +121,6 @@ fn seed_condition(store: &Store, sweep: u64, sources: &[RawId]) {
     }
 }
 
-fn table_exists(store: &Store, table: &str) -> bool {
-    let guard = match store.conn.lock() {
-        Ok(locked) => locked,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    guard
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            params![table],
-            |row| row.get::<_, i64>(0),
-        )
-        .expect("the schema probe must read")
-        > 0
-}
-
 fn raw_execute(store: &Store, sql: &str, params: impl rusqlite::Params) {
     let guard = match store.conn.lock() {
         Ok(locked) => locked,
@@ -163,86 +148,6 @@ async fn seed_delegated_task(store: &Store) -> (TaskRef, DelegationId, RawId) {
         .unwrap();
     assert!(matches!(outcome, DelegationOutcome::Delegated(_)));
     (created, delegation, purpose_source)
-}
-
-#[tokio::test]
-async fn authoritative_empty_store_allows_the_claim_and_records_ordered_data_use() {
-    let store = open_memory().await.unwrap();
-    seed_dialogue_consent(&store).await;
-    let (created, delegation, purpose_source) = seed_delegated_task(&store).await;
-    assert!(
-        table_exists(&store, "erasure_condition")
-            && table_exists(&store, "erasure_condition_source"),
-        "the canonical condition store exists in the fresh schema"
-    );
-    assert_eq!(
-        task_table_count(&store, "erasure_condition"),
-        0,
-        "the authoritative active set is empty by reading the store, not by a sentinel"
-    );
-    assert_eq!(task_table_count(&store, "erasure_condition_source"), 0);
-
-    let second = RawId::new();
-    let data_use = vec![purpose_source, second, purpose_source];
-    let ticket = InferenceTicketId(RawId::new());
-    assert_eq!(
-        store
-            .begin_inference_attempt(task_agent_claim(
-                ticket,
-                1,
-                task_agent_premise(delegation, created, data_use.clone()),
-            ))
-            .await,
-        Ok(AttemptBeginOutcome::Started),
-        "an authoritative empty condition set admits the send"
-    );
-    let record = store
-        .load_inference_attempt(ticket)
-        .await
-        .unwrap()
-        .expect("the claimed attempt must read");
-    assert_eq!(
-        record
-            .task_agent
-            .expect("the task agent correlation")
-            .data_use,
-        data_use,
-        "order and duplicates survive the durable round trip"
-    );
-    assert_eq!(
-        task_table_count(&store, "inference_attempt_data_use"),
-        3,
-        "every logical-input entry keeps its own ordinal row"
-    );
-}
-
-#[tokio::test]
-async fn covering_condition_holds_the_send_without_an_attempt_row_or_child_rows() {
-    let store = open_memory().await.unwrap();
-    seed_dialogue_consent(&store).await;
-    let (created, delegation, purpose_source) = seed_delegated_task(&store).await;
-    // A condition committed before the claim covers the purpose source.
-    seed_condition(&store, 1, &[purpose_source]);
-
-    let ticket = InferenceTicketId(RawId::new());
-    assert_eq!(
-        store
-            .begin_inference_attempt(task_agent_claim(
-                ticket,
-                1,
-                task_agent_premise(delegation, created, vec![purpose_source]),
-            ))
-            .await,
-        Ok(AttemptBeginOutcome::DataUseHeld),
-        "a covered source is a data-use hold, not a stale or technical outcome"
-    );
-    assert_eq!(
-        task_table_count(&store, "inference_attempt"),
-        0,
-        "a held send starts no attempt"
-    );
-    assert_eq!(task_table_count(&store, "inference_attempt_data_use"), 0);
-    assert_eq!(store.load_inference_attempt(ticket).await, Ok(None));
 }
 
 #[tokio::test]
@@ -434,9 +339,15 @@ async fn condition_and_data_use_survive_reopen() {
         "the ordered data_use survives restart"
     );
     assert_eq!(
+        task_table_count(&reopened, "inference_attempt_data_use"),
+        3,
+        "every logical-input entry keeps its own ordinal row"
+    );
+    let held_ticket = InferenceTicketId(RawId::new());
+    assert_eq!(
         reopened
             .begin_inference_attempt(task_agent_claim(
-                InferenceTicketId(RawId::new()),
+                held_ticket,
                 1,
                 task_agent_premise(delegation, created, vec![condition_source]),
             ))
@@ -444,6 +355,7 @@ async fn condition_and_data_use_survive_reopen() {
         Ok(AttemptBeginOutcome::DataUseHeld),
         "the canonical current-condition state survives restart"
     );
+    assert_eq!(reopened.load_inference_attempt(held_ticket).await, Ok(None));
     assert_eq!(
         task_table_count(&reopened, "erasure_condition_source"),
         1,

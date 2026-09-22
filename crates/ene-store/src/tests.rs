@@ -3,8 +3,7 @@ mod publication;
 use ene_companion::{
     ActivityId, ActivityRepository as _, AppendHistoryCommand, CompanionId, CompanionLifecycle,
     CompanionRepository, CompanionTechnicalError, HistoryAppendOutcome, HistoryRepository,
-    HistoryRole, PresentationMark, RecordResumeActivityCommand, ReportStatus,
-    ReportStatusTransition, ResumeActivityOutcome, UndeliveredRepository,
+    HistoryRole, RecordResumeActivityCommand, ResumeActivityOutcome, UndeliveredRepository,
 };
 use ene_credential::{
     CredentialApprovalRepository, CredentialIntentRepository as _, CredentialRef,
@@ -193,34 +192,6 @@ async fn reopen_is_idempotent_and_seeds_running_companion() {
 }
 
 #[tokio::test]
-async fn append_message_commits_and_timeline_reads_back() {
-    let store = open_memory().await.unwrap();
-    let (companion, generation) = running_companion(&store).await.unwrap();
-    let appended = store
-        .append_message(history_command(companion, generation, "hello history"))
-        .await;
-    let outcome = appended.unwrap();
-    assert!(
-        matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
-        "happy path must commit"
-    );
-    let loaded = store.load_timeline(companion, None, None, 10).await;
-    let timeline = loaded.unwrap();
-    assert_eq!(timeline.len(), 1, "one item must read back");
-    assert_eq!(timeline[0].text, "hello history");
-    assert_eq!(timeline[0].lang, "en");
-    assert_eq!(timeline[0].presence_generation, generation);
-    let bounded = store
-        .load_timeline(companion, Some(fixture_clock()), None, 10)
-        .await;
-    let kept = bounded.unwrap();
-    assert_eq!(kept.len(), 1, "item at the bound must be kept");
-    let capped = store.load_timeline(companion, None, None, 0).await;
-    let none = capped.unwrap();
-    assert!(none.is_empty(), "zero limit must return nothing");
-}
-
-#[tokio::test]
 async fn append_with_stale_generation_is_rejected() {
     let store = open_memory().await.unwrap();
     let (companion, generation) = running_companion(&store).await.unwrap();
@@ -346,222 +317,6 @@ async fn supersession_probe_is_index_backed_not_a_scan() {
             .any(|step| step.contains("idx_history_message_companion_role")),
         "the probe must use the companion-role index, got: {plan:?}"
     );
-}
-
-#[tokio::test]
-async fn undelivered_register_mark_and_stale_mark() {
-    let store = open_memory().await.unwrap();
-    let (companion, generation) = running_companion(&store).await.unwrap();
-    let appended = store
-        .append_reply_with_undelivered(
-            history_command(companion, generation, "reply body"),
-            true,
-            None,
-        )
-        .await;
-    let (outcome, registered) = appended.unwrap();
-    assert!(
-        matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
-        "reply must commit"
-    );
-    let entry = registered.expect("registration must return the entry");
-    assert_eq!(entry.status, ReportStatus::Pending);
-    assert!(entry.round.is_some(), "conversation sources carry a round");
-    assert!(entry.presence_generation.is_some());
-    let round = entry.round.unwrap();
-
-    let listed = store
-        .list_unpresented(companion, None, ene_companion::UNDELIVERED_PAGE_MAX)
-        .await
-        .unwrap();
-    assert_eq!(listed.entries.len(), 1, "one entry must be unpresented");
-    assert_eq!(listed.entries[0].id, entry.id);
-    assert_eq!(listed.next, None, "a short page drains the pass");
-
-    // Presentation start: Pending -> PresentationUnknown, still re-listed.
-    let started = store
-        .compare_and_mark_reported(
-            entry.id,
-            ReportStatus::Pending,
-            PresentationMark {
-                round,
-                presented: false,
-            },
-        )
-        .await;
-    assert_eq!(
-        started,
-        Ok(ReportStatusTransition::MarkedPresentationUnknown)
-    );
-    let relisted = store
-        .list_unpresented(companion, None, ene_companion::UNDELIVERED_PAGE_MAX)
-        .await
-        .unwrap();
-    assert_eq!(relisted.entries.len(), 1, "Unknown must be re-listed");
-    assert_eq!(
-        relisted.entries[0].status,
-        ReportStatus::PresentationUnknown
-    );
-
-    // A current not-presented receipt returns the row to Pending.
-    let failed = store
-        .compare_and_mark_reported(
-            entry.id,
-            ReportStatus::PresentationUnknown,
-            PresentationMark {
-                round,
-                presented: false,
-            },
-        )
-        .await;
-    assert_eq!(failed, Ok(ReportStatusTransition::FailedToPending));
-
-    // A mismatched expected status on the pending row is stale.
-    let stale = store
-        .compare_and_mark_reported(
-            entry.id,
-            ReportStatus::PresentationUnknown,
-            PresentationMark {
-                round,
-                presented: true,
-            },
-        )
-        .await;
-    assert_eq!(
-        stale,
-        Ok(ReportStatusTransition::StaleSource),
-        "a mismatched expected status must be stale"
-    );
-
-    // Confirmed presentation is absorbing.
-    let presented = store
-        .compare_and_mark_reported(
-            entry.id,
-            ReportStatus::Pending,
-            PresentationMark {
-                round,
-                presented: true,
-            },
-        )
-        .await;
-    assert_eq!(presented, Ok(ReportStatusTransition::PendingToPresented));
-    let duplicate = store
-        .compare_and_mark_reported(
-            entry.id,
-            ReportStatus::PresentationUnknown,
-            PresentationMark {
-                round,
-                presented: true,
-            },
-        )
-        .await;
-    assert_eq!(
-        duplicate,
-        Ok(ReportStatusTransition::AlreadyPresented),
-        "duplicate ACK writes nothing"
-    );
-    let downgrade = store
-        .compare_and_mark_reported(
-            entry.id,
-            ReportStatus::PresentationUnknown,
-            PresentationMark {
-                round,
-                presented: false,
-            },
-        )
-        .await;
-    assert_eq!(
-        downgrade,
-        Ok(ReportStatusTransition::AlreadyPresented),
-        "presented absorbs a later not-presented receipt"
-    );
-    let drained = store
-        .list_unpresented(companion, None, ene_companion::UNDELIVERED_PAGE_MAX)
-        .await
-        .unwrap();
-    assert!(
-        drained.entries.is_empty(),
-        "presented entries leave the unpresented list"
-    );
-
-    let stale = store
-        .compare_and_mark_reported(
-            entry.id,
-            ReportStatus::Pending,
-            PresentationMark {
-                round,
-                presented: true,
-            },
-        )
-        .await;
-    assert_eq!(
-        stale,
-        Ok(ReportStatusTransition::AlreadyPresented),
-        "a presented row absorbs every later mark, stale premise included"
-    );
-}
-
-#[tokio::test]
-async fn presence_begin_mismatch_is_rejected_as_stale() {
-    let store = open_memory().await.unwrap();
-    let (companion, generation) = running_companion(&store).await.unwrap();
-    let raw = companion.as_raw();
-    let check = PresenceCheckRef {
-        expected_generation: PresenceGeneration::from_u64(generation.as_u64() + 1),
-        expected_state: PresenceState::NoActive,
-        expected_active: None,
-    };
-    let rejected = store
-        .compare_and_begin_transition(
-            raw,
-            check,
-            Some(ClientId::generate()),
-            ThinMoveReason::InitialAttach,
-        )
-        .await;
-    let decision = rejected.unwrap();
-    assert!(
-        matches!(decision, MoveDecision::RejectedAsStalePresence { .. }),
-        "generation mismatch must reject as stale"
-    );
-    if let MoveDecision::RejectedAsStalePresence { current } = decision {
-        assert_eq!(current.generation, generation);
-        assert_eq!(current.state, PresenceState::NoActive);
-    } else {
-        return;
-    }
-    let client = ClientId::generate();
-    let begin = store
-        .compare_and_begin_transition(
-            raw,
-            PresenceCheckRef {
-                expected_generation: generation,
-                expected_state: PresenceState::NoActive,
-                expected_active: None,
-            },
-            Some(client),
-            ThinMoveReason::InitialAttach,
-        )
-        .await;
-    let MoveDecision::TransitioningToNew { generation: next } = begin.unwrap() else {
-        panic!("unexpected variant");
-    };
-    let confirmed = store
-        .confirm_transition(
-            raw,
-            next,
-            LiveReachabilityRef {
-                client,
-                connection_live: true,
-            },
-        )
-        .await;
-    let ConfirmTransitionOutcome::Confirmed(fact) = confirmed.unwrap() else {
-        panic!("unexpected variant");
-    };
-    assert_eq!(fact.state, PresenceState::Present);
-    assert_eq!(fact.active_client, Some(client));
-    assert_eq!(fact.generation, next);
 }
 
 /// Commits one consent row through the intent-atomic write path, minting a
@@ -1788,72 +1543,9 @@ fn task_premise(workspace: Option<WorkspaceAssociationPremise>) -> TaskCreationP
     }
 }
 
-#[tokio::test]
-async fn task_creation_commits_the_au2_unit_and_loads() {
-    let store = open_memory().await.unwrap();
-    let workspace = task_workspace("/srv/workspace/ene", Some("/srv/workspace/ene/out"));
-    let premise = task_premise(Some(workspace.clone()));
-    let created = store
-        .create_task(premise.clone())
-        .await
-        .expect("creation must commit");
-    assert_eq!(created.task, premise.task);
-    assert_eq!(created.revision, TaskRevision::initial());
+// --- Task: AU4 helpers ---
 
-    let record = store
-        .load_task(created.task)
-        .await
-        .unwrap()
-        .expect("the created task must load");
-    assert_eq!(record.task.reference, created);
-    assert_eq!(
-        record.task.purpose,
-        TaskPurposeRef {
-            task: premise.task,
-            adopted_revision: TaskRevision::initial(),
-        }
-    );
-    assert_eq!(record.task.assignee, premise.assignee);
-    assert_eq!(record.revision.reference, created);
-    assert_eq!(record.revision.purpose, record.task.purpose);
-    assert_eq!(record.revision.purpose_text, premise.purpose);
-    assert_eq!(record.revision.assignee, premise.assignee);
-    assert_eq!(
-        record.context.len(),
-        1,
-        "AU2 records exactly the adopted purpose entry"
-    );
-    let entry = &record.context[0];
-    assert_eq!(entry.entry, premise.entry);
-    assert_eq!(entry.reference, created);
-    assert_eq!(
-        entry.item,
-        TaskContextItem::AdoptedPurpose(record.task.purpose)
-    );
-    assert_eq!(entry.origin, premise.origin);
-    assert_eq!(
-        entry.acquired_at.to_rfc3339(),
-        premise.acquired_at.to_rfc3339(),
-        "the stored acquisition time keeps its creation rendering"
-    );
-    let association = record
-        .workspace
-        .expect("the confirmed association must load");
-    assert_eq!(association.assoc, workspace.assoc);
-    assert_eq!(association.task, premise.task);
-    assert_eq!(association.folder, workspace.need.folder);
-    assert_eq!(association.save_target, workspace.need.save_target);
-
-    assert_eq!(
-        store.load_task(TaskId::generate()).await,
-        Ok(None),
-        "a missing task is never fabricated"
-    );
-}
-
-// --- Task: AU4 steering / CAS forward ---
-
-fn task_purpose_adoption(text: &str) -> TaskPurposeAdoptionPremise {
+pub(super) fn task_purpose_adoption(text: &str) -> TaskPurposeAdoptionPremise {
     TaskPurposeAdoptionPremise {
         purpose: TaskPurpose {
             text: text.to_owned(),
@@ -1866,7 +1558,6 @@ fn task_purpose_adoption(text: &str) -> TaskPurposeAdoptionPremise {
     }
 }
 
-/// One adopted-instruction premise sourced from the given utterance record.
 fn task_instruction_adoption(source: RawId) -> TaskInstructionAdoptionPremise {
     TaskInstructionAdoptionPremise {
         entry: TaskContextEntryId::generate(),
@@ -1878,22 +1569,6 @@ fn task_instruction_adoption(source: RawId) -> TaskInstructionAdoptionPremise {
     }
 }
 
-/// The D1 current row as stored: `(revision, adopted, text, assignee)`.
-fn task_current_row(store: &Store, task: TaskId) -> (i64, i64, String, String) {
-    let guard = match store.conn.lock() {
-        Ok(locked) => locked,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    guard
-        .query_row(
-            "SELECT revision, purpose_adopted_revision, purpose_text, assignee FROM task WHERE task_id = ?1",
-            params![crate::codec::encode_id(task.as_raw())],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .expect("the current row must read")
-}
-
-/// Every stored revision snapshot: `(revision, adopted, text)` by revision.
 fn task_revision_rows(store: &Store, task: TaskId) -> Vec<(i64, i64, String)> {
     let guard = match store.conn.lock() {
         Ok(locked) => locked,
@@ -1913,12 +1588,8 @@ fn task_revision_rows(store: &Store, task: TaskId) -> Vec<(i64, i64, String)> {
         .expect("the revision probe must read")
 }
 
-/// One stored context entry:
-/// `(revision, adopted, entry, kind, origin, source, at)`. The adopted
-/// revision is `None` for entries whose kind carries no purpose payload.
 type ContextRow = (i64, Option<i64>, String, String, String, String, String);
 
-/// Every stored context entry by row order.
 fn task_context_rows(store: &Store, task: TaskId) -> Vec<ContextRow> {
     let guard = match store.conn.lock() {
         Ok(locked) => locked,
@@ -1944,107 +1615,6 @@ fn task_context_rows(store: &Store, task: TaskId) -> Vec<ContextRow> {
         .expect("the context probe must query")
         .collect::<Result<Vec<_>, _>>()
         .expect("the context probe must read")
-}
-
-#[tokio::test]
-async fn task_steering_with_a_new_purpose_adopts_it_at_the_new_revision() {
-    let store = open_memory().await.unwrap();
-    let workspace = task_workspace("/srv/workspace/au4", Some("/srv/workspace/au4/out"));
-    let creation = task_premise(Some(workspace.clone()));
-    let created = store.create_task(creation.clone()).await.unwrap();
-    let adoption = task_purpose_adoption("revised AU4 purpose");
-    let adopted_entry = TaskContextEntryId::generate();
-    let outcome = store
-        .forward_steering(TaskCommitPremise {
-            expected: created,
-            new_purpose: Some(adoption.clone()),
-            adopted_purpose_entry: adopted_entry,
-            adopted_instruction: None,
-        })
-        .await
-        .expect("the steering commit must run");
-    let TaskCommitOutcome::CommittedAs(committed) = outcome else {
-        panic!("expected CommittedAs, got {outcome:?}");
-    };
-    assert_eq!(committed.task, created.task);
-    assert_eq!(committed.revision, TaskRevision::from_u64(2));
-
-    let record = store.load_task(created.task).await.unwrap().unwrap();
-    assert_eq!(record.task.reference, committed, "D1 advanced by one");
-    assert_eq!(
-        record.task.purpose,
-        TaskPurposeRef {
-            task: created.task,
-            adopted_revision: committed.revision,
-        },
-        "a purpose change adopts at the new revision"
-    );
-    assert_eq!(record.revision.reference, committed);
-    assert_eq!(record.revision.purpose, record.task.purpose);
-    assert_eq!(record.revision.purpose_text, adoption.purpose);
-    assert_eq!(
-        record.revision.assignee, creation.assignee,
-        "steering carries the assignee unchanged"
-    );
-    assert_eq!(
-        record.context.len(),
-        1,
-        "the new revision records exactly its adopted purpose entry"
-    );
-    let entry = &record.context[0];
-    assert_eq!(
-        entry.entry, adopted_entry,
-        "the repository persists the caller-minted entry identity"
-    );
-    assert_eq!(entry.reference, committed);
-    assert_eq!(
-        entry.item,
-        TaskContextItem::AdoptedPurpose(record.task.purpose)
-    );
-    assert_eq!(entry.origin, adoption.origin);
-    assert_eq!(
-        entry.acquired_at.to_rfc3339(),
-        adoption.acquired_at.to_rfc3339()
-    );
-    let association = record
-        .workspace
-        .as_ref()
-        .expect("steering must keep the confirmed workspace association");
-    assert_eq!(association.assoc, workspace.assoc);
-    assert_eq!(association.task, created.task);
-    assert_eq!(association.folder, workspace.need.folder);
-    assert_eq!(association.save_target, workspace.need.save_target);
-
-    let current = task_current_row(&store, created.task);
-    assert_eq!(current.0, 2);
-    assert_eq!(current.1, 2);
-    assert_eq!(current.2, adoption.purpose.text);
-    assert_eq!(
-        current.3,
-        crate::codec::encode_id(creation.assignee.companion),
-        "the D1 assignee projection is untouched"
-    );
-    assert_eq!(
-        task_revision_rows(&store, created.task),
-        vec![
-            (1, 1, creation.purpose.text.clone()),
-            (2, 2, adoption.purpose.text.clone()),
-        ],
-        "the old snapshot is retained and the new one adopts the new purpose"
-    );
-    let contexts = task_context_rows(&store, created.task);
-    assert_eq!(contexts.len(), 2, "both revisions keep their context entry");
-    assert_eq!(contexts[0].0, 1);
-    assert_eq!(
-        contexts[0].2,
-        crate::codec::encode_id(creation.entry.as_raw()),
-        "the old entry keeps its row identity"
-    );
-    assert_eq!(contexts[1].0, 2);
-    assert_eq!(
-        contexts[1].2,
-        crate::codec::encode_id(adopted_entry.as_raw())
-    );
 }
 
 // --- Task: AU4 adopted instructions ---
