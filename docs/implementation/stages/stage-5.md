@@ -25,6 +25,8 @@ Client を閉じても Host-only Task を継続し、再接続先へ未伝達の
 
 前の gate が揃う前に後続の実行経路を enable しません。各行は必要に応じてさらに小さな stacked PR に分割します。
 
+以下の OS transport とその検証は Stage 5 完了時点の実装範囲です。通常 Client channel の現行設計は [IPC 第10節](../../design/concrete/host-client-ipc.md#10-transport) の WSS 統一に更新しました。置換実装と両 OS の回帰は [Stage 7 A2](stage-7.md#a2-通常-client-通信の-wss-統一未実装) で行い、Stage 5 の既存検証を WSS の検証済み証拠として扱いません。
+
 | 順 | 実装範囲と責務 | 完了条件 |
 |---|---|---|
 | A | `ene-core::conn/serve` と `ene-ctl::client` の connection phase、current install、terminal supersede、close admission。Client boot incarnation、descriptor と pairing identity の分離。OS transport と単一 Host lock | #1384/#1385/#1387/#1389 の回帰を接続入口で再現して通す。Linux socket と Windows named pipe が同じ認証/currentness を使う。startup 前の writer 排他、二つの Host、旧 socket の handshake 再入場拒否を検証する |

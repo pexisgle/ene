@@ -502,7 +502,7 @@ presence の begin は `(companion, state, active_client, generation)` を CAS �
 | Owner summon / Stop と restart recovery | generation CAS に従う。Stop の lifecycle が確定した後は recovery/summon を拒否。別 Client の summon が先なら元 Client の late auth は復旧しない |
 | DB 書込失敗・遷移途中の crash | 遷移が確定したとは返さない。残った InTransition では admission を拒否し、次の startup は NoActive へ置く |
 
-fallback 候補は current authenticated、SameMachine の OS peer 確認、必要な device 許可を満たす別 Client に限定します。複数なら `ClientId` のバイト列昇順で最初を選び、confirm でも再照合します。候補なし・確認不能なら NoActive とし、UI を起動しません。新しい優先端末設定や fallback manager は設けません。
+fallback 候補は current authenticated、[IPC §10.5](host-client-ipc.md#105-samemachine-の根拠) の `SameMachine` 検証、必要な device 許可を満たす別 Client に限定します。ローカル専用 listener と現在のローカルトークン・Host 起動世代の検証結果を connection に束縛し、IP や保存済みの通信種別で代用しません。複数なら `ClientId` のバイト列昇順で最初を選び、confirm でも同じ connection の現在性・有効性を再照合します。候補なし・確認不能なら NoActive とし、UI を起動しません。新しい優先端末設定や fallback manager は設けません。
 
 ### 10.5 未伝達 ACK は選択した事項だけを確定する
 

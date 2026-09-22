@@ -36,9 +36,9 @@
 
 以下の事項は実装の裁量（Design Freedom）として残し、本書では固定しません。
 
-- 具体的な暗号ライブラリ、鍵のフォーマット、鍵導出関数、証明書運用の詳細（満たすべきセキュリティ要件は第9節で固定）。
+- 具体的な暗号ライブラリ、鍵のフォーマット、鍵導出関数、証明書更新の実装詳細（満たすべき認証・接続保護の条件は第9・10節で固定）。
 - ハートビートの間隔、キープアライブやタイムアウトの秒数、再試行回数、スケジューリングや画面キャプチャのアルゴリズム、利用枠（費用）の算定式。
-- 具体的な TCP ポート番号、mDNS の有無、NAT 越え、リレーサーバーの運用（そもそも中央リレーは非目標であり導入しません）。
+- LAN / VPN 向けの具体的な TCP ポート番号。ローカルは `127.0.0.1` の動的ポートとし、自動探索・NAT 越え・外部リレーは導入しません（第10節）。
 - 音声コーデックや画面キャプチャ画像形式の最終選定（満たすべき制約条件のみ第13・14節で固定）。
 - Client 側の UI レイアウト、画面の文言、具体的なデータ保持期間、監査ログの出力形式。first-party の process 分割、要求 / 確認 channel の分離、Host-spawned GUI への seat 発行と直接確認は [First-party desktop](first-party-desktop.md) が固定する。toolkit / overlay backend / keyring crate は同文書第7節の provisional であり、probe 前に恒久 contract としない。
 
@@ -91,12 +91,11 @@ flowchart TB
     Pay["ドメインペイロード<br/>(型付けされた業務データ)"]
     Blob["バイナリアタッチメント<br/>(音声 / キャプチャ画像 / アセット分割データ)"]
   end
-  subgraph Transport["トランスポート層アダプター"]
-    Local["ローカルソケット<br/>(同一マシン内通信)"]
-    WS["WebSocket + TLS<br/>(LAN / VPN 経由のリモート通信)"]
+  subgraph Transport["通常 Client channel"]
+    WS["WSS + MessagePack<br/>(同一 PC / LAN / VPN 共通)"]
   end
   subgraph Host["Host コア (決定権威・マスターデータ保持者)"]
-    HTrans["トランスポート層アダプター<br/>(フレーム入出力・生存監視)"]
+    HTrans["WSS 入出力・TLS<br/>(接続受付・上限・生存監視)"]
     HAuth["接続認証<br/>(ペアリング・セッション管理)"]
     HMap["Host 側 IPC マッピング<br/>(通信 DTO ↔ ドメイン前提構造体)"]
     Dom["ドメイン担当クレート群<br/>(Companion / Task / Presence /<br/>Observer / Action / Preservation...)"]
@@ -112,6 +111,8 @@ flowchart TB
   HAuth <--> HMap
   HMap <--> Dom
 ```
+
+通常 Client channel の transport は WSS に統一します。Host-local control と GUI–Body 間の投影 IPC はこの図の対象外です。専用の確認・秘密入力経路を通常 Client channel に統合しません（第10.3節）。
 
 各層の責務と境界：
 
@@ -235,6 +236,9 @@ struct ObservedMarks {
 | **Protocol Buffers** | △（デコードしないと読めない） | ○（コード生成ツールが必要） | ◎（フィールド番号による互換性） | スキーマレジストリの運用やコード生成ツールの配布、可読ログのための追加機構が必要となり、単一ユーザーが管理する Ene のトポロジーには過剰です。「独自のバイナリプロトコルを作らない」という基本方針とも衝突します |
 
 **設計上の決定: MessagePack を標準の電文エンコーディング（canonical wire encoding）とし、論理データモデルは JSON 互換を保ちます。**
+
+通常 DTO の1電文を、1つの WebSocket binary message で運びます。独自の4バイト長さプレフィックスは付けません。バイナリアタッチメントも記述子と対応付けた1チャンクを1つの binary message で運び、既存の `StreamWireId`・連番・記述子との相関を保ちます。WebSocket の分割フレームは通信層が上限内で再構成し、業務電文の分割や再試行とは区別します（第10.2節）。純粋な MessagePack codec は DTO とともに `ene-api` に置きます（第25節）。
+
 すべての通信 DTO は、JSON としても自然に表現できるデータ構造（文字列、数値、真偽値、配列、マップのみで構成し、巨大なバイナリデータはアタッチメントとして分離）として定義し、実際の通信電文上は MessagePack で効率的にエンコードします。デバッグ表示、一般ログ、監査ログでは JSON 形式で出力します。また、音声フレームやキャプチャ画像、アセットのバイナリデータはペイロード内に base64 埋め込みするのではなく、バイナリアタッチメントフレームとして記述子 DTO と対応付けて送信します（第21節）。
 
 データ形式を選んだことだけで互換性が自動的に保証されるわけではありません。互換性は以下の規約によって厳格に維持します。
@@ -294,15 +298,19 @@ struct NegotiatedConnection {
 
 ### 9.1 概念の区別
 
-以下の3つの概念は明確に区別し、決して混同してはなりません。
+以下の認証材料は用途と寿命を区別します。TLS・ローカル接続の受付・端末認証・第一者管理画面の確認権限は、それぞれ別の境界です。
 
 | 概念 | 意味合い | 取り扱いルール |
 |---|---|---|
 | **Credential（登録済み認証秘密）** | LLM プロバイダーや MCP サーバーへ接続するための、ユーザーが登録した秘密情報（API キー等） | OS のセキュアストア等で完全に分離保管します。平文で通信電文に乗せてはならず、Client 端末へ渡してもいけません。Client 認証の材料として流用してはなりません |
 | **ペアリング情報 (Pairing material)** | 特定の Client 端末を Host が正式に認識するための接続用材料 | Host 側のマスターデータでもなければ、上記 Credential のキャッシュでもありません。Client 側で保持する場合は暗号化等で保護し、接続目的のみに限定します。デバイス失効の対象となります |
 | **セッション情報 (Session material)** | 確立された1回の通信セッションのための一時的な証明材料 | コネクションごとに発行され、切断時に破棄されます。古いセッション情報を使って新しいセッションを勝手に再開させてはなりません |
+| **Host TLS 鍵・信頼情報** | Client が接続先 Host の真正性を検証するための材料 | Host 秘密鍵は保護ストアに用途を分けて保存します。Client は信頼済みの公開鍵 pin で Host を検証します。端末の利用許可や最終確認を与える材料ではありません（第10.4節） |
+| **ローカル接続用トークン** | 同一 OS ユーザーのローカル Client を通常 listener に受け入れるための材料 | Host 起動ごとに更新し、保護された runtime ファイルで渡します。TLS の Host 検証後にのみ送信し、端末ペアリング・所有証明・第一者確認の代用にしません（第10.4・10.5節） |
 
 ### 9.2 pairing
+
+`PairingRequest` より前に、第10節の TLS・listener 受付条件を満たす必要があります。これは未ペアリング端末に業務操作を許可するものではありません。
 
 1. 初めて接続する Client 端末は、Host 側でオーナー（ユーザー）自身が明示的に確認・承認する「デバイスペアリング」が必須です（Remote Client のセキュリティ要件）。ペアリングの開始は Client からの `PairingRequest { device_descriptor }` によって行われ、Host PC 上の信頼された第一者管理画面におけるユーザーの最終確認待ち状態となります（§18）。ペアリング済みの別のリモート端末からの遠隔承認だけでは成立させてはなりません。また、初回ペアリング前の `PairingRequest` はデバイス ID が未発行であるため、エンベロープの送信者情報を `device_id: None`、自インカーネーション、`connection_id: None` とし、これ以外の通信で `device_id` が欠落しているものは一切受け付けません（§5 の規則）。
 2. ユーザーの確認・承認を経て、Host は新しいペアリング識別子と `DeviceWireId` を発行します。デバイス情報の非秘密な表示参照は PR Group G に、許可された機能の記録は Group F に、Host 側の所有証明検証材料・信頼範囲・失効状態は Group K のデバイス認証ストア（E）に安全に保存します。ペアリング情報は認証専用の電文フレームで Client へ手渡し、通常のメッセージペイロードには含めません。
@@ -325,7 +333,7 @@ connection は `Accepted → Paired → Challenged → Authenticated → Superse
 - AuthProof の検証後、Host は短い connection 所有区間で phase と device の有効性を再確認し、旧 current を Superseded にして新 current を設置します。`AuthResult::Accepted` はこの変更の後に送ります。応答が失われても旧 current へ戻しません。認証処理が同時ならこの設置順で最後の成功 connection が current になり、非 current の socket が AuthProof を再送して競争し直すことはできません。
 - replacement が同じ Client の `Present` 中に、current 不在区間なしで成立した場合、帰属先と PresenceGeneration は維持します。ただし旧 connection の Round、stream、presentation receipt、再試行 epoch は無効になり、新 connection は新しい Round だけを使います。旧 socket を持つことは新 connection の認証や提示の成功を意味しません。
 - close は connection identity を比較して current slot を除去します。superseded/unauthed connection の close は新 current を消しません。current の close 後に stale socket が残っても、presence fallback の条件は成立します。古い close 通知を非同期で処理する際の再比較は [CCT §10.4](concurrency-control.md#104-connection-の現在性と-presence-commit) に従います。
-- Stage 5 の local transport は EOF、read/write error、明示 DisconnectNotice を確定した切断とします。応答待ちの timeout だけで帰属を捨てません。可用性を確認できない間は Client-dependent admission を止めます。将来の remote heartbeat はこの判定へ証拠を供給するものであり、Stage 5 に新設しません。
+- WSS の Close、EOF、read/write error、明示 DisconnectNotice は確定した切断として共通の close admission に渡します。Ping / Pong の監視で疎通を確認できない間は Client-dependent admission を止め、定めた生存監視期限を過ぎた接続は閉じます。業務応答の timeout だけで帰属を捨てたり、作用を未実行とみなしたりしません（第10.2節）。
 - 新規 `PairingRequest` は Host の権限・制約 owner が不透明な pending identity（既存の pending device ID）を発行し、同じ connection・request_id・同一本文の再送には同じ pending を返し、対応は元 connection の終了まで保持します。異なる本文での request_id 再利用は拒否し、認証後の command epoch を使いません。承認は pending ID と元 connection を指定し、その行を CAS して Paired にします。Host restart / 元接続終了後の未承認 pending は認証に使えず、新接続は新しい要求を出します。pending の表示属性や画面上の行番号から承認先を逆引きしません。
 - device descriptor は表示属性です。既存ペアリングの再接続は保存済みの `DeviceWireId` から Host が device を解決して認証し、descriptor を identity lookup に使いません。同じ descriptor の新規要求にはそれぞれ別の pending request identity と Owner 確認を与えます（[#1389](https://github.com/pexisgle/ene/issues/1389)）。descriptor による接続 identity の取り違えを、Stage 5 の replacement として扱ってはなりません。
 
@@ -339,42 +347,54 @@ connection は `Accepted → Paired → Challenged → Authenticated → Superse
 
 ### 10.1 範囲の判断
 
-電文の意味（セマンティクス）と下位のトランスポート層を明確に分離します。エンベロープ、ペイロード、バイナリアタッチメントのエンコーディング方式、識別子・相関・バージョン・認証要件、およびドメインパターンの意味はトランスポート層によらず共通とします。通信方式による差異は、すべてアダプター境界の内側に閉じ込めます。
+通常の Host–Client 通信は、Windows / Linux、同一 PC / LAN / VPN のいずれも **WSS（WebSocket + TLS）＋ MessagePack** に統一します。エンベロープ、相関、認証、接続の置き換え、再接続、ストリーム処理を共通にし、接続先の発見と受付条件だけを listener の役割に応じて分けます。
 
-| トランスポート方式 | 主な用途 | 採用する通信技術 |
+| listener | 接続範囲 | 受付条件 |
 |---|---|---|
-| **同一マシン内通信 (Same-machine)** | Host と同じ PC 上で動作する Client | OS ローカルソケット（Linux: Unixドメインソケット、Windows: 名前付きパイプ＋OS ピア認証）。OS のユーザーアカウント権限による保護を前提とし、TLS は必須としません。フレームは長さプレフィックス（4バイト・ビッグエンディアン、上限値付き）で区切ります |
-| **LAN / リモート端末通信** | 別の PC や端末で動作する Client（同一 LAN または VPN 経由） | WebSocket（バイナリメッセージ）＋ TLS。外部のリレーサーバーやクラウドサービス、外部アカウントへの依存は一切排除します。1本の接続上で論理ストリームを多重化（ペイロードの `StreamWireId` で識別）します |
-| **将来の通信方式** | 将来的な拡張 | 新しいトランスポートアダプターを追加することで対応します。電文のセマンティクス、DTO 定義、バージョン管理、認証要件は一切変更しません |
+| **ローカル専用** | 既定で `127.0.0.1` の動的ポートに bind。外部 interface には公開しない | TLS による Host 検証と、現在のローカル接続用トークンを必須とする（第10.4節） |
+| **remote** | 明示設定された LAN / VPN 向けアドレスだけに公開 | 信頼済み Host 鍵による TLS 検証を必須とする。ローカル用トークンを配布・要求せず、常に `Remote` として扱う |
 
-現時点では QUIC 等の複雑なプロトコルは採用しません。現在のトポロジー（単一ユーザーが管理する単一 Host、少数の Client 端末、チケット制による低頻度な画面キャプチャ、WebSocket で十分なストリーム多重化）においては過剰設計（Over-engineering）となるためです。必要になった段階でアダプターとして素直に追加できる設計としています（第28節）。
-
-「Host PC 上で動いている Client であるか」の判定は、Host のトランスポートアダプターが接続経路および OS のピア認証情報から判定する `transport_class = SameMachine | Remote` に基づいて行います。Client 端末から送られてくるプラットフォーム情報や IP アドレスなどの自己申告を鵜呑みにして判定してはなりません。この情報は接続記録に保持され、実際の処理時にもリアルタイムに再確認されます。なお、管理画面における「信頼された第一者（first-party）」の資格判定には、これに加えて §18 で定める厳格な確認境界が必須となります。
-
-Stage 5 の Windows は Tokio の named-pipe adapter を使い、`PIPE_REJECT_REMOTE_CLIENTS`、最初の server instance の排他作成、Host の logon SID に限定した明示 DACL を必須にします。接続時に OS peer token を照合し、既定 DACL や Client の自己申告だけで SameMachine / 第一者と認めません。Linux は保護された runtime directory の Unix socket と peer UID を使います。OS peer の同一性は第一者管理資格と pairing proof を代替せず、実際の管理操作は §18 の gate も通します。DACL の根拠は [Microsoft の named-pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights) に従います。
-
-### 10.3 Host-local control transport（Client channel ではない）
-
-Host-local control は、要求専用 listener と Host-spawned GUI に継承する非公開の確認 channel に分けます。前者は複数 requester の非秘密 request / outcome、後者だけが session completion と秘密 intake を扱います。listener の peer UID / DACL は local transport の適格性であり、確認権限を与えません。seat は Host が起動した GUI に高々1つ発行し、任意接続の先着では発行しません。`ene-core approve-*` は requester、`ene-ctl` は Client channel のみ、Body はどちらも使いません。control DTO は `ene-local-control` に置き、`ene-api` / remote WebSocket に載せません。起動・限定継承・GUI 不在時の outcome・切断失効は [First-party desktop 第5.1節](first-party-desktop.md#51-二つの-channel-と-owner-確認) を正本とします。
+両方とも、第9節の端末ペアリング・接続ごとの所有証明を通します。通常 Client channel に Unix socket / named pipe、平文 WS、旧方式へのフォールバックは設けません。QUIC、自動探索、NAT 越え、外部リレー、ブラウザ Client は追加しません。remote Client の製品提供は Stage 14 に残し、ローカルの WSS 化だけで remote listener を有効化しません。
 
 ### 10.2 transport adapter boundary
 
-```rust
-// Host と Client が共有するアダプターの抽象概念（擬似 trait。クレート配置は第25節参照）
-trait TransportAdapter {
-    async fn send_frame(&self, frame: TransportFrame) -> Result<(), TransportError>;
-    async fn recv_frame(&self) -> Result<TransportFrame, TransportError>;
-    async fn peer_liveness(&self) -> PeerLiveness; // Reachable（疎通）| Suspected（疑い）| Lost（切断）
-}
+`ene-api` の純粋な codec は、第7節の電文とバイト列の変換だけを担います。Host と `ene-client` が WSS の入出力・接続監視を持ち、業務処理へは再構成・検証済みの電文を渡します。1本の接続上の論理ストリームは既存の `StreamWireId` で識別します。複数 transport のための汎用 trait、factory、共通 transport crate は新設しません。
 
-enum TransportFrame {
-    ControlFrame { bytes: Vec<u8> },
-    BinaryFrame { descriptor_ref: WireMessageId, bytes: Vec<u8> },
-}
-```
+- WebSocket の frame サイズと、分割後に再構成する message 全体のサイズを両方制限します。受信・再構成中に上限を適用し、全量確保後に切り詰めません。業務制御電文とアタッチメントには用途別の上限を適用し、送信側も上限内の電文・チャンクだけを生成します。Text message や不正な framing は通信層で拒否し、業務上の stale / denied と区別します。
+- TLS / HTTP Upgrade / 端末認証の待機時間、認証前接続数と pending pairing 数、送受信キューと書込待ちを制限します。HTTP Upgrade は通常 Client 用の接続先だけを受け付け、`Origin` ヘッダーを持つ要求は拒否します。native Client は Origin を送らず、欠落だけを認証成功の根拠にしません。
+- Ping / Pong、Close、EOF、read/write error を共通の接続監視で処理します。疎通を確認できない `Suspected` の間は Client-dependent admission を止め、生存監視期限の超過で接続を閉じ、既存の close admission へ渡します。Ping / Pong は presence、許可、提示 ACK、業務完了を代替しません。
+- Close や timeout で作用を未実行・失敗へ決めつけず、再接続は新しい connection として認証し直します。成否不明の作用や旧電文を自動再実行しません。低速 Client が Host-only Task を止めないこと、業務制御電文を無言で捨てないことは第22節に従います。
 
-- フレームサイズには厳格な上限を設け、超過したフレームは `FrameTooLarge`（通信エラー）として受信前に安全に拒否します。具体的な上限値は実装の裁量としますが、制御用フレームとバイナリフレームで別々の上限を設け、重要な制御電文が高頻度な画像キャプチャの巻き添えで破棄されないようにします（第22節）。
-- ハートビート通信は単なるネットワーク疎通確認のためだけに利用し、存在状態（Presence）、キャラクターの帰属、機能許可、報告完了などの決定権威にしてはなりません。通信状態が `Suspected` や `Lost` になったとしても、それは一時的な切断の検知にすぎず、永続化された帰属状態を即座に破棄してはなりません（CCT §10）。
+Origin の制約、分割 message の上限、TLS と認証の区別は [RFC 6455 §10](https://www.rfc-editor.org/rfc/rfc6455.html#section-10) に従います。ライブラリ、上限値、監視間隔は実装時に決めますが、これらの制限を無効にした経路は設けません。
+
+### 10.3 Host-local control transport（Client channel ではない）
+
+Host-local control は、要求専用 listener と Host-spawned GUI に継承する非公開の確認 channel に分けます。前者は複数 requester の非秘密 request / outcome、後者だけが session completion と秘密 intake を扱います。listener の peer UID / DACL は local transport の適格性であり、確認権限を与えません。seat は Host が起動した GUI に高々1つ発行し、任意接続の先着では発行しません。`ene-core approve-*` は requester、`ene-ctl` は Client channel のみ、Body はどちらも使いません。control DTO は `ene-local-control` に置き、同一 PC を含め通常 Client の WSS / `ene-api` には載せません。起動・限定継承・GUI 不在時の outcome・切断失効は [First-party desktop 第5.1節](first-party-desktop.md#51-二つの-channel-と-owner-確認) を正本とします。GUI–Body 間の投影 IPC も同文書第4節の専用経路を維持します。
+
+### 10.4 接続先の発見と Host の検証
+
+Host の証明書はアプリが生成・管理します。Host 秘密鍵は既存の保護ストアに専用用途で保存し、Provider credential や端末のペアリング秘密を流用しません。証明書の更新と Host 鍵の変更を区別し、信頼済み公開鍵 pin と一致しない鍵を自動承認しません。保護ストアや検証材料が使えない場合は接続不能とし、平文や証明書検証の無効化へ縮退しません。
+
+ローカル接続は次の順に準備・検証します。
+
+1. serving Host は、startup mutation より前に data directory の単一 writer lock を取得し、終了まで保持します（PR §6.4）。起動ごとに予測不能なローカル接続用トークンを生成し、TLS と listener の準備を完了します。
+2. 接続 URL、Host 公開鍵 pin、Host 起動世代、ローカルトークンを一つの runtime ファイルとして原子的に公開します。親 directory と一時ファイルを含め、Linux の所有者権限 / Windows の明示 ACL で同一 OS ユーザーだけが読み書きできる状態を作成時から保証します。保護を確認できなければ公開しません。ファイルは通常設定やマスターデータに含めません。
+3. Client はファイルと保護条件を読み取り専用で確認します。接続先がローカル用の `wss://127.0.0.1` であることと TLS の Host 鍵を検証してから、HTTP Upgrade の認証ヘッダーでトークンと起動世代を提示します。Host は現在値と照合して受け入れます。トークンを URL、通常 DTO、環境変数、ログへ出さず、redirect や別 listener へ転送しません。
+4. ファイルの欠落・破損・保護不備、pin 不一致、古いトークン・起動世代は接続不能として扱います。Client はファイルや Host 鍵を修復・再作成しません。新しい runtime 情報を読み直す場合も、接続・端末認証は最初から行い、旧電文を再送しません。
+
+Host の正常終了時は自身が公開した runtime ファイルを削除します。crash 後に残っていても、ファイルの存在は Host の生存証明になりません。次の Host は lock を取得してから新しい情報を公開し、古い情報で再利用されたポートへつないでも、Host 検証または起動ごとの受付条件で拒否します。原子的公開は torn read を防ぐためのもので、writer 排他の代わりにはしません。
+
+remote Client は初回ペアリング時に、Host の信頼された画面など接続先の自己申告だけに依存しない別経路で Host 公開鍵 pin を確認・登録します。Host 鍵が変わった場合は再確認し、新規ペアリングが必要な場合は第9節の Owner 確認も行います。
+
+ローカルも信頼済み Host 鍵の変更は Owner の再確認を通し、runtime ファイルの更新だけで自動承認しません。初回の信頼情報は保護された runtime ファイルから取得し、以後の信頼済み pin と照合します。秘密鍵・信頼情報と runtime 情報の保存・復元・Full Reset は PR の Group K と第9.2節に従います。
+
+### 10.5 SameMachine の根拠
+
+Host は `transport_class = SameMachine | Remote` を現在の connection に束縛します。`SameMachine` は、ローカル専用 listener で現在のローカルトークンと Host 起動世代を検証した接続に限ります。トークンの欠落・不一致を `Remote` として受け入れ直しません。remote listener は、接続元が loopback に見えたりトークンが提示されたりしても `Remote` のままです。
+
+TCP の接続元 IP、Client の platform / descriptor、保存済みの通信種別だけから判定しません。認証済みで現在有効な connection、端末許可、排他性の再照合を満たして初めて presence の fallback 候補にできます（CCT §10.4）。接続が失効・置き換え・終了した後は、このローカル判定を次の connection へ引き継ぎません。
+
+これは同一 OS ユーザーに保護された接続情報へのアクセスを根拠とする判定です。OS セッションや同一ユーザーの秘密領域が侵害されていない前提は Runtime Topology に従います。トークンを知ることは、Host が起動した第一者 GUI である証明や、本人の直接確認にはなりません（第10.3・18節）。
 
 ## 11. Client incarnation / stale rejection
 
@@ -888,6 +908,8 @@ struct ManagementViewWire {
 
 ## 22. Backpressure and streams
 
+以下の制御は同一 PC / remote の WSS 接続で共通に適用します。WebSocket の送信バッファだけに任せず、application queue、書込待ち、分割 message の再構成にも第10.2節の上限を適用します。Ping / Pong / Close の処理が業務電文の待ちで無期限に止まらない構成とし、通信層の Pong を業務上の ACK に変換しません。
+
 すべてのメッセージに対して、システム全体での厳密な一意の順序付け（global total ordering）を求める必要はありません。順序が厳密に求められるのは、特定のストリーム内（`StreamWireId`＋`seq`）だけであり、独立したストリーム間や、各種の事実（fact）・コマンド（command）の間には大域的な順序関係を課しません。また、重要な制御メッセージ（control message）を高頻度な画面キャプチャフレームと同じ方針で安易に破棄（drop）してはなりません。
 
 | ドメイン | バッファリング方針 | 破棄（drop）／期限切れ（stale）方針 | 順序付け |
@@ -914,7 +936,7 @@ struct ManagementViewWire {
 - **ログ・監査ログ・デバッグ出力に秘密値や削除対象の本文を出力しない**：
   削除対象となった本文、不要な会話の全文、ファイル本文などを出力してはなりません。デバッグログには通信用の参照ID、世代、処理結果（outcome）などのメタ情報のみを残し、本文やバイナリデータは適切にマスキング（redact）します。
 - **トランスポート層の保護**：
-  同一マシン内（same-machine）通信では OS のユーザーアカウント領域とピア認証を活用し、リモート接続では TLS 暗号化、LAN/VPN 制限、ペアリング認証、コネクションごとの個別認証を組み合わせます。いずれの場合も、Ene の開発・運営元が管理する外部リレーサーバーや外部アカウントには依存しません。
+  通常 Client channel は同一 PC も含め WSS とし、信頼済み pin による Host 検証、端末ペアリング、接続ごとの所有証明を組み合わせます。ローカルの受付と `SameMachine` 判定には第10.4・10.5節の保護された runtime 情報を使い、remote は明示設定された LAN / VPN 向け listener に限定します。認証ヘッダーも秘密として伏せ、HTTP Upgrade や TLS のエラーに値を残しません。Origin 検査・資源上限は第10.2節に従います。外部リレーや外部アカウントには依存しません。Host-local control の OS peer 認証と継承確認 channel は第10.3節のまま維持します。
 
 ## 24. Error and rejection model
 
@@ -940,9 +962,11 @@ struct ManagementViewWire {
 
 クレート・モジュール分割方針（CM）を前提とし、安易な新規クレートの追加や依存方向の変更は行いません。通信マッピング処理は既存クレート内のモジュールとして配置します。
 
+通常 Host–Client の DTO / codec を `ene-api` へ集約し、`ene-core` と `ene-client` は通常通信のために `ene-plugin-ipc` へ依存しません。`ene-plugin-ipc` はプラグイン用の責務に限定します。WSS / TLS の I/O は Host と `ene-client` が担当し、Client channel の統一のために新しい transport crate は作りません。ローカル接続情報の読込・検証は `ene-client`、生成・公開・失効は serving Host が所有し、秘密を `ene-config` の通常設定へ移しません。
+
 | 配置場所 | 責務 | 保持するもの／保持してはならないもの |
 |---|---|---|
-| `ene-api`（`ene-api::v1::*`） | 通信用DTOの定義のみ。バージョニングされたモジュール（`v1`）配下に、エンベロープ・ペイロード・機能申告・認証フレーム型・拒絶DTOを配置する。`CommandReplayRejectWire` は `v1::command` などのコマンド検証モジュールに配置 | **保持するもの**: serde対応DTO、バージョン定義型、メッセージ種別識別子、JSON表示用ヘルパー。<br>**保持してはならないもの**: ビジネスロジック、権限判定ロジック、ホスト内部のドメイン型、秘密情報、永続化データ行、ネットワークI/O処理。Ene内部の他クレートへの依存を持たない状態（外部のserde等のみに依存）を維持する |
+| `ene-api`（`ene-api::v1::*`、codec） | 通信用 DTO と純粋な MessagePack codec。`v1` 配下にエンベロープ・ペイロード・機能申告・認証フレーム型・拒絶 DTO を置き、codec は電文とバイト列の変換だけを担う | **保持するもの**: serde 対応 DTO、バージョン・種別、JSON 表示用ヘルパー、長さプレフィックスを持たない encode / decode と型付き codec error。<br>**保持してはならないもの**: ビジネスロジック、権限判断、Host 内部のドメイン型、認証材料の保管、DB 行、WSS / TLS / OS / ネットワーク I/O。Ene 内部の他 crate へ依存しない |
 | ホスト側アダプター（`apps/ene-core` の `ipc_map` モジュール ＋ 各ドメインの前提受付） | DTOの入力検証、通信用参照（wire ref）からドメインの前提条件（premise）への変換、ドメインの事実からDTOへの投影、コネクション・化身・バージョン・機能申告の保持（永続化データは各担当ドメインが保持）、現在の送信者エポックにおけるコマンド再実行抑止マーカーの参照 | **保持するもの**: `validate()` 関数、各種マッピング関数、購読管理、ストリーム多重化（mux）、送信者の期限切れチェック、コマンドフィンガープリント照合。<br>**保持してはならないもの**: 採否・達成・許可・確信度の最終判断（これらは各ドメイン担当者が行う）。ドメイン層クレートに通信層への逆依存を持ち込んではならない |
 | クライアント側アダプター（`crates/ene-client` ＋ `apps/ene-desktop` / `apps/ene-ctl` 内の session / ipc モジュール） | 受信DTOから画面表示・デバイス操作への変換、デバイス側で生じた事実のDTO化、一時キャッシュの管理、個人データ削除参加時のローカルデータ完全消去、ホストからクライアントへの指示コマンドに対する再実行抑止マーカーの管理 | **保持するもの**: プレゼンテーション表示、画面・音声キャプチャ、音声出力のアダプター。<br>**保持してはならないもの**: ホスト側ドメインクレートへの依存、マスターデータの更新権限、マスターデータの保持。依存先は `ene-api`、`ene-primitive`、およびクライアント自身のアダプターのみに限定する。tray は Milestone 1 に無い |
 | `ene-local-control` | Host-local の要求 DTO と専用確認 DTO | 要求専用 listener と継承確認 channel は別の frame enum / dispatch。requester は確認・秘密 frame を処理しない。`ene-api` / remote へ載せず、秘密の Debug / log / 永続化可能な返却を禁止。seat の発行は Host の spawn / 専用 endpoint で行い、DTO の自己申告では行わない |
@@ -1048,7 +1072,25 @@ struct ManagementViewWire {
 2. リモート / 通常 Client / 同一 UID requester の自己申告、別 endpoint からの nonce、Computer Use の `EffectReport` を拒否します（`DeniedByBoundary`）。空席時も requester は seat を取得できません。Host が起動した GUI の専用 channel と直接確認だけが最終確認の経路であり、ene Computer Use はこの面へ入力できません。保証対象外の OS セッション侵害は Runtime Topology の信頼前提に従います。
 3. 信頼できるホストPC本体の画面（Host-local surface）において、オーナー自身が対象・変更内容・影響範囲を目視で確認した後、担当ドメインが現在の前提条件を再照合して初めて変更を適用します。確認中に対象の状態が変わったり期限切れになったりした場合は、最初から確認をやり直します。なお、バックアップ復元の実行と、復元された設定の一括有効化は、安全のため必ず別々の手順として確認を行います。
 
+### V-15 WSS の接続準備・Host 検証・ローカル受付
+
+1. Windows / Linux の実 WSS 接続で、初回起動時の証明書生成、runtime 情報の保護・公開、初回 pairing と再接続を通します。通常 Client の Unix socket / named pipe や平文 WS は使いません。
+2. 別 OS ユーザーによる runtime ファイルの読取・書換えを拒否します。保護不備、偽 Host、pin 不一致、古いトークン・起動世代、Origin 付き Upgrade は業務操作前に拒否し、秘密をエラー・ログに出しません。Host 検証に失敗した相手にはトークンも送信しません。
+3. 二重 Host 起動では lock を取得した一方だけが startup と runtime 公開を行います。ファイルの欠落・破損・残存、同じポートの再利用、Host restart を検証し、Client の read-only 接続先参照から修復や durable mutation が起きないことを確認します。
+4. remote listener への接続元が loopback の場合や、Client がローカルと自称した場合も `Remote` のままです。ローカル専用 listener の検証と現在の端末認証・許可を満たした connection だけが fallback 候補となり、置き換え・切断後には失効します。Stage 7 で remote listener が未実装なら remote の実接続検証は Stage 14 に残し、合格扱いしません。
+5. Host 鍵変更は再確認を必要とし、runtime の更新や接続先の自己申告だけで信頼済み pin を置き換えません。バックアップから鍵・pin・トークンを復活させず、Full Reset 後は過去の信頼情報を再利用できないことを確認します。
+
+### V-16 WSS の上限・切断・既存 lifecycle
+
+1. 過大な単一 frame、小さな frame を連続させた過大 message、不正 binary / Text message、認証前の無応答、pending pairing と送受信キューの飽和を検証します。受信中から資源を制限し、処理できない電文を業務上の成功へ変換しません。
+2. Ping / Pong、Close、EOF、書込失敗、監視期限超過を通じて close admission を検証します。疎通確認が提示 ACK や presence 成立にならず、旧 connection の close が新 current を消さないことを確認します。
+3. Windows / Linux の実 WSS で connection replacement、遅延 ACK、削除要求、slow consumer、Client 不在中の Host-only Task 継続を再検証します。再接続時に古い command / stream を自動再実行しません。シナリオは [acceptance S5-01〜24](../../requirements/acceptance.md) を用います。
+4. TLS 追加後の起動時間、常駐メモリ、CPU、応答性を [First-party desktop 第8節](first-party-desktop.md) の測定に含めます。通常 Client channel の変更後も、Host-local control の本人確認と秘密入力、GUI–Body 投影 IPC の既存 gate を維持します。
+
 ## 27. Avoid over-engineering — 導入しないもの
+
+- **通常 Client channel の複数 transport と汎用 transport 基盤**：
+  WSS に統一し、Unix socket / named pipe の並行サポート、平文 WS、旧方式への自動フォールバックを設けません。管理用・投影用 IPC は異なる信頼境界を持つ専用経路として維持します。
 
 - **トランスポート層での厳密な1回のみ配送（exactly-once transport）**：
   少なくとも1回届く配送保証（at-least-once）に加え、`message_id` による通信レベルの重複排除と、第6.2節で規定した送信者エポック単位の `command_id` による再実行抑止を組み合わせることで十分な整合性が得られます。業務レベルの同一性マーカーの生存期間を、短命なネットワーク通信キャッシュと同じにしてはなりません。
@@ -1057,14 +1099,14 @@ struct ManagementViewWire {
 - **スキーマレジストリサービス・独自のバイナリプロトコル**：
   MessagePack によるシリアライズ、バージョニングされた明示的な DTO、および明確なフィールド命名規約があれば十分です。
 - **QUIC などの高度な新規トランスポートプロトコルの先行導入**：
-  現時点で不要な複雑さを持ち込まず、将来的に真に必要となった段階でアダプターとして追加します。
+  現在の通信には WSS を用い、将来の方式追加を見越した trait や拡張枠を作りません。方式変更が必要になった場合は、先に本書の設計を見直します。
 
 ## 28. 意図的に残した Design Freedom
 
-- 具体的な暗号ライブラリの選定、鍵フォーマット、鍵導出関数、証明書の運用手順、ペアリング用データの具体的な表現形式や保存方法、ナンス（nonce）や署名検証の具体的手法。
+- 具体的な暗号ライブラリの選定、鍵フォーマット、鍵導出関数、証明書更新の実装手順、ペアリング用データの具体的な表現形式、ナンス（nonce）や署名検証の具体的手法。Host 鍵の保護・pin 検証・鍵変更時の再確認、runtime 情報の保護・寿命・公開順は第10節の契約を守ります。
 - ハートビート／キープアライブの間隔、タイムアウト値、再試行回数やバックオフ値、`message_id` キャッシュの保持期間、`command_id` マーカーの保存形式、過去結果の要約方法、送信者エポック終了後のクリーンアップのタイミング、コマンドフィンガープリントの正規化エンコーディングやハッシュ算出方式。
   **ただし、「再試行を受理し得る有効期間よりも先に再実行抑止マーカーを破棄すること」や、「同一IDでありながら内容の異なるコマンドを一致とみなすこと」は、許容される自由度（Freedom）には含まれません。**
-- 具体的な TCP ポート番号、mDNS によるサービス検出の有無、NAT 越え（トラバーサル）の具体的手法（外部リレーサーバーは導入しません）。
+- LAN / VPN 向けの具体的な TCP ポート番号、runtime ファイルや認証ヘッダーの具体的な名称・形式。ローカルの動的ポートと保護されたファイルによる発見は第10節に従い、自動探索・NAT 越え・外部リレーは導入しません。
 - 音声コーデックの選定、画面キャプチャの画像形式、解像度の上限、チャンクサイズ、添付ファイル等のチャンクサイズやキャッシュ容量の上限。
 - 画面キャプチャの実行間隔、負荷分散アルゴリズム、LLM呼び出し等の費用予約量の計算式や集計期間、身体状態ヒント（BodyState hint）の粒度や更新頻度。
 - 画面ビューの具体的な項目配置、表示文言、UIレイアウト、監査ログの出力フォーマット、提示確認ダイアログの具体的なUIデザイン。

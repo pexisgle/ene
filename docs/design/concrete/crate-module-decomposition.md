@@ -71,12 +71,12 @@ crates/
   ene-action/           # 外部作用の実行・確定度管理・拡張受け入れ・Client限定作用（E-1〜E-6）＋ アダプター/リポジトリ trait
   ene-preservation/     # データ保持・バックアップ/復元/リセット・監査/デバッグログ・全域協調（PE-1〜PE-7）
   ene-store/            # app.db + derived.db + internal_copies の実装（D1/D2/D3/R/T の永続化機構のみ）
-  ene-api/              # Host↔Client 間の通信用中立 DTO（ネットワーク越し利用可能なもののみ）
+  ene-api/              # Host↔Client 間の通信用中立 DTO と純粋な MessagePack codec
   ene-plugin-ipc/       # プラグイン向けプロセス間通信フレーム（Body 投影 IPC ではない）
   ene-plugin-host/      # 外部コード実行用ホストアダプター（推論/作用 trait の実装）
   ene-provider-assets/  # カタログ/マニフェスト/ダウンロード補助
   ene-sandbox/          # OS レベルのプロセス隔離
-  ene-client/           # Host Client IPC（handshake / correlation / device identity / erasure participant）
+  ene-client/           # Host Client WSS（接続先の発見 / TLS / handshake / correlation / erasure）
   ene-local-control/    # Host-local control DTO。ene-api に載せない
 apps/
   ene-core/             # Host 側の結合ルート（配線・起動・store・要求専用 listener・GUI spawn）
@@ -111,9 +111,9 @@ plugins/tool/*, plugins/provider/*  # 外部拡張（ene-plugin-host 経由で�
 | `ene-action` | 外部作用の実行・拡張（作用・確定度・拡張受け入れ・Client限定作用。E-1〜E-6、K-H/I/J） | `candidate`（`ActionCandidate`。候補を作ることと実行を許可することは別。producer を持つスライスで追加）、`execute`（実行直前の不可分な前提検証、`RealTargetRef` の実体解決、mount/reparse 境界の照合。このスライスは `filesystem` モジュールで Workspace 内の List/Read/Create/Edit を実装）、`effect`（`ActionAttemptId`、`ActionCertainty`、委任（execution lifetime）相関と execution seal gate、試行ごとの CAS 更新）、`extension`（MCP/プラグイン/MCP Apps の受け入れ、サンドボックス適用。後続スライス）、`client_bound`（現在アクティブな Client 限定、デバイス許可との AND 条件。後続スライス）、`adapters`（OS・デバイス・MCP との境界。具体実装は `ene-plugin-host` / Client アダプター / プラットフォームモジュール） | pub: このスライスで具象化する `ActionAttemptId`、`ActionCertainty`、`OperationKind`（List/Read/Create/Edit）、`RealTargetRef`、`EffectGrounds`、`AttemptCommitPremise`、`ActionStartOutcome`、`CertaintyUpdateOutcome`、`ActionAttemptRecord`、`ActionAttemptRepository` trait、`WorkspaceRoot`（と `WorkspaceRootError` / `TargetRejection`）、`ObservedEffect`（と `ActionOutput` / `ListEntry`）、`WorkspaceActionCommand`、`ActionNotStarted`、`ActionRunOutcome`、`orchestrate_workspace_action`。`ActionCandidate`、`ExecuteActionCommand`、`ReportEffectFact`、OS/デバイス/MCP アダプター trait は producer を持つスライスが同じ設計変更で追加します。priv: 実際の操作対象を解決する詳細処理、シェル実行の内部詳細。禁止: 実行許可の確定（Permission の責務）、タスク達成の判断（Task の責務）、秘密情報の保持 |
 | `ene-preservation` | データ保全・消去（データ保持期間・バックアップ/復元/リセット・監査/デバッグログ・全域協調。PE-1〜PE-7、D-A〜D-E、DP-0〜DP-8） | `retention`（データ保持期間・オプトインでのクリーンアップ。既定は OFF）、`backup`（バックアップ時点の固定・参照・秘密除外・未完了処理への対応）、`restore`（ステージング領域での展開・アトミック切り替え・適用保留・ユーザーによる一括有効化）、`deletion`（完全削除範囲の確定、`ErasureConditionRef`、残存データの検証、全域完了の判定）、`reset`（設定のみリセットと全データリセットの明確な区別）、`audit`（追記順の保護・長期保持。本文とは別保管庫にしない）、`debug`（明示的な有効化・短期間での自動停止・安全な削除）、`coordination`（`ErasureParticipant` trait・各ドメインの削除完了の集約。他ドメインのデータを勝手に書き換える権限は持たない） | pub: `DeletionOperationId`、`DeletionSweepGeneration`、`BackupPointId`、`RestoreGeneration`、`DemandLocalErasureCommand`、`ParticipantCompletionFact`、`PreservationRepository` trait。priv: ファイル探索・検証の詳細実装、アーカイブフォーマット。禁止: 各ドメインの状態を勝手に変更すること、秘密情報の取得、外部所有ファイルの管理 |
 | `ene-store` | 永続化の機構のみ（PR Group A〜K の D1/D2/D3 + R/T の保存。ドメインの担当責任者ではない） | `sqlite`（`app.db` のドメイン別テーブルグループ。`Immediate` による短いトランザクションのみを使用し、トランザクション内で await しない）、`derived`（`derived.db` + sqlite-vec。feature で隔離し、いつでも安全に再構築可能）、`fs`（`internal_copies/` と `*.ene-backup` のステージング。temp書き込み → fsync → 公開保護（publication guard）確立 → rename → DBポインタ確定 → 保護解除 → 不要ファイル掃除）、`migrate`（空DBのスキーマ初期化とバージョン照合。未対応バージョンは変更せず拒否する） | pub: 各テーブルグループの行型へのマッピング関数、`new`/`open`、クリーンアップ関数のみ。`Transaction` 型は公開しない。各ドメインの `*Repository` trait の実装（`ene-store` が各ドメインに依存する向き）。クリーンアップ時は、削除直前に同じ同期境界内で「アクティブな参照も公開中保護もないこと」を再確認する。禁止: 採否・達成・許可・確定度の意味判断、リビジョンを進めてよいかの決定、秘密情報の保持、派生データからマスターデータを勝手に捏造すること |
-| `ene-api` | Host↔Client 間の中立な通信用 DTO（ネットワーク越し利用可能なもののみ。IB §15） | `round`（`SubmitClientInputCandidate` の通信用形式）、`presence`（`RequestMoveCommand` や `PresenceAttributionFact` の通信用形式）、`undelivered`（`UndeliveredSummaryFact` の通信用形式）、`character_asset`（表示アセットの参照情報のみ）、`management`（`ManagementOperationCommand` の通信用形式）、`erasure_client`（Client 側の一時データ削除参加用） | pub: serde によるシリアライズ可能な DTO のみ。`ene-companion` や `ene-task` 等の内部クレートへの依存は一切禁止。Host 内部の newtype、秘密情報、DB 行構造を漏洩させてはならない。また、内部マスターデータの主キーとして悪用できる形式で ID を渡さない |
+| `ene-api` | Host↔Client 間の中立な通信用 DTO と純粋な MessagePack codec（IB §15、IPC §7・25） | `round`（`SubmitClientInputCandidate` の通信用形式）、`presence`（`RequestMoveCommand` や `PresenceAttributionFact` の通信用形式）、`undelivered`（`UndeliveredSummaryFact` の通信用形式）、`character_asset`（表示アセットの参照情報のみ）、`management`（`ManagementOperationCommand` の通信用形式）、`erasure_client`（Client 側の一時データ削除参加用）、`codec`（電文・バイト列の変換） | pub: serde 対応 DTO、長さプレフィックスを持たない encode / decode、型付き codec error。WSS / TLS / OS の I/O、認証材料の保管、Ene 内部 crate への依存は禁止。Host 内部 newtype、秘密情報、DB 行構造を漏洩させず、ID を内部マスターの主キーとして流用させない |
 | `ene-plugin-ipc` / `ene-plugin-host` / `ene-provider-assets` / `ene-sandbox` | 通信 / ホスティング / カタログ / プロセス隔離（外部との境界） | 必要な最小限のアダプター実装（第7節参照） | pub: 通信フレーム、外部ホスティング、カタログ管理、プロセス隔離の API のみ。ドメインとしての意味を持たせない |
-| `ene-client` | Client 側の Host 接続ライブラリ（handshake、correlation、device identity、erasure participant）。ドメインの担当責任者ではない | `session`、`correlation`、`erasure` | pub: 接続・相関・local erasure の API。禁止: clap/stdio、Host ドメインクレート、`ene-store`、秘密生値、control DTO |
+| `ene-client` | Client 側の Host WSS 接続（接続先の発見・TLS 検証、handshake、correlation、device identity、erasure participant）。ドメインの担当責任者ではない | `transport`、`session`、`correlation`、`erasure` | pub: 接続・相関・local erasure の API。codec は `ene-api` を使用。接続認証材料は保護して扱い、通常 API / Debug / log へ返さない。禁止: clap/stdio、Host ドメインクレート、`ene-store`、Provider credential 生値、control DTO |
 | `ene-local-control` | Host-local の request / confirmation DTO。remote-capable ではない | `request`、`confirmation` | pub: 別々の serde frame enum。request は非秘密候補と outcome、confirmation は Host-spawned seat の session と redacted secret intake。Host 内部 newtype、通常 Debug / log / 永続化可能な秘密返却を禁止。authority の発行は Host が行う |
 | `apps/ene-desktop` | Host-spawned text GUI、専用 control seat、Body の親、確認面。通常起動時は短命 launcher | `ui`、`session`、`control`、`body_supervise`、`i18n`、`erasure` | Host 内部ドメインの master や authority を持たない。確認 channel は Host が渡した endpoint だけを使い、Body に継承しない。公開 listener・同一 UID を本人確認にしない。Computer Use は確認面への注入を拒否する |
 | `apps/ene-body` | VRM overlay だけの child process | `window`、`vrm`、`render`、`ipc` | Host に接続しない。秘密・会話本文・Task を持たない。crate 名 `ene-vrm` は使わない |
@@ -232,7 +232,7 @@ Client が Host 側のドメインクレートに直接依存して、マスタ�
 | `ene-config` | ● | ●（パス解決・ロケール設定のみ） | — | 秘密情報やドメイン状態は含みません |
 | `ene-character`、`ene-companion`、`ene-task`、`ene-learning`、`ene-presence`、`ene-permission`、`ene-credential`、`ene-inference`、`ene-action`、`ene-preservation`、`ene-observer`、`ene-presentation`（Host 側） | ●（決定権威・リポジトリ trait・直列化ドメインの順序付け） | —（直接の依存は禁止） | — | Client は `ene-api` の DTO 経由でのみ機能を利用します。Client が `CompanionId` などの内部 newtype を主キーとして勝手に再利用してはいけません |
 | `ene-store`（sqlite/derived/fs/migrate） | ●（Host のみ） | — | — | DB トランザクションを Client や Provider、MCP へ露出させてはいけません。また、派生 DB `derived.db` をバックアップに含めてはなりません |
-| `ene-api` | ●（リクエスト処理・マッピング） | ●（通信用 DTO・型付きクライアント） | ●（ネットワーク中立な入出力 DTO のみ） | 秘密情報、内部 newtype、DB の行構造を漏洩させてはなりません。各 ID は用途を限定した一時的な参照情報としてのみ公開します |
+| `ene-api` | ●（DTO / codec の利用） | ●（DTO / codec の利用） | ●（中立な DTO と純粋な codec） | I/O、認証判断、リクエスト処理・マッピングは利用側が持ちます。秘密情報、内部 newtype、DB 行を漏洩させず、ID は用途を限定した参照として公開します |
 | `ene-plugin-ipc` | ● | —（プラグインを Client 側に配置する場合のみ該当アダプターが利用） | 通信フレームのみ | ドメイン的な意味を持たせません |
 | `ene-plugin-host`、`ene-provider-assets`、`ene-sandbox` | ●（ホスティング・カタログ・プロセス隔離） | —（Client 側の拡張ポイントで必要な場合に限り該当アダプターが `ene-sandbox` を利用可） | — | 外部コードをマスターデータや権限の決定者にしてはなりません |
 | `ene-client` | ●（Host 側の対向） | ● | ●（handshake / correlation。ドメイン状態は持たない） | GUI と CLI が `ene-ctl` バイナリに依存しないための抽出。clap/stdio は CLI に残す |
@@ -261,11 +261,11 @@ Client が Host 側のドメインクレートに直接依存して、マスタ�
 | `ene-permission`、`ene-credential`、`ene-character` | `ene-primitive`、`ene-config` のみ（＋ `ene-preservation` の trait のみ） | 権限制御・秘密管理・静的構成の各担当責任者。これら同士は互いに依存しません。他のドメインの具象クレートへの依存も禁止します |
 | `ene-preservation` | `ene-primitive`、`ene-config` のみ | システム全域の保全・消去を取りまとめる調整役（コーディネーター）。各参加クレートの具象型への依存は禁止します（`ErasureParticipant` などの横断 trait を定義し、各参加クレート側がそれを実装します）。送信 currentness の最小基盤（canonical current erasure-condition state と durable store、`data_use` source coverage 判定）は Stage 4 erasure-currentness foundation として先行導入してよく、そのために最小の保全・消去 owner 境界（`ene-preservation` production crate がまだ無ければ最小 crate / contract）を導入できます。ただし backup / restore / retention / full deletion orchestration / audit manager を同時に実装しません。ユーザー向け Targeted Deletion の operation producer は Stage 6 で、enforcement より先に `DeletionOperationId` + `DeletionSweepGeneration` + 対象 source 相関を durable に確定して同じ canonical store へ active condition を投入し、各利用・送信箇所（少なくとも Task Agent 推論試行 claim の data-use 照合）が coverage の有無を機械的に判定できる形を提供します。Stage 6 は Stage 4 の gate を置き換えず、別の currentness store / 別の source correlation を作りません。利用側に「削除なし」既定値を置かせず、active condition が 0 件の場合も store を実際に照会した authoritative な「被覆なし」として扱います |
 | `ene-config` | Ene プロジェクト内のクレート依存なし（外部の serde / serde_json / directories 等のみ） | 型安全な設定構造体とパス解決に専念する末端クレート。ドメイン、ストレージ、アダプターに依存しません |
-| `ene-api` | Ene プロジェクト内のクレート依存なし（外部の serde / uuid / chrono 等のみ。`ene-primitive` にも依存しない） | ネットワーク中立な通信用 DTO のみ。Host 側の内部ドメイン、`ene-store`、秘密情報に一切依存しないことが、Client と Host の安全な分離を保証する条件です |
+| `ene-api` | Ene プロジェクト内のクレート依存なし（外部の serde / MessagePack codec / uuid 等のみ。`ene-primitive` にも依存しない） | 通信用 DTO と純粋な codec。Host 内部ドメイン、`ene-store`、WSS / TLS / OS の I/O、認証材料の保管には依存しません |
 | `ene-store` | `ene-primitive`、`ene-config` ＋ 各ドメインの担当クレート（DB 行のマッピングのため） | アダプター → ドメイン（永続化の実装側がドメインの trait を実装）。ドメイン → store への逆依存は禁止です。`rusqlite`、`sqlite-vec`、ファイルシステム操作などの低レイヤー依存はすべてここに隔離します |
 | `ene-plugin-host` | `ene-primitive`、`ene-config`、`ene-inference`、`ene-action`、`ene-sandbox`、`ene-plugin-ipc`、`ene-provider-assets` | アダプター → ドメイン（ドメイン側の trait を実装）。ドメイン → アダプターの依存は禁止です。ドメイン的な意味判断は持ちません |
 | `apps/ene-core` | 上記の Host 側全クレート ＋ `ene-api`、`ene-local-control`、`ene-store`、`ene-config` | システム全体の組み立て役（配線・ライフサイクル管理・ストレージ初期化・ルート登録・control listener）。ドメインとしての意味判断は行いません。`ene-body` や desktop UI には依存しません |
-| `ene-client` | `ene-api`、`ene-config`、`ene-primitive`（必要な範囲） | Client 接続の共有。Host 内部ドメイン、`ene-store`、秘密生値、`ene-local-control` には依存しません |
+| `ene-client` | `ene-api`、`ene-config`、`ene-primitive`（必要な範囲）、外部の WSS / TLS ライブラリ | Client 接続を共有し、接続認証材料を保護します。Host 内部ドメイン、`ene-store`、Provider credential 生値、`ene-local-control`、`ene-plugin-ipc` には依存しません |
 | `ene-local-control` | Ene プロジェクト内のクレート依存なし（外部の serde 等のみ。`ene-api` にも依存しない） | Host-local DTO。remote-capable と混ぜない |
 | `apps/ene-desktop` | `ene-api`、`ene-client`、`ene-local-control`、`ene-config`、text GUI toolkit（provisional: Slint） | `ene-api` の DTO 経由で Client channel を話す。control は `ene-local-control`。Host 側の内部ドメイン、`ene-store`、`ene-plugin-host` には依存しません。生値は入力 widget と redacted control field の揮発区間に限り、通常 DTO / log / 永続 state に載せません |
 | `apps/ene-body` | `ene-config`（パス程度）、VRM runtime（provisional: `vrm-runtime`）、wgpu、OS overlay | Host に接続しない。`ene-api` / `ene-client` / 秘密に依存しません |
@@ -294,7 +294,7 @@ flowchart TB
   present["ene-presentation"]
   comp["ene-companion<br/>(dialogue only)"]
   store["ene-store<br/>(sqlite/derived/fs)"]
-  api["ene-api<br/>(wire DTO, no Ene deps)"]
+  api["ene-api<br/>(wire DTO / pure codec, no Ene deps)"]
   phost["ene-plugin-host"]
   core["apps/ene-core<br/>(composition)"]
   desktop["apps/ene-desktop<br/>(text GUI Client)"]
@@ -397,6 +397,8 @@ flowchart TB
 `ene-store` に多くの矢印が集まっている（ファンイン）のは永続化機構の共通利用のためであり、所有権の統合を意味しません。`apps/ene-core` に矢印が集まっているのも全体の配線のためであり、ドメインの意味判断を行うためではありません。`ene-companion` や `ene-task` への集約もそれぞれの用途に応じたオーケストレーションに限定されており、万能な巨大オブジェクト化を許すものではありません。このグラフ上に循環依存（サイクル）は一切存在しません。
 
 ## 10. IPC boundary
+
+通常 Client channel は同一 PC を含め WSS＋MessagePack とします。Host と `ene-client` が I/O を持ち、DTO / codec は `ene-api` に集約します。`ene-core` と `ene-client` は通常通信のために `ene-plugin-ipc` へ依存せず、同 crate はプラグイン用の責務だけを持ちます。将来の transport を見越した共通 crate や trait は新設しません。接続情報の生成・公開は serving Host、読込・検証は `ene-client` が担当し、ローカルトークンを `ene-config` の通常設定へ入れません。
 
 Host と Client のプロセス境界を越えるインターフェースの選定、通信用 DTO のモジュール配置、および Host ローカルに留めるべき処理のルールは、[Host↔Client IPC](host-client-ipc.md) の第2節および第25節で定めています。本書はその前提として、ネットワーク中立な型を `ene-api` のみに配置し（第3節・第8節）、Client 側が Host の内部ドメインクレート、`ene-store`、秘密情報に直接依存しないという依存ルール（第9節）を厳格に固定します。first-party の control channel は `ene-local-control` に置き、`ene-api` に混ぜません。[First-party desktop](first-party-desktop.md)。
 
