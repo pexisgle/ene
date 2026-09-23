@@ -26,4 +26,4 @@
 
 ## フォローアップ
 
-設計上の correction interface と現在の formation 内包経路の型分離は [#1508](https://github.com/pexisgle/ene/issues/1508) で追跡します。Stage 3 の完了履歴と、未解決の設計フォローアップを混同しません。
+学習用モデルの設定、形成方式、設計上の correction interface と現在の formation 内包経路の型分離は [Learning の後続計画](../follow-ups/learning.md) で扱います。Stage 3 の完了履歴と、未解決の後続作業を混同しません。
