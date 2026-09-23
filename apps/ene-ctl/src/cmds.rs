@@ -1,26 +1,3 @@
-//! `ene-ctl` subcommands: wire-payload builders and rendering.
-//!
-//! Pure: builds `ene-api` DTOs and renders views to display strings; no I/O,
-//! sockets, or environment. Argument syntax lives in the `clap` command at
-//! the crate root; transport lives in [`crate::client`]; the routing helpers
-//! here map Host answers onto [`CliError`] outcome classes, and the crate
-//! root only maps those classes to exit codes.
-//!
-//! Wire-mapping decisions (all within the existing DTO shapes):
-//!
-//! * Setup intents use the shared setup-target grammar ([`credential_target`]
-//!   and [`consent_target`], never a CLI-local mini-language). The credential
-//!   key comes from the Host process environment over the Host-local path,
-//!   never this wire; assignment parameters travel in the consent target,
-//!   never in the rationale quote, and both rationales are provenance-only.
-//! * Both setup intents carry the display-revision mark of a freshly fetched
-//!   setup view as `base_view`, so staleness is checked against something the
-//!   CLI actually saw, never defaulted to unconstrained.
-//! * `watch --round ROUND` prints that round's items from a [`HistoryRequest`]
-//!   (same fetch as `history`, filtered by round); true stream-following needs
-//!   a live `send` in the same process because streams cannot resume, so that
-//!   follow mode is deferred (see [`Command::Watch`]).
-
 use crate::errors::CliError;
 
 use ene_api::v1::deletion::{
@@ -55,12 +32,6 @@ pub const DEFAULT_HISTORY_LIMIT: u64 = 50;
 
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
-/// The CLI's copy of the documented Host setup section set: `HostHandle::build_view`
-/// in `apps/ene-core/src/setup.rs` renders exactly these for a setup view
-/// request. The in-file test below pins this literal and the setup request
-/// against this constant only; the Host side is exercised by the `ene-core`
-/// integration tests. An empty request is not the same set: the Host also
-/// selects the read-only `memory` section.
 pub const HOST_SETUP_SECTIONS: &[&str] =
     &["provider", "model", "consent", "credential", "learning"];
 
@@ -119,15 +90,7 @@ pub enum Command {
         cursor: Option<String>,
         limit: Option<u32>,
     },
-    /// Read one bounded page of the first-party usage / cost summary plus
-    /// the current cap slots (`usage-cost-cap` §16). No body text, prompt,
-    /// output, or credential value crosses this path.
     Usage(UsageSummaryRequest),
-    /// Set or update one provider/system daily/monthly usage cap
-    /// (`usage-cost-cap` §13/§17). The Client only proposes: the Host
-    /// re-checks the current authenticated connection, the base-view mark
-    /// from a read, and the cap revision before the permission-owned command
-    /// commits.
     UsageCap {
         provider: Option<String>,
         window: String,
@@ -178,11 +141,6 @@ pub fn memory_view_request(
     }
 }
 
-/// `round` restricts the read to one Host-issued stored round projection;
-/// [`None`] reads the whole companion timeline. The Host filters by the stored
-/// projection, so a round stays addressable even after a Host restart dropped
-/// its transient wire map, and the result does not depend on the overall recent
-/// window.
 pub fn history_request(companion: &str, round: Option<&str>, limit: u64) -> HistoryRequest {
     HistoryRequest {
         companion: CompanionWireRef(companion.to_string()),
@@ -192,8 +150,6 @@ pub fn history_request(companion: &str, round: Option<&str>, limit: u64) -> Hist
     }
 }
 
-/// `companion` is the caller-learned projection echoed from presence
-/// ([`crate::client::DEFAULT_COMPANION_REF`] until the first fact).
 pub fn submit_input(
     companion: &str,
     round: Option<String>,
@@ -213,9 +169,6 @@ pub fn submit_input(
     }
 }
 
-/// Mints a client-local correspondence ID from a v4 UUID: unique per
-/// connection for this process, which is all `local_id` needs (it matches
-/// acks to sends within one Client and is never Host-canonical).
 fn new_local_id() -> ClientLocalId {
     ClientLocalId(uuid::Uuid::new_v4().to_string())
 }
@@ -315,8 +268,6 @@ pub fn render_summary(summary: &UndeliveredSummary) -> String {
     lines.join("\n")
 }
 
-/// One `task rev progress [running] purpose <purpose>` line per entry, plus the
-/// `next:` continuation while a page remains.
 pub fn render_task_list(page: &TaskListPage) -> String {
     let mut lines: Vec<String> = page
         .tasks
@@ -335,9 +286,6 @@ pub fn render_task_list(page: &TaskListPage) -> String {
     lines.join("\n")
 }
 
-/// Headline (`<task> rev <n> <progress> purpose <purpose> purpose-source
-/// <ref>`) plus one `kind id [source <ref>]` line per detail row and the
-/// `next:` continuation while rows remain; the refs page the bodies.
 pub fn render_report_page(page: &TaskReportPage) -> String {
     let mut lines = vec![format!(
         "{} rev {} {} purpose {} purpose-source {}",
@@ -379,8 +327,6 @@ pub fn consent_target_for(capability: &str, provider: &str, model: &str) -> Mana
     consent_target(capability, provider, model, &credential_id_for(provider))
 }
 
-/// The shared management-intent shape: provenance-only rationale (origin, no
-/// quote) and never confirmed.
 fn intent(
     intent_id: CommandWireId,
     kind: ManagementIntentKind,
@@ -400,9 +346,6 @@ fn intent(
     }
 }
 
-/// The Host sources the key from its own environment over the Host-local
-/// path, so this payload carries no secret; the rationale is provenance-only
-/// (origin, no quote).
 pub fn credential_intent(
     intent_id: CommandWireId,
     base: &BaseViewMark,
@@ -446,10 +389,6 @@ pub fn deletion_intent(
     )
 }
 
-/// Renders the bounded deletion status page: the surface mark an intent builds
-/// on, one line per operation, and the `next ` cursor while a later page
-/// exists. No target body, search material, or credential is in this page.
-/// `Unavailable` stays a retryable outcome, never an empty page.
 pub fn render_deletion_status(response: &DeletionStatusResponse) -> Result<String, CliError> {
     let DeletionStatusResponse::Page(page) = response else {
         return Err(retryable("deletion status is unavailable; retry later"));
@@ -480,11 +419,6 @@ pub fn render_deletion_status(response: &DeletionStatusResponse) -> Result<Strin
     Ok(lines.join("\n"))
 }
 
-/// Builds one cap set/update intent. The target grammar is shared with the
-/// Host (`usage_cap_target`, never a CLI-local mini-language); the base mark
-/// comes from a just-read [`UsageSummaryPage`], so the Host re-checks a
-/// revision the Owner actually saw. `quote` is never populated: the cap value
-/// travels in the typed target.
 #[must_use]
 pub fn usage_cap_intent(
     intent_id: CommandWireId,
@@ -514,9 +448,6 @@ pub fn usage_cap_mark_for<'a>(
         .map(|cap| cap.mark.0.as_str())
 }
 
-/// Renders one bounded usage page: one line per row, one line per cap slot,
-/// and the `next ` cursor while a later page exists. Unavailable and stale
-/// answers stay retryable outcomes instead of an empty page.
 pub fn render_usage_page(response: &UsageSummaryResponse) -> Result<String, CliError> {
     match response {
         UsageSummaryResponse::Unavailable => Err(retryable("usage is unavailable; retry later")),
@@ -629,12 +560,10 @@ pub fn render_view(view: &ManagementView) -> String {
         .join("\n")
 }
 
-/// One retryable Host-domain answer (exit 2); the message is operational only.
 fn retryable(message: impl Into<String>) -> CliError {
     CliError::Client(ClientError::ServerOutcome(message.into()))
 }
 
-/// One terminal Host-domain decline (exit 1); the message is operational only.
 fn rejected(message: impl Into<String>) -> CliError {
     CliError::Client(ClientError::ServerRejected(message.into()))
 }
@@ -654,10 +583,6 @@ pub fn render_history(items: &[HistoryItem]) -> String {
         .join("\n")
 }
 
-/// One explicit History read. A successful empty result is distinct from an
-/// invalid request, an unreadable store, and a rotated companion projection;
-/// each failure keeps its own meaning and exit class instead of being shown
-/// as an empty timeline.
 pub fn describe_history(response: HistoryResponse) -> Result<Vec<HistoryItem>, CliError> {
     match response {
         HistoryResponse::Items(items) => Ok(items),
@@ -671,9 +596,6 @@ pub fn describe_history(response: HistoryResponse) -> Result<Vec<HistoryItem>, C
     }
 }
 
-/// Intake-routing for a [`RoundIntakeOutcomeWire`]: the accepted round on
-/// success, a retryable `ServerOutcome` otherwise. Decline messages carry
-/// refs and generations only, never body text.
 pub fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> Result<String, CliError> {
     match outcome {
         RoundIntakeOutcomeWire::AcceptedForRound { round } => Ok(round.0.clone()),
@@ -699,9 +621,6 @@ pub fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> Result<String, CliEr
     }
 }
 
-/// ACK-routing for an [`UndeliveredAckOutcome`]: `Ok(())` only when the
-/// confirmation is recorded; retryable answers stay `ServerOutcome` instead
-/// of being shown as presented.
 pub fn describe_ack(outcome: &UndeliveredAckOutcome) -> Result<(), CliError> {
     match outcome {
         UndeliveredAckOutcome::Presented { .. }
@@ -726,9 +645,6 @@ pub fn describe_ack(outcome: &UndeliveredAckOutcome) -> Result<(), CliError> {
     }
 }
 
-/// Resume-routing for a [`ResumeTaskOutcomeWire`]: the resume detail on
-/// success; only `Resumed` is applied, refusals stay `ServerRejected` with
-/// zero Task writes, and `InFlight` / `Unavailable` are `ServerOutcome`.
 pub fn describe_resume(outcome: &ResumeTaskOutcomeWire) -> Result<String, CliError> {
     match outcome {
         ResumeTaskOutcomeWire::Resumed {
@@ -778,8 +694,6 @@ pub fn describe_resume(outcome: &ResumeTaskOutcomeWire) -> Result<String, CliErr
     }
 }
 
-/// Undelivered-fetch routing for an [`UndeliveredResponse`]: the summary to
-/// paint on success, a retryable `ServerOutcome` otherwise.
 pub fn describe_fetch(response: UndeliveredResponse) -> Result<UndeliveredSummary, CliError> {
     match response {
         UndeliveredResponse::Summary(summary) => Ok(summary),
@@ -801,8 +715,6 @@ pub fn describe_fetch(response: UndeliveredResponse) -> Result<UndeliveredSummar
     }
 }
 
-/// Report-fetch routing for a [`TaskReportResponse`]: the page on success, a
-/// retryable `ServerOutcome` otherwise.
 pub fn describe_report(response: TaskReportResponse) -> Result<TaskReportPage, CliError> {
     match response {
         TaskReportResponse::Page(page) => Ok(page),
@@ -818,9 +730,6 @@ pub fn describe_report(response: TaskReportResponse) -> Result<TaskReportPage, C
     }
 }
 
-/// Task-list routing for a [`TaskListResponse`]: the page on success, a
-/// retryable `ServerOutcome` otherwise. Stale cursors and rejections keep
-/// their own exit classes instead of rendering as an empty list.
 pub fn describe_task_list(response: TaskListResponse) -> Result<TaskListPage, CliError> {
     match response {
         TaskListResponse::Page(page) => Ok(page),
@@ -831,9 +740,6 @@ pub fn describe_task_list(response: TaskListResponse) -> Result<TaskListPage, Cl
     }
 }
 
-/// Source-body routing for a [`ReportSourceResponse`]: the page on success.
-/// `InputUnavailable` is retryable (exit 2): the body exists but cannot be
-/// projected safely right now.
 pub fn describe_report_source(
     response: ReportSourceResponse,
 ) -> Result<ReportSourcePageView, CliError> {
@@ -848,9 +754,6 @@ pub fn describe_report_source(
     }
 }
 
-/// Task-selection routing for a [`SelectTaskResponse`]: the selection on
-/// success, a retryable `ServerOutcome` otherwise. Selection is in-memory
-/// display state, never an execution start.
 pub fn describe_select_task(response: SelectTaskResponse) -> Result<TaskSelected, CliError> {
     match response {
         SelectTaskResponse::Selected(selected) => Ok(selected),
@@ -863,10 +766,6 @@ pub fn describe_select_task(response: SelectTaskResponse) -> Result<TaskSelected
     }
 }
 
-/// Management-routing for a [`ManagementOutcome`]: the applied detail on
-/// success; retryable answers are `ServerOutcome` (exit 2) and terminal
-/// declines are `ServerRejected` (exit 1). Detail/message lines carry
-/// operational facts only, never bodies or secrets.
 pub fn describe_management(outcome: &ManagementOutcome) -> Result<String, CliError> {
     match outcome {
         ManagementOutcome::AppliedAsOneTime => Ok(String::from("applied as a one-time approval")),
@@ -1188,8 +1087,6 @@ mod tests {
                 == "consent:learning:openai:gpt-x:openai:main",
             "learning consent target is capability-distinct"
         );
-        // Roundtrip through the shared parsers: the builders never bypass
-        // Host-side validation.
         assert!(
             ene_api::v1::management::parse_credential_target(&credential_target_for("openai"))
                 == Some((String::from("openai"), String::from("main"))),

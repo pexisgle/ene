@@ -183,10 +183,6 @@ where
     let mut tmp = [0u8; 4096];
     let mut health = tokio::time::interval(HEALTH_INTERVAL);
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Single cadence source: tick interval and animation dt must stay in
-    // lockstep. 60 Hz is the measured presentation margin for the fixed-window
-    // >= 30 FPS gate (a fixed 30 Hz tick could not absorb a Present stall);
-    // lowering it requires a fresh measurement per first-party-desktop §8.4.
     const RUNTIME_TICK: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
     let mut runtime_tick = tokio::time::interval(RUNTIME_TICK);
     runtime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -222,9 +218,6 @@ where
             _ = health.tick() => {
                 while let Some(fact) = overlay.take_local_ui() {
                     if matches!(fact, LocalUiFact::Hide) {
-                        // The gesture hides the overlay locally on every
-                        // backend; Windows already hid its HWND in WM_CLOSE,
-                        // so this is idempotent.
                         overlay.set_visible(false);
                     }
                     send(&writer, &BodyToParent::LocalUi(fact)).await?;
@@ -301,20 +294,13 @@ where
                 }
             }
             Err(crate::ipc::IpcError::Truncated { .. }) => return Ok(false),
-            Err(_) => {
-                // Unknown / corrupt body: drop the framed bytes whole if the
-                // length is readable. An oversize claim leaves no boundary and
-                // is unrecoverable: aborting beats desynchronizing the stream
-                // or buffering up to 4 GiB. Never decode leftover bytes as
-                // conversation text.
-                match crate::ipc::frame_len(buf) {
-                    Ok(need) => {
-                        buf.drain(..need);
-                    }
-                    Err(crate::ipc::IpcError::Truncated { .. }) => return Ok(false),
-                    Err(error) => return Err(BodyError::Ipc(error)),
+            Err(_) => match crate::ipc::frame_len(buf) {
+                Ok(need) => {
+                    buf.drain(..need);
                 }
-            }
+                Err(crate::ipc::IpcError::Truncated { .. }) => return Ok(false),
+                Err(error) => return Err(BodyError::Ipc(error)),
+            },
         }
     }
 }

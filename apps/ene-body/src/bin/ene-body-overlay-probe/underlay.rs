@@ -1,13 +1,3 @@
-//! Probe-only top-layer surface that records real pointer input.
-//!
-//! The Body overlay is an `Overlay` layer surface with an alpha-aware input
-//! region. This underlay is a `Top` layer surface (immediately below the
-//! `Overlay` layer) anchored top-left and sized to
-//! `ENE_PROBE_UNDERLAY_WIDTH` x `ENE_PROBE_UNDERLAY_HEIGHT` (default 700x900),
-//! so it only receives clicks that fall inside that region: a click the
-//! overlay does not claim there lands here and is written as raw evidence. It
-//! is not a product surface.
-
 use std::io::Write as _;
 use std::path::PathBuf;
 

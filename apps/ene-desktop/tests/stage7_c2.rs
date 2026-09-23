@@ -1,17 +1,3 @@
-//! Stage 7 C2: Task / Workspace management GUI against a real Host.
-//!
-//! Provider is fake and barrier-gated. The Slint window is not displayed; the
-//! same [`DesktopRuntime`] the window projects is driven here. Tasks are
-//! created only through companion `[task-control]` delegation, never a
-//! GUI-only factory.
-//!
-//! Covers acceptance §4's GUI path and the GUI subset of §5: Unknown vs
-//! interrupted vs Failed vs Cancelled vs Completed, and presentation ACK only
-//! after the panel copies a receipt. Conversation ACK is issued by the
-//! `send_text` presentation path via
-//! [`ene_desktop::session::confirm_chat_presentation`] after the collected
-//! turn is placed in the timeline.
-
 #![cfg(any(unix, windows))]
 
 use std::collections::{BTreeSet, VecDeque};

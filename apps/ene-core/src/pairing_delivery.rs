@@ -6,20 +6,13 @@ use ene_api::v1::refs::{ConnectionWireId, RequestWireId};
 
 struct Slot {
     pending_id: Option<String>,
-    /// The request id and body of the `PairingRequest` that minted
-    /// `pending_id`, kept so a repeat can be told from a conflicting reuse
-    /// (IPC §9.3).
     request_id: Option<RequestWireId>,
     descriptor: Option<String>,
     sender: tokio::sync::mpsc::Sender<PairingProvision>,
 }
 
-/// How a repeated `PairingRequest` relates to the pending already bound to
-/// its connection (IPC §9.3).
 pub(crate) enum PendingResend {
-    /// The same request id and body: answer the live pending.
     Answer(String),
-    /// The request id was reused with a different body: refuse.
     Conflicting,
 }
 
@@ -36,8 +29,6 @@ struct RegistryState {
 
 pub(crate) struct PairingDeliveryClaim {
     pub(crate) connection: ConnectionWireId,
-    /// Binding the claim took from the slot, so a claim whose durable
-    /// approval did not commit can be put back.
     pending_id: String,
     request_id: Option<RequestWireId>,
     descriptor: String,
@@ -98,12 +89,6 @@ impl PairingDeliveryRegistry {
         true
     }
 
-    /// Matches a repeated `PairingRequest` against the pending already bound
-    /// to `connection`, `None` when the connection holds no pending.
-    ///
-    /// A reused request id whose body changed is refused; a differently
-    /// identified request still sees the live pending, because one pending
-    /// is held per connection until it ends (IPC §9.3).
     pub(crate) fn resend_match(
         &self,
         connection: &ConnectionWireId,
@@ -138,10 +123,6 @@ impl PairingDeliveryRegistry {
         })
     }
 
-    /// Re-binds a claimed pending whose durable approval did not commit
-    /// (a technical `approve_pending` error), so a later retry can still name
-    /// it instead of a terminal unknown-id answer. No-op when the connection
-    /// slot already holds a newer pending or the connection ended.
     pub(crate) fn release(&self, claim: PairingDeliveryClaim) {
         let mut state = crate::lock_unpoison(&self.inner);
         if state.by_pending.contains_key(&claim.pending_id) {

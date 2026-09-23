@@ -14,7 +14,6 @@ pub struct UsageSummaryRequest {
     pub consumer: Option<String>,
     pub purpose: Option<String>,
     pub status: Option<String>,
-    /// Host-issued cursor continuing a previous page of the same query.
     pub cursor: Option<UsageCursorWire>,
     pub limit: Option<u32>,
 }
@@ -55,11 +54,7 @@ pub struct UsageSummaryRowView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageCapView {
-    /// Opaque mark for this exact `(provider, window)` slot. Echo it
-    /// as a cap intent's `base_view`; it names the revision the reader saw,
-    /// or the none state when `stored` is `None`.
     pub mark: ViewMarkWire,
-    /// Provider the slot scopes, or `None` for the system scope.
     pub provider: Option<String>,
     pub window: String,
     pub stored: Option<UsageCapStoredView>,

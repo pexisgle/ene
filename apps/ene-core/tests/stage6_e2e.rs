@@ -1,54 +1,3 @@
-//! Stage 6 slice D: first-party E2E over the real transport for Targeted
-//! Deletion, usage / cost / cap, and credential secret non-exposure.
-//!
-//! Every leg starts from the production composition: a real listener
-//! ([`ene_core::conn::run`]), the real `ene-ctl` [`Client`], the real store,
-//! the real management inlets and the real preservation fan-out. Only the
-//! provider transport is a controllable fake (scripted replies, per-call
-//! barriers, injected usage and failures), never a substitute for a
-//! first-party boundary.
-//!
-//! The file is platform-neutral on purpose: the transport-generic
-//! `serve_connection` loop is what the Unix socket and the Windows named pipe
-//! both drive, so the same suite runs on both required CI operating systems
-//! over their own OS transport.
-//!
-//! Determinism: provider call order is controlled by per-call barriers and
-//! observation (`wait_parked`), never by sleeps that assume ordering; race
-//! legs park a supplier at a barrier and commit the other premise while it is
-//! held.
-//!
-//! Coverage map:
-//!
-//! - E2E 1 (Targeted Deletion): request → Host-local confirmation → bounded
-//!   fan-out → finalizing → completed through the real socket, with the
-//!   target planted in History, Learning Summary / Memory current + past
-//!   revision, Task instruction / result / report, the control/metadata
-//!   journal, the workspace path copies, and an undelivered presentation
-//!   transient; completed-state scans, search-material destruction, and the
-//!   fresh-origin acceptance are asserted after the operation.
-//! - E2E 1 Client participant: a Client that received a target-bearing copy
-//!   is snapshotted as a required `ClientIncarnation` by the serving Host's
-//!   first-party confirmation inlet; its local-erasure answer verifies the
-//!   participant, an unreachable Client keeps the operation `Held`, a
-//!   disconnect or replacement connection alone completes nothing, and an
-//!   already-snapshotted participant survives a Host restart until the
-//!   Client's own local erasure (lifecycle §8.1).
-//! - E2E 1 races: provider wait and deletion condition in both orders;
-//!   Learning formation and deletion condition in both orders; presentation
-//!   ACK after the condition is a domain hold, not a Presented write.
-//! - E2E 1 restart: an unfinished operation survives Host restart in
-//!   `active` and in `finalizing` and is never completed by the restart.
-//! - E2E 2 (Usage / Cost / Cap): Reported input/cached/output tokens and the
-//!   cost breakdown from the first-party query for dialogue, learning and
-//!   Task Agent calls, Unknown distinct from Reported, concurrent admission
-//!   for the last cap slot with a zero-byte refusal, `ResponseLost` Unknown
-//!   counted across restart, and cap update currentness / replay.
-//! - E2E 3 (Credential safety): a registered secret never reaches provider
-//!   request bodies, History, Memory, Task data, presentation bodies, or the
-//!   frames, errors, and debug renderings this process captures; a rotation
-//!   during a parked provider wait leaves no raw value durable.
-
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -179,14 +128,6 @@ fn on_task_agent_turn(tool_calls: usize) -> Matcher {
     })
 }
 
-/// Controllable provider fake: content-matched scripted calls, per-call
-/// barriers, captured inputs, a send counter, and one fixed safe usage upper
-/// bound.
-///
-/// A barrier is membership-only (it shrinks), so removing a call from
-/// `blocks` releases it without a lost-wakeup race. Observation polls
-/// (`wait_parked`) observe a call held at a barrier; they are never an ordering
-/// device for a race, which uses the barriers.
 struct ScriptedTransport {
     scripts: Mutex<Vec<(Matcher, Call)>>,
     default_call: Mutex<Call>,
@@ -568,10 +509,6 @@ struct Served {
     shutdown: Option<tokio::sync::watch::Sender<bool>>,
     client: Option<Client>,
     transport: Arc<ScriptedTransport>,
-    /// Reconstructs the configured credential store for a restart. A
-    /// `MemoryCredentialStore` is not `Clone` and `open_host_with` consumes it,
-    /// so the configured value has to be rebuilt from its description rather
-    /// than carried by value.
     cred_store: Box<dyn Fn() -> MemoryCredentialStore + Send + Sync>,
 }
 
@@ -603,8 +540,6 @@ impl Served {
             .complete()
             .await
             .expect("provision must authenticate");
-        // Approve the registration through the serving handle so the sweep
-        // uses the configured credential store, not a default one.
         setup_flow(&mut client, &handle, capabilities)
             .await
             .expect("setup must complete");
@@ -1101,7 +1036,6 @@ fn assert_absent_all(label: &str, texts: &[String], needle: &str) {
     }
 }
 
-/// Commits one Owner History message and returns its identity.
 async fn seed_owner_message(
     store: &ene_store::Store,
     companion: ene_companion::CompanionId,
@@ -1474,21 +1408,8 @@ async fn stage6_targeted_deletion_completes_system_wide() {
     served.server.abort();
 }
 
-/// A target that only the finalizing-restart leg uses: it is never planted in
-/// the store, so the leg can build the crash-consistent `finalizing` marker
-/// through the sealed repository boundary without claiming an erasure.
 const FINALIZING_TARGET: &str = "TS6-FINALIZING-CANARY-2201";
 
-/// E2E 1 race (design R2): a dialogue provider call already claimed when the
-/// deletion condition commits must not publish or adopt its covered reply, a
-/// fresh target-bearing submit is held with zero provider bytes while the
-/// operation is unfinished, and the completed surface stays clean.
-///
-/// The reachable incarnation participates as `more_work` while the
-/// single-frame connection loop is inside the parked provider call, so this
-/// leg drives the fence without parking on a Client demand the loop cannot
-/// deliver mid-frame; the Client-incarnation demand path has its own legs
-/// below.
 #[tokio::test]
 async fn stage6_deletion_races_provider_wait_and_delayed_result() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1540,9 +1461,6 @@ async fn stage6_deletion_races_provider_wait_and_delayed_result() {
             }
         }
         if confirmed && !driven {
-            // One bounded pass collects the durable owner surfaces and moves
-            // the Host transient fence; the parked provider call stays held
-            // until the pass returns.
             handle
                 .run_targeted_deletion_tick()
                 .await
@@ -1690,8 +1608,6 @@ async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
             .any(|input| input.contains("learning formation pass") && input.contains(TARGET)),
         "the fixture must reach the formation provider call"
     );
-    // The durable scan is the ordering guard: the completed surface must hold
-    // no target after the fan-out and every current condition closed.
     assert_eq!(served.canonical_remainder(TARGET).await, 0);
     assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
     assert!(
@@ -1742,16 +1658,12 @@ async fn stage6_delayed_formation_after_completion_is_refused() {
     assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
     transport.release_blocked();
     wait_for_usage_consumer(served.client(), "companion_learning").await;
-    // The durable scan is the ordering guard: once the completed surface is
-    // free of the target, the refused formation must not write it back.
     assert_eq!(served.canonical_remainder(TARGET).await, 0);
     assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
     assert!(
         !memory_view(served.client()).await.contains(TARGET),
         "a formation claimed before the interval never writes target Memory after completion"
     );
-    // The completed operation is not a permanent ban: a fresh Owner origin
-    // after completion is learned as a new experience.
     let (_round, _stream, reply) = send_round(served.client(), &fresh)
         .await
         .expect("a fresh origin must be accepted");
@@ -1853,9 +1765,6 @@ async fn stage6_delayed_task_result_after_completion_is_collected() {
     served.server.abort();
 }
 
-/// E2E 1 restart: an unfinished operation survives a Host restart in `active`,
-/// keeps its current condition, and resumes to completion; a restart never
-/// completes it by itself.
 #[tokio::test]
 async fn stage6_deletion_restart_during_active_resumes() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1884,10 +1793,6 @@ async fn stage6_deletion_restart_during_active_resumes() {
         assert_eq!(outcome, ManagementOutcome::NeedsClarification);
         confirm_deletion(served.handle()).await
     };
-    // Restart while the operation is unfinished. The confirmation already
-    // kicked one bounded pass, so the durable phase may be Active or Held on
-    // an unreachable holder; the restart must neither lose the operation nor
-    // complete it by itself.
     let mut client = served.restart().await;
     let page = deletion_page(&mut client)
         .await
@@ -1909,15 +1814,11 @@ async fn stage6_deletion_restart_during_active_resumes() {
         "the operation identity survives the restart"
     );
     assert_eq!(page.operations[0].sweep, current.sweep.as_u64());
-    // The current condition survived too: a fresh target submit is still held
-    // with zero provider bytes.
     let sends_before = transport.sends();
     submit_expect_hold(&mut client, &format!("still {TARGET}"))
         .await
         .expect("the condition survives the restart");
     assert_eq!(transport.sends(), sends_before);
-    // The restarted Host resumes and completes the operation through the
-    // production fan-out.
     let page = drive_until(served.handle(), &mut client, DeletionPhaseWire::Completed)
         .await
         .expect("the restarted Host must complete the operation");
@@ -1927,8 +1828,6 @@ async fn stage6_deletion_restart_during_active_resumes() {
     served.server.abort();
 }
 
-/// Aborting `conn::run` still stops the async Targeted Deletion driver as an
-/// emergency path. Restart correctness uses graceful shutdown instead.
 #[tokio::test]
 async fn listener_abort_stops_the_deletion_driver() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2084,8 +1983,6 @@ async fn shutdown_waits_for_started_deletion_store_work() {
         .expect("successor startup must complete once predecessor Store work is gone");
 }
 
-/// After graceful shutdown returns, neither the async driver nor started
-/// deletion Store work from the predecessor remains.
 #[tokio::test]
 async fn graceful_shutdown_leaves_no_detached_deletion_work() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2107,11 +2004,6 @@ async fn graceful_shutdown_leaves_no_detached_deletion_work() {
     );
 }
 
-/// E2E 1 restart: a durable `finalizing` marker (the crash-consistent state
-/// between the two sealed completion calls, built here through the public
-/// preservation repository because only a real crash can interleave them)
-/// survives the restart and resumes to completion; the restart itself never
-/// completes it.
 #[tokio::test]
 async fn stage6_deletion_restart_during_finalizing_resumes() {
     use ene_preservation::{
@@ -2127,11 +2019,6 @@ async fn stage6_deletion_restart_during_finalizing_resumes() {
         &[cmds::CAPABILITY_DIALOGUE],
     )
     .await;
-    // The Host is stopped, and the operation is built through the canonical
-    // store producer (the same admission the Host-local confirmation runs)
-    // because the serving composition's driver would otherwise finish the
-    // operation before the crash point can be staged. Only a real crash can
-    // interleave the two sealed completion calls, so the marker is a fixture.
     served.stop().await;
     let store = ene_store::Store::open(&dir.join("app.db"))
         .await
@@ -2167,9 +2054,6 @@ async fn stage6_deletion_restart_during_finalizing_resumes() {
         other => panic!("the confirmation must start one operation, got {other:?}"),
     };
 
-    // Build the crash point: every required participant is verified for the
-    // current sweep, then the durable `finalizing` marker commits and the
-    // process would have crashed before the completion commit.
     let participants = store
         .deletion_participants(current.operation, None, 100)
         .await
@@ -2195,9 +2079,6 @@ async fn stage6_deletion_restart_during_finalizing_resumes() {
     );
     drop(store);
 
-    // Restart: the startup recovery reads the durable `finalizing` marker and
-    // finishes the remaining completion steps (lifecycle §14). It resumes the
-    // completion boundary, never a phase guess and never a second sweep.
     let mut client = served.serve().await;
     let page = deletion_page(&mut client)
         .await
@@ -2217,7 +2098,6 @@ async fn stage6_deletion_restart_during_finalizing_resumes() {
             .as_hyphenated()
             .to_string()
     );
-    // The resume is a completion step, not a second participant sweep.
     let before = transport.sends();
     let page = drive_until(served.handle(), &mut client, DeletionPhaseWire::Completed)
         .await
@@ -2231,12 +2111,6 @@ async fn stage6_deletion_restart_during_finalizing_resumes() {
     served.server.abort();
 }
 
-// ---------------------------------------------------------------------------
-// E2E 1: the Client-incarnation required participant (lifecycle §8.1)
-// ---------------------------------------------------------------------------
-
-/// The Client-incarnation participant row of the first operation in one
-/// status page, when the durable snapshot named one (lifecycle §8.1).
 fn client_incarnation_participant(
     page: &DeletionStatusPage,
 ) -> Option<&DeletionParticipantStatusWire> {
@@ -2392,10 +2266,6 @@ async fn wait_for_target_memory_row(served: &Served) {
     }
 }
 
-/// The Owner confirmation runs in the serving Host, so the
-/// Client that received a target-bearing copy is snapshotted as a required
-/// participant; its own local-erasure confirmation is what verifies the
-/// participant and lets global completion commit.
 #[tokio::test]
 async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2451,11 +2321,6 @@ async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
     served.server.abort();
 }
 
-/// An unreachable Client that received a target-bearing
-/// copy keeps the operation `Held`; a disconnect, a replacement connection,
-/// and a Host restart alone never verify it or complete the operation. The
-/// snapshotted Client participant survives the restart, and only its own
-/// local-erasure confirmation lets completion commit.
 #[tokio::test]
 async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2538,13 +2403,6 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     served.server.abort();
 }
 
-/// The management Memory view is a
-/// body-bearing first-party read. After a Host restart cleared the in-memory
-/// delivery evidence of the earlier non-target round, an incarnation that
-/// receives the target-bearing Memory only through the management view must
-/// still be snapshotted as a required participant by the serving Host's
-/// control inlet, and its own local erasure is what verifies it and lets
-/// global completion commit.
 #[tokio::test]
 async fn stage6_management_view_memory_body_is_a_required_client_participant() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2625,22 +2483,12 @@ async fn stage6_management_view_memory_body_is_a_required_client_participant() {
     served.server.abort();
 }
 
-// ---------------------------------------------------------------------------
-// E2E 2: usage / cost / cap
-// ---------------------------------------------------------------------------
-
-/// One reviewed-route usage report: `(input, cached, output)` token counts
-/// whose cost under the first-party `gpt-4o-mini` rates is exactly
-/// representable in micro-USD.
 fn reported_cost_micros(input: u64, cached: u64, output: u64) -> u64 {
-    // Reviewed rates are micro-USD per 1,000,000 tokens:
-    // input 150_000, cached 75_000, output 600_000.
     (input - cached) * 150_000 / 1_000_000
         + cached * 75_000 / 1_000_000
         + output * 600_000 / 1_000_000
 }
 
-/// One bounded first-party usage read over the socket.
 async fn usage_page(client: &mut Client) -> UsageSummaryPage {
     let answer = ask(
         client,
@@ -2767,7 +2615,6 @@ async fn set_system_daily_cap(
     outcome
 }
 
-/// The usage page's first row for one consumer.
 fn row_for<'a>(
     page: &'a UsageSummaryPage,
     consumer: &str,
@@ -2796,11 +2643,6 @@ fn assert_reported_cost(row: &ene_api::v1::usage::UsageSummaryRowView, label: &s
     assert_eq!(cost.total.currency, "USD");
 }
 
-/// E2E 2: dialogue, Learning and Task Agent provider calls appear in the
-/// first-party usage / cost surface with their Reported token split and cost
-/// breakdown, an Unknown settlement is never rendered as zero, and the
-/// historical cost is bound to the admission pricing snapshot (a later
-/// admission under a different snapshot does not reprice it).
 #[tokio::test]
 async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2880,15 +2722,9 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
         .expect("the unknown round must complete");
     confirm_round(served.client(), &round, stream).await;
 
-    // Learning runs behind the three client-visible rounds. Wait for the
-    // formation and both updates to commit before taking the read-only
-    // baseline; otherwise their legitimate usage settlement can land between
-    // the two reads and look like a mutation caused by the read itself.
     wait_for_memory_revision_at_least(served.client(), 3).await;
 
     let page = usage_page(served.client()).await;
-    // Attribution: one Reported row per consumer, each with the exact
-    // reviewed-rate breakdown.
     let dialogue = page
         .rows
         .iter()
@@ -2916,8 +2752,6 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
     let task = row_for(&page, "task_agent");
     assert_eq!(task.purpose, "task_agent_turn");
     assert_reported_cost(task, "task agent");
-    // Reported and Unknown are distinct states: the Unknown row carries no
-    // token counts and no zero cost.
     let unknown = page
         .rows
         .iter()
@@ -2926,15 +2760,9 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
     assert_eq!(unknown.consumer, "companion_dialogue");
     assert!(unknown.tokens.is_none(), "Unknown is never zero tokens");
     assert!(unknown.cost.is_none(), "Unknown is never a zero cost");
-    // Read-only: a second read answers the same rows and settles nothing.
     let again = usage_page(served.client()).await;
     assert_eq!(again.rows, page.rows, "the read changes nothing durable");
 
-    // Historical pricing: a settlement admitted under a different reviewed
-    // snapshot keeps its own rate. The current milestone has no runtime
-    // catalog-update producer, so the changed-price premise is constructed as
-    // a durable fixture through the production claim/settlement boundary (the
-    // same shape the store's `usage_query` suite injects).
     let synthetic = ene_inference::pricing::PricingSnapshot {
         provider: String::from("openai"),
         model: String::from(MODEL),
@@ -2943,9 +2771,6 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
         cached_input_rate: ene_inference::cost::TokenRate::from_micros_per_million(150_000),
         output_rate: ene_inference::cost::TokenRate::from_micros_per_million(1_200_000),
         effective_at: WallClockWithTz::now(),
-        // Not the reviewed revision: the store keeps one immutable row per
-        // `(provider, model, revision)`, so a changed-price premise must carry a
-        // revision number the reviewed catalog never published.
         source_revision: ene_inference::pricing::PricingCatalogRevision::new(
             ene_inference::pricing::FIRST_PARTY_REVISION.as_u64() + 1,
         ),
@@ -3006,8 +2831,6 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
             .expect("the synthetic settlement must record");
     }
     let after = usage_page(served.client()).await;
-    // The synthetic ticket settled at the revision-2 rates
-    // (1000 x 300_000 + 100 x 1_200_000 per million tokens = 300 + 120).
     let synthetic_row = after
         .rows
         .iter()
@@ -3020,7 +2843,6 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
         })
         .expect("the revision-2 settlement keeps its own rate");
     assert!(synthetic_row.cost.is_some());
-    // Every pre-existing row keeps the exact cost it was admitted under.
     for before_row in &page.rows {
         let same = after
             .rows
@@ -3048,10 +2870,6 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
     served.server.abort();
 }
 
-/// The safe upper bound the cap tests reserve: 1,000,000 input tokens at the
-/// non-cached input rate plus 100,000 output tokens at the output rate under
-/// the reviewed `gpt-4o-mini` snapshot plus the one-micro-unit allowance for
-/// the separately rounded input components = 210,001 micro-USD.
 fn cap_estimate() -> UsageEstimate {
     UsageEstimate {
         input_tokens_upper_bound: 1_000_000,
@@ -3485,14 +3303,6 @@ async fn set_system_daily_cap_mark(
     outcome
 }
 
-// ---------------------------------------------------------------------------
-// E2E 3: credential secret non-exposure
-// ---------------------------------------------------------------------------
-
-/// E2E 3: a registered secret never reaches provider request bodies, History,
-/// Memory, Task data, presentation bodies, the management view, or the
-/// structured errors the first-party client observes — across dialogue,
-/// Learning, Task Agent, management, and provider-failure paths.
 #[tokio::test]
 async fn stage6_registered_secret_absent_from_every_first_party_surface() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -3567,19 +3377,13 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
     select_workspace(served.client(), &workspace)
         .await
         .expect("workspace must select");
-    // Dialogue + Learning: the owner input, the provider reply, and the
-    // formation answer all quote the registered value.
     let (round, stream, _reply) = send_round(
         served.client(),
         &format!("please remember the passphrase {SECRET}"),
     )
     .await
     .expect("the secret round must complete");
-    // The provider answer is synthetic (a real model never sees the scrubbed
-    // value), so only the durable adoption is the invariant: the History row
-    // must carry the redaction marker instead of the value.
     confirm_round(served.client(), &round, stream).await;
-    // Task Agent: the directive purpose and the final answer quote it.
     let (round, stream, _) =
         send_round(served.client(), "please read input.txt and write report.md")
             .await
@@ -3588,16 +3392,12 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
     wait_task_progress(served.client(), "completed", 1)
         .await
         .expect("the task must complete");
-    // Provider failure: the request must already be scrubbed.
     let errored = send_round_raw(served.client(), &format!("an error path with {SECRET}")).await;
     match errored {
         Ok((_, _, text, _)) => assert_absent("errored round text", &text, SECRET),
         Err(rendered) => assert_absent("errored round rendering", &rendered, SECRET),
     }
-    // Provider captures: every request body is scrubbed.
     assert_absent_all("provider request", &transport.input_texts(), SECRET);
-    // Durable surfaces: History, Memory, the Task report and its sources, the
-    // undelivered excerpts, and the whole state database.
     let history = history_texts(served.client()).await;
     assert_absent_all("history", &history, SECRET);
     assert_absent("memory view", &memory_view(served.client()).await, SECRET);
@@ -3627,7 +3427,6 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
     else {
         panic!("the report must answer a page: {report:?}");
     };
-    // Every report source body (the purpose and the result rows) is scrubbed.
     for row in &page.rows {
         let Some(source) = row.source.as_ref() else {
             continue;
@@ -3647,7 +3446,6 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
             assert_absent("report source body", &source_page.text, SECRET);
         }
     }
-    // Management view: credential/consent metadata renders refs, never values.
     let view = ask(
         served.client(),
         WirePayload::ManagementViewRequest(cmds::setup_view_request()),
@@ -3670,9 +3468,6 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
     served.server.abort();
 }
 
-/// E2E 3: registering a value sweeps its prior durable occurrences, and a
-/// registration that commits while a provider call is parked leaves no raw
-/// value durable anywhere.
 #[tokio::test]
 async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked_send() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -3707,9 +3502,6 @@ async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked
         &[cmds::CAPABILITY_DIALOGUE],
     )
     .await;
-    // The rotated value is not yet registered: the round's durable History
-    // legitimately carries it raw, and the registration's approval sweep must
-    // redact it.
     let (round, stream, _) = send_round(served.client(), &rotated_round)
         .await
         .expect("the pre-registration round must complete");
@@ -3718,8 +3510,6 @@ async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked
         !db_target_hits(&dir.join("app.db"), ROTATED_SECRET).is_empty(),
         "the fixture must plant the not-yet-registered value"
     );
-    // Stage the rotation; the Host-local approval commits it while the next
-    // provider call is parked.
     let mark = view_mark(served.client()).await.expect("show");
     let staged = ask(
         served.client(),
@@ -3763,8 +3553,6 @@ async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked
     barrier.release_blocked();
     let (_round, _stream, reply, _close) = parked.await.expect("the parked round must answer");
     assert_absent("parked reply", &reply, SECRET);
-    // The approval sweep removed the prior durable occurrence; nothing keeps
-    // either value raw.
     assert!(
         db_target_hits(&dir.join("app.db"), ROTATED_SECRET).is_empty(),
         "the registration sweep must redact prior occurrences: {:?}",
@@ -3780,17 +3568,6 @@ async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked
     served.server.abort();
 }
 
-// ---------------------------------------------------------------------------
-// E2E 1: durable Client body-delivery evidence across a Host restart
-// ---------------------------------------------------------------------------
-
-/// M1: a Client that received a target-bearing copy before a Host restart must
-/// still be snapshotted as a required `ClientIncarnation` by a later
-/// serving-Host confirmation — the delivery evidence is durable, so the
-/// restart must not clear it. The unreachable old incarnation is an explicit
-/// hold, and only the same incarnation's reconnected, verified local erasure
-/// lets the sealed global completion commit; the verified wipe then clears the
-/// durable evidence.
 #[tokio::test]
 async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -3809,15 +3586,10 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
         &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
     )
     .await;
-    // 1: the target-bearing copy reaches the Client in the first Host process.
     deliver_target_copy(&mut served).await;
 
-    // 2: the Host restarts before any deletion exists. The in-memory delivery
-    // tracking is gone; only the durable evidence can survive.
     let mut client = served.restart().await;
 
-    // 3: stage the request through the reconnected Client, then drop the
-    // connection so the confirmation meets the old incarnation unreachable.
     let outcome = request_deletion(&mut client, TARGET)
         .await
         .expect("the request inlet must answer");
@@ -3829,9 +3601,6 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
     served.client = None;
     drop(client);
 
-    // 4: the serving Host's trusted confirmation snapshots the durable
-    // evidence and names the incarnation that received the copy before the
-    // restart.
     let current = confirm_deletion_via_serving_control(&mut served).await;
     let page = local_deletion_page(served.handle()).await;
     let participant = client_incarnation_participant(&page)
@@ -3841,7 +3610,6 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
         "the Client participant belongs to the current sweep: {participant:?}"
     );
 
-    // 5: the unreachable incarnation is an explicit hold, never a completion.
     let page = drive_until_local(served.handle(), DeletionPhaseWire::Held).await;
     assert_ne!(
         page.operations[0].phase,
@@ -3870,9 +3638,6 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
         "the restart keeps exactly the delivered incarnation's evidence"
     );
 
-    // 6: the same Client boot incarnation reconnects (a new connection, same
-    // identity). Only its verified local erasure lets the operation reach the
-    // sealed global completion.
     let mut client = connect(&served.dir).await;
     let handle = served.handle_arc();
     let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
@@ -3886,9 +3651,6 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
     );
     assert_eq!(served.canonical_remainder(TARGET).await, 0);
     assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
-    // The verified full-class wipe cleared the durable evidence: no later
-    // admission claims a copy that no longer exists. Read it over the same
-    // fresh store connection the canonical remainder probe uses.
     let store = ene_store::Store::open(&served.dir.join("app.db"))
         .await
         .expect("the state database opens");
@@ -3903,12 +3665,6 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
     served.server.abort();
 }
 
-// ---------------------------------------------------------------------------
-// E2E 1 dialogue currentness
-// ---------------------------------------------------------------------------
-
-/// The delayed reply's paraphrase: it never quotes the target, so only the
-/// durable old-claim provenance can refuse it.
 const DIALOGUE_RACE_PARAPHRASE: &str = "I still keep that detail in mind.";
 
 #[expect(clippy::expect_used, reason = "test fixture helper")]
@@ -4156,18 +3912,6 @@ async fn stage6_active_deletion_keeps_covered_context_from_the_provider() {
     served.server.abort();
 }
 
-// ---------------------------------------------------------------------------
-// E2E 1: exhaustive source reconciliation beyond the admission page
-// ---------------------------------------------------------------------------
-
-/// M3 regression over the real composition: strictly more covered source
-/// identities than one reconciliation page, with the already-committed
-/// inference claim naming the canonical last one.
-///
-/// The served Host must walk every page through the durable cursor before the
-/// participant sweeps redact the identity bodies, complete only after the
-/// walk, keep the claim durably held after completion, refuse the delayed
-/// result, and accept a fresh post-completion origin.
 #[tokio::test]
 async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
     use ene_companion::CompanionRepository as _;
@@ -4180,7 +3924,6 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
     use ene_permission::{CapabilityKind, ConsentRepository as _};
     use ene_presence::PresenceRepository as _;
 
-    /// One clean delayed formation carrying the durable claim handle.
     fn delayed_formation(
         companion: RawId,
         claim: ene_learning::LearningClaimRef,
@@ -4223,9 +3966,6 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
         &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
     )
     .await;
-    // Quiesce the serving Host, then seed the fixture directly: more covered
-    // identities than one reconciliation page, and one already-committed
-    // Learning formation claim naming the canonical last identity.
     served.stop().await;
     let (ticket, companion_raw) = {
         let store = ene_store::Store::open(&dir.join("app.db"))
@@ -4292,8 +4032,6 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
         (ticket, companion.as_raw())
     };
 
-    // The production first-party path: request, trusted confirmation, bounded
-    // fan-out. The walk must cover every page before completion.
     let mut client = served.serve().await;
     let outcome = request_deletion(&mut client, TARGET)
         .await
@@ -4312,8 +4050,6 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
         db_target_hits(&served.dir.join("app.db"), TARGET)
     );
 
-    // The durable correspondence names the claim whose source fell past the
-    // admission page.
     served.stop().await;
     let store = ene_store::Store::open(&dir.join("app.db"))
         .await
@@ -4331,8 +4067,6 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
     };
     assert_eq!(held, 1, "the last-page claim is durably associated");
 
-    // The delayed result arrives after completion: refused by the durable
-    // correspondence even though no current condition is readable.
     let delayed = delayed_formation(companion_raw, LearningClaimRef::from_raw(ticket.0));
     assert_eq!(
         store
@@ -4343,11 +4077,6 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
         "a formation claimed before the interval stays stale after completion"
     );
 
-    // The completed operation is not a permanent ban: a fresh claim from a
-    // fresh source after completion is accepted as a new origin. The
-    // serving Host's startup normalization may have moved the credential-set
-    // revision since the fixture was seeded, so the fresh claim reads the
-    // current premise instead of reusing the seeding snapshot.
     let fresh_consent = store
         .load_current(CapabilityKind::Learning)
         .await
@@ -4393,16 +4122,6 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
     );
 }
 
-/// E2E 1 race (design R2, post-completion): a Task Agent execution observed a
-/// target-bearing workspace source as execution-local tool output (no
-/// canonical source identity), the following provider claim consumed that
-/// observation and parked, the mutable workspace path was then rewritten so
-/// the current file no longer carries the target, and Targeted Deletion
-/// started only after that rewrite. Re-reading the path at admission cannot
-/// prove the discarded observation body was unrelated to the target, so the
-/// occurrence stays deletion-relevant, the unsealed delegation is held, and
-/// the delayed clean paraphrase is collected. A fresh Owner origin after
-/// completion remains allowed.
 #[tokio::test]
 async fn stage6_task_transient_observation_after_completion_is_collected() {
     const LEG_TARGET: &str = TARGET;
@@ -4658,11 +4377,6 @@ async fn stage6_task_sealed_observation_paraphrase_is_erased_after_workspace_rew
     served.server.abort();
 }
 
-/// Action result body is in memory, the occurrence row is not yet
-/// durable, and Targeted Deletion runs to completion in that window. The
-/// in-flight read/list correspondence keeps the delayed body old-origin, so
-/// it cannot re-enter the next provider turn or a durable result. A later
-/// fresh Owner origin of the same string is accepted.
 #[tokio::test]
 async fn stage6_observation_write_across_deletion_stays_old_origin() {
     const LEG_TARGET: &str = TARGET;
@@ -4815,9 +4529,6 @@ async fn stage6_observation_write_across_deletion_stays_old_origin() {
     served.server.abort();
 }
 
-/// A paraphrase Summary whose History pin sits past the
-/// admission page is erased with that source. Exact-text remainder of 0 is
-/// not enough; the semantic derived Summary/Memory must actually disappear.
 #[tokio::test]
 async fn stage6_reconciliation_erases_paraphrase_pinned_past_the_page() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _};
@@ -5055,17 +4766,6 @@ fn transient_sole_result_body(db: &Path) -> String {
     .expect("the result body must read")
 }
 
-/// E2E 4 (credential revision currentness, docs/implementation/stages/stage-6.md C3): a credential rotation that commits while the Task
-/// Agent's final provider call is parked is current at the result commit, so
-/// the final answer is scrubbed under the advanced set: the durable result
-/// body carries only the redaction marker, the raw value is absent from every
-/// durable surface and every provider request, and no diagnostic carries it.
-///
-/// The stale-refusal half of the same premise is driven deterministically at
-/// the execution boundary in `task_run::tests`, where a delegating scrubber
-/// can advance the set between the scrub and the commit; the serving
-/// composition reads the revision immediately before its own commit, so this
-/// E2E pins the current-premise path end to end.
 #[tokio::test]
 async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scrub() {
     let temp = tempfile::TempDir::new().unwrap();

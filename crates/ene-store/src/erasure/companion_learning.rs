@@ -1,43 +1,3 @@
-//! Local-erasure participants for the Companion and Learning owners
-//! (Targeted Deletion lifecycle §9–§10).
-//!
-//! Each implementation owns exactly its own durable rows and never updates
-//! another domain's tables:
-//!
-//! - [`companion_erasure_participant`] sweeps the content columns of
-//!   `history_message` and `activity_record` with the operation's exact
-//!   mechanical target, and removes `undelivered` reporting references whose
-//!   canonical source is gone (the reference carries no body; the source-side
-//!   erasure governs the referenced content).
-//! - [`learning_erasure_participant`] sweeps `learning_summary`,
-//!   `learning_memory`, and `learning_memory_revision` content, the derived
-//!   `learning_memory_term` token index, and follows the recorded
-//!   correspondence: a revision whose evidence Summary no longer exists is
-//!   erased, and a Memory whose current revision is erased goes with its
-//!   history and tokens, so derived text can never remain as the only copy of
-//!   the erased evidence.
-//!
-//! The mechanical layer is mandatory and LLM-independent: matching is exact
-//! substring / token equality, never a model judgment. Work is bounded per
-//! demand (`ERASURE_SCAN_ROWS` scanned rows), the continuation cursor is
-//! owned by the participant, and `(operation, sweep, participant)` is
-//! idempotent: re-scanning the same range after a crash deletes nothing new
-//! because the target rows are already gone. A demand for a different
-//! condition starts a fresh sweep, so a completion is never mixed across
-//! generations, and a lost cursor (restart) simply restarts the sweep from its
-//! head — never from a remembered position that could skip rows.
-//!
-//! The History→Summary correlation is the recorded correspondence only: the
-//! Summary's own source pins. A pin is correlated when the operation's
-//! current `erasure_condition_source` primary key names it (indexed
-//! membership, never a materialized copy of every covered identity) or when
-//! the pinned message still carries the target. Reading the History row for
-//! that check is a read-only cross-owner lookup; the Learning participant
-//! never writes another owner's rows. A Summary that paraphrases the target
-//! without an exact occurrence and without a recorded covered source is not
-//! mechanically reachable in this slice — no LLM and no guessed correlation
-//! is used to reach it.
-
 use std::collections::HashMap;
 
 use ene_preservation::{ErasureConditionRef, ParticipantOwnerRef};
@@ -50,15 +10,9 @@ use super::{
     ErasurePageError, LocalErasureParticipant, PageOutcome, PageRequest, SweepCursor, bounded_step,
 };
 
-/// Content columns of the Companion owner. The system-wide remainder probe
-/// (`remainder.rs`) derives its Companion surface from this list, so a column
-/// added here is probed as well.
 pub(crate) const COMPANION_CONTENT: &[(&str, &str)] =
     &[("history_message", "body"), ("activity_record", "body")];
 
-/// Content columns of the Learning owner. The Learning sweep and the
-/// system-wide remainder probe both derive their surface from this list, so a
-/// column added here is swept and probed together.
 pub(crate) const LEARNING_CONTENT: &[(&str, &str)] = &[
     ("learning_summary", "content"),
     ("learning_memory", "content"),
@@ -73,9 +27,6 @@ const MEMORY_KEY: &str = "memory_id";
 const REVISION_KEY: &str = "revision";
 const TERM_TABLE: &str = "learning_memory_term";
 
-/// Deletes the rows named by `keys` from one table inside the caller's
-/// transaction. `table` / `column` are compile-time constants; the identities
-/// travel only as bound parameters.
 fn delete_keys(
     tx: &Transaction<'_>,
     table: &str,
@@ -94,10 +45,6 @@ fn delete_keys(
     Ok(u64::try_from(deleted).unwrap_or(u64::MAX))
 }
 
-/// One exact-content page over a single-key table: walks `key > after` in key
-/// order, matches `instr(content, target) > 0`, and deletes the matches
-/// through `delete` when erasing. The delete action is the only per-owner
-/// difference, so the paging loop has one implementation.
 fn exact_page_with(
     tx: &Transaction<'_>,
     table: &str,
@@ -136,7 +83,6 @@ fn exact_page_with(
     })
 }
 
-/// One exact-content page that deletes only the matching rows.
 fn exact_page(
     tx: &Transaction<'_>,
     table: &str,
@@ -149,17 +95,8 @@ fn exact_page(
     })
 }
 
-/// The dangling-reporting-reference predicate: a row matches when its
-/// canonical History or activity source no longer exists. The row itself
-/// carries no body, so the source side's erasure governs the content and only
-/// the dangling reference is removed here. `?1`/`?2` are the History-message
-/// and activity-record source kinds; the sweep page and the system-wide
-/// remainder probe share this one declaration.
 pub(crate) const SQL_DANGLING_UNDELIVERED: &str = "(u.source_kind = ?1 AND NOT EXISTS (SELECT 1 FROM history_message h WHERE h.message_id = u.source_id)) OR (u.source_kind = ?2 AND NOT EXISTS (SELECT 1 FROM activity_record a WHERE a.activity_id = u.source_id))";
 
-/// One page of the `undelivered` reference table. Only the dangling
-/// reference is removed here; the referenced source body is the owning
-/// table's concern.
 fn undelivered_page(
     tx: &Transaction<'_>,
     request: &PageRequest<'_>,
@@ -256,10 +193,6 @@ fn companion_step(
     )
 }
 
-// --- Learning owner --------------------------------------------------------
-
-/// Tables of the Learning sweep, in order: evidence Summaries, Memory
-/// revisions, current Memories, then the derived recall token index.
 const LEARNING_TABLES: usize = 4;
 
 fn delete_memories(tx: &Transaction<'_>, memories: &[String]) -> Result<u64, rusqlite::Error> {
@@ -517,15 +450,11 @@ fn learning_step(
     })
 }
 
-/// Companion-owned local erasure (SO §4.3/4.4): History bodies, activity
-/// records, and the undelivered references that name an erased source.
 #[must_use]
 pub fn companion_erasure_participant(store: Store) -> LocalErasureParticipant {
     LocalErasureParticipant::new(ParticipantOwnerRef::Companion, companion_step, store)
 }
 
-/// Learning-owned local erasure (SO §4.5-4.9): Experience Summary evidence,
-/// current and historical Memory content, and the derived recall index.
 #[must_use]
 pub fn learning_erasure_participant(store: Store) -> LocalErasureParticipant {
     LocalErasureParticipant::new(ParticipantOwnerRef::Learning, learning_step, store)

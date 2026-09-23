@@ -149,33 +149,12 @@ pub struct AttemptCommitPremise {
     pub relied_evaluation: RawId,
 }
 
-/// The domain result of one attempt insertion.
-///
-/// Every non-`Started` variant is an `Ok`-side domain outcome that writes no
-/// attempt row and executes nothing; a missing delegation, task, or workspace
-/// association, and a moved revision or association all answer
-/// `StalePremise` (the Work owner re-reads to distinguish them). Terminal
-/// Task progress and an execution-sealed delegation are their own Action-owned
-/// outcomes: Action never imports the Task lifecycle type, and the Work-side
-/// adapter re-reads the durable state to explain them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionStartOutcome {
     Started,
     StalePremise,
-    /// The Task is terminal (`Completed` / `Failed` / `Cancelled`); nothing was written and
-    /// no external effect may happen.
     TaskTerminal,
     ExecutionSealed,
-    /// A canonical current erasure condition covers the resolved target
-    /// (lifecycle §7/§11). No attempt row is written and no external effect may
-    /// start: the attempt is refused before it exists, so no target copy is
-    /// saved and no outcome has to be retracted. The coverage gate's erasure-use
-    /// hold is nonetheless committed (materialized when it was still
-    /// unreconciled), so the correspondence outlives the refused try.
-    ///
-    /// Distinct from [`Self::StalePremise`] (a correlation moved) and
-    /// [`Self::TaskTerminal`] / [`Self::ExecutionSealed`] (the Task or
-    /// delegation closed): the target itself is under an active deletion.
     HeldForErasure,
 }
 
@@ -212,22 +191,6 @@ pub struct ActionAttemptRecord {
     reason = "Stage 4 contract style uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait ActionAttemptRepository: Send + Sync {
-    /// Inserts one attempt iff every durable premise still holds.
-    ///
-    /// Missing rows and moved revisions/associations answer
-    /// [`ActionStartOutcome::StalePremise`] without writes; terminal Task
-    /// progress answers [`ActionStartOutcome::TaskTerminal`] and an
-    /// execution-sealed delegation answers
-    /// [`ActionStartOutcome::ExecutionSealed`], both without writes and
-    /// before any external effect. A canonical current erasure condition
-    /// covering the resolved target answers
-    /// [`ActionStartOutcome::HeldForErasure`]: no attempt row is written and
-    /// no external effect starts, but the gate's erasure-use hold is
-    /// committed so the correspondence outlives the refused try. A premise
-    /// that disagrees with the stored delegation correspondence, duplicate
-    /// workspace association rows, unknown operation names, and a duplicate
-    /// attempt identity are technical errors (fail closed, never reduced to
-    /// stale).
     async fn insert_attempt_if_current(
         &self,
         premise: AttemptCommitPremise,

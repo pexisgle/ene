@@ -30,8 +30,6 @@ pub(crate) struct TaskPanel {
     result_adopted: Option<u64>,
     action_lines: Vec<String>,
     report_rows: Vec<super::presentation::Row>,
-    /// Certainty per presented action-attempt subject, from the undelivered
-    /// receipt. Kept across report reloads so display order cannot settle it.
     certainty: std::collections::BTreeMap<String, String>,
     workspace_path: Option<String>,
     undelivered_lines: Vec<String>,
@@ -195,8 +193,6 @@ impl TaskPanel {
     }
 
     pub(crate) async fn refresh_list(&mut self, client: &mut Client) -> Result<(), DesktopError> {
-        // A Host page sized at its own bound leaves a continuation cursor;
-        // dropping it would silently truncate the list.
         let mut cursor = None;
         let mut items = Vec::new();
         loop {
@@ -297,8 +293,6 @@ impl TaskPanel {
         match self.load_report(client).await {
             Ok(()) => Ok(()),
             Err(error) => {
-                // The new identity is committed; a failed report read must not
-                // leave the previous Task's body under it.
                 self.clear_selection_body();
                 Err(error)
             }
@@ -500,8 +494,6 @@ impl TaskPanel {
                 answer.message_type()
             )));
         };
-        // `Unavailable` means the Host wrote no status; the receipt is still
-        // valid and retryable, so keep it for a later ACK.
         if !matches!(outcome, UndeliveredAckOutcome::Unavailable) {
             self.presented = None;
         }
@@ -513,8 +505,6 @@ impl TaskPanel {
             .displayed
             .clone()
             .ok_or_else(|| DesktopError::Protocol(String::from("report needs a displayed task")))?;
-        // A report larger than one Host page reports a continuation cursor;
-        // merge every page before applying so no attempt or result is lost.
         let mut cursor = None;
         let mut merged: Option<TaskReportPage> = None;
         loop {
@@ -593,8 +583,6 @@ impl TaskPanel {
                 } else {
                     String::new()
                 };
-                // The attempt's certainty is receipt state, not report state;
-                // carrying it onto the row is what the card can show.
                 let meta = if row.kind == "action_attempt" {
                     let certainty = self.certainty.get(&row.id).map_or("unset", String::as_str);
                     format!("{} certainty={certainty}", row.id)
@@ -633,9 +621,6 @@ impl TaskPanel {
         Ok(())
     }
 
-    /// Drops the selected Task's report body only. The undelivered receipt
-    /// and certainty are Host presentation facts; only
-    /// `reset_connection_state` or an explicit ACK may drop them.
     fn clear_selection_body(&mut self) {
         self.displayed = None;
         self.purpose_text.clear();

@@ -1,17 +1,8 @@
 pub const CONFIRMATION_MODE_ENV: &str = "ENE_CONFIRMATION_CHANNEL";
 pub const CONFIRMATION_MODE_STDIO: &str = "stdio";
 
-/// Upper bound on one control frame, shared by the confirmation channel and
-/// the requester listener. The secret-bearing credential frame is the largest
-/// legal message; anything bigger is not this protocol.
 pub const MAX_CONTROL_FRAME_BYTES: u32 = 16 * 1024;
 
-/// Serializes one frame body and checks it against
-/// [`MAX_CONTROL_FRAME_BYTES`].
-///
-/// # Errors
-///
-/// Fails when the value cannot serialize or exceeds the bound.
 pub fn encode_body<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
     let body = serde_json::to_vec(value)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -24,11 +15,6 @@ pub fn encode_body<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
     Ok(body)
 }
 
-/// Decodes one frame body, mapping a decode failure to `InvalidData`.
-///
-/// # Errors
-///
-/// Returns `InvalidData` when the body does not decode.
 pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> std::io::Result<T> {
     serde_json::from_slice(body)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
@@ -43,12 +29,6 @@ pub enum ChannelEvent {
 
 use crate::{FromConfirmation, ToConfirmation};
 
-/// Encodes one frame as a `u32` big-endian length followed by JSON.
-///
-/// # Errors
-///
-/// Fails when the value cannot serialize or exceeds
-/// [`MAX_CONTROL_FRAME_BYTES`].
 pub fn encode_frame<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
     let body = zeroize::Zeroizing::new(encode_body(value)?);
     let mut out = Vec::with_capacity(body.len() + 4);
@@ -57,16 +37,6 @@ pub fn encode_frame<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> 
     Ok(out)
 }
 
-/// Reads one framed message.
-///
-/// `Ok(None)` is terminal for the channel and means the peer closed or the
-/// length prefix was zero or over [`MAX_CONTROL_FRAME_BYTES`].
-///
-/// # Errors
-///
-/// Propagates transport failures, including a truncated body, and returns
-/// `InvalidData` for a body that fails to decode; both are terminal for the
-/// channel, and a malformed frame never becomes a guessed message.
 pub fn read_frame<R, T>(reader: &mut R) -> std::io::Result<Option<T>>
 where
     R: std::io::Read,
@@ -163,16 +133,6 @@ mod platform {
             Ok((Self { stream: gui }, HostChannel { stream: host }))
         }
 
-        /// Adopts the channel the Host passed as this process's stdin.
-        ///
-        /// The descriptor is re-armed close-on-exec, so no descendant this
-        /// process execs can inherit the confirmation endpoint; the channel
-        /// is never re-handed to Body, tools, or plugins.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when stdin cannot be taken or its
-        /// close-on-exec flag cannot be set.
         pub fn adopt_stdio() -> std::io::Result<Self> {
             // SAFETY: fd 0 is this process's stdin, which the Host set to the
             // child end of the pair before exec. Taking ownership here keeps a
@@ -315,25 +275,11 @@ mod platform {
             ))
         }
 
-        /// Adopts the channel the Host passed as this process's stdio.
-        ///
-        /// The standard handles' inherit bit is cleared after the private
-        /// duplicates are taken, so no descendant this process spawns can
-        /// carry the confirmation endpoint; the channel is never re-handed to
-        /// Body, tools, or plugins.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when the standard handles are unusable or
-        /// their inherit flag cannot be cleared.
         pub fn adopt_stdio() -> std::io::Result<Self> {
             use std::os::windows::io::{AsHandle as _, AsRawHandle as _};
 
             let from_host = std::io::stdin().as_handle().try_clone_to_owned()?;
             let to_host = std::io::stdout().as_handle().try_clone_to_owned()?;
-            // `try_clone_to_owned` duplicates without inheritance, but the
-            // original std handles stay inheritable. Clear the bit so no
-            // descendant that inherits stdio can carry the endpoint onward.
             for handle in [
                 std::io::stdin().as_raw_handle(),
                 std::io::stdout().as_raw_handle(),
@@ -367,14 +313,12 @@ mod tests {
     use super::{MAX_CONTROL_FRAME_BYTES, encode_frame, read_frame, write_frame};
     use crate::ToConfirmation;
 
-    /// A frame that is too large is refused, never truncated.
     #[test]
     fn an_oversize_frame_is_refused() {
         let huge = "x".repeat(MAX_CONTROL_FRAME_BYTES as usize + 1);
         assert!(encode_frame(&huge).is_err());
     }
 
-    /// Frames round-trip through the encoder, so both ends agree on shape.
     #[test]
     fn frames_round_trip() {
         let mut buffer = Vec::new();
@@ -388,9 +332,6 @@ mod tests {
         assert_eq!(decoded, Some(frame));
     }
 
-    /// A frame whose declared length is not there ends the channel rather than
-    /// guessing at partial content. A truncated body is a transport failure,
-    /// not a message: the reader reports it and the caller closes the channel.
     #[test]
     fn a_truncated_frame_ends_the_channel() {
         let mut cursor = std::io::Cursor::new(vec![0_u8, 0, 0, 8, b'x']);

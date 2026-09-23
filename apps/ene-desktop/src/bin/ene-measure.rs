@@ -153,9 +153,6 @@ fn run() -> Result<bool, CliError> {
             args.fps_wall_secs,
         )?;
         if !feedback.is_empty() {
-            // Uncorrelatable runtime evidence is 測定不能 (unmeasured), not a
-            // discarded campaign: keep the completed CPU/RSS/interaction
-            // record and let `evaluate` mark FPS incomplete.
             match wayland_presentation_record(
                 body_pid,
                 args.fps_warmup_secs,
@@ -215,8 +212,6 @@ fn start_presentmon(args: &Args, body_pid: u32) -> Result<Option<std::process::C
     Ok(Some(child))
 }
 
-/// Opens one JSONL trace at the campaign's captured offset. A trace that does
-/// not exist is unmeasured evidence, not a failed campaign.
 fn open_trace(
     path: &Path,
     offset: u64,
@@ -309,13 +304,6 @@ fn read_wayland_feedback(
                 selected.push(trace.feedback);
             }
             ene_body::ipc::PresentationOutcome::Submitted => {}
-            // The window is approximated by the desktop's observation of the
-            // submission: `Submitted` carries no commit timestamp, so commits
-            // within roughly one 250 ms tick before `window_end` are excluded
-            // and commits just before `window_start` observed after it are
-            // included. Terminal lines are selected by correlation id (not
-            // their own observed time) so late-resolving feedback still counts.
-            // A feedback that never resolves stays Missing.
             _ if submitted.contains(&trace.feedback.correlation_id) => {
                 selected.push(trace.feedback);
             }

@@ -21,11 +21,6 @@ const MOTION_PLAYBACK: PlaybackOptions = PlaybackOptions {
     scale_hips_translation: true,
 };
 
-/// One CPU-deformed primitive plus its expression-evaluated PBR base color.
-/// Base-color texture sampling and the evaluated base-color factor are
-/// implemented; MToon shading terms (shade, matcap, rim, outline) remain
-/// renderer quality work. Geometry, skinning, morphs, and vertex colors are
-/// retained.
 #[derive(Debug, Clone)]
 pub struct RenderMesh {
     pub mesh: vrm_runtime::CpuMesh,
@@ -86,8 +81,6 @@ impl VrmSession {
         self.stats
     }
 
-    /// Changes the Body-local activity projection. Runtime controls are
-    /// applied on the next fixed-rate update.
     pub fn set_pose(&mut self, pose: PoseHint) {
         self.pose = pose;
     }
@@ -410,8 +403,6 @@ fn fail(reason: AssetFailReason, detail: impl Into<String>) -> AssetFailInfo {
     }
 }
 
-/// Filesystem problem shared by the asset and motion-clip preconditions. The
-/// two callers map it onto their own failure reason type.
 enum PathProblem {
     Missing,
     NotAFile,
@@ -426,8 +417,6 @@ fn regular_file(path: &str) -> Result<(), PathProblem> {
     }
 }
 
-/// Slot of a pose hint inside [`POSE_ORDER`], which is the single source of
-/// the slot order.
 fn pose_index(pose: PoseHint) -> usize {
     POSE_ORDER
         .iter()
@@ -547,15 +536,12 @@ mod tests {
     use crate::testing::{MotionFixture, write_generated_vrm, write_generated_vrma};
     use std::io::Write as _;
 
-    /// A rotating clip: the head turns 120 degrees over half a second.
     const HEAD_TURN: MotionFixture = MotionFixture {
         bone: "head",
         yaw_degrees: 120.0,
         duration_secs: 0.5,
     };
 
-    /// A clip on a different bone, so which clip plays changes the frame and
-    /// not only its timing.
     const SPINE_TURN: MotionFixture = MotionFixture {
         bone: "spine",
         yaw_degrees: -120.0,
@@ -673,8 +659,6 @@ mod tests {
     #[test]
     fn expressions_stay_hand_authored_while_a_clip_plays() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // The same clip on two hints: the clip and the spring state are equal,
-        // so a differing frame shows the expression staging is still applied.
         let mut idle = loaded_session(dir.path(), "idle", &[(PoseHint::Idle, HEAD_TURN)]);
         let mut attention =
             loaded_session(dir.path(), "attention", &[(PoseHint::Attention, HEAD_TURN)]);
@@ -701,7 +685,6 @@ mod tests {
         session.set_pose(PoseHint::Speaking);
         let speaking_frame = first_frame(&mut session);
         assert_ne!(idle_frame, speaking_frame);
-        // Hints without a clip keep producing frames next to clipped ones.
         session.set_pose(PoseHint::Listening);
         let listening_frame = first_frame(&mut session);
         assert!(
@@ -808,7 +791,6 @@ mod tests {
             .expect_err("corrupt clip");
         assert_eq!(invalid.reason, MotionFailReason::InvalidVrma);
 
-        // A valid glTF that is not a VRMA document must fail the same way.
         let avatar = dir.path().join("avatar-not-clip.vrma");
         write_generated_vrm(&avatar).expect("vrm bytes");
         let wrong_profile = session
@@ -845,7 +827,6 @@ mod tests {
         );
     }
 
-    /// A session holding the generated avatar plus the given pose → clip pairs.
     fn loaded_session(
         dir: &std::path::Path,
         name: &str,
@@ -880,7 +861,6 @@ mod tests {
         session
     }
 
-    /// Advances one frame and returns the generated primitive's vertices.
     fn first_frame(session: &mut VrmSession) -> Vec<[f32; 3]> {
         let meshes = session.update(1.0 / 30.0).expect("runtime update");
         meshes

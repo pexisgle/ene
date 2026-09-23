@@ -56,14 +56,6 @@ pub struct UsageSummaryRow {
     pub status: UsageSummaryStatus,
     pub tokens: Option<ReportedTokenUsage>,
     pub cost: Option<UsageCostFact>,
-    /// The amount this row's state counts against the applicable caps: the
-    /// reserved upper bound for `Reserved` and `Unknown`, `None` for a
-    /// `Reported` row whose projected cost was representable (cap accounting
-    /// counts its actual committed cost instead). A `Reported` row whose
-    /// projected cost could not be represented — its [`Self::cost`] is
-    /// [`UsageCostFact::Unknown`] because the projected amount overflowed the
-    /// money representation — still counts its reserved upper bound, so
-    /// `reserved` is present rather than `None`.
     pub reserved: Option<Money>,
     pub started_at: WallClockWithTz,
 }

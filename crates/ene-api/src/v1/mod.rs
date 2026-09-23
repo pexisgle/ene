@@ -1,6 +1,3 @@
-//! Everything here is serde data; authority, validation, and domain mapping
-//! live Host-side.
-
 pub mod command;
 pub mod deletion;
 pub mod envelope;

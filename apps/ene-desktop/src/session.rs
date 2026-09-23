@@ -26,9 +26,6 @@ pub const SETUP_PROVIDER_OPENAI: &str = "openai";
 pub const CAPABILITY_DIALOGUE: &str = "dialogue";
 pub const DEFAULT_HISTORY_LIMIT: u64 = 50;
 
-/// The GUI's bounded bootstrap budget while a freshly started Host comes up.
-/// The launcher and the Client connect share the budget; only the retried
-/// error class differs.
 pub const BOOTSTRAP_ATTEMPTS: u8 = 80;
 pub const BOOTSTRAP_DELAY: Duration = Duration::from_millis(50);
 const HOST_SETUP_SECTIONS: &[&str] = &["provider", "model", "consent", "credential", "learning"];
@@ -78,13 +75,6 @@ impl SetupFacts {
     }
 }
 
-/// One GUI connect attempt: an established session, or a pairing that is
-/// still waiting for the Owner.
-///
-/// A stored device authenticates and returns [`Paired`](Self::Paired); only a
-/// first run (or a run whose device file is gone) pends. The two are never
-/// conflated: a successful connect is not an error, and a pending pairing owns
-/// the connection the GUI must retain until confirmation completes.
 pub enum DesktopConnect {
     Paired(Box<Client>),
     PendingOwnerConfirmation(PendingPairingClient),
@@ -235,10 +225,6 @@ pub async fn submit_and_collect(
                 }
                 break;
             }
-            // Protocol-defined interleavings the Client must absorb: state-only
-            // facts (`Client::next_frame` already observed them) and an
-            // auto-presented backlog summary the explicit UndeliveredRequest
-            // path re-presents. A stream turn must not fail on any of them.
             WirePayload::PresenceAttribution(_)
             | WirePayload::UndeliveredResponse(_)
             | WirePayload::BodyStateHint(_) => {}
@@ -257,9 +243,6 @@ pub async fn submit_and_collect(
     })
 }
 
-/// Maps an intake refusal to the Owner-facing reason in the Owner's locale.
-/// The wire type defines these as distinct domain outcomes, so a hold, a stale
-/// round, and a revalidation demand must not read as one another.
 fn describe_intake_refusal(lang: &str, outcome: &RoundIntakeOutcomeWire) -> String {
     let ja = lang.eq_ignore_ascii_case("ja");
     let text = |japanese: &str, english: &str| {
@@ -282,7 +265,6 @@ fn describe_intake_refusal(lang: &str, outcome: &RoundIntakeOutcomeWire) -> Stri
             "送信前に最新の状態を確認してください。",
             "Refresh the current state before sending.",
         ),
-        // The accepted variant is handled before this helper is reached.
         RoundIntakeOutcomeWire::AcceptedForRound { .. } => text(
             "送信は受け付けられませんでした。",
             "The message was not accepted.",
@@ -290,10 +272,6 @@ fn describe_intake_refusal(lang: &str, outcome: &RoundIntakeOutcomeWire) -> Stri
     }
 }
 
-/// Presentation ACK for one collected chat turn. Call only from the path
-/// that actually presented that receipt. Mere receive is not
-/// [`PresentationStatus::Presented`]. `send_text` ACKs
-/// PresentationStatus::Presented only after the timeline shows the turn.
 pub async fn confirm_chat_presentation(
     client: &mut Client,
     turn: &ChatTurn,

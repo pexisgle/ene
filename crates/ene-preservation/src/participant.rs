@@ -144,9 +144,6 @@ impl ParticipantProgress {
         matches!(self, Self::Verified { .. })
     }
 
-    /// Rebuilds one progress row from its storage state token, sweep, and hold
-    /// class. The hold class is present exactly for `held`; any other
-    /// combination is outside the closed vocabulary and answers [`None`].
     #[must_use]
     pub fn from_state_name(
         state: &str,
@@ -177,9 +174,6 @@ impl ParticipantErasureScope {
         }
     }
 
-    /// Body-free scope for a holder whose transport must not carry target
-    /// bodies or search material (a Client-partition demand, §8.1). The Host
-    /// maps its own state to this body-free shape.
     #[must_use]
     pub fn correlation_only() -> Self {
         Self { target: None }
@@ -398,31 +392,12 @@ pub enum ParticipantCompletionOutcome {
     StaleSweep,
 }
 
-/// Outcome of one bounded owner-local erasure pass (§9).
-///
-/// Each participant maps its own storage result onto this vocabulary;
-/// [`drive_local_erasure`] turns it into the completion fact the durable
-/// participant record accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalErasurePass {
-    /// The condition is not the operation's current unfinished condition (a
-    /// superseded sweep or a completed operation): nothing was read or
-    /// mutated, and no verification is claimed for it.
     NotCurrent,
-    /// The bounded pass ran: `erased` target-bearing values were removed,
-    /// redacted, or invalidated, and `remainder` target-bearing values remain.
     Applied { erased: u64, remainder: u64 },
 }
 
-/// Drives one bounded owner-local erasure demand into a completion fact.
-///
-/// Text-owning participants share this envelope: a correlation-only or blank
-/// demand is an explicit hold rather than a verification, and only a
-/// zero-remainder [`LocalErasurePass::Applied`] is a verification claim (§9).
-/// The `erase` callback runs the owner's own bounded pass over the protected
-/// exact-text material; it must be idempotent for the same
-/// `(condition, target)` and must not mutate anything when the condition is
-/// not current.
 pub async fn drive_local_erasure<F, E>(
     owner: ParticipantOwnerRef,
     command: DemandLocalErasureCommand,
@@ -455,9 +430,6 @@ where
         return held();
     }
     match erase(condition, text).await {
-        // Not-current work mutates nothing and cannot verify the demanded
-        // condition; the durable record refuses it as stale or completed, so
-        // the pass ends without a false completion.
         Ok(LocalErasurePass::NotCurrent) => ParticipantCompletionFact::local_complete(
             condition,
             owner,
@@ -478,28 +450,10 @@ where
                 WallClockWithTz::now(),
             )
         }
-        // A storage failure is a hold, never a completion: the residual
-        // target-bearing state is unproven, so the operation stays
-        // retryable-incomplete.
         Err(_) => held(),
     }
 }
 
-/// Cross-cutting participant boundary owned by preservation; each semantic
-/// owner implements it and the Host composition registers it (§9).
-///
-/// Contracts:
-///
-/// - The implementation erases and verifies only its own state and never
-///   updates another domain's rows.
-/// - Calls are bounded work. Continuation state (including any cursor) belongs
-///   to the participant, so the same `(condition, participant)` demand may be
-///   repeated after a crash without a second semantic effect (§9.1).
-/// - The returned fact carries metadata only.
-///
-/// The method returns a boxed future (not an `async fn`) so the trait stays
-/// object-safe: the composition holds heterogeneous implementations behind
-/// `Arc<dyn ErasureParticipant>`.
 pub trait ErasureParticipant: Send + Sync {
     fn owner(&self) -> ParticipantOwnerRef;
 

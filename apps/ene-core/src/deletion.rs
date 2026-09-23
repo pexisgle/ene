@@ -109,11 +109,6 @@ fn status_view(
 impl HostHandle {
     const INTENT_KIND_DELETION: &str = "deletion-targeted";
 
-    /// Body-free journal target for any Owner-body-carrying intent target.
-    ///
-    /// It names the inlet family only: even a target the grammar refuses may
-    /// carry the Owner's text (an unknown purpose token, an over-long body),
-    /// and the journal must never keep it.
     pub(crate) const DELETION_JOURNAL_FAMILY: &str = "deletion-family";
 
     pub(crate) fn deletion_intent_fingerprint(
@@ -312,9 +307,6 @@ impl HostHandle {
         &self,
         record: &DeletionOperationRecord,
     ) -> Result<DeletionParticipantReportWire, CoreError> {
-        // The durable registry can exceed one page (nine fixed owners plus one
-        // entry per Client incarnation with durable delivery evidence), so walk
-        // it to a short page instead of truncating at 100 and under-reporting.
         let mut participants = Vec::new();
         let mut after = None;
         loop {

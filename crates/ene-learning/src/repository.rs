@@ -14,17 +14,7 @@ pub enum LearningTechnicalError {
     #[error("summary identity conflicts with the stored evidence")]
     SummaryIdentityConflict { summary: SummaryId },
     #[error("learning inference unavailable: {reason}")]
-    InferenceUnavailable {
-        /// Provider-class cause. Never prompt or output text.
-        reason: String,
-    },
-    /// The secret boundary could not prove registered values absent, or the
-    /// credential set moved past the scrub premise.
-    ///
-    /// The unproven text was neither sent nor stored. The stale-credential-set
-    /// refusal can follow changes of the same pass that already committed, so
-    /// the caller must not retry the same content: it may carry the newly
-    /// registered value and needs a fresh scrub and currentness premise.
+    InferenceUnavailable { reason: String },
     #[error("secret boundary unavailable: {reason}")]
     SecretBoundaryUnavailable { reason: String },
 }
@@ -40,20 +30,14 @@ pub enum MemoryTarget {
     },
 }
 
-/// One prospective Memory change: the content, its meaning, and the change
-/// kind relative to the target's previous revision.
 #[derive(Clone, PartialEq, Eq)]
 pub struct MemoryChange {
     pub target: MemoryTarget,
     pub scope: LearningScope,
-    /// Proposed recognition text; redacted from `core::fmt::Debug` because it
-    /// may quote owner speech or secret-bearing material before scrubbing.
     pub content: String,
     pub importance: Importance,
     pub temporal: TemporalMeaning,
     pub change: ChangeKind,
-    /// When this change was decided; becomes the revision and current-row
-    /// timestamp.
     pub at: WallClockWithTz,
 }
 
@@ -72,7 +56,6 @@ impl core::fmt::Debug for MemoryChange {
     }
 }
 
-/// One atomic commit: evidence Summary (when present) plus one Memory change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryChangeCommit {
     pub summary: Option<SummaryRecord>,
@@ -131,22 +114,6 @@ pub trait LearningRepository: Send + Sync {
         limit: u64,
     ) -> Result<Vec<MemoryRevisionRecord>, LearningTechnicalError>;
 
-    /// Retrieves bounded recall candidates for one companion.
-    ///
-    /// Returns current, non-suppressed memories that are among the newest
-    /// `limit` rows, among the most important `limit` rows, or carry one of
-    /// `terms` in the derived token index, with each arm capped by `limit`.
-    /// Candidates are returned newest-first with duplicate ids removed, so
-    /// the caller's stable ranking keeps recency as its final tie-break.
-    /// Lexical matching is token equality against
-    /// [`recall_index_terms`](crate::recall_index_terms): a query term
-    /// matches a Memory whose content derives that same token, so an old
-    /// relevant Memory stays reachable without scanning stored content.
-    /// Suppression is excluded before the caps apply, so suppressed rows
-    /// never consume candidate slots. Every arm is served by an index, so
-    /// growing unrelated rows does not turn candidate lookup into a full
-    /// scan or sort. The caller ranks the returned candidates; the retrieval
-    /// carries no persisted score and does not decide canonical importance.
     async fn recall_candidates(
         &self,
         companion: RawId,

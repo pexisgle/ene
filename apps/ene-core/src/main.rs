@@ -195,27 +195,6 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<CliCommand, CliError> {
     }
 }
 
-/// `Stage 2` Host entrypoint: parse arguments, load configuration, then stop,
-/// serve, or approve.
-///
-/// Without a subcommand this keeps the `Stage 1` behavior: [`Config::load`]
-/// (which validates), and [`ene_config::resolve_data_dir`] proof with no
-/// effects. With `serve` it resolves the data directory (which must exist
-/// as a value: an unresolvable directory is a [`CoreError::Store`] failure,
-/// since serving without durable state is meaningless) and blocks on
-/// [`serve::serve`] under a multi-threaded `Tokio` runtime. With
-/// `approve-device` it resolves the data directory the same way and approves
-/// one pending pairing by its exact `--pending` id (surrounding whitespace
-/// trimmed), or lists `pending-id descriptor` lines when `--pending` is
-/// omitted.
-///
-/// `--help` and `--version` are standard successful exits handled by `clap`
-/// before configuration is loaded, so they have no side effects.
-///
-/// # Errors
-///
-/// Returns [`CliError::Usage`] for argument misuse, [`CliError::Config`] when
-/// [`Config::load`] fails, and [`CliError::Serve`] when `serve` mode fails.
 fn main() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let matches = match ene_core_command()
@@ -301,7 +280,6 @@ fn main() -> Result<(), CliError> {
     }
 }
 
-/// Loads the configuration and requires a resolvable data directory.
 fn load_data_dir(config: Option<&Path>) -> Result<PathBuf, CliError> {
     let cfg = Config::load(config)?;
     ene_config::resolve_data_dir(&cfg).ok_or_else(|| {
@@ -309,12 +287,6 @@ fn load_data_dir(config: Option<&Path>) -> Result<PathBuf, CliError> {
     })
 }
 
-/// Builds the multi-threaded `Tokio` runtime the store-backed tasks run on
-/// and blocks on `task`.
-///
-/// A runtime that cannot be built is a [`CoreError::Store`] failure: the
-/// runtime is the async substrate of the store-backed Host, and no narrower
-/// variant names it.
 fn block_on<F>(task: F) -> Result<(), CoreError>
 where
     F: std::future::Future<Output = Result<(), CoreError>>,
@@ -349,24 +321,6 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
     block_on(serve::serve(data_dir))
 }
 
-/// An unknown pending id fails with the pending id set so the Owner
-/// can retry with the exact value; descriptors are display strings only.
-///
-/// No serving Host means refusal: this command never mutates the store
-/// offline (first-party-desktop §5.1.5). While a Host is serving, the
-/// approval is recorded in the serving process through the Host-local
-/// control inlet. The one-time pairing provision travels only on the
-/// authentication frame to the originating pairing connection, never to
-/// this command's stdout, and an occupied seat never falls through to the
-/// Client channel.
-///
-/// # Errors
-///
-/// [`CoreError::HostUnavailable`] when no Host is serving,
-/// [`CoreError::Control`] when the requester inlet is unreachable,
-/// [`CoreError::Store`] when the single-writer lock cannot be inspected,
-/// [`CoreError::Approve`] when the settled outcome cannot be shown, and
-/// [`CoreError::UnsupportedPlatform`] without a Host-local control transport.
 fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
     run_requester(
         data_dir,
@@ -375,10 +329,6 @@ fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError
     )
 }
 
-/// Runs one requester exchange under the serving-Host premise: an acquirable
-/// writer lock means no Host is serving, so the command refuses with
-/// `HostUnavailable` instead of opening the state offline
-/// (first-party-desktop §5.1.5).
 fn run_requester(
     data_dir: &Path,
     what: &str,
@@ -398,8 +348,6 @@ fn run_requester(
     })
 }
 
-/// Shows one requester request's settled state. Secrets never appear here: the
-/// pairing provision and the credential value belong to their own channels.
 fn show_requester_state(
     what: &str,
     state: &ene_local_control::RequestState,
@@ -455,19 +403,6 @@ fn show_requester_state(
         .map_err(|error| CoreError::Approve(format!("the outcome could not be shown: {error}")))
 }
 
-/// The pair is named, never the value: the Owner's confirmation surface opens
-/// the intake, and an unknown or refused pair is reported from the settled
-/// `RequesterOutcome`. The raw value is entered on that surface and never on
-/// this command line. No serving Host means refusal, never an offline store
-/// open (`host_control::request_credential_put`).
-///
-/// # Errors
-///
-/// [`CoreError::HostUnavailable`] when no Host is serving,
-/// [`CoreError::Control`] when the requester inlet is unreachable,
-/// [`CoreError::Store`] when the single-writer lock cannot be inspected,
-/// [`CoreError::Approve`] when the settled outcome cannot be shown, and
-/// [`CoreError::UnsupportedPlatform`] without a Host-local control transport.
 fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
     run_requester(
         data_dir,
@@ -476,19 +411,6 @@ fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Resul
     )
 }
 
-/// Prints the Targeted Deletion requests awaiting the Owner's confirmation,
-/// one `<request-id> <purpose> <exact-text>` line each.
-///
-/// This is the Host-local trusted preview (IPC §18.1): the exact target text is
-/// shown here, on the Owner's own console, and nowhere else. The request
-/// identity is Host-minted and never travels the wire, so no Client can name —
-/// let alone confirm — one.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
-/// cannot be opened, and [`CoreError::Deletion`] for a malformed `--after`
-/// identity or a `--limit` outside `1..=100`.
 fn run_pending_deletions(
     data_dir: &Path,
     after: Option<&str>,
@@ -528,30 +450,6 @@ fn run_pending_deletions(
     })
 }
 
-/// Records one Owner confirmation and starts the canonical Targeted Deletion
-/// operation (IPC §18.1) through the serving Host's Host-local first-party
-/// control inlet, then prints the operation identity the status view reports.
-///
-/// The confirmation must run in the serving process. The required
-/// participant snapshot includes every Client incarnation with durable
-/// body-delivery evidence, and only the serving process can reach those
-/// incarnations through its live connection table (lifecycle §8.1); an
-/// offline state open could name them but could never complete their local
-/// erasure, so this command never admits from an offline handle. It dials
-/// [`ene_core::host_control`] and reports the serving Host's typed outcome;
-/// when no Host is serving it fails with recovery guidance instead of
-/// confirming.
-///
-/// An unknown request id fails with the pending id set (never their target
-/// text, which stays on the `pending-deletions` preview).
-///
-/// # Errors
-///
-/// Returns [`CoreError::Control`] when the serving Host is not reachable on
-/// the control inlet or the confirmation is refused (no surface, declined,
-/// still awaiting) or malformed, [`CoreError::Deletion`] for an unknown or
-/// inadmissible request, and [`CoreError::Store`] when the pending-id
-/// fallback cannot be read.
 fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError> {
     use std::io::Write as _;
 
@@ -609,16 +507,6 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
     })
 }
 
-/// Prints the same bounded deletion status page the wire view renders: the
-/// surface mark, then one line per operation, then the next cursor while a
-/// later page exists. No target body, search material, or credential appears
-/// here.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
-/// cannot be opened, and [`CoreError::Deletion`] for a malformed cursor, a
-/// `--limit` outside `1..=50`, or an unreadable surface.
 fn run_deletion_status(data_dir: &Path, cursor: Option<&str>, limit: u32) -> Result<(), CoreError> {
     use std::io::Write as _;
 

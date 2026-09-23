@@ -1,17 +1,3 @@
-//! Real-compositor overlay probe for `ene-body`.
-//!
-//! Runs the Body runtime in-process with the same projection IPC contract as
-//! the product parent (`--ipc-stdio` framing), prints every Body event as one
-//! JSON line, and accepts projection commands on stdin:
-//!
-//! ```text
-//! show | hide | pose idle|listening|speaking|working|attention
-//! placement X Y W H SCALE | asset PATH | motions DIR | help | quit
-//! ```
-//!
-//! This is a probe tool, not product acceptance: a successful run here does
-//! not stand in for the official `ene` asset or for slice F.
-
 use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
@@ -119,9 +105,6 @@ async fn run() -> Result<(), ProbeError> {
         eprintln!("probe: shutdown send failed: {error}");
     }
     drop(to_body);
-    // The runtime future ends only after it has written `CleanExit`; drive it
-    // while draining so the body processes `Shutdown` and its final event is
-    // printed too.
     let drain = async {
         loop {
             tokio::select! {
@@ -133,8 +116,6 @@ async fn run() -> Result<(), ProbeError> {
                     absorb(&mut frame, &chunk[..read])?;
                 }
                 result = &mut body_future => {
-                    // Drain the events the runtime wrote before it dropped its
-                    // writer (including CleanExit), then propagate its result.
                     loop {
                         let read = from_body.read(&mut chunk).await?;
                         if read == 0 {

@@ -53,7 +53,6 @@ const SQL_SELECT_CREDENTIAL_PENDING: &str = "SELECT provider, label, requested_a
 const SQL_DELETE_CREDENTIAL_PENDING: &str =
     "DELETE FROM credential_pending WHERE provider = ?1 AND label = ?2";
 
-/// Secrets are never stored in SQLite and remain zeroizing in memory.
 fn fresh_pairing_secret() -> PairingSecretMaterial {
     PairingSecretMaterial::new(RawId::new().as_uuid().to_string())
 }
@@ -106,24 +105,8 @@ impl Store {
     }
 }
 
-/// Marker-language passes bounded before the fallback removal. A replacement
-/// can re-form the bearer across the marker, and a bearer that is a substring
-/// of the marker keeps re-matching, so the sweep repeats and then removes.
 const SWEEP_PASS_BOUND: usize = 8;
 
-/// Table and column pairs holding quarantined plaintext content.
-///
-/// The derived recall token index is deliberately absent: a registered value
-/// is replaced as a whole string, while tokens hold its fragments, so a
-/// replace would leave credential-derived pieces behind. Token rows are
-/// rebuilt from the swept canonical text instead (see below).
-///
-/// Task and activity bodies are included because they are canonical sources
-/// for the Task report, the management view, and undelivered excerpts: a
-/// purpose, instruction activity, or final result recorded while the value
-/// was still ordinary text must be redacted by the same boundary, or the
-/// report/presentation would keep reading the raw value out of the owner row
-/// after the value became a registered credential.
 const SWEEP_TARGETS: &[(&str, &str)] = &[
     ("activity_record", "body"),
     ("history_message", "body"),
@@ -155,13 +138,6 @@ pub(crate) fn sweep_registered_secret(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| credential_unavailable(error.to_string()))?
     };
-    // Table and column names are compile-time constants; the bearer travels
-    // only as a bound parameter. The bounded marker passes and the removal
-    // fallback mirror `erasure::redact_exact`: a single `replace` can re-form
-    // the bearer across the marker (or reproduce a bearer that is a substring
-    // of it), and removal strictly shortens the value so it reaches a clean
-    // fixpoint. Every matched row is modified, so `changed == 0` proves no
-    // row matches; no separate residual probe can find one.
     for (table, column) in SWEEP_TARGETS {
         let replace = format!(
             "UPDATE {table} SET {column} = replace({column}, ?1, ?2) \
@@ -202,8 +178,6 @@ pub(crate) fn sweep_registered_secret(
     Ok(())
 }
 
-/// Advances the credential-set revision inside the caller's transaction and
-/// returns the new revision.
 pub(crate) fn advance_credential_set(
     tx: &rusqlite::Transaction<'_>,
 ) -> Result<u64, CredentialTechnicalError> {
@@ -213,8 +187,6 @@ pub(crate) fn advance_credential_set(
     let next = current
         .checked_add(1)
         .ok_or_else(|| credential_unavailable("credential set revision exhausted"))?;
-    // Refuse a stored count that cannot be a revision (a corrupt negative
-    // value) before it can persist.
     let revision = u64::try_from(next)
         .map_err(|_| credential_unavailable("credential set revision out of range"))?;
     tx.execute(
@@ -365,11 +337,6 @@ impl DevicePairingRepository for Store {
             if stored_origin != origin_connection {
                 return Ok(None);
             }
-            // The pending delete and the paired insert share one transaction
-            // keyed on both columns (compare-and-swap), so an approval never
-            // strands a pending in both tables or neither. The wire projection
-            // is minted fresh here, unrelated to the device identity bytes: it
-            // is the only device string that ever crosses the wire.
             let wire = RawId::new().as_uuid().to_string();
             let deleted = tx
                 .execute(SQL_DELETE_PENDING, params![stored_id, stored_origin])
@@ -515,9 +482,6 @@ impl CredentialIntentRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            // Write-once claim first: an existing row decides without
-            // touching credential state; the caller answers from the
-            // journal.
             if select_intent_row(&tx, &journal.intent_id)
                 .map_err(credential_unavailable)?
                 .is_some()
@@ -555,12 +519,6 @@ impl CredentialIntentRepository for Store {
     }
 }
 
-/// Deletes usable refs whose derived identity, provider, or label carries the
-/// target. Deleting the ref is the local erasure: the derived
-/// `provider:label` identity can never be redacted without breaking the ref
-/// grammar, and the pair must not stay usable under a textless identity. The
-/// protected bearer value is not touched here (K-C); the pair simply stops
-/// being resolvable, and the set revision advances below.
 const SQL_ERASE_CREDENTIAL_REF: &str = "DELETE FROM credential_ref
      WHERE id IN (
          SELECT id FROM credential_ref

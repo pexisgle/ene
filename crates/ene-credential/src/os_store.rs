@@ -2,11 +2,6 @@ use crate::CredentialTechnicalError;
 use crate::registry::CredentialRef;
 use crate::secret::{ActiveVersions, CredentialStore, PreparedCredentialSnapshot, SecretValue};
 
-/// Prefix of the installation namespace for the OS protected store.
-///
-/// The composition root appends a per-data-directory identity to this prefix,
-/// so two data directories never share an OS item even under one OS user whose
-/// OS keyring is shared, and an unrelated application's item is never read.
 pub const DEFAULT_NAMESPACE: &str = "ene";
 
 #[must_use]
@@ -20,10 +15,6 @@ pub fn service_name(namespace: &str, cred: &CredentialRef, version: u64) -> Stri
 
 pub struct OsCredentialStore {
     namespace: String,
-    /// Immutable value snapshot published for each ref, shared with the
-    /// in-memory versioned store: the credential owner replaces an entry only
-    /// after the activation transaction commits, and routine use never
-    /// re-reads a mutable external OS item as the same revision.
     active: ActiveVersions,
 }
 
@@ -55,8 +46,6 @@ impl OsCredentialStore {
         let entry = self.entry(cred, version)?;
         match entry.get_password().map(SecretValue::new) {
             Ok(existing) => {
-                // The probe copy is dropped zeroized: a discarded `String`
-                // would leave the previous bearer on the heap unzeroized.
                 drop(existing);
                 return Err(CredentialTechnicalError::StorageUnavailable {
                     reason: format!("{}: version {version} is already published", cred.id()),
@@ -111,13 +100,6 @@ impl OsCredentialStore {
         }
     }
 
-    /// Reads one version's value into the request-builder closure.
-    ///
-    /// # Errors
-    ///
-    /// [`CredentialTechnicalError::StorageUnavailable`] when the version is
-    /// not published or the OS store refuses the read. The error never carries
-    /// the value.
     pub fn with_version<R>(
         &self,
         cred: &CredentialRef,
@@ -185,8 +167,6 @@ mod tests {
         );
     }
 
-    /// Reading without an active version is unavailable, never a guess at
-    /// "the newest item".
     #[test]
     fn a_read_without_an_active_version_is_unavailable() {
         use super::OsCredentialStore;

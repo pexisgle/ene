@@ -17,34 +17,15 @@ use crate::serve::HostHandle;
 #[cfg(any(unix, windows))]
 use std::sync::Arc;
 
-/// Bound on each inbound read from a control peer. Every request on a
-/// requester connection is covered, not only the first: a peer that stops
-/// sending is dropped instead of holding a serving task forever.
 #[cfg(any(unix, windows))]
 const CONTROL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Upper bound on how long one minted confirmation session stays completable.
-/// The Owner's surface must decide within it; an abandoned challenge must not
-/// stay confirmable for the Host's lifetime.
 const CONTROL_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Upper bound on accepted-but-unsettled requester requests. A same-user peer
-/// may dial the requester listener repeatedly; without a bound the pending map
-/// (and the confirmation sessions minted from it) would grow for the Host's
-/// lifetime. A full queue is answered `FromHost::BackpressureHold`, never
-/// silently admitted or dropped (first-party-desktop §5.1.5).
 const MAX_PENDING_REQUESTS: usize = 64;
 
-/// Upper bound on settled request rows retained so a requester can still read
-/// the outcome by id. The oldest settled rows are retired first; pending rows
-/// are never evicted.
 const MAX_SETTLED_REQUESTS: usize = 256;
 
-/// Environment variables that select injected code or library search paths.
-/// The Host-spawned GUI is pinned to the trusted installation and must not
-/// inherit loader redirection from the launcher's environment; the display and
-/// session variables it needs (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
-/// fonts, `ENE_INTERACTION_TRACE_JSONL`) are inherited unchanged.
 #[cfg(any(unix, windows))]
 const LOADER_ENV_VARS: &[&str] = &[
     "PATH",
@@ -61,13 +42,11 @@ const LOADER_ENV_VARS: &[&str] = &[
     "DYLD_FALLBACK_FRAMEWORK_PATH",
 ];
 
-/// Unix requester-listener socket name inside the `0700` data directory.
 #[cfg(unix)]
 const CONTROL_SOCKET_NAME: &str = "host-control.sock";
 
 struct AcceptedRequest {
     state: RequestState,
-    /// Insertion order, used to retire the oldest settled rows first.
     seq: u64,
 }
 
@@ -78,9 +57,6 @@ enum PendingOp {
     CredentialPut {
         provider: String,
         label: String,
-        /// Per-request mutation identity used by `publish_credential`'s same-id
-        /// dedup/reconciliation. It is minted per accepted request, so a CLI
-        /// retry starts a new mutation rather than observing the first.
         mutation_id: String,
         secret: Option<RedactedSecret>,
     },
@@ -92,18 +68,11 @@ enum PendingOp {
 struct ConfirmationSession {
     nonce: String,
     seat_generation: u64,
-    /// Instant after which the session is no longer completable. Re-checked
-    /// at consumption, not only at the requester's own poll bound.
     deadline: std::time::Instant,
     request_id: String,
     pending: PendingOp,
 }
 
-/// Identity of the GUI the Host itself started.
-///
-/// Recorded at spawn, not declared by a peer. The seat generation is the
-/// authority key: it moves whenever a new child takes the seat, so a closing
-/// older channel can never clear a newer seat.
 pub(crate) struct SeatedGui {
     pub(crate) generation: u64,
 }
@@ -114,17 +83,10 @@ struct SeatInner {
     next_generation: u64,
     sessions: HashMap<Uuid, ConfirmationSession>,
     requests: HashMap<String, AcceptedRequest>,
-    /// Monotonic insertion sequence for request rows.
     next_request_seq: u64,
-    /// Outbound side of the live GUI's private channel. Present exactly while
-    /// a Host-spawned GUI holds the seat.
     outbound: Option<std::sync::mpsc::Sender<ene_local_control::channel::ChannelEvent>>,
 }
 
-/// Exclusive first-party control seat owned by one serving Host.
-///
-/// The seat is issued to the Host-spawned GUI alone. Nothing in this type can
-/// be reached from the requester listener.
 #[derive(Default)]
 pub(crate) struct FirstPartyControlSeat {
     inner: StdMutex<SeatInner>,
@@ -157,11 +119,6 @@ impl FirstPartyControlSeat {
         generation
     }
 
-    /// Clears the seat when the spawned GUI's private channel ends. Sessions
-    /// die with it: an unconfirmed request never survives its surface.
-    ///
-    /// Keyed by the seat generation, never by the child id: a closing older
-    /// channel must not clear the seat a newer spawn installed.
     pub(crate) fn seat_closed(&self, generation: u64) {
         let mut inner = lock_unpoison(&self.inner);
         if inner
@@ -175,7 +132,6 @@ impl FirstPartyControlSeat {
         }
     }
 
-    /// The generation of the live seat, when a Host-spawned GUI holds it.
     pub(crate) fn holder_generation(&self) -> Option<u64> {
         lock_unpoison(&self.inner)
             .holder
@@ -183,14 +139,10 @@ impl FirstPartyControlSeat {
             .map(|holder| holder.generation)
     }
 
-    /// True while a Host-spawned GUI holds the seat.
     pub(crate) fn has_seat(&self) -> bool {
         lock_unpoison(&self.inner).holder.is_some()
     }
 
-    /// Settles every request whose confirmation session passed its deadline:
-    /// the session is dropped and the request reads back `Rejected`, matching
-    /// the single-session poll path. A request with no session is left as-is.
     fn settle_expired_sessions(inner: &mut SeatInner) {
         let now = std::time::Instant::now();
         let expired = inner
@@ -204,10 +156,6 @@ impl FirstPartyControlSeat {
         }
     }
 
-    /// Retires the oldest settled request rows while too many are retained, so
-    /// a long-lived Host does not accumulate pollable rows forever. Pending
-    /// rows are never evicted: admission is refused instead (see
-    /// [`Self::accept_request`]).
     fn retire_settled_requests(inner: &mut SeatInner) {
         loop {
             let settled = inner
@@ -233,15 +181,6 @@ impl FirstPartyControlSeat {
         }
     }
 
-    /// Registers one accepted requester request under a Host-issued id, or
-    /// refuses admission.
-    ///
-    /// Admission is bounded (first-party-desktop §5.1.5): expired sessions are
-    /// settled and the oldest settled rows retired first, and if the pending
-    /// set is still full `None` is returned so the caller can answer
-    /// `FromHost::BackpressureHold`. The request carries no authority of its
-    /// own: it only records what the Owner's surface should show, and its
-    /// state is read back by the same id.
     fn accept_request(&self) -> Option<(String, RequestState)> {
         let mut inner = lock_unpoison(&self.inner);
         Self::settle_expired_sessions(&mut inner);
@@ -274,10 +213,6 @@ impl FirstPartyControlSeat {
 
     fn request_state(&self, request_id: &str) -> Option<RequestState> {
         let mut inner = lock_unpoison(&self.inner);
-        // An expired session is gone: a requester polling the id must observe
-        // `Rejected`, not a challenge that can no longer be completed. A
-        // request with no session at all is left as-is, so the accepted-but-
-        // executing window is not misreported as a refusal.
         Self::settle_expired_sessions(&mut inner);
         inner
             .requests
@@ -294,10 +229,6 @@ impl FirstPartyControlSeat {
     ) -> FromConfirmation {
         let mut inner = lock_unpoison(&self.inner);
         let Some(seat_generation) = inner.holder.as_ref().map(|holder| holder.generation) else {
-            // The holder vanished between admission and mint: the request can
-            // never reach a surface, so report it exactly like a delivery
-            // failure instead of leaving it awaiting a decision that cannot
-            // come.
             if let Some(request) = inner.requests.get_mut(request_id) {
                 request.state = RequestState::ConfirmationUnavailable;
             }
@@ -340,10 +271,6 @@ impl FirstPartyControlSeat {
         challenge
     }
 
-    /// Drops one session that has passed its deadline, marking its request
-    /// `Rejected` so a requester polling the id observes a settled refusal
-    /// instead of a challenge that can no longer be completed. Returns
-    /// whether the named session had expired.
     fn settle_expired_session(inner: &mut SeatInner, session_id: Uuid) -> bool {
         let expired = inner
             .sessions
@@ -360,8 +287,6 @@ impl FirstPartyControlSeat {
         true
     }
 
-    /// Takes one session for completion, checking the nonce, the seat
-    /// generation it was minted under, and its deadline.
     fn take(&self, session_id: Uuid, nonce: &str) -> Option<(String, PendingOp)> {
         let mut inner = lock_unpoison(&self.inner);
         if Self::settle_expired_session(&mut inner, session_id) {
@@ -406,9 +331,6 @@ impl FirstPartyControlSeat {
         secret: RedactedSecret,
     ) -> bool {
         let mut inner = lock_unpoison(&self.inner);
-        // A session past its deadline must not park a secret candidate: the
-        // same settlement `take`/`reject` run drops the value with the
-        // session, so a late `CredentialSecret` cannot outlive its challenge.
         if Self::settle_expired_session(&mut inner, session_id) {
             return false;
         }
@@ -479,12 +401,6 @@ pub struct ControlClient {
 
 #[cfg(any(unix, windows))]
 impl ControlClient {
-    /// Dials the serving Host's requester listener.
-    ///
-    /// # Errors
-    ///
-    /// [`CoreError::Control`] when no serving Host answers (the same
-    /// recovery guidance Targeted Deletion already used).
     pub async fn connect(data_dir: &Path) -> Result<Self, CoreError> {
         Ok(Self {
             stream: connect(data_dir).await?,
@@ -599,9 +515,6 @@ pub(crate) async fn serve_requester<S>(
     }
 }
 
-/// Admits one high-privilege requester request (first-party-desktop
-/// §5.1.5): start the confirmation surface, admit or hold, mint when a
-/// seat is live, and answer the Host-issued id.
 #[cfg(any(unix, windows))]
 async fn admit_requester(
     handle: &Arc<HostHandle>,
@@ -646,8 +559,6 @@ async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHo
                     provider,
                     label,
                     mutation_id: Uuid::new_v4().as_hyphenated().to_string(),
-                    // The secret arrives on the confirmation channel; the
-                    // requester only names the pair.
                     secret: None,
                 },
             )
@@ -944,11 +855,6 @@ impl std::fmt::Debug for GuiProcess {
     }
 }
 
-/// Reaps one GUI child the Host is abandoning.
-///
-/// `std::process::Child` never reaps on drop, and an abandoned GUI may be
-/// exiting on channel EOF, so a detached thread kills and waits for it
-/// without blocking the runtime.
 #[cfg(any(unix, windows))]
 fn reap_gui_child(process: GuiProcess) {
     std::thread::spawn(move || {
@@ -958,12 +864,6 @@ fn reap_gui_child(process: GuiProcess) {
     });
 }
 
-/// Resolves the official GUI executable and its installation directory: the
-/// `ene-desktop` binary installed beside this Host binary.
-///
-/// The path is fixed by the installation. No request, environment variable,
-/// `PATH` entry, or current directory selects it, so a requester cannot aim
-/// the Host at a different program.
 #[cfg(any(unix, windows))]
 fn locate_gui_binary() -> Option<(PathBuf, PathBuf)> {
     let exe = std::env::current_exe().ok()?;
@@ -977,13 +877,6 @@ fn locate_gui_binary() -> Option<(PathBuf, PathBuf)> {
 }
 
 impl HostHandle {
-    /// Waits for every in-flight confirmation dispatch to finish.
-    ///
-    /// The serving composition calls this before releasing its authority: an
-    /// operation the Owner's surface already admitted must not be cut in half,
-    /// and no dispatch may outlive the handle it borrowed. The stop flag is
-    /// set first so a frame arriving during the drain is refused instead of
-    /// being dispatched after the last observation.
     pub(crate) async fn join_confirmation_tasks(&self) {
         loop {
             let next = {
@@ -991,9 +884,6 @@ impl HostHandle {
                     .confirmation_tasks
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                // Set under the same guard the serve thread holds across its
-                // check-and-push, so a frame is either registered before this
-                // pop or refused after it.
                 self.confirmation_stopping
                     .store(true, std::sync::atomic::Ordering::Release);
                 tasks.pop()
@@ -1020,10 +910,6 @@ impl HostHandle {
             let (host_channel, mut child_handles) = ene_local_control::HostChannel::pair()
                 .map_err(|error| CoreError::Bind(format!("confirmation channel: {error}")))?;
             let mut command = std::process::Command::new(binary);
-            // Fix the child's cwd to the trusted installation and strip any
-            // loader redirection inherited from the Host's launcher
-            // environment, without removing the display/session variables the
-            // GUI needs to open its window.
             command.current_dir(install_dir);
             for variable in LOADER_ENV_VARS {
                 command.env_remove(variable);
@@ -1040,16 +926,11 @@ impl HostHandle {
                 .spawn()
                 .map_err(|error| CoreError::Bind(format!("spawn the official GUI: {error}")))?;
             let child_id = child.id();
-            // A slot entry found here is a child `gui_is_live` could not
-            // clear (alive but seatless): overwriting it must reap it too.
             let replaced = lock_unpoison(&self.gui_child).replace(GuiProcess { child, child_id });
             if let Some(previous) = replaced {
                 reap_gui_child(previous);
             }
             if !self.attach_confirmation_channel(host_channel) {
-                // The private channel is gone, so the GUI may be exiting on
-                // EOF; reaping it keeps a failed attach from leaving a
-                // zombie for the Host's lifetime.
                 if let Some(process) = lock_unpoison(&self.gui_child).take() {
                     reap_gui_child(process);
                 }
@@ -1081,13 +962,6 @@ impl HostHandle {
         }
     }
 
-    /// Registers one spawned GUI's private channel and serves it.
-    ///
-    /// Exactly one thread owns the channel: it writes outbound challenges and
-    /// replies, dispatches inbound frames against this handle, and clears the
-    /// seat when the child's channel ends. Returns `false` when the channel
-    /// cannot be registered or served, so the caller refuses the desktop
-    /// instead of rendering it open with no confirmation surface.
     #[cfg(any(unix, windows))]
     pub(crate) fn attach_confirmation_channel(
         self: &Arc<Self>,
@@ -1172,10 +1046,6 @@ impl HostHandle {
                                     Ok(()) | Err(_) => {}
                                 }
                             });
-                            // The Host joins these on shutdown: an operation the
-                            // Owner's surface already admitted runs to
-                            // completion before the serving authority goes
-                            // away, and no task outlives the handle it borrows.
                             tasks.retain(|task| !task.is_finished());
                             tasks.push(dispatched);
                         }
@@ -1206,13 +1076,6 @@ pub fn seat_test_gui_for_tests(
     Ok(gui)
 }
 
-/// Owner device approval over the requester listener.
-///
-/// # Errors
-///
-/// [`CoreError::Control`] when the requester listener is unreachable.
-/// A request that no Owner surface could confirm settles as
-/// [`RequestState::ConfirmationUnavailable`].
 pub async fn request_device_approve(
     data_dir: &Path,
     pending_id: &str,
@@ -1236,15 +1099,6 @@ pub async fn request_device_approve(
     }
 }
 
-/// Serving-time credential registration request.
-///
-/// The pair is named, never the value: the raw secret is accepted from the
-/// inherited confirmation channel alone, so this call can only ask the Owner's
-/// surface to open the intake. Returns the settled requester state.
-///
-/// # Errors
-///
-/// [`CoreError::Control`] when the requester listener is unreachable.
 pub async fn request_credential_put(
     data_dir: &Path,
     provider: &str,
@@ -1274,11 +1128,6 @@ pub async fn request_credential_put(
 async fn requester_complete(data_dir: &Path, request: ToHost) -> Result<RequestState, CoreError> {
     let mut client = ControlClient::connect(data_dir).await?;
     let accepted = client.exchange(&request).await?;
-    // Admission was refused before any request id existed: a hold, not a
-    // transport failure and not a domain refusal. The same request may be
-    // retried once the queue drains (first-party-desktop §5.1.5). The
-    // `show_requester_state` renderer never sees this because no request state
-    // exists; the explicit message is the requester-facing answer.
     if matches!(accepted, FromHost::BackpressureHold) {
         return Err(CoreError::Control(String::from(
             "the host-local requester queue is saturated; retry once it drains",
@@ -1315,15 +1164,6 @@ async fn requester_complete(data_dir: &Path, request: ToHost) -> Result<RequestS
     Ok(RequestState::AwaitingOwnerConfirmation)
 }
 
-/// Dials the serving Host's requester listener and records the Owner's
-/// confirmation inside it.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Control`] with recovery guidance when no serving
-/// Host answers (the offline fallback is deliberately absent), and an
-/// explicit [`CoreError::Control`] refusal for the domain states that are
-/// not `Applied` (no surface, declined, still awaiting, malformed).
 pub async fn confirm_targeted_deletion(
     data_dir: &Path,
     request: &str,
@@ -1426,8 +1266,6 @@ where
     stream.flush().await
 }
 
-/// Reads one length-prefixed JSON message; [`None`] when the peer closed or
-/// the frame is malformed or oversize.
 #[cfg(any(unix, windows))]
 async fn read_message<R, T>(stream: &mut R) -> std::io::Result<Option<T>>
 where
@@ -1486,9 +1324,6 @@ mod tests {
         assert_eq!(deletion_from_control(&malformed), None);
     }
 
-    /// The offline fallback is deliberately absent: with no serving Host the
-    /// console gets an explicit refusal with recovery guidance, never a
-    /// confirmation admitted from an empty delivery history (lifecycle §8.1).
     #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_stopped_host_refuses_instead_of_admitting_offline() {
@@ -1681,7 +1516,6 @@ mod tests {
             seat.accept_request().is_none(),
             "a full pending set must be held, never admitted"
         );
-        // A settled request frees exactly one pending slot.
         let first = admitted.remove(0);
         seat.reject_request(&first);
         assert!(
@@ -1716,9 +1550,6 @@ mod tests {
                 .expect("the minted session must exist");
             session.deadline = std::time::Instant::now() - CONTROL_SESSION_TTL;
         }
-        // The next admission retires the expired session and settles its
-        // request, so the reclaimed request is no longer pending and the
-        // session map does not accumulate.
         let admitted = seat.accept_request();
         assert!(
             admitted.is_some(),

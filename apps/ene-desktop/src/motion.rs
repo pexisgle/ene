@@ -27,14 +27,9 @@ impl MotionEnvironment {
     }
 }
 
-/// Resolves the assignment from the standard locations, most specific first.
-///
-/// Placement is not this module's job: when nothing is placed, the body keeps
-/// its hand-authored staging and `HealthTick.motion` reports `Unsupported`.
 #[must_use]
 pub fn resolve(env: &MotionEnvironment) -> Vec<PoseClip> {
     if let Some(dir) = &env.motion_dir {
-        // An explicit override is used exactly as given: no search.
         return pose_clips_in(dir);
     }
     search_dirs(env)
@@ -44,8 +39,6 @@ pub fn resolve(env: &MotionEnvironment) -> Vec<PoseClip> {
         .unwrap_or_default()
 }
 
-/// Install-asset roots, most specific first. The motion pack and the bundled
-/// sample model live under the same roots with their own relative path.
 #[must_use]
 pub fn install_roots(env: &MotionEnvironment) -> Vec<PathBuf> {
     let mut roots = vec![env.data_dir.clone()];
@@ -61,7 +54,6 @@ pub fn install_roots(env: &MotionEnvironment) -> Vec<PathBuf> {
     roots
 }
 
-/// Locations holding the motion pack, most specific first.
 fn search_dirs(env: &MotionEnvironment) -> Vec<PathBuf> {
     install_roots(env)
         .into_iter()
@@ -82,8 +74,6 @@ mod tests {
     use ene_body::testing::{MotionFixture, write_generated_vrma};
     use std::path::{Path, PathBuf};
 
-    /// A sandboxed environment: every searched location lives under one
-    /// temporary directory, so the test never touches the real user profile.
     fn environment(dir: &Path) -> MotionEnvironment {
         MotionEnvironment {
             motion_dir: None,

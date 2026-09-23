@@ -1,21 +1,3 @@
-//! Orchestration of one Workspace-contained filesystem Action.
-//!
-//! The order is fixed by K-B.1 and AU5: input shape and path resolution
-//! happen before any durable claim (a refused or malformed request never
-//! leaves an attempt row), the permission-owned live decision is taken for
-//! exactly the resolved target, the attempt insert is the start linearization
-//! point inside the repository, and the filesystem effect runs only after
-//! [`ActionStartOutcome::Started`], outside every transaction.
-//!
-//! The observed effect is always returned once the attempt started, even when
-//! recording the fact fails technically: an external effect must never be
-//! hidden by a storage failure. Recording failure leaves the durable row as it
-//! was (still `Unknown`, already settled, or absent), and the effect is still
-//! returned.
-//!
-//! This orchestration never adopts the effect into a Task, never completes
-//! the Task, and never re-executes an unknown outcome.
-
 use ene_permission::{
     ActionAuthorizationDecision, ActionDenyCode, ActionEvaluationTracker, ActionKind,
     ActionUseCandidate, CurrentActionPremise, authorize_action_use,
@@ -66,15 +48,9 @@ impl core::fmt::Debug for WorkspaceActionCommand {
     }
 }
 
-/// Why one request never started. Every variant means zero attempt rows and
-/// zero execution; the `DataUseHeld` variant may additionally commit the
-/// durable erasure-use hold that the coverage probe materialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionNotStarted {
     StalePremise,
-    /// The Task is terminal (`Completed` / `Failed` / `Cancelled`); nothing was claimed or
-    /// executed. Unit-style because the Task lifecycle vocabulary stays with
-    /// its owner; the Work-side adapter re-reads to carry the detail.
     TaskTerminal,
     ExecutionSealed,
     DataUseHeld,
@@ -90,11 +66,6 @@ pub enum ActionRunOutcome {
     Completed {
         attempt: ActionAttemptId,
         effect: ObservedEffect,
-        /// Whether the observation became durable. `false` means it did not:
-        /// the compare-and-set reported `MissingAttempt`, `StaleCurrent`, or a
-        /// technical failure, so the row is absent or keeps whatever certainty
-        /// it already held (`CertaintyUpdateOutcome` distinguishes them); the
-        /// effect is still reported.
         fact_recorded: bool,
     },
     NotStarted(ActionNotStarted),
@@ -144,13 +115,7 @@ pub async fn orchestrate_workspace_action(
             ));
         }
     };
-    // `authorize_action_use` minted this id for exactly this candidate a
-    // moment ago, so consuming it here cannot fail; the call still burns the
-    // single-use entry. The durable AU5 transaction refuses a second attempt
-    // with the same evaluation identity.
     tracker.consume(&evaluation, &candidate);
-    // The Permission-owned decision ends here: the durable claim carries only
-    // its opaque raw correlation identity.
     let evaluation_id = evaluation.as_raw();
     let premise = attempt_premise(&command, &target, evaluation_id);
     let attempt = premise.attempt;
@@ -252,7 +217,6 @@ mod tests {
         CurrentActionPremise, authorize_action_use,
     };
 
-    /// Captures every claim and answers configured domain outcomes.
     #[derive(Default)]
     struct FakeAttempts {
         starts: Mutex<Vec<AttemptCommitPremise>>,

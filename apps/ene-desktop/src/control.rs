@@ -12,15 +12,10 @@ use crate::ui::DesktopError;
 
 const CONFIRMATION_WAIT: Duration = Duration::from_secs(30);
 
-/// How long one requester-listener request round trip may take.
 const REQUESTER_WAIT: Duration = Duration::from_secs(30);
 
-/// Bound on challenges retained for a later Owner gesture. Concurrent
-/// requester traffic can mint challenges faster than the Owner answers them;
-/// the oldest deferred challenge is dropped first so retention stays bounded.
 const DEFERRED_LIMIT: usize = 8;
 
-/// One challenge waiting for the Owner's direct gesture.
 #[derive(Debug, Clone)]
 pub struct PendingChallenge {
     pub session_id: Uuid,
@@ -29,7 +24,6 @@ pub struct PendingChallenge {
     nonce: ene_local_control::RedactedSecret,
 }
 
-/// Requester-side client for the serving Host's local listener.
 #[derive(Debug, Clone)]
 pub struct RequesterClient {
     data_dir: PathBuf,
@@ -43,17 +37,6 @@ impl RequesterClient {
         }
     }
 
-    /// Sends one request and reads its answer.
-    ///
-    /// The refusal answers every requester call shares are classified once
-    /// here: a hold is its own state, and a boundary refusal or an unavailable
-    /// Host is a domain answer, not a control-shape failure.
-    ///
-    /// # Errors
-    ///
-    /// [`DesktopError::Transport`] when the requester listener is unreachable
-    /// or does not answer within `REQUESTER_WAIT`, [`DesktopError::Protocol`]
-    /// when the answer cannot be decoded.
     pub async fn request(&self, message: &ToHost) -> Result<FromHost, DesktopError> {
         let answer = tokio::time::timeout(REQUESTER_WAIT, async {
             let mut stream = connect_requester(&self.data_dir).await?;
@@ -93,11 +76,6 @@ impl RequesterClient {
         }
     }
 
-    /// Requests one high-privilege object under a Host-issued request id.
-    ///
-    /// # Errors
-    ///
-    /// As [`RequesterClient::request`].
     async fn request_accepted(&self, message: &ToHost) -> Result<(), DesktopError> {
         match self.request(message).await? {
             FromHost::RequestAccepted { .. } => Ok(()),
@@ -212,13 +190,6 @@ impl ConfirmationClient {
         self.await_challenge(ControlOp::DeletionConfirm).await
     }
 
-    /// Waits for the Host to push the challenge of the operation just
-    /// requested.
-    ///
-    /// # Errors
-    ///
-    /// [`DesktopError::Control`] when a frame other than a challenge arrives,
-    /// and [`DesktopError::Transport`] when none does.
     async fn await_challenge(&mut self, expected: ControlOp) -> Result<(), DesktopError> {
         loop {
             let frame = self.next_frame().await?;
@@ -239,10 +210,6 @@ impl ConfirmationClient {
                     });
                     return Ok(());
                 }
-                // A different request's challenge may be pushed first when a
-                // concurrent requester races this GUI's own request. Keep it
-                // for its own Owner gesture instead of dropping the only
-                // surface that can complete it.
                 FromConfirmation::ConfirmationChallenge {
                     session_id,
                     op,
@@ -269,16 +236,10 @@ impl ConfirmationClient {
         }
     }
 
-    /// Takes the challenge currently presented to the Owner, whether it was
-    /// the most recently awaited one or an earlier deferred one.
     fn take_challenge(&mut self) -> Option<PendingChallenge> {
         self.challenge.take().or_else(|| self.deferred.pop_front())
     }
 
-    /// Retains an already-held challenge for its own gesture before a newly
-    /// arriving one takes the single presented slot. Without this the previous
-    /// session is overwritten and can never be answered on the one-shot
-    /// private channel.
     fn retain_presented(&mut self) {
         if let Some(previous) = self.challenge.take() {
             if self.deferred.len() >= DEFERRED_LIMIT {
@@ -288,12 +249,6 @@ impl ConfirmationClient {
         }
     }
 
-    /// The Owner's direct confirmation on a non-secret challenge surface.
-    ///
-    /// # Errors
-    ///
-    /// [`DesktopError::Protocol`] when no challenge is live, and
-    /// [`DesktopError::Transport`] when the boundary does not answer.
     pub async fn complete_pending(&mut self) -> Result<FromConfirmation, DesktopError> {
         let Some(challenge) = self.take_challenge() else {
             return Err(DesktopError::Protocol(String::from(
@@ -363,11 +318,6 @@ impl ConfirmationClient {
         self.await_outcome().await
     }
 
-    /// Sends one frame on the private channel.
-    ///
-    /// # Errors
-    ///
-    /// [`DesktopError::Transport`] when the channel ended.
     fn send(&mut self, frame: &ToConfirmation) -> Result<(), DesktopError> {
         match self.channel.send(frame) {
             Ok(()) => Ok(()),
@@ -394,8 +344,6 @@ impl ConfirmationClient {
                     nonce,
                     ..
                 } => {
-                    // A second request's challenge may arrive while the first
-                    // is settling; keep it for its own Owner gesture.
                     self.retain_presented();
                     self.challenge = Some(PendingChallenge {
                         session_id,
@@ -436,8 +384,6 @@ async fn connect_requester(data_dir: &Path) -> Result<tokio::net::UnixStream, De
 async fn connect_requester(
     data_dir: &Path,
 ) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, DesktopError> {
-    // Same derivation as the Host's requester listener: the device pipe name
-    // plus the control suffix, folded from the data directory.
     let pipe = format!("{}-control", ene_plugin_ipc::pipe_name(data_dir));
     tokio::net::windows::named_pipe::ClientOptions::new()
         .open(&pipe)
@@ -496,17 +442,12 @@ where
 mod tests {
     use ene_local_control::{CONFIRMATION_MODE_ENV, CONFIRMATION_MODE_STDIO};
 
-    /// The launcher/GUI switch is an environment marker the Host sets, never a
-    /// command-line flag a user or a requester can aim.
     #[test]
     fn the_confirmation_mode_marker_is_the_hosts() {
         assert_eq!(CONFIRMATION_MODE_ENV, "ENE_CONFIRMATION_CHANNEL");
         assert_eq!(CONFIRMATION_MODE_STDIO, "stdio");
     }
 
-    /// A saturated Host answers every requester call with
-    /// `FromHost::BackpressureHold`; the GUI must classify that as the hold,
-    /// never as a control-shape or technical failure.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_backpressure_hold_is_its_own_error_at_every_requester_call() {
@@ -548,8 +489,6 @@ mod tests {
         server.await.expect("hold server must finish");
     }
 
-    /// A hold is an admission answer, not a transient transport failure: the
-    /// requester waits for the Owner to act again and never resends on its own.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_held_request_is_not_resent() {

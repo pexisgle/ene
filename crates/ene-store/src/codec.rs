@@ -57,18 +57,12 @@ pub(crate) fn decode_id(text: &str) -> Result<RawId, String> {
         .parse()
         .map_err(|_| String::from("malformed identity text"))?;
     let raw = RawId::from_uuid(parsed);
-    // Only the canonical rendering `encode_id` writes is readable: another
-    // spelling (simple, braced, urn, uppercase) would be a second durable key
-    // for one identity, so it is an unreadable row.
     if encode_id(raw) != text {
         return Err(String::from("malformed identity text"));
     }
     Ok(raw)
 }
 
-/// Pricing references have a text form by design: the durable row is what
-/// historical cost facts join on. Malformed text never becomes a fresh or
-/// default reference.
 pub(crate) fn decode_pricing_reference(text: &str) -> Result<PricingSnapshotRef, String> {
     PricingSnapshotRef::from_text(text)
         .ok_or_else(|| String::from("malformed pricing snapshot reference"))
@@ -141,9 +135,6 @@ pub(crate) fn encode_round_intent(intent: &RoundIntentMark) -> (&'static str, Op
     }
 }
 
-/// `None` intent means the row carries no command key (replies): the caller
-/// fail-closes on replay instead of guessing. A kind and reference that
-/// disagree are a malformed row, never defaulted.
 pub(crate) fn decode_round_intent(
     kind: Option<&str>,
     reference: Option<String>,
@@ -286,17 +277,6 @@ fn resolve_source_task(
     decode_id(&task_text)
 }
 
-/// Decodes one stored source key back to its typed form.
-///
-/// An unknown kind, an undecodable identity, a phase that is not the kind's
-/// canonical rendering (a non-canonical revision decimal, a phase present for
-/// a kind that has none, an unknown certainty, an unknown terminal phase) are
-/// unreadable rows and fail closed. Delegation-, attempt-, and result-owned
-/// facts resolve
-/// their owning task from the canonical rows at read time (the delegation
-/// row, the attempt's delegation row, the result row): the `task` field is
-/// the owning task, never the source identity itself, so report composition
-/// finds the task behind every fact.
 pub(crate) fn decode_undelivered_source(
     conn: &Connection,
     kind: &str,
@@ -404,8 +384,6 @@ pub(crate) fn decode_usage_source(text: &str) -> Result<UsageSource, String> {
     }
 }
 
-/// Consumer/purpose storage vocabulary is owned by `ene-permission`; unknown
-/// stored names are unreadable rows and fail closed on decode.
 pub(crate) fn decode_consumer(text: &str) -> Result<ConsumerKind, String> {
     ConsumerKind::from_name(text).ok_or_else(|| String::from("unknown inference consumer"))
 }
@@ -545,8 +523,6 @@ pub(crate) fn fingerprints_match(stored: &IntentFingerprint, incoming: &IntentFi
         && stored.rationale_quote == incoming.rationale_quote
 }
 
-/// Shared by every write-once claim check: an existing row decides, and exact
-/// content replays while anything else clarifies.
 pub(crate) fn replay_or_conflict<T>(
     stored: IntentOutcomeRecord,
     fingerprint: &IntentFingerprint,
@@ -558,10 +534,6 @@ pub(crate) fn replay_or_conflict<T>(
     }
 }
 
-/// Stores the decided row for an intent whose write-once claim already ran in
-/// the same `BEGIN IMMEDIATE` transaction. A constraint violation here is torn
-/// state, never a lost race: the write lock is held from the claim through
-/// this insert, so no other writer can commit the key in between.
 pub(crate) fn insert_decided_row_tx(
     tx: &Transaction<'_>,
     fingerprint: &IntentFingerprint,
@@ -633,9 +605,6 @@ pub(crate) fn select_intent_row(
         .transpose()
 }
 
-/// Decodes one `paired_device` row. The wire projection is non-null: an
-/// approval always stores a freshly minted opaque wire, so a row without one
-/// is unreadable rather than a legacy identity rendering.
 pub(crate) fn decode_device_record(
     device_text: &str,
     descriptor: String,
@@ -672,10 +641,6 @@ pub(crate) fn credential_pair_is_blank(provider: &str, label: &str) -> bool {
     provider.trim().is_empty() || label.trim().is_empty()
 }
 
-/// `None` command text means no replay key; `None` wire projection is
-/// unreadable stored state (every current writer persists one); the
-/// incarnation appears only when both counter and random are present and
-/// decode.
 pub(crate) fn decode_history_message(
     companion: CompanionId,
     row: HistoryRow,
@@ -797,10 +762,6 @@ pub(crate) fn decode_hint(
     })
 }
 
-/// Named fields keep column order in exactly one place:
-/// [`HistoryRow::from_row`]. The readers (`lookup_command`, `load_message`,
-/// `load_timeline`, `load_recent_timeline`, and `append_history`'s command
-/// lookup) share the column order through that constructor.
 pub(crate) struct HistoryRow {
     message_text: String,
     round_text: String,

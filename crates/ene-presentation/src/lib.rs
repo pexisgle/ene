@@ -39,10 +39,6 @@ impl core::fmt::Debug for ClientInputRef {
     }
 }
 
-/// Owner text input candidate arriving at the Host boundary.
-///
-/// A proposal, never an acceptance: attribution checks and round issuance
-/// happen Host-side in [`check_intake`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SubmitClientInputCandidate {
     pub companion: RawId,
@@ -74,7 +70,6 @@ pub struct OpenRound {
     pub generation: PresenceGeneration,
 }
 
-/// Full intake premise evaluated by [`check_intake`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntakePremise {
     pub candidate: SubmitClientInputCandidate,
@@ -84,7 +79,6 @@ pub struct IntakePremise {
     pub open_round: Option<OpenRound>,
 }
 
-/// Opaque revalidation reason.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RevalidationReason {
     MissingGenerationView,

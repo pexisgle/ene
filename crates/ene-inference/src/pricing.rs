@@ -77,7 +77,6 @@ fn push_field(name: &mut String, value: &str) {
     name.push(';');
 }
 
-/// The reviewed pricing source of truth.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PricingCatalog {
     entries: Vec<PricingSnapshot>,
@@ -98,13 +97,6 @@ pub enum PricingCatalogError {
 }
 
 impl PricingCatalog {
-    /// Builds a catalog, refusing ambiguous entries.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PricingCatalogError::DuplicateEffectiveInstant`] when two
-    /// entries name the same `(provider, model)` and the same effective
-    /// instant: picking either rate would be an arbitrary guess.
     pub fn new(entries: Vec<PricingSnapshot>) -> Result<Self, PricingCatalogError> {
         for (index, entry) in entries.iter().enumerate() {
             for other in &entries[index + 1..] {
@@ -253,8 +245,6 @@ mod tests {
         assert_eq!(snapshot.cached_input_rate, rate(1_250_000));
         assert_eq!(snapshot.output_rate, rate(10_000_000));
         assert_eq!(snapshot.source_revision, FIRST_PARTY_REVISION);
-        // The same content yields the same durable identity across catalogs
-        // and processes.
         let rebuilt = PricingCatalog::first_party().expect("the reviewed table must be valid");
         let PricingResolution::Priced(rebuilt) =
             rebuilt.resolve("openai", "gpt-4o", at("2026-09-17T12:00:00Z"))
@@ -347,7 +337,6 @@ mod tests {
             panic!("the newer entry must cover October");
         };
         assert_eq!(after.input_rate, newer.input_rate);
-        // A revision that is not effective yet does not reprice earlier calls.
         assert_eq!(
             catalog.resolve("openai", "gpt-test", at("2025-05-01T00:00:00Z")),
             PricingResolution::Unpriced
@@ -367,7 +356,6 @@ mod tests {
                 model: String::from("gpt-test"),
             })
         );
-        // The same instant on different routes is not ambiguous.
         let other = PricingCatalog::new(vec![
             entry("gpt-a", "2025-06-01T00:00:00Z"),
             entry("gpt-b", "2025-06-01T00:00:00Z"),
@@ -396,8 +384,6 @@ mod tests {
         let mut changed_model = base.clone();
         changed_model.model = String::from("gpt-other");
         assert_ne!(reference, changed_model.reference());
-        // Field framing is length-prefixed, so concatenation collisions do
-        // not alias two different snapshots.
         let mut split = base.clone();
         split.provider = String::from("openaiX");
         split.model = String::from("gpt-tes");

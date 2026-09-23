@@ -15,12 +15,6 @@ use ene_task::{
     TaskInstructionSourceRecord,
 };
 
-/// Adapts one [`InferenceExecutor`] to the Task Agent port.
-///
-/// `abort` is the running execution's local cooperative stop token: the
-/// adapter forwards it into the dispatch boundary, which owns the post-claim
-/// accounting, so an abort stops the provider wait without losing the
-/// attempt's usage fact.
 pub struct TaskAgentInferenceAdapter<'a, I> {
     executor: &'a I,
     abort: &'a DispatchAbort,
@@ -76,17 +70,6 @@ impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, 
     }
 }
 
-/// Adapts the companion-owned canonical sources to the Task-owned
-/// instruction-source port.
-///
-/// The adapter resolves the origin kind to its table — Owner conversation
-/// messages by History primary key, first-party management activities by
-/// activity primary key — with one bounded single-record read each, and
-/// maps the row into the Task-owned record. It adds no behavior: no body is
-/// cached or copied into Task state, an absent row is `Ok(None)`, and a
-/// malformed row or read failure becomes a fixed-class technical error
-/// without the row or the body. Timeline loads, recent windows, and command
-/// lookups are never a substitute for either read.
 pub struct OwnerInstructionSource<'a> {
     store: &'a Store,
 }

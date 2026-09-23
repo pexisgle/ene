@@ -25,10 +25,6 @@ const SQL_UPDATE_ATTRIBUTION: &str = "UPDATE presence_attribution SET state = ?1
 
 const SQL_INSERT_TRANSITION: &str = "INSERT INTO presence_transition_log (companion_id, old_state, new_state, old_gen, new_gen, reason, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
-/// Writes one attribution change and its transition-log row inside the
-/// caller's transaction. Every presence write is update-plus-log; keeping the
-/// pair in one function keeps the transition history an exact mirror of the
-/// attribution the callers commit.
 fn write_attribution_tx(
     tx: &rusqlite::Transaction<'_>,
     old: PresenceAttribution,
@@ -61,17 +57,6 @@ fn write_attribution_tx(
     Ok(())
 }
 
-/// Synchronous presence primitives for the connection-ownership section.
-///
-/// [`PresenceRepository`] wraps each of these in its own `spawn_blocking`
-/// call, which is the right shape for standalone await callers. The connection
-/// table's admission sections are different: they must decide and commit while
-/// holding the connection-table lock, inside a single `spawn_blocking`
-/// (CCT §10.4), so the same compare/commit is exposed synchronously and never
-/// awaited across the section. The sync bodies carry the full slice B
-/// semantics (stop outranks begin, encode-checked generations, relocation-hint
-/// maintenance), so the close-admission fallback and the async repository
-/// agree by construction.
 impl Store {
     pub fn load_attribution_sync(
         &self,
@@ -129,8 +114,6 @@ impl Store {
             reason_text,
             &now_text,
         )?;
-        // Leaving RecoveryWait cancels the recovery intent; the candidate
-        // lives only in the attribution and never becomes `last_client`.
         tx.execute(
             SQL_UPSERT_HINT,
             params![key, Option::<String>::None, Option::<String>::None],
@@ -165,10 +148,6 @@ impl Store {
                 "missing presence attribution",
             )));
         };
-        // Only the transitioning generation's `InTransition` row may move. A
-        // different generation is a newer begin/normalization that superseded
-        // this transition, and a stopped row outranks the transition, so
-        // neither may be read as this confirmation's own success.
         if current.generation != transitioning_generation {
             return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
         }
@@ -193,8 +172,6 @@ impl Store {
             generation: transitioning_generation,
         };
         write_attribution_tx(&tx, current, confirmed, confirm_reason, &now_text)?;
-        // `last_client` moves only when the attribution becomes Present;
-        // a NoActive confirm keeps the last confirmed client as history.
         if let Some(client) = target_client {
             tx.execute(
                 SQL_UPSERT_HINT,
@@ -218,10 +195,6 @@ impl Store {
     }
 }
 
-/// The one relocation-hint upsert. A `NULL` `last_client` keeps the stored
-/// one (`COALESCE`), so a destination write (begin, recovery, stop) never
-/// touches `last_client`; a Present confirm supplies the new client and
-/// clears the destination.
 pub(crate) const SQL_UPSERT_HINT: &str = "INSERT INTO relocation_hint (companion_id, last_client, recovery_destination) VALUES (?1, ?2, ?3) ON CONFLICT(companion_id) DO UPDATE SET last_client = COALESCE(excluded.last_client, relocation_hint.last_client), recovery_destination = excluded.recovery_destination";
 
 const SQL_SELECT_COMPANIONS: &str = "SELECT companion_id, lifecycle FROM companion";
@@ -458,10 +431,6 @@ impl PresenceRepository for Store {
                 active_client: None,
                 generation: current.generation,
             };
-            // Stop clears presence without advancing the generation: the
-            // lifecycle change that would make the companion movable again is
-            // a separate owner's decision, and the stopped state itself
-            // rejects every later begin.
             write_attribution_tx(
                 &tx,
                 current,
@@ -482,10 +451,6 @@ impl PresenceRepository for Store {
     }
 }
 
-/// A companion identity that is the target is erased whole: the identity is
-/// the row's primary fact, so a redaction would be a silent rename. The
-/// companion itself belongs to its own owner; presence only removes its
-/// attribution.
 const SQL_ERASE_ATTRIBUTION_IDENTITY: &str = "DELETE FROM presence_attribution
      WHERE companion_id IN (
          SELECT companion_id FROM presence_attribution

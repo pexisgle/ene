@@ -1,9 +1,3 @@
-//! Optional Body child. Chat and settings do not wait for this process.
-//!
-//! Projection IPC matches `apps/ene-body/README.md`: length-prefixed
-//! MessagePack on `--ipc-stdio`. Commands are [`ene_body::ipc::ParentToBody`]
-//! only — secrets, chat text, and Task commands have no variant.
-
 use std::collections::VecDeque;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -113,13 +107,6 @@ impl BodySupervisor {
                                                 Ok(len) => {
                                                     buf.drain(..len);
                                                 }
-                                                // The length prefix itself is
-                                                // unreadable or oversize: no
-                                                // valid boundary exists, so
-                                                // dropping only 4 bytes would
-                                                // reread body bytes as the next
-                                                // length and desynchronize the
-                                                // stream. Abort the reader.
                                                 Err(_) => return,
                                             },
                                         }
@@ -174,7 +161,6 @@ impl BodySupervisor {
         }
     }
 
-    /// Takes an overlay-local settings candidate.
     pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
         self.drain_events();
         self.local_ui.pop_front()
@@ -233,10 +219,6 @@ impl BodySupervisor {
                             self.native_ready = false;
                         }
                         BodyToParent::AssetReady(_) => self.asset_ready = true,
-                        // A rejected replacement leaves the previous avatar
-                        // live; this supervisor projects one asset per child, so
-                        // an `AssetFail` seen after readiness is about the
-                        // loaded asset.
                         BodyToParent::AssetFail(_) => self.asset_ready = false,
                         BodyToParent::HealthTick(tick) => {
                             self.motion_ready =

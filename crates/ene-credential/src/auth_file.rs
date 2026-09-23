@@ -11,78 +11,6 @@ use crate::CredentialTechnicalError;
 use crate::pairing::{DeviceId, decode_hex_lower, encode_hex_lower, verify_pairing_proof};
 use crate::secret::SecretValue;
 
-/// File-backed custody for device-auth verification material.
-///
-/// Pairing secrets minted at approval must survive both process boundaries
-/// (a separate `approve-device` process persists them while the serving
-/// process verifies proofs) and Host restarts, so verification material
-/// cannot live only in the serving process's memory. This store keeps one
-/// entry per paired device in a protected file shared across processes and
-/// restarts. Reads are read-through on every call: nothing is cached, so a
-/// verifier always observes the latest persisted rotation.
-/// Authentication stays per-connection-once, so the extra file read costs
-/// correctness nothing it cannot afford.
-///
-/// The whole file is one JSON document mapping canonical device UUID text to
-/// an entry holding the secret (lowercase hex), the owner-visible
-/// descriptor, and the entry write time as RFC 3339:
-///
-/// ```json
-/// {"devices": {"123e4567-e89b-12d3-a456-426614174000": {"secret_hex": "00ab",
-/// "descriptor": "phone", "paired_at": "2026-09-08T12:00:00+09:00"}}}
-/// ```
-///
-/// Secret custody: generation stays with the caller (the pairing repository
-/// approve path mints the secret); this store only persists it, and the owned
-/// `SecretValue` never leaves this crate. Callers outside the crate verify a
-/// device with [`verify_device_proof`](FileDeviceAuthStore::verify_device_proof)
-/// and probe existence with [`has_secret`](FileDeviceAuthStore::has_secret);
-/// there is no public accessor that returns the value. Secrets and descriptors
-/// are never logged and never appear in this type's `Debug` output, which shows
-/// the path and the entry count only.
-///
-/// File protection: on Unix the file at rest must be mode `0600`. Opening an
-/// existing file with any other mode attempts to tighten it to `0600` and
-/// fails when tightening does not stick; newly written files (including the
-/// staging temp) are created `0600`. On non-Unix platforms there is no mode
-/// check: the OS-specific protection story is documented at the call site
-/// instead, and the file must still live in a directory only the owner can
-/// read.
-///
-/// Caller-owned directory: the caller creates the parent directory. Opening
-/// fails when the parent directory is missing, so a misconfigured data
-/// directory can never silently redirect the store. A missing file is not an
-/// error: opening succeeds empty and the file is created lazily on the first
-/// save. A malformed file is always an error, never a silent default.
-///
-/// [`Clone`] names the same protected file that
-/// [`FileDeviceAuthStore::open`] already validated; cloning never re-opens,
-/// re-reads, or re-checks the file.
-///
-/// Atomicity story: every mutation rewrites the whole file by staging the
-/// new bytes to a temp file in the same directory (created `0600` on Unix,
-/// flushed with `sync_all`) and renaming it over the target. The rename is
-/// the atomic replace: concurrent readers observe the old or the new
-/// document whole, so torn reads are impossible. Atomic replacement does
-/// not order writers, so every read-modify-write cycle additionally holds an
-/// exclusive OS advisory lock on the sidecar `device-auth.json.lock` for
-/// its whole duration: concurrent approves of different devices serialize
-/// instead of dropping each other's entry, and concurrent rotations of one
-/// device leave exactly one current secret. The kernel releases the lock
-/// when the holder exits or drops it, so a crashed approval never leaves a
-/// permanent lock.
-///
-/// Backup-exclusion contract: this file holds Group K verification material
-/// with E classification. It must never enter backups or exports and must
-/// never live inside `app.db`: a future backup stage walks the data
-/// directory and must exclude every sibling whose name starts with
-/// `device-auth` — the `device-auth.json` file, its `.lock` sidecar, and the
-/// `device-auth.json.tmp.*` staging temps that briefly hold the same secret
-/// material before the rename. Restore must not replace it, reset wipes it
-/// only on full-data reset, and a Host without this file authenticates
-/// nothing until fresh pairing mints new material. The mutation sidecar
-/// `device-auth.json.lock` carries no secret material; backups may ignore it
-/// and restore must not replace it.
 #[derive(Clone)]
 pub struct FileDeviceAuthStore {
     path: PathBuf,
@@ -187,19 +115,6 @@ impl FileDeviceAuthStore {
         result
     }
 
-    /// Loads the persisted secret for `device`, if any.
-    ///
-    /// Crate-private: the owned `SecretValue` must not cross the crate
-    /// boundary, so external callers use [`Self::verify_device_proof`] or the
-    /// non-secret [`Self::has_secret`] probe instead.
-    ///
-    /// An unknown device (or a missing file) yields `Ok(None)`; only an
-    /// unreadable or malformed file yields an error, never a silent default.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
-    /// file cannot be read or fails validation.
     pub(crate) fn load_secret(
         &self,
         device: &DeviceId,
@@ -221,37 +136,11 @@ impl FileDeviceAuthStore {
         Ok(Some(SecretValue::new(text)))
     }
 
-    /// Reports whether a persisted secret exists for `device` without
-    /// returning any of its material.
-    ///
-    /// This is the non-secret existence probe for callers outside the crate;
-    /// the value itself stays confined to `load_secret`
-    /// and [`verify_device_proof`](Self::verify_device_proof).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
-    /// file cannot be read or fails validation, so an unreadable file is never
-    /// reported as absent.
     pub fn has_secret(&self, device: &DeviceId) -> Result<bool, CredentialTechnicalError> {
         let entries = self.read_entries()?;
         Ok(entries.contains_key(&device_key(device)))
     }
 
-    /// Verifies one pairing ownership proof against the persisted secret.
-    ///
-    /// The secret never leaves this crate: it is borrowed into the
-    /// constant-time comparison inside [`verify_pairing_proof`] and zeroized
-    /// on drop with the `SecretValue`. An unknown device yields `Ok(false)`;
-    /// stored material that is not valid UTF-8 (never minted by the approve
-    /// path, which stores UUID text) is malformed and yields
-    /// [`CredentialTechnicalError::StorageUnavailable`], never a silent proof
-    /// failure.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
-    /// file cannot be read or fails validation.
     pub fn verify_device_proof(
         &self,
         device: &DeviceId,

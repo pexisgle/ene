@@ -68,7 +68,6 @@ pub struct SurfaceSnapshot {
     pub ready: bool,
     pub credential: bool,
     pub consent: bool,
-    /// The Host's durable model assignment, not the wizard draft.
     pub assigned_model: String,
     pub step: i32,
     pub status: String,

@@ -37,11 +37,6 @@ pub enum ConfigError {
 }
 
 impl Config {
-    /// # Errors
-    ///
-    /// Returns [`ConfigError::EmptyLanguage`] when [`Config::language`] is
-    /// empty or whitespace-only, or [`ConfigError::EmptyDataDir`] when an
-    /// explicit [`Config::data_dir`] is the empty path.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.language.trim().is_empty() {
             return Err(ConfigError::EmptyLanguage);
@@ -54,13 +49,6 @@ impl Config {
         Ok(())
     }
 
-    /// Loads defaults, an optional JSON file, then ENE_LANGUAGE and ENE_DATA_DIR.
-    /// Missing files and non-Unicode environment values are ignored.
-    ///
-    /// # Errors
-    /// Returns a read or JSON error for an unreadable or malformed file, or
-    /// EmptyLanguage when the final language is blank, or EmptyDataDir when
-    /// the final data directory is the empty path.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
         let mut config: Config = match path.map(std::fs::read).transpose() {
             Ok(Some(bytes)) => serde_json::from_slice(&bytes)?,

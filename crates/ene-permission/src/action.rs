@@ -10,11 +10,6 @@ pub enum ActionKind {
     Edit,
 }
 
-/// Identity of one Action-use authorization decision.
-///
-/// Separate from the inference [`PermissionEvaluationId`](crate::PermissionEvaluationId).
-/// Minted only by [`ActionEvaluationTracker`] for one candidate fingerprint;
-/// single-use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActionPermissionEvaluationId(RawId);
 

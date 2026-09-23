@@ -158,7 +158,6 @@ impl HostHandle {
                 self.clarify(frame, live, intent, Self::INTENT_KIND_CANCEL_TASK)
                     .await
             }
-            // Nothing was decided, so a retry is safe.
             Err(_) => Self::hold(frame, live, intent),
         }
     }
@@ -219,9 +218,6 @@ impl HostHandle {
             .await
         {
             Err(_) => return Self::hold(frame, live, intent),
-            // The instruction body is under a current erasure condition: the
-            // activity is not recorded and the resume is held, never answered
-            // as applied.
             Ok(ResumeActivityOutcome::HeldForErasure) => return Self::hold(frame, live, intent),
             Ok(ResumeActivityOutcome::Recorded(activity)) => activity,
         };
@@ -247,15 +243,10 @@ impl HostHandle {
                 )
                 .await,
             )],
-            // Every owner refusal (stale, terminal, running, held,
-            // available-result, missing, exhausted) clarifies: the
-            // management vocabulary has no narrower refusal, and nothing
-            // committed.
             Ok(_) => {
                 self.clarify(frame, live, intent, Self::INTENT_KIND_RESUME_TASK)
                     .await
             }
-            // Nothing was decided, so a retry is safe.
             Err(_) => Self::hold(frame, live, intent),
         }
     }
@@ -287,9 +278,6 @@ impl HostHandle {
                 .clarify(frame, live, intent, Self::INTENT_KIND_SELECT_WORKSPACE)
                 .await;
         };
-        // Durable before visible: a held or conflicted record must not leave
-        // the workspace premise set, because the Task proposal consumes it as
-        // the applied authorization while the Client is told nothing applied.
         let outcome = self
             .record_decided(
                 Self::intent_fingerprint(intent, Self::INTENT_KIND_SELECT_WORKSPACE),
@@ -349,13 +337,10 @@ impl HostHandle {
             Ok(RegistrationApply::Decided(RegistrationState::HeldByOperation)) => {
                 Self::hold(frame, live, intent)
             }
-            Ok(RegistrationApply::AlreadyDecided) => {
-                // Lost a cross-process race: answer from the journal winner
-                // through the one journal-resolution rule.
-                self.replay_or_hold(frame, live, intent, fingerprint)
-                    .await
-                    .unwrap_or_else(|| Self::hold(frame, live, intent))
-            }
+            Ok(RegistrationApply::AlreadyDecided) => self
+                .replay_or_hold(frame, live, intent, fingerprint)
+                .await
+                .unwrap_or_else(|| Self::hold(frame, live, intent)),
             Err(_) => Self::hold(frame, live, intent),
         }
     }
@@ -375,9 +360,6 @@ impl HostHandle {
     }
 
     pub(crate) fn intent_fingerprint(intent: &ManagementIntent, kind: &str) -> IntentFingerprint {
-        // The target grammar, never the declared kind, decides whether the
-        // intent may carry the Owner's deletion body; a body-carrying target
-        // is journaled body-free even under a mismatched kind.
         let body_carrying = intent.target_carries_owner_body();
         IntentFingerprint {
             intent_id: intent.intent_id.0.as_hyphenated().to_string(),
@@ -469,17 +451,11 @@ impl HostHandle {
         let Some((capability, provider, model, credential_id)) =
             parse_consent_target(&intent.target)
         else {
-            // Malformed targets decide Clarify like any other outcome: the
-            // row closes the hole where a retry could otherwise swap in a
-            // valid target under the same id and reach assign. Recorded
-            // under the assign kind so the fingerprint stays comparable.
             return self
                 .clarify(frame, live, intent, Self::INTENT_KIND_ASSIGN)
                 .await;
         };
         let Some(capability) = CapabilityKind::from_name(&capability) else {
-            // Unknown capabilities are outside the closed world; a retry
-            // under the same id observes the same clarification.
             return self
                 .clarify(frame, live, intent, Self::INTENT_KIND_ASSIGN)
                 .await;
@@ -511,8 +487,6 @@ impl HostHandle {
         }
     }
 
-    /// Answers one intent as an undecided clarification, recording the
-    /// durable decision under `kind` first.
     pub(crate) async fn clarify(
         &self,
         frame: &WireFrame,
@@ -532,7 +506,6 @@ impl HostHandle {
         )]
     }
 
-    /// Answers one intent as held: nothing was decided, so a retry is safe.
     pub(crate) fn hold(
         frame: &WireFrame,
         live: &LiveInput,
@@ -546,9 +519,6 @@ impl HostHandle {
         )]
     }
 
-    /// The saved record keeps the stored id when one exists and advances its
-    /// revision. A lost compare race answers `StaleBaseView` with the rebuilt
-    /// current mark instead of overwriting: the caller re-reads and retries.
     async fn assign_consent(
         &self,
         frame: &WireFrame,
@@ -675,11 +645,6 @@ impl HostHandle {
         }
     }
 
-    /// An empty section list selects every known section (`provider`,
-    /// `model`, `consent`, `credential`, `learning`, `memory`); otherwise only requested
-    /// known sections render and unknown names are skipped. `memory_after`
-    /// continues the current-memory list; `memory_revisions_of` (with
-    /// `memory_revisions_after`) renders one Memory's revision page instead.
     pub(crate) async fn answer_view(
         &self,
         frame: &WireFrame,
@@ -825,28 +790,6 @@ impl HostHandle {
         }
     }
 
-    /// Read-only projection of current Memory and its change history.
-    ///
-    /// With no direction, renders one page of [`MEMORY_PAGE_SIZE`] current
-    /// memories, newest first, continuing strictly after `after` and ending
-    /// with `next: <id>` while more remain. With `revisions_of`, renders one
-    /// page of that Memory's revisions (oldest first) plus their grounds,
-    /// continuing strictly after `after_revision` and ending with
-    /// `next-revision: <n>` while more remain. Both pages stop at a body byte
-    /// budget, so a large corpus never inflates one frame past the IPC cap; a
-    /// first body larger than that budget is truncated rather than skipped
-    /// (its id / revision number is the cursor). The cursor is the last
-    /// rendered item, so stopping early cannot skip or duplicate a row.
-    ///
-    /// The list and the revision detail are separate reads on purpose: a
-    /// Memory with hundreds of revisions must not enlarge the list page.
-    /// There is no write path here: corrections and changes arrive as
-    /// Experience through Learning, never by editing a Memory row.
-    ///
-    /// Every rendered body is checked against the pass's [`CurrentCoverage`]:
-    /// a covered body is withheld (the row keeps its identity and cursor
-    /// position), and the returned flag reports whether at least one
-    /// non-empty, uncovered body actually reached this section.
     async fn render_memory_view(
         &self,
         after: Option<&str>,
@@ -1007,23 +950,8 @@ const MEMORY_PAGE_SIZE: u64 = 20;
 
 const MEMORY_REVISION_PAGE_SIZE: u64 = 20;
 
-/// Soft cap on one memory section body before frame encoding.
-///
-/// The IPC frame cap is 256 KiB including the envelope and every other
-/// section; this leaves headroom. Both pages stop at the last item that
-/// fits, so the cursor continues without skips and a large corpus can never
-/// inflate one frame without bound. Only the first item is never skipped (its
-/// id / revision number is the `next` cursor), so a first body over the budget
-/// is truncated at a UTF-8 char boundary instead.
 const MEMORY_BODY_BUDGET: usize = 192 * 1024;
 
-/// Truncates one over-budget rendered line at a UTF-8 char boundary,
-/// preserving its trailing newline.
-///
-/// Both pages never skip their first item (its id / revision number is the
-/// `next` cursor), so a single body larger than the page budget is cut here;
-/// otherwise one frame can exceed the IPC encode cap and the whole
-/// ManagementView becomes undeliverable.
 fn capped_line(mut line: String, cap: usize) -> String {
     if line.len() <= cap {
         return line;
@@ -1055,8 +983,6 @@ fn short_id(id: RawId) -> String {
 
 fn render_memory(memory: &Memory, coverage: &CurrentCoverage) -> (String, bool) {
     let covered = coverage.covers(&memory.content);
-    // One field per line: an embedded newline in the body would split the
-    // parser's line-oriented framing, so it is flattened to spaces.
     let content = if covered {
         String::new()
     } else {
@@ -1082,8 +1008,6 @@ fn render_memory(memory: &Memory, coverage: &CurrentCoverage) -> (String, bool) 
 
 fn render_revision(revision: &MemoryRevisionRecord, coverage: &CurrentCoverage) -> (String, bool) {
     let covered = coverage.covers(&revision.content);
-    // Same one-field-per-line framing as [`render_memory`]: a newline in the
-    // body must not become a spurious `grounds` continuation line.
     let content = if covered {
         String::new()
     } else {

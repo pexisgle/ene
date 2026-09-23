@@ -12,12 +12,8 @@ const FPS_MINIMUM: f64 = 30.0;
 const INTAKE_LIMIT_SECS: f64 = 1.0;
 const IDLE_GATE_SECS: f64 = 300.0;
 
-/// The measured GUI operation whose intake and paint the campaign gate
-/// requires. Shared with the producer so a renamed label cannot silently turn
-/// every campaign Incomplete.
 pub const CANCEL_TASK_OPERATION: &str = "cancel_task";
 
-/// Role of a process included in the idle campaign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessRole {
@@ -175,13 +171,6 @@ impl PresentationRecord {
         })
     }
 
-    /// The first presentation rejection, so the operator failure line names the
-    /// real cause instead of printing numbers that all look passing. `None`
-    /// when the presented events are accepted.
-    ///
-    /// A discarded frame is not its own rejection: it is absent from
-    /// `presented`, so it already lowers the FPS checked below. Only a
-    /// missing frame is a rejection independent of the presented count.
     fn rejection(&self) -> Option<&'static str> {
         let mut last_timestamp = None;
         let mut timing_domain = None;
@@ -305,16 +294,6 @@ pub fn wayland_presentation_record(
     )
 }
 
-/// Imports a PresentMon CSV while retaining the raw trace path and requiring
-/// every row to correlate to the selected Body PID and swap chain.
-/// `DisplayedTime` must show a positive display duration; the display timestamp
-/// is reconstructed from `CPUStartTime + DisplayLatency`. A row whose
-/// `DisplayedTime` is `NA` is discarded, while a row without complete display
-/// timing is missing.
-///
-/// # Errors
-///
-/// Missing required columns, malformed values, or I/O.
 pub fn import_presentmon_csv(
     path: &Path,
     body_pid: u32,
@@ -424,15 +403,10 @@ pub fn import_presentmon_csv(
     )
 }
 
-/// Input-to-Host-outcome-to-painted timestamps for a first-party GUI
-/// operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InteractionSample {
     pub operation: String,
     pub input_monotonic_ns: u64,
-    /// When this GUI received the Host outcome, including any follow-up
-    /// refresh work. An upper bound on the Host's intake instant, not an
-    /// instrumented intake timestamp.
     pub host_outcome_monotonic_ns: u64,
     pub gui_painted_monotonic_ns: u64,
 }
@@ -1077,9 +1051,6 @@ mod os {
         })
     }
 
-    /// The online logical CPU count, not the usable-parallelism estimate:
-    /// `machine_percent` is defined against all online CPUs, so process
-    /// affinity or a cgroup quota must not shrink the denominator.
     pub(super) fn logical_cpus() -> Result<u32, MeasurementError> {
         // SAFETY: sysconf is side-effect free for this constant and has no
         // pointer arguments. A non-positive result is rejected below.
@@ -1172,7 +1143,6 @@ mod os {
 mod tests {
     use super::*;
 
-    /// Presented events at 30 FPS over the 10 s fixture window.
     fn presented_events(count: u64) -> Vec<PresentationEvent> {
         (0..count)
             .map(|id| PresentationEvent::Presented {
@@ -1350,8 +1320,6 @@ mod tests {
     fn rejected_presentation_names_the_reason_on_the_failure_line() {
         let mut record = passing_record();
         let source = record.fps.as_ref().expect("fps").source.clone();
-        // Every presented timestamp is valid and no frame is discarded or
-        // missing, so the empty output is the only rejection.
         let events = (0..300)
             .map(|id| PresentationEvent::Presented {
                 correlation_id: id,

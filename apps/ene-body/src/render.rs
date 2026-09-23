@@ -10,9 +10,6 @@ use wgpu::util::DeviceExt as _;
 use crate::vrm::{RenderMesh, RenderTexture};
 
 const HIT_TEST_CELL_PIXELS: u32 = 4;
-/// Alpha cutoff shared by the CPU input-region mask and the WGSL fragment
-/// shader in this module: the shader must discard exactly the pixels the mask
-/// treats as transparent, so visible and clickable stay the same set.
 const VISIBLE_ALPHA_THRESHOLD: f32 = 0.001;
 
 pub struct SurfaceRenderer {
@@ -25,9 +22,6 @@ pub struct SurfaceRenderer {
     fallback_texture: wgpu::BindGroup,
     textures: BTreeMap<u64, wgpu::BindGroup>,
     depth_view: wgpu::TextureView,
-    /// CPU-side frame retained from the last [`Self::render`] call so the
-    /// alpha-aware hit-test mask can be rebuilt without re-deriving the vertex
-    /// stream.
     last_frame: Option<Frame>,
     config: wgpu::SurfaceConfiguration,
     lost: Arc<AtomicBool>,
@@ -46,19 +40,12 @@ struct DrawRange {
     texture_id: Option<u64>,
 }
 
-/// CPU-side geometry of one rendered frame, retained for hit-testing.
 struct Frame {
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
     draws: Vec<DrawRange>,
 }
 
-/// Coarse alpha-aware ownership mask for native pointer hit-testing.
-///
-/// Four-pixel cells keep per-frame CPU work bounded while following the
-/// deformed mesh closely enough that transparent desktop space remains owned
-/// by the underlying application. One-cell dilation avoids tiny ungrabbable
-/// gaps around thin geometry and texture-filtered edges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HitTestMask {
     width: u32,
@@ -390,9 +377,6 @@ fn texture_alpha(texture: Option<&RenderTexture>, uv: [f32; 2]) -> f32 {
         .map_or(0.0, |alpha| f32::from(*alpha) / 255.0)
 }
 
-/// Surface rendering failure. The renderer is dropped and the reason is
-/// reported to the parent as `GpuFail`; presentation stops while the body
-/// process stays alive, so a GPU failure never takes chat down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderFailure {
     Surface,
@@ -681,9 +665,6 @@ struct VertexOut {
         if self.lost.load(Ordering::Acquire) {
             return Err(RenderFailure::DeviceLost);
         }
-        // Bind groups for textures no longer referenced by the current asset
-        // own their GPU texture; drop them so replacing the asset does not
-        // accumulate resident memory.
         let live: BTreeSet<u64> = meshes
             .iter()
             .filter_map(|mesh| mesh.texture.as_ref().map(|texture| texture.id))
@@ -791,10 +772,6 @@ struct VertexOut {
         Ok(RenderOutcome::Presented)
     }
 
-    /// Rebuilds the alpha-aware hit-test mask from the last rendered frame.
-    ///
-    /// `meshes` supplies the texture alpha data the retained frame keeps only
-    /// as texture ids. Returns `None` when nothing has been rendered yet.
     pub(crate) fn hit_test_mask(
         &self,
         meshes: &[RenderMesh],

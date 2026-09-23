@@ -202,8 +202,6 @@ impl DesktopRuntime {
         self.secret.set(value);
     }
 
-    /// Clears temporary secret/confirmation UI state without consuming a
-    /// challenge retained for a later Owner gesture.
     pub fn cancel_secret_keep_pending(&mut self) {
         self.secret.cancel();
         if matches!(self.page, Page::Confirm) {
@@ -236,8 +234,6 @@ impl DesktopRuntime {
         let mut commands = vec![ParentToBody::AssetRef(AssetRef::Path {
             path: asset.to_string_lossy().into_owned(),
         })];
-        // The assignment travels next to the avatar path as asset data. A
-        // missing pack is not an error: the body keeps its staged pose.
         let clips = self.motion_plan();
         if !clips.is_empty() {
             commands.push(ParentToBody::MotionSet(MotionSetInfo { clips }));
@@ -312,9 +308,6 @@ impl DesktopRuntime {
         let Ok(mut encoded) = serde_json::to_vec(&line) else {
             return;
         };
-        // One write: the measurement reader captures its offset from the file
-        // length, so a separate newline write leaves a torn line it cannot
-        // decode.
         encoded.push(b'\n');
         let _result = file.write_all(&encoded);
     }
@@ -347,7 +340,6 @@ impl DesktopRuntime {
         data_candidate
     }
 
-    /// Detach `ene-core serve` when the Client listener is down.
     pub fn ensure_host(&mut self) -> Result<(), DesktopError> {
         host_launch::ensure_serving(&self.data_dir)
             .map_err(|error| DesktopError::HostLaunch(error.to_string()))
@@ -397,8 +389,6 @@ impl DesktopRuntime {
         })
     }
 
-    /// True once the Host's private channel ended. The GUI must then discard
-    /// its sessions and temporary secrets, stop Body, and close.
     #[must_use]
     pub fn confirmation_lost(&self) -> bool {
         self.control
@@ -406,9 +396,6 @@ impl DesktopRuntime {
             .is_some_and(ConfirmationClient::is_closed)
     }
 
-    /// Discards session and temporary-secret state after the private channel
-    /// ended, then stops the Body child. The GUI is no longer the Host's
-    /// confirmation surface.
     pub fn close_after_confirmation_loss(&mut self) {
         self.cancel_secret();
         self.client = None;
@@ -417,8 +404,6 @@ impl DesktopRuntime {
         self.body_status = self.body.poll();
     }
 
-    /// The Owner's refusal of the currently displayed challenge. Applies
-    /// nothing; a no-op when no challenge is live.
     pub async fn reject_pending_challenge(&mut self) {
         let Some(seat) = self.control.as_mut() else {
             return;
@@ -433,16 +418,12 @@ impl DesktopRuntime {
 
     pub async fn begin_credential_put(&mut self) -> Result<(), DesktopError> {
         self.require_confirmation()?;
-        // Ordered before the empty check so a disconnected intake reports the
-        // transport state, not an empty-secret protocol error.
         self.ensure_client()?;
         if self.secret.is_empty() {
             return Err(DesktopError::Protocol(String::from(
                 "secret intake is empty",
             )));
         }
-        // Wire intent stages the pending pair. Control put+approve then
-        // makes it usable. Approve without a pending does not create the ref.
         let staged = self.register_credential_intent().await?;
         match staged {
             ManagementOutcome::HeldByOperation | ManagementOutcome::AppliedAsOneTime => {}
@@ -676,8 +657,6 @@ impl DesktopRuntime {
         };
         self.project_body_pose(PoseHint::Listening);
         let lang = self.locale.as_tag().to_string();
-        // A disconnected send takes the same failure path as a transport
-        // failure, so the typed text stays in the Owner-visible timeline.
         let collected = match self.client.as_mut() {
             Some(client) => session::submit_and_collect(client, &text, &lang).await,
             None => Err(DesktopError::Transport(String::from(
@@ -715,8 +694,6 @@ impl DesktopRuntime {
                     }
                 }
                 self.flush_pending_erasure().await;
-                // The round is committed and painted; a failed follow-up read
-                // must not report the accepted send as a failure.
                 let _result = self.refresh_history().await;
                 Ok(())
             }
@@ -879,8 +856,6 @@ impl DesktopRuntime {
                 .as_mut()
                 .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             let outcome = self.tasks.cancel_displayed(client, &mark).await?;
-            // The cancel already reached the Host; a failed follow-up list
-            // must not report the accepted cancel as a failure.
             let _result = self.tasks.refresh_list(client).await;
             Ok(outcome)
         };
@@ -962,8 +937,6 @@ impl DesktopRuntime {
         self.usage.set_cap_limit_micros(micros);
     }
 
-    /// Cap mutation uses the last-read mark. Remaining on the panel is
-    /// display-only and is not consulted.
     pub async fn apply_usage_cap(&mut self) -> Result<ManagementOutcome, DesktopError> {
         let outcome = {
             let client = self
@@ -1157,9 +1130,6 @@ async fn complete_pending_pumping(
     pump_while_pending(complete, client, copies, surface).await
 }
 
-/// Drives one Client's frame pump while a seat-confirmation future is
-/// pending, so a bounded local-erasure demand raised during the wait is
-/// answered inline.
 async fn pump_while_pending<F>(
     pump: F,
     client: &mut Client,

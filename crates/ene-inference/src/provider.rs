@@ -1,18 +1,3 @@
-//! `OpenAI` Responses API transport for inference dispatch.
-//!
-//! [`OpenAiResponsesTransport`] posts one
-//! `{"model", "input", "stream": true, "store": false, "max_output_tokens"}`
-//! body per [`ProviderTransport::complete_streaming`] call and parses the
-//! server-sent event stream, forwarding text deltas as they arrive.
-//! Key material never rests on the transport: each call borrows the bearer inside
-//! [`CredentialStore::with_bearer`] and only the owned [`reqwest::Request`]
-//! escapes the closure. Error strings carry status classes only, never URLs,
-//! keys, or bodies. There is no retry and no model fallback.
-//!
-//! The transport performs HTTPS I/O, so integration tests cover it through
-//! transport fakes; the pure `StreamAssembler` mapping below carries the unit
-//! tests.
-
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -33,29 +18,10 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const MAX_OUTPUT_TOKENS: u64 = 4_096;
 
-/// Protocol-framing allowance added to the request text's byte length for the
-/// input side of the reservation upper bound.
-///
-/// A byte-level BPE token never encodes fewer than one byte, so the token
-/// count cannot exceed the UTF-8 byte length; the allowance covers
-/// server-side framing (special tokens and request formatting) that the
-/// local body does not spell out.
 pub const INPUT_TOKENS_FRAMING_ALLOWANCE: u64 = 1_024;
 
-/// Hard cap on one provider response body/stream, independent of the
-/// request timeout. A larger response is malformed external input: fail
-/// closed and let dispatch record the unknown-usage fact.
 pub const MAX_PROVIDER_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
-/// HTTPS transport for the `OpenAI` Responses API (`POST /v1/responses`).
-///
-/// No field ever holds key material or a fixed credential: the bearer is
-/// resolved per request from the [`ene_credential::CredentialRef`] the authorized dispatch
-/// carries, and borrowed transiently inside [`CredentialStore::with_bearer`].
-///
-/// The store is a generic `S: CredentialStore` rather than a trait object
-/// because [`CredentialStore::with_bearer`] is generic over its closure return
-/// type, which makes the trait not dyn-compatible.
 pub struct OpenAiResponsesTransport<S> {
     base_url: String,
     http: reqwest::Client,
@@ -88,12 +54,6 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
 }
 
 impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
-    /// The safe upper bound of one Responses request.
-    ///
-    /// The input side is the request text's UTF-8 byte length plus
-    /// [`INPUT_TOKENS_FRAMING_ALLOWANCE`]; the output side is the explicit
-    /// [`MAX_OUTPUT_TOKENS`] the body carries. Both are contract bounds, not
-    /// estimates of what this prompt will use.
     fn usage_estimate(&self, req: &ProviderRequest) -> Option<UsageEstimate> {
         let input_bytes = u64::try_from(req.input.len()).ok()?;
         Some(UsageEstimate {
@@ -113,8 +73,6 @@ impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
 }
 
 impl<S: CredentialStore> OpenAiResponsesTransport<S> {
-    /// Builds and sends one `POST /v1/responses`, so headers, path, and error
-    /// mapping live in one place.
     async fn send_responses_request(
         &self,
         model: &str,
@@ -147,11 +105,6 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
             .map_err(|err| io_error(&err, "send failed"))
     }
 
-    /// Runs one `"stream": true` Responses call, parsing a 2xx body as
-    /// server-sent events.
-    ///
-    /// A non-2xx answer is never an event stream: the status class alone
-    /// decides, and the error body is not read, parsed, or echoed.
     async fn complete_streaming_inner(
         &self,
         req: ProviderRequest,
@@ -268,13 +221,6 @@ impl StreamAssembler {
     }
 }
 
-/// History lives durably on the local side, which never needs server-side
-/// response state; leaving `store` unset would default it to `true` and
-/// retain conversation text provider-side for no reason. This is a
-/// storage-scope boundary, not a no-logging promise: it disables the
-/// Responses application-state store, nothing more. `max_output_tokens` is
-/// the explicit maximum the reservation upper bound uses, so the provider
-/// cannot generate more output than the bound covers.
 fn responses_body(model: &str, input: &str) -> serde_json::Value {
     serde_json::json!({
         "model": model,
@@ -322,11 +268,6 @@ impl UsageObj {
     }
 }
 
-/// Maps a non-2xx provider status to its bounded transport failure.
-///
-/// 401 reports unauthorized; 429 and 5xx report provider-unavailable with the
-/// status; any other non-2xx reports a request failure with the status. The
-/// status class alone carries the cause, so no error body is read or echoed.
 fn status_failure(status: u16) -> InferenceTechnicalError {
     if status == 401 {
         return InferenceTechnicalError::ProviderTransportFailed("unauthorized".to_owned());

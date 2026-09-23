@@ -48,14 +48,10 @@ fn verified_full_class_wipe(result: &LocalErasureResult) -> bool {
     })
 }
 
-/// The wire projection of one operation identity. One definition: the demand
-/// and the Client's answer echo must stay byte-identical or every valid answer
-/// is refused as a mismatch.
 fn operation_wire(operation: DeletionOperationId) -> DeletionOperationWireRef {
     DeletionOperationWireRef(operation.as_raw().as_uuid().as_hyphenated().to_string())
 }
 
-/// The protected exact mechanical text of one operation target.
 fn exact_text(target: &TargetedDeletionTarget) -> &str {
     let MechanicalDeletionTarget::ExactText(material) = &target.mechanical;
     material.expose_for_erasure()
@@ -108,7 +104,6 @@ impl TransientErasureFence {
         self.epoch.load(Ordering::SeqCst)
     }
 
-    /// Invalidates every in-flight transient payload.
     pub(crate) fn invalidate(&self) {
         self.epoch.fetch_add(1, Ordering::SeqCst);
     }
@@ -118,20 +113,6 @@ pub(crate) const HOST_TRANSIENT_LEARNING_QUEUE_PAGE: usize = 32;
 
 pub(crate) const LEARNING_FORMATION_QUEUE_CAP: usize = 256;
 
-/// Process-local continuation of one HostTransient Learning-queue sweep.
-///
-/// This is not a canonical deletion registry. Restart loses it and the next
-/// demand starts a new cycle from the live pending queue. `examined` keys the
-/// progress by the candidate's stable source range rather than by a
-/// positional count: another condition's demand removes its covered entries
-/// from the shared deque and records the examined sources, so a positional
-/// count no longer identifies an entry and decrementing a slot count would let
-/// this sweep report Verified while an unexamined TARGET-bearing entry is
-/// still queued. An entry whose source is examined is clean for this
-/// condition's target; the generation advance on every queue mutation
-/// invalidates the set.
-/// Demands for different conditions keep separate entries so one operation's
-/// demand cannot restart or overwrite another's cursor.
 #[derive(Debug, Clone)]
 struct HostTransientLearningSweep {
     queue_generation: u64,
@@ -147,23 +128,6 @@ impl HostTransientLearningSweep {
     }
 }
 
-/// In-memory Learning formation work: the pending queue plus at most one
-/// worker-owned candidate that has left the queue but does not yet have a
-/// canonical formation identity.
-///
-/// `mutation_generation` advances on every worker or producer ownership
-/// change (enqueue, overflow drop, pending→taken, taken clear). HostTransient
-/// may apply a snapshotted page only while this generation still matches, so
-/// a `pending → taken` race during the membership await cannot verify from
-/// the stale page. HostTransient's own covered drop and examined-source
-/// recording do not advance the generation: that is the confirmed apply of
-/// the snapshot.
-///
-/// HostTransient must not report Verified while `taken` still carries a
-/// covered transcript. The worker clears `taken` only after
-/// `begin_learning_formation` commits, so the pop→claim window cannot lose
-/// deletion provenance. The pending queue itself stays the HostTransient
-/// drop surface; `taken` is counted as remainder, never dropped here.
 #[derive(Debug, Default)]
 pub(crate) struct LearningFormationQueue {
     pending: VecDeque<ExperienceCandidate>,
@@ -200,8 +164,6 @@ impl LearningFormationQueue {
         self.pending.iter()
     }
 
-    /// Moves the next pending candidate into the worker-owned slot. The
-    /// returned clone is the pass body; HostTransient still sees `taken`.
     pub(crate) fn take_pending(&mut self) -> Option<ExperienceCandidate> {
         let next = self.pending.pop_front()?;
         self.taken = Some(next.clone());
@@ -219,14 +181,6 @@ impl LearningFormationQueue {
         self.taken.as_ref()
     }
 
-    /// Applies one already-selected pending page: every pending candidate
-    /// whose source was selected in the snapshot is examined in queue order —
-    /// covered premises drop, uncovered ones stay queued and are recorded in
-    /// `examined` (they are clean for this condition's target). Candidates
-    /// that were not selected keep their queue position untouched. The caller
-    /// must have confirmed that [`Self::mutation_generation`] still matches
-    /// the snapshot that produced `selected` / `identities` / `covered`. This
-    /// does not bump the generation.
     fn apply_examined_page(
         &mut self,
         exact: &str,
@@ -264,16 +218,7 @@ pub(crate) struct HostTransientArrival {
 struct ArrivalPublishState {
     scan_incomplete: bool,
     owed: HashSet<DeletionOperationId>,
-    /// The bounded walk's keyset position: the last unfinished operation the
-    /// previous page classified. A new arrival keeps this position and only
-    /// marks the walk unfinished again, so the walk rotates to the rest of the
-    /// set before wrapping; rewinding to the head here would re-classify the
-    /// same page forever while arrivals keep arriving and starve the tail.
     after: Option<DeletionOperationId>,
-    /// The queue mutation generation the outstanding page-chain classified
-    /// its pages against, recorded where the chain started at the head. A
-    /// chain that crosses a live-remainder change cannot prove the head pages
-    /// were classified against that remainder and restarts at the head.
     chain_generation: Option<u64>,
 }
 
@@ -327,16 +272,6 @@ impl HostTransientArrival {
         self.verified_generation.load(Ordering::SeqCst)
     }
 
-    /// A body-bearing remainder was accepted into process memory. Canonical
-    /// delayed-arrival publication is owed until a later bounded walk proves
-    /// it succeeded; this is not a deletion registry.
-    ///
-    /// The walk's position is not rewound: the live remainder changed, so the
-    /// walk must classify every unfinished operation again, and the rotation
-    /// reaches the remaining pages before wrapping to the head. Restarting at
-    /// the head instead would re-classify that page on every arrival and never
-    /// reach the tail. This remains scheduling only: finalizing re-derives
-    /// relatedness for its own operation directly.
     pub(crate) fn note_queued_arrival(&self) {
         let mut state = crate::lock_unpoison(&self.publish);
         state.scan_incomplete = true;
@@ -426,19 +361,6 @@ async fn publish_current_related_arrival(
     }
 }
 
-/// One bounded page of operation-specific delayed-arrival publication.
-///
-/// The caller holds the arrival gate. A clean publish state is a no-op:
-/// leftover unrelated or already-published queue entries do not restart
-/// classification. A technical failure or a truncated unfinished-ops page
-/// leaves unpublished bookkeeping set so finalizing cannot treat the
-/// remainder as clean.
-///
-/// The page starts after the walk's keyset position and the position advances
-/// past the page, wrapping to the head when the unfinished set ends, so
-/// successive calls classify the whole set without materializing it and
-/// without re-reading the head. The position is scheduling only: a related
-/// operation is also classified directly when its own finalizing needs it.
 pub(crate) async fn publish_owed_learning_arrivals(
     store: &Store,
     arrival: &HostTransientArrival,
@@ -497,9 +419,6 @@ pub(crate) async fn publish_owed_learning_arrivals(
     }
     let mut state = crate::lock_unpoison(&arrival.publish);
     if page_len < HOST_TRANSIENT_ARRIVAL_PAGE as usize {
-        // Only a chain whose head page saw this live remainder can read
-        // clean; a chain resumed past the head that observed a different
-        // generation restarts at the head instead of clearing.
         let one_remainder = match state.chain_generation {
             Some(chain_generation) => chain_generation == generation,
             None => started_at_head,
@@ -598,13 +517,6 @@ impl HostTransientParticipant {
             .await
     }
 
-    /// Records a HostTransient Verified fact only while the examined queue
-    /// generation is still live, no body-bearing pin is in flight, and the
-    /// fact's own operation has no unpublished TARGET-bearing arrival owed.
-    ///
-    /// The park sits *before* the arrival gate so a test can enqueue G+1
-    /// while the in-memory fact exists and the durable row is still
-    /// `running`. The gate then serializes that enqueue against this commit.
     pub(crate) async fn commit_verified(
         &self,
         fact: ParticipantCompletionFact,
@@ -667,15 +579,6 @@ impl ErasureParticipant for HostTransientParticipant {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>>
     {
         Box::pin(async move {
-            // Process-memory mutation cannot share the Immediate writer with
-            // the canonical row. The currentness predicate durable
-            // participants re-check inside their erase transaction is read
-            // before the classification snapshot and before any drop, so a
-            // condition already closed here does not discard a fresh
-            // post-closure premise. A condition that closes during the awaits
-            // below is caught by the post-drop read, which refuses Verified
-            // but cannot roll back the drop. Unreadable currentness fails
-            // closed (no mutation, not Verified).
             #[cfg(any(test, feature = "test-support"))]
             self.store.pause_erasure_mutation_if_armed_for_tests().await;
             let current = match self
@@ -723,9 +626,6 @@ impl ErasureParticipant for HostTransientParticipant {
                         HashSet::new()
                     }
                 };
-                // Select the page by entry identity, in queue order: another
-                // condition's demand reorders the shared deque, so the
-                // progress cannot be a positional count.
                 let page = queue
                     .iter()
                     .filter(|experience| !examined.contains(&experience.source))
@@ -768,8 +668,6 @@ impl ErasureParticipant for HostTransientParticipant {
             let (dropped_learning, unfinished, remainder) = {
                 let mut queue = crate::lock_unpoison(&self.learning_queue);
                 if queue.mutation_generation() != generation {
-                    // Worker/producer mutated the queue after the snapshot.
-                    // Discard the page; never drop from it and never Verified.
                     let live_generation = queue.mutation_generation();
                     self.rebase_sweep(command.condition(), live_generation);
                     let remainder = queue.len() as u64 + u64::from(queue.taken().is_some());
@@ -787,34 +685,21 @@ impl ErasureParticipant for HostTransientParticipant {
                         &selected,
                         examined,
                     );
-                    // `taken` is inspected from the live slot under the still-
-                    // matching generation. HostTransient never drops it.
                     let taken_covered = queue.taken().is_some_and(|experience| {
                         experience_covered(experience, &exact, &covered, &identities)
                     });
-                    // Verified requires that no queued candidate is left
-                    // unexamined for this condition's target.
                     let unfinished = taken_covered
                         || queue
                             .iter()
                             .any(|experience| !examined.contains(&experience.source));
                     let remainder = queue.len() as u64 + u64::from(queue.taken().is_some());
                     if !unfinished {
-                        // Every live pending source is examined for this
-                        // condition: the sweep is finished. Drop the
-                        // process-local cursor so the singleton participant's
-                        // map does not grow for the Host's lifetime; a later
-                        // demand for the same condition rebases from empty.
                         sweep.remove(&command.condition());
                     }
                     (dropped, unfinished, remainder.max(1))
                 }
             };
             self.fence.invalidate();
-            // Process memory cannot roll back. A second currentness read
-            // after the drop refuses Verified when the operation closed in
-            // the window: the durable record will not treat a stale demand as
-            // completion, and a later pass of a still-current sweep re-demands.
             let still_current = match self
                 .store
                 .erasure_condition_is_current(command.condition())
@@ -882,15 +767,7 @@ struct PendingDemand {
     id: String,
     condition: ErasureConditionRef,
     connection: ConnectionWireId,
-    /// Whether this demand already went on the wire. Delivery is once per
-    /// live connection; a connection end abandons the demand, so a later pass
-    /// re-demands the same condition under a fresh demand id.
     delivered: bool,
-    /// Durable delivery-evidence sequence observed when this demand went on
-    /// the wire (`None` when no evidence row existed then). The verified
-    /// answer may clear the evidence only while the row still carries this
-    /// exact sequence: a delivery that raced the wipe advances it and the row
-    /// survives.
     evidence_seq: Option<u64>,
     state: PendingState,
 }
@@ -910,9 +787,7 @@ enum ClientErasureWait {
 }
 
 pub(crate) struct ClientTransientRegistry {
-    /// At most one outstanding demand per incarnation.
     inner: std::sync::Mutex<HashMap<RawId, PendingDemand>>,
-    /// Wakes connection loops to deliver a pending demand.
     delivery_wake: Notify,
     result_wake: Notify,
     table: OnceLock<Arc<ConnectionTable>>,
@@ -944,14 +819,6 @@ impl ClientTransientRegistry {
         RawId::from_uuid(Uuid::from_u64_pair(counter, random))
     }
 
-    /// The current authenticated connection of one tracked incarnation.
-    ///
-    /// The boot incarnation is recovered from the identity itself, so a
-    /// durable participant snapshot resolves after a Host restart even though
-    /// the in-flight demand plumbing did not survive it (`Self::identity_for`:
-    /// the identity is the deterministic projection of the boot incarnation,
-    /// so the incarnation is recovered from the identity itself). A missing
-    /// connection is an explicit unreachable hold.
     fn current_connection(&self, identity: RawId) -> Option<ConnectionWireId> {
         let (counter, random) = identity.as_uuid().as_u64_pair();
         let table = self.table.get()?;
@@ -963,15 +830,6 @@ impl ClientTransientRegistry {
         &self.delivery_wake
     }
 
-    /// Begins one bounded demand for an incarnation.
-    ///
-    /// A demand for the same `(condition, connection)` reuses the outstanding
-    /// one instead of minting a new id: a bounded pass that yielded before the
-    /// Client answered must still match the Client's answer, and a Client
-    /// answer is never orphaned by a later retry of the same condition. Any
-    /// older demand with a different condition (or a different connection) is
-    /// replaced, and its waiter observes [`ClientErasureWait::Abandoned`]
-    /// instead of adopting a foreign answer.
     fn begin(&self, identity: RawId, condition: ErasureConditionRef, connection: ConnectionWireId) {
         let mut inner = crate::lock_unpoison(&self.inner);
         match inner.get(&identity) {
@@ -1139,10 +997,6 @@ impl ClientIncarnationParticipant {
         if verified_full_class_wipe(result) {
             ParticipantCompletionFact::verified(condition, owner, wiped, WallClockWithTz::now())
         } else {
-            // A report that does not cover the whole demanded class set keeps
-            // the bounded pass at local completion with a remainder: a class
-            // absent from both lists is as unproven as a reported unverified
-            // one, and the Host never upgrades either to verified.
             let missing = current_client_targets()
                 .iter()
                 .filter(|target| {
@@ -1236,11 +1090,6 @@ impl ErasureParticipant for ClientIncarnationParticipant {
                 )
                 .await;
             }
-            // The durable Running mark may already exist; the wire demand is
-            // the non-rollbackable side effect. Re-read currentness after any
-            // park and before minting the in-process/wire demand so a
-            // completed operation cannot class-wipe a fresh post-closure
-            // Client copy.
             let current = match self
                 .registry
                 .store

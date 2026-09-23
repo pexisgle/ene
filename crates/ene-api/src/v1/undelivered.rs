@@ -59,20 +59,13 @@ pub struct UndeliveredSummary {
     pub items: Vec<UndeliveredItemView>,
     pub reports: Vec<TaskReportView>,
     pub has_more: bool,
-    /// Continuation of this pass; [`None`] means the pass reached its
-    /// captured bound. Bound to this companion's pass: reuse elsewhere
-    /// answers `StaleBaseView`.
     pub next_cursor: Option<PageCursorWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UndeliveredRequest {
-    /// Which companion's backlog; [`None`] means the running companion.
     pub companion: Option<CompanionWireRef>,
-    /// Continue this pass, else catch up.
     pub cursor: Option<PageCursorWire>,
-    /// Page bound (`1..=50`, default 50). Out of range answers
-    /// `UnsupportedFieldValue`.
     pub limit: Option<u32>,
     #[serde(default)]
     pub redisplay: bool,
@@ -81,16 +74,11 @@ pub struct UndeliveredRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UndeliveredResponse {
     Summary(UndeliveredSummary),
-    /// The store could not answer; nothing was read or changed.
     Unavailable,
-    /// Not even one item fits the agreed frame cap. Nothing was mutated:
-    /// no rows, no cursor, no receipt.
     FrameTooLarge,
     NoCurrentPresence,
     UnknownCompanion,
-    StaleBaseView {
-        current: Option<PageCursorWire>,
-    },
+    StaleBaseView { current: Option<PageCursorWire> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -101,19 +89,14 @@ pub struct UndeliveredAck {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UndeliveredAckOutcome {
-    Presented {
-        presented: u32,
-    },
+    Presented { presented: u32 },
     AlreadyPresented,
-    ReturnedToPending {
-        count: u32,
-    },
+    ReturnedToPending { count: u32 },
     KeptUnknown,
     UnknownRef,
     StalePresentation,
     StaleConnection,
     HeldForErasure,
-    /// The store could not answer; no status was written for the carried ids.
     Unavailable,
 }
 
@@ -141,10 +124,7 @@ pub struct TaskListPage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskListResponse {
     Page(TaskListPage),
-    StaleBaseView {
-        current: Option<PageCursorWire>,
-    },
-    /// The store could not answer; nothing was read.
+    StaleBaseView { current: Option<PageCursorWire> },
     Unavailable,
 }
 
@@ -178,20 +158,14 @@ pub struct TaskReportPage {
 pub enum TaskReportResponse {
     Page(TaskReportPage),
     UnknownRef,
-    StaleBaseView {
-        current: Option<PageCursorWire>,
-    },
-    /// The store could not answer; nothing was read.
+    StaleBaseView { current: Option<PageCursorWire> },
     Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GetReportSource {
     pub source: ReportSourceWireRef,
-    /// Byte cursor into the body; [`None`] starts at zero.
     pub cursor: Option<u64>,
-    /// `4..=16384`, default 4096. Out of range answers
-    /// `UnsupportedFieldValue`.
     pub limit_bytes: Option<u32>,
 }
 
@@ -238,7 +212,6 @@ pub struct TaskSelected {
 pub enum SelectTaskResponse {
     Selected(TaskSelected),
     UnknownRef,
-    /// The store could not answer; nothing was changed.
     Unavailable,
 }
 

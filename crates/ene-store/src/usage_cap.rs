@@ -23,29 +23,20 @@ const SQL_SELECT_CAP: &str = "SELECT revision, currency, limit_micros FROM usage
 
 const SQL_UPSERT_CAP: &str = "INSERT INTO usage_cap (scope, provider, window, revision, currency, limit_micros) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(scope, provider, window) DO UPDATE SET revision = excluded.revision, currency = excluded.currency, limit_micros = excluded.limit_micros";
 
-/// Every cap applying to one provider route, or every stored cap when no
-/// provider filter is bound (`?1` is SQL `NULL`), deterministically ordered
-/// for the status read.
 const SQL_SELECT_CAPS: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap WHERE (?1 IS NULL OR scope = 'system' OR (scope = 'provider' AND provider = ?1)) ORDER BY scope, provider, window";
 
-/// Reservations opened inside `[?1, ?2)`; the provider-scoped sum additionally
-/// filters `provider = ?3`. The decode loop owns the rule that `released` rows
-/// do not count, so this read and the summary read share one authority.
 const SQL_SELECT_WINDOW_CONSUMPTION: &str = "SELECT state, currency, upper_bound_micros, committed_currency, committed_micros FROM usage_reservation WHERE opened_at >= ?1 AND opened_at < ?2";
 
 const SQL_SELECT_WINDOW_CONSUMPTION_PROVIDER: &str = "SELECT state, currency, upper_bound_micros, committed_currency, committed_micros FROM usage_reservation WHERE opened_at >= ?1 AND opened_at < ?2 AND provider = ?3";
 
 pub(crate) const SQL_SELECT_RESERVATION_BY_TICKET: &str = "SELECT ticket, provider, model, pricing_snapshot, state FROM usage_reservation WHERE ticket = ?1";
 
-/// Every reservation still `reserved`, for Host-startup reconciliation.
 pub(crate) const SQL_SELECT_ORPHANED_RESERVATIONS: &str = "SELECT ticket, provider, model, pricing_snapshot, state FROM usage_reservation WHERE state = 'reserved'";
 
 const SQL_INSERT_RESERVATION: &str = "INSERT INTO usage_reservation (reservation_id, ticket, provider, model, pricing_snapshot, currency, upper_bound_micros, state, opened_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reserved', ?8)";
 
 pub(crate) const SQL_SETTLE_RESERVATION: &str = "UPDATE usage_reservation SET state = ?2, committed_currency = ?3, committed_micros = ?4 WHERE ticket = ?1 AND state = 'reserved'";
 
-/// The six stored cap columns every cap query selects, in `scope, provider,
-/// window, revision, currency, limit_micros` order.
 fn cap_fields(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<(String, String, String, i64, String, i64)> {
@@ -106,9 +97,6 @@ fn select_cap(
         .transpose()
 }
 
-/// Reads every current cap applying to the route. The rows are ordered
-/// deterministically (system before provider, daily before monthly) so a
-/// multi-cap violation always answers with the same cap reference.
 fn select_applicable_caps(tx: &Transaction<'_>, provider: &str) -> Result<Vec<UsageCap>, String> {
     let mut statement = tx
         .prepare(SQL_SELECT_CAPS)
@@ -128,7 +116,6 @@ fn select_applicable_caps(tx: &Transaction<'_>, provider: &str) -> Result<Vec<Us
     Ok(caps)
 }
 
-/// System before provider, daily before monthly.
 fn cap_order(cap: &UsageCap) -> (u8, u8) {
     let scope = match cap.scope() {
         UsageCapScope::System => 0,
@@ -141,7 +128,6 @@ fn cap_order(cap: &UsageCap) -> (u8, u8) {
     (scope, window)
 }
 
-/// One non-released reservation row's accounting columns.
 struct ConsumptionRow {
     state: String,
     currency: String,
@@ -166,17 +152,6 @@ pub(crate) struct WindowConsumption {
     pub(crate) committed_unknown: u64,
 }
 
-/// Sums one scope's consumption breakdown over the UTC period containing
-/// `at`.
-///
-/// The decode loop drops `released` rows; every other state counts.
-/// `committed_reported` contributes the actual committed cost (the reserved
-/// upper bound is released); `reserved` and `committed_unknown` contribute the reserved
-/// upper bound, so an unknown external consumption can never free a cap slot.
-/// `Ok(None)` is indeterminate: an unrepresentable period, a currency the cap
-/// cannot be compared in, or a sum that does not fit the money representation.
-/// An unknown stored state or a malformed stored amount is a technical error,
-/// never a guessed number.
 pub(crate) fn consumption_breakdown(
     conn: &rusqlite::Connection,
     scope: &UsageCapScope,
@@ -248,9 +223,6 @@ pub(crate) fn consumption_breakdown(
     }))
 }
 
-/// The overflow-safe micro-currency total of one window, or `None` when the
-/// three buckets cannot be represented; both the admission compare and the
-/// displayed status must agree on that question.
 fn total_micros(breakdown: &WindowConsumption) -> Option<u64> {
     u64::try_from(
         u128::from(breakdown.reserved)
@@ -260,15 +232,10 @@ fn total_micros(breakdown: &WindowConsumption) -> Option<u64> {
     .ok()
 }
 
-/// The cap-admission decision for one attempt claim.
 pub(crate) enum ReservationAdmission {
     NoCap,
     Reserved,
-    /// A current cap would be exceeded: no attempt, no reservation, and no
-    /// provider byte.
     Held,
-    /// A cap applies but a finite safe upper bound cannot be established:
-    /// no attempt, no reservation, and no provider byte.
     Indeterminate,
 }
 
@@ -331,8 +298,6 @@ pub(crate) fn admit_reservation(
     Ok(ReservationAdmission::Reserved)
 }
 
-/// One stored reservation row, narrowed to the columns its readers use:
-/// settlement reads the state, recovery reads the route and binding.
 pub(crate) struct ReservationRow {
     pub(crate) ticket: String,
     pub(crate) provider: String,

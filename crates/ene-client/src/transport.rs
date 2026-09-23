@@ -29,12 +29,6 @@ use super::session::{
 #[cfg(unix)]
 use super::socket_path;
 
-/// Connected, handshaked Host session: the stream, the sender identity
-/// pairing and authentication fill in, and the observed session state.
-/// Unix dials `ene.sock`; Windows opens the data directory's named pipe
-/// (see `pipe_name`). Everything after the dial — pairing poll, capability,
-/// provision, capability, challenge authentication, and request/response
-/// correlation — is shared.
 #[cfg(any(unix, windows))]
 pub struct Client {
     stream: Stream,
@@ -263,19 +257,6 @@ impl Client {
         Ok(session)
     }
 
-    /// Answers one authentication challenge using the supplied device secret,
-    /// storing the accepted connection key into the sender (for all later
-    /// frames). [`Client::connect`] calls this for the
-    /// post-negotiation challenge, the only challenge the Host sends on a
-    /// connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
-    /// exchange cannot be moved or framed; [`ClientError::ServerOutcome`] when
-    /// the Host rejects the proof (a fresh pairing is required); and
-    /// [`ClientError::ServerRejected`] when the Host answers with an unexpected
-    /// payload kind.
     async fn authenticate(
         &mut self,
         challenge: &AuthChallenge,
@@ -303,9 +284,6 @@ impl Client {
         self.state.companion_ref()
     }
 
-    /// Drains deferred auto-presented summaries the Host pushed without
-    /// `reply_to`. The caller paints each and ACKs the receipts it fully
-    /// painted.
     pub fn take_undelivered(&mut self) -> Vec<WireFrame> {
         self.state.take_undelivered()
     }
@@ -315,27 +293,6 @@ impl Client {
         PreparedRequest::new(payload)
     }
 
-    /// Sends one prepared request and returns the answer correlated by
-    /// `reply_to`, absorbing pipelined presence facts and deferring other
-    /// out-of-order frames on the way. The deferred queue only buffers
-    /// auto-presented summaries drained by the session's `take_undelivered`;
-    /// the answer itself
-    /// is read from the socket, so this loops until the correlated answer
-    /// arrives (the streaming form of `session::decide_frame`). A
-    /// [`StaleRound`](ene_api::v1::round::RoundIntakeOutcomeWire::StaleRound)
-    /// answer refreshes the session generation; mismatches are never returned
-    /// as answers and never silently dropped.
-    ///
-    /// Message and request ids go fresh per attempt while the prepared command
-    /// identity travels unchanged, so calling this again on the same retained
-    /// handle replays one logical command rather than minting a second one.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
-    /// exchange cannot be moved or framed. Payload semantics are the caller's
-    /// job: this helper never interprets the answer beyond the generation
-    /// bookkeeping.
     pub async fn execute(
         &mut self,
         prepared: &PreparedRequest,
@@ -344,14 +301,6 @@ impl Client {
             .await
     }
 
-    /// One-shot convenience for [`Client::prepare`] plus
-    /// [`Client::execute`]. Prefer that pair when the caller must retain the
-    /// command identity to re-execute a lost reply; this form mints or takes
-    /// the identity but never exposes it.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Client::execute`].
     pub async fn request(&mut self, payload: WirePayload) -> Result<WirePayload, ClientError> {
         let prepared = self.prepare(payload);
         self.execute(&prepared).await
@@ -396,15 +345,6 @@ impl Client {
         }
     }
 
-    /// Answers one unsolicited Host local-erasure demand inline, returning
-    /// whether the frame was handled: `true` means either an answer was
-    /// written or, in the deferred (GUI participant) mode, the demand was
-    /// stashed for later local wiping — never that a reply reached the Host.
-    ///
-    /// The demand is a control fact, never the reply this session is waiting
-    /// for: it is handled and the read continues. The reply carries only class
-    /// names and correlation — never a target body — and claims nothing beyond
-    /// this process's own local wiping (IPC §17, lifecycle §10).
     async fn answer_deletion_demand_if_any(
         &mut self,
         payload: &WirePayload,
@@ -513,14 +453,6 @@ async fn read_frame(
         .map_err(|error: CodecError| ClientError::Codec(format!("decode failed: {error}")))
 }
 
-/// Terminal connect refusal: no common protocol major (IPC §7.2, V-11). Names
-/// both sides' maxima and the Host's upgrade hint so the operator can move the
-/// older side; operational text only, never a secret or body copy. Retrying
-/// the same build cannot intersect majors, so it is [`ServerRejected`], not a
-/// retryable [`ServerOutcome`].
-///
-/// [`ServerRejected`]: ClientError::ServerRejected
-/// [`ServerOutcome`]: ClientError::ServerOutcome
 #[cfg(any(unix, windows))]
 pub(crate) fn incompatible_protocol_error(notice: &IncompatibleProtocol) -> ClientError {
     ClientError::ServerRejected(format!(
@@ -548,11 +480,6 @@ fn require_reply_to(
     }
 }
 
-/// Unsupported-platform placeholder: connection and I/O methods return
-/// [`ClientError::UnsupportedPlatform`] (transport needs a Unix-domain socket
-/// or a Windows named pipe); state-only accessors report the empty/default
-/// value. The supported-only helpers (`prepare`/`execute`/
-/// `request_observed`/`take_undelivered`) are not available on this platform.
 #[cfg(not(any(unix, windows)))]
 pub struct Client {
     _sealed: (),
