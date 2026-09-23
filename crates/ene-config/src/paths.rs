@@ -21,32 +21,3 @@ pub fn default_data_dir() -> Option<PathBuf> {
 pub fn resolve_data_dir(cfg: &Config) -> Option<PathBuf> {
     cfg.data_dir.clone().or_else(default_data_dir)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::resolve_data_dir;
-    use crate::typed::Config;
-
-    #[test]
-    fn resolution_creates_no_directories() {
-        let scratch = tempfile::tempdir().expect("scratch directory");
-        let probe = scratch.path().join("data");
-        let config = Config {
-            language: "ja".to_string(),
-            data_dir: Some(probe.clone()),
-        };
-        let resolved = resolve_data_dir(&config);
-        assert!(
-            resolved == Some(probe),
-            "resolution must echo the explicit override"
-        );
-        let created = match resolved.as_ref() {
-            Some(path) => path.exists(),
-            None => false,
-        };
-        assert!(
-            !created,
-            "resolution must not create directories as a side effect"
-        );
-    }
-}

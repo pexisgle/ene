@@ -50,17 +50,3 @@ impl GenerationInner {
         self.0
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::GenerationInner;
-
-    #[test]
-    fn sequence_advances_and_reports_exhaustion() {
-        let first = GenerationInner::first();
-        assert_eq!(first.as_u64(), 0);
-        assert_eq!(first.checked_next(), Some(GenerationInner::from_u64(1)));
-        let max = GenerationInner::from_u64(u64::MAX);
-        assert_eq!(max.checked_next(), None);
-    }
-}

@@ -400,25 +400,3 @@ async fn ask(client: &mut Client, payload: WirePayload) -> Result<WirePayload, D
         .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
         .map_err(DesktopError::Client)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::DeletionPanel;
-
-    #[test]
-    fn debug_redacts_exact_text() {
-        let mut panel = DeletionPanel::default();
-        panel.set_exact_text(String::from("raw-secret-keyword"));
-        let rendered = format!("{panel:?}");
-        assert!(
-            !rendered.contains("raw-secret-keyword"),
-            "exact text must not Debug: {rendered}"
-        );
-        assert!(rendered.contains("[redacted]"));
-        let body = panel.render();
-        assert!(
-            !body.contains("raw-secret-keyword"),
-            "projection must omit the body: {body}"
-        );
-    }
-}

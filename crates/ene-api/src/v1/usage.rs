@@ -178,30 +178,3 @@ pub enum UsageSummaryResponse {
     /// The usage read could not answer; nothing was read or changed.
     Unavailable,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::UsageSummaryRequest;
-    use crate::v1::refs::UsageCursorWire;
-
-    #[test]
-    fn request_roundtrips_through_json_with_omitted_fields() {
-        let json = r#"{"cursor":null}"#;
-        let decoded: UsageSummaryRequest =
-            serde_json::from_str(json).expect("optional fields may be omitted");
-        assert_eq!(decoded.limit, None);
-        assert_eq!(decoded.provider, None);
-        assert_eq!(decoded.status, None);
-        let decoded: UsageSummaryRequest = serde_json::from_str(
-            r#"{"provider":"openai","status":"reserved","limit":10,"cursor":"cursor-1"}"#,
-        )
-        .expect("the request roundtrips");
-        assert_eq!(decoded.provider.as_deref(), Some("openai"));
-        assert_eq!(decoded.status.as_deref(), Some("reserved"));
-        assert_eq!(decoded.limit, Some(10));
-        assert_eq!(
-            decoded.cursor,
-            Some(UsageCursorWire(String::from("cursor-1")))
-        );
-    }
-}

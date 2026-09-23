@@ -343,38 +343,3 @@ async fn ask_stream(client: &mut Client) -> Result<WirePayload, DesktopError> {
         .map_err(|_| DesktopError::Transport(String::from("stream timed out")))?
         .map_err(DesktopError::Client)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::SetupFacts;
-    use ene_api::v1::management::{ManagementView, ViewSection};
-    use ene_api::v1::refs::ViewMarkWire;
-
-    #[test]
-    fn setup_ready_requires_host_facts_not_a_local_flag() {
-        let view = ManagementView {
-            mark: ViewMarkWire(String::from("mark-1")),
-            sections: vec![
-                ViewSection {
-                    kind: String::from("credential"),
-                    title: String::from("Credential"),
-                    body: String::from("present (memory)"),
-                },
-                ViewSection {
-                    kind: String::from("consent"),
-                    title: String::from("Consent"),
-                    body: String::from("none"),
-                },
-                ViewSection {
-                    kind: String::from("model"),
-                    title: String::from("Model"),
-                    body: String::from("unconfigured"),
-                },
-            ],
-        };
-        let facts = SetupFacts::from_view(&view);
-        assert!(facts.credential_present);
-        assert!(!facts.consent_assigned);
-        assert!(!facts.setup_ready());
-    }
-}

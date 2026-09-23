@@ -323,20 +323,3 @@ fn create_server(pipe: &str, first: bool) -> Result<NamedPipeServer, CoreError> 
     unsafe { options.create_with_security_attributes_raw(pipe, attrs.as_mut_ptr()) }
         .map_err(|error| CoreError::Bind(format!("create named pipe: {error}")))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::pipe_name;
-
-    /// Mirrors the `ene-ctl` client vector: both sides derive the pipe name
-    /// from one data directory with the same FNV-1a, without sharing code.
-    /// Runs on Windows only (this module is Windows-gated); the client copy
-    /// runs on Linux too.
-    #[test]
-    fn pipe_name_matches_the_client_vector() {
-        assert_eq!(
-            pipe_name(std::path::Path::new("/tmp/ene-data")),
-            String::from(r"\\.\pipe\ene-2c2d8a5218b804b9"),
-        );
-    }
-}

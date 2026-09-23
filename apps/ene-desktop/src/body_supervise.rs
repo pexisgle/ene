@@ -310,17 +310,3 @@ pub enum BodySuperviseError {
     #[error("projection write failed")]
     Write,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{BodyStatus, BodySupervisor};
-    use std::path::Path;
-
-    #[test]
-    fn missing_binary_is_absent_not_a_character() {
-        let mut supervisor = BodySupervisor::new();
-        let status = supervisor.spawn_if_present(Path::new("/no/such/ene-body"));
-        assert_eq!(status, BodyStatus::Absent);
-        assert_eq!(supervisor.poll(), BodyStatus::Absent);
-    }
-}

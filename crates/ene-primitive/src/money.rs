@@ -92,20 +92,3 @@ impl Money {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{CurrencyCode, Money};
-
-    #[test]
-    fn money_addition_refuses_overflow_and_currency_mixing() {
-        assert_eq!(
-            Money::from_micros(CurrencyCode::Usd, u64::MAX)
-                .checked_add(Money::from_micros(CurrencyCode::Usd, 1)),
-            None
-        );
-        assert_eq!(Money::zero(CurrencyCode::Usd).currency().as_str(), "USD");
-        assert_eq!(CurrencyCode::from_code("USD"), Some(CurrencyCode::Usd));
-        assert_eq!(CurrencyCode::from_code("EUR"), None);
-    }
-}

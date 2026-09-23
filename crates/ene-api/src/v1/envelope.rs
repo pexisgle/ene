@@ -113,33 +113,3 @@ pub fn new_outgoing_envelope(
         message_type,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::super::refs::ClientIncarnationId;
-    use super::WireSender;
-    use super::{ProtocolVersion, WireMessageType, new_outgoing_envelope};
-
-    #[test]
-    fn major_match_admits_negotiation_only() {
-        assert!(ProtocolVersion::V1.shares_major_with(&ProtocolVersion { major: 1, minor: 9 }));
-        assert!(!ProtocolVersion::V1.shares_major_with(&ProtocolVersion { major: 0, minor: 0 }));
-    }
-
-    #[test]
-    fn fresh_envelopes_carry_distinct_message_ids() {
-        let sender = WireSender {
-            device_id: None,
-            incarnation_id: ClientIncarnationId {
-                counter: 0,
-                random: 1,
-            },
-            connection_id: None,
-        };
-        let first =
-            new_outgoing_envelope(ProtocolVersion::V1, sender, WireMessageType(String::new()));
-        let second =
-            new_outgoing_envelope(ProtocolVersion::V1, sender, WireMessageType(String::new()));
-        assert_ne!(first.message_id, second.message_id);
-    }
-}

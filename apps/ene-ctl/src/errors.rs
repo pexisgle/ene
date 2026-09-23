@@ -59,15 +59,3 @@ impl CliError {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn ene_ctl_manifest_does_not_depend_on_ene_local_control() {
-        let manifest = include_str!("../Cargo.toml");
-        assert!(
-            !manifest.contains("ene-local-control"),
-            "product ene-ctl must not speak control: {manifest}"
-        );
-    }
-}

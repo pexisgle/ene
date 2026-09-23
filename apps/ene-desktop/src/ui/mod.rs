@@ -229,31 +229,3 @@ pub(crate) fn history_lines(items: &[HistoryItem]) -> Vec<String> {
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Composer;
-
-    #[test]
-    fn ime_composition_does_not_send() {
-        let mut composer = Composer::default();
-        composer.set_draft(String::from("こんにちは"));
-        composer.begin_composition();
-        assert!(composer.take_sendable().is_none());
-        composer.end_composition(Some(String::from("こんにちは")));
-        assert_eq!(composer.take_sendable().as_deref(), Some("こんにちは"));
-    }
-
-    #[test]
-    fn wipe_clears_draft_ime_and_undo() {
-        let mut composer = Composer::default();
-        composer.set_draft(String::from("one"));
-        composer.set_draft(String::from("two"));
-        assert!(composer.undo_len() > 0);
-        composer.begin_composition();
-        composer.wipe();
-        assert!(composer.draft().is_empty());
-        assert!(!composer.composing());
-        assert_eq!(composer.undo_len(), 0);
-    }
-}

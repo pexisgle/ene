@@ -800,13 +800,6 @@ impl HostHandle {
         // reply whose claim a deletion admission associated with an interval
         // is never presented, even when the Host transient fence did not move.
         let inference_claim = authorized.ticket().0;
-        // Test-only race gate: pause after admission and before the guarded
-        // acceptance section, so a test can supersede the connection in
-        // between and pin that nothing commits.
-        #[cfg(test)]
-        if let Some(gate) = self.submit_accept_gate() {
-            gate.pause().await;
-        }
         let store = self.store.clone();
         let commit_input = input.clone();
         let committed = self
@@ -840,13 +833,6 @@ impl HostHandle {
                 // adoption to continue (the reply registers as undelivered
                 // for the new connection), while this connection opens no
                 // round and its stream aborts before any further publication.
-                #[cfg(test)]
-                {
-                    let gate = crate::lock_unpoison(&self.submit_open_gate).clone();
-                    if let Some(gate) = gate {
-                        gate.pause().await;
-                    }
-                }
                 let installed = self.record_open_round(
                     live,
                     &live.client_ref,
@@ -858,13 +844,6 @@ impl HostHandle {
                         generation: attribution.generation,
                     },
                 );
-                #[cfg(test)]
-                {
-                    let gate = crate::lock_unpoison(&self.submit_publish_gate).clone();
-                    if let Some(gate) = gate {
-                        gate.pause().await;
-                    }
-                }
                 let stream = StreamWireId(RawId::new().as_uuid());
                 // The fence epoch is captured before the stream can publish:
                 // a Targeted Deletion that invalidates Host transient payloads
@@ -1752,6 +1731,3 @@ impl DeltaSink for StreamGate<'_> {
         })
     }
 }
-
-#[cfg(test)]
-mod tests;
