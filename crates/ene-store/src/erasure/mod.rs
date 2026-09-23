@@ -16,22 +16,14 @@
 //! defines a port instead (`ene-permission`, `ene-credential`, `ene-presence`)
 //! implement their participants behind those ports.
 
-// The five owner registration names keep the existing `X::new(store)` entry
-// point the Host composition calls; each constructs the single shared
-// participant implementation rather than itself.
-#![expect(
-    clippy::new_ret_no_self,
-    reason = "owner registration names construct the shared participant"
-)]
-
 mod companion_learning;
 mod remainder;
 mod task_action_inference;
 
-pub use companion_learning::{CompanionErasureParticipant, LearningErasureParticipant};
+pub use companion_learning::{companion_erasure_participant, learning_erasure_participant};
 pub(crate) use remainder::system_remainder;
 pub use task_action_inference::{
-    ActionErasureParticipant, InferenceErasureParticipant, TaskErasureParticipant,
+    action_erasure_participant, inference_erasure_participant, task_erasure_participant,
 };
 
 use std::collections::HashMap;

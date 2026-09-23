@@ -11,7 +11,6 @@
 //! exposes the bearer only inside a caller closure; the caller must build an
 //! owned request there and send it after the closure returns.
 
-mod approval;
 mod auth_file;
 mod erasure;
 mod os_store;
@@ -24,7 +23,6 @@ mod secret;
 
 use thiserror::Error;
 
-pub use approval::{CredentialApprovalRepository, PendingCredentialApproval};
 pub use auth_file::FileDeviceAuthStore;
 pub use erasure::{
     CredentialErasureOutcome, CredentialErasureParticipant, CredentialErasureRepository,

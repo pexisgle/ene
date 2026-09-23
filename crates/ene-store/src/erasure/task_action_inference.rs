@@ -426,34 +426,19 @@ fn inference_step(
 }
 
 /// The Task owner's local-erasure registration.
-pub struct TaskErasureParticipant;
-
-impl TaskErasureParticipant {
-    /// Binds the Task owner's participant to one store handle.
-    #[must_use]
-    pub fn new(store: Store) -> LocalErasureParticipant {
-        LocalErasureParticipant::new(ParticipantOwnerRef::Task, task_step, store)
-    }
+#[must_use]
+pub fn task_erasure_participant(store: Store) -> LocalErasureParticipant {
+    LocalErasureParticipant::new(ParticipantOwnerRef::Task, task_step, store)
 }
 
 /// The Action owner's local-erasure registration.
-pub struct ActionErasureParticipant;
-
-impl ActionErasureParticipant {
-    /// Binds the Action owner's participant to one store handle.
-    #[must_use]
-    pub fn new(store: Store) -> LocalErasureParticipant {
-        LocalErasureParticipant::new(ParticipantOwnerRef::Action, action_step, store)
-    }
+#[must_use]
+pub fn action_erasure_participant(store: Store) -> LocalErasureParticipant {
+    LocalErasureParticipant::new(ParticipantOwnerRef::Action, action_step, store)
 }
 
 /// The Inference owner's verification registration.
-pub struct InferenceErasureParticipant;
-
-impl InferenceErasureParticipant {
-    /// Binds the Inference owner's participant to one store handle.
-    #[must_use]
-    pub fn new(store: Store) -> LocalErasureParticipant {
-        LocalErasureParticipant::new(ParticipantOwnerRef::Inference, inference_step, store)
-    }
+#[must_use]
+pub fn inference_erasure_participant(store: Store) -> LocalErasureParticipant {
+    LocalErasureParticipant::new(ParticipantOwnerRef::Inference, inference_step, store)
 }

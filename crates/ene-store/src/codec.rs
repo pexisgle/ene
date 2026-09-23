@@ -6,9 +6,7 @@ use ene_companion::{
     HistoryMessage, HistoryRole, ReportStatus, RoundIntentMark, TaskFact, TerminalKindWire,
     UndeliveredSource, UndeliveredTechnicalError,
 };
-use ene_credential::{
-    CredentialTechnicalError, DeviceId, DeviceRecord, PendingCredentialApproval, PendingPairing,
-};
+use ene_credential::{CredentialTechnicalError, DeviceId, DeviceRecord, PendingPairing};
 use ene_inference::cost::CurrencyCode;
 use ene_inference::pricing::PricingSnapshotRef;
 use ene_inference::{InferenceTechnicalError, UsageSource};
@@ -672,20 +670,6 @@ pub(crate) fn decode_pending_pairing(
 
 pub(crate) fn credential_pair_is_blank(provider: &str, label: &str) -> bool {
     provider.trim().is_empty() || label.trim().is_empty()
-}
-
-pub(crate) fn decode_pending_credential(
-    provider: String,
-    label: String,
-    requested_text: &str,
-) -> Result<PendingCredentialApproval, String> {
-    let requested_at = decode_wall_clock(requested_text)
-        .map_err(|_| String::from("malformed credential approval timestamp"))?;
-    Ok(PendingCredentialApproval {
-        provider,
-        label,
-        requested_at,
-    })
 }
 
 /// `None` command text means no replay key; `None` wire projection is

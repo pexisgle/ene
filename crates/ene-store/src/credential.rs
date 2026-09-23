@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
 use ene_credential::{
-    CredentialApprovalRepository, CredentialErasureOutcome, CredentialErasureRepository,
-    CredentialIntentRepository, CredentialRef, CredentialRefRepository, CredentialSetRepository,
-    CredentialSetRevision, CredentialStore, CredentialTechnicalError, DeviceId,
-    DevicePairingRepository, DeviceRecord, PairingSecretMaterial, PendingCredentialApproval,
-    PendingPairing, REDACTED_CREDENTIAL, RegistrationApply, RegistrationFingerprint,
-    RegistrationState,
+    CredentialErasureOutcome, CredentialErasureRepository, CredentialIntentRepository,
+    CredentialRef, CredentialRefRepository, CredentialSetRepository, CredentialSetRevision,
+    CredentialStore, CredentialTechnicalError, DeviceId, DevicePairingRepository, DeviceRecord,
+    PairingSecretMaterial, PendingPairing, REDACTED_CREDENTIAL, RegistrationApply,
+    RegistrationFingerprint, RegistrationState,
 };
 use ene_permission::{IntentFingerprint, IntentOutcome};
 use ene_preservation::ErasureConditionRef;
@@ -16,8 +15,8 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use crate::Store;
 use crate::codec::{
     SQL_INSERT_CREDENTIAL_PENDING_IGNORE, SQL_SELECT_CREDENTIAL, credential_pair_is_blank,
-    credential_unavailable, decode_device_record, decode_pending_credential,
-    decode_pending_pairing, encode_id, insert_decided_row_tx, lock_shared, select_intent_row,
+    credential_unavailable, decode_device_record, decode_pending_pairing, encode_id,
+    insert_decided_row_tx, lock_shared, select_intent_row,
 };
 use crate::erasure::{ERASURE_BATCH_ROWS, erasure_count};
 use crate::preservation::condition_is_current;
@@ -54,9 +53,7 @@ const SQL_SELECT_CREDENTIAL_PENDING: &str = "SELECT provider, label, requested_a
 const SQL_DELETE_CREDENTIAL_PENDING: &str =
     "DELETE FROM credential_pending WHERE provider = ?1 AND label = ?2";
 
-const SQL_LIST_CREDENTIAL_PENDING: &str =
-    "SELECT provider, label, requested_at FROM credential_pending ORDER BY rowid ASC";
-
+/// Secrets are never stored in SQLite and remain zeroizing in memory.
 fn fresh_pairing_secret() -> PairingSecretMaterial {
     PairingSecretMaterial::new(RawId::new().as_uuid().to_string())
 }
@@ -483,40 +480,6 @@ impl DevicePairingRepository for Store {
                         origin_connection,
                     )
                     .map_err(credential_unavailable)?,
-                );
-            }
-            Ok(pending)
-        })
-        .await
-    }
-}
-
-impl CredentialApprovalRepository for Store {
-    async fn list_pending(
-        &self,
-    ) -> Result<Vec<PendingCredentialApproval>, CredentialTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let guard = lock_shared(&conn);
-            let mut query = guard
-                .prepare(SQL_LIST_CREDENTIAL_PENDING)
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let rows = query
-                .query_map((), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let mut pending = Vec::new();
-            for row in rows {
-                let (provider, label, requested_text) =
-                    row.map_err(|error| credential_unavailable(error.to_string()))?;
-                pending.push(
-                    decode_pending_credential(provider, label, &requested_text)
-                        .map_err(credential_unavailable)?,
                 );
             }
             Ok(pending)

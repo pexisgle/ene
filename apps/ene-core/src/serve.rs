@@ -733,17 +733,11 @@ impl HostHandle {
         use std::sync::Arc;
 
         let participants: [Arc<dyn ene_preservation::ErasureParticipant>; 8] = [
-            Arc::new(ene_store::CompanionErasureParticipant::new(
-                self.store.clone(),
-            )),
-            Arc::new(ene_store::LearningErasureParticipant::new(
-                self.store.clone(),
-            )),
-            Arc::new(ene_store::TaskErasureParticipant::new(self.store.clone())),
-            Arc::new(ene_store::ActionErasureParticipant::new(self.store.clone())),
-            Arc::new(ene_store::InferenceErasureParticipant::new(
-                self.store.clone(),
-            )),
+            Arc::new(ene_store::companion_erasure_participant(self.store.clone())),
+            Arc::new(ene_store::learning_erasure_participant(self.store.clone())),
+            Arc::new(ene_store::task_erasure_participant(self.store.clone())),
+            Arc::new(ene_store::action_erasure_participant(self.store.clone())),
+            Arc::new(ene_store::inference_erasure_participant(self.store.clone())),
             Arc::new(ene_permission::PermissionErasureParticipant::new(Arc::new(
                 self.store.clone(),
             ))),

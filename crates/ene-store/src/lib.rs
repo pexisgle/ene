@@ -4,9 +4,9 @@
 //! [`ene_action`]; those owners never depend on this crate and program against
 //! their own traits. It also implements the preservation-owned local-erasure
 //! participants for the owners whose durable master lives here
-//! ([`CompanionErasureParticipant`], [`LearningErasureParticipant`],
-//! [`TaskErasureParticipant`], [`ActionErasureParticipant`], and
-//! [`InferenceErasureParticipant`]); the Host composition registers them.
+//! ([`companion_erasure_participant`], [`learning_erasure_participant`],
+//! [`task_erasure_participant`], [`action_erasure_participant`], and
+//! [`inference_erasure_participant`]); the Host composition registers them.
 //!
 //! Concurrency shape: the connection is `Send` but not `Sync`, so an
 //! `Arc<std::sync::Mutex<Connection>>` shares it across callers. Each
@@ -44,8 +44,8 @@ mod usage_cap;
 
 pub use companion::UndeliveredExcerpt;
 pub use erasure::{
-    ActionErasureParticipant, CompanionErasureParticipant, InferenceErasureParticipant,
-    LearningErasureParticipant, TaskErasureParticipant,
+    action_erasure_participant, companion_erasure_participant, inference_erasure_participant,
+    learning_erasure_participant, task_erasure_participant,
 };
 pub use preservation::{HOST_TRANSIENT_ARRIVAL_PAGE, HostTransientArrivalOutcome};
 

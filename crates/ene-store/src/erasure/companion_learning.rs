@@ -4,12 +4,12 @@
 //! Each implementation owns exactly its own durable rows and never updates
 //! another domain's tables:
 //!
-//! - [`CompanionErasureParticipant`] sweeps the content columns of
+//! - [`companion_erasure_participant`] sweeps the content columns of
 //!   `history_message` and `activity_record` with the operation's exact
 //!   mechanical target, and removes `undelivered` reporting references whose
 //!   canonical source is gone (the reference carries no body; the source-side
 //!   erasure governs the referenced content).
-//! - [`LearningErasureParticipant`] sweeps `learning_summary`,
+//! - [`learning_erasure_participant`] sweeps `learning_summary`,
 //!   `learning_memory`, and `learning_memory_revision` content, the derived
 //!   `learning_memory_term` token index, and follows the recorded
 //!   correspondence: a revision whose evidence Summary no longer exists is
@@ -519,24 +519,14 @@ fn learning_step(
 
 /// Companion-owned local erasure (SO §4.3/4.4): History bodies, activity
 /// records, and the undelivered references that name an erased source.
-pub struct CompanionErasureParticipant;
-
-impl CompanionErasureParticipant {
-    /// Binds the Companion owner's participant to one store handle.
-    #[must_use]
-    pub fn new(store: Store) -> LocalErasureParticipant {
-        LocalErasureParticipant::new(ParticipantOwnerRef::Companion, companion_step, store)
-    }
+#[must_use]
+pub fn companion_erasure_participant(store: Store) -> LocalErasureParticipant {
+    LocalErasureParticipant::new(ParticipantOwnerRef::Companion, companion_step, store)
 }
 
 /// Learning-owned local erasure (SO §4.5-4.9): Experience Summary evidence,
 /// current and historical Memory content, and the derived recall index.
-pub struct LearningErasureParticipant;
-
-impl LearningErasureParticipant {
-    /// Binds the Learning owner's participant to one store handle.
-    #[must_use]
-    pub fn new(store: Store) -> LocalErasureParticipant {
-        LocalErasureParticipant::new(ParticipantOwnerRef::Learning, learning_step, store)
-    }
+#[must_use]
+pub fn learning_erasure_participant(store: Store) -> LocalErasureParticipant {
+    LocalErasureParticipant::new(ParticipantOwnerRef::Learning, learning_step, store)
 }
