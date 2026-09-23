@@ -150,6 +150,8 @@ body → desktop:
 4. owner の確定境界で現在の対象と前提、期限、未消費、seat の live 性を再照合して消費する。GUI close / channel 切断 / session expiry と確定は Host の control admission 内で直列化し、失効が先なら拒否、commit が先なら確定結果を保持する。credential 更新の取得順序は control admission → credential publication guard → SQLite とする。前提が変わったら新しい確認が必要である。
 5. Client / requester の `confirmed=true`、別 channel の nonce、tool / plugin / LLM の DTO、`EffectReport` は最終確認として拒否する。
 
+会話での Task 対象や Workspace 候補の確認は、この `ConfirmationSession` を消費しない。新たなアクセス許可や高権限操作に本節の直接確認が必要なときは、Companion が理由と続きの操作を音声とテキストで案内し、Host が発行した専用確認面で Owner が直接操作する。音声認識結果やモデル出力を確認 frame に変換しない。
+
 nonce・確認 frame・秘密は通常 log / Debug、公開 request outcome、Client wire、投影 IPC に出さない。登録された秘密の有効化と session の消費は [Credential publication](credential-publication.md) の commit 境界に従う。
 
 #### 5.1.2 `FirstPartyControlSeat` の発行と再起動

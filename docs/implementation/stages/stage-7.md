@@ -24,7 +24,7 @@ Stage 0〜6 の機能を、初回セットアップから日常の会話・管�
 
 Stage 8 以降の schedule、backup / restore 本体、Host の OS 自動起動、Voice、Observation、group conversation、Global Memory、skill 自動生成、長期 emotion / relationship、remote Client、character editor / package distribution、multi-provider / automatic fallback は追加しません。同梱 `ene` の静的定義・表示アセットを使う最小経路は必要ですが、汎用の配布・編集基盤を先取りしません。
 
-音声中心の Task UX と作業 GUI の削除は [Stage 10](stage-10.md) / [#1686](https://github.com/pexisgle/ene/issues/1686) で扱います。D0 の要件・設計変更前に、この Stage の text-first 契約を実装だけで置き換えません。既存の Stage 完了・probe の記録は、新しい音声 UX の検証結果ではありません。
+音声中心の Task UX と作業 GUI の削除は [Stage 10](stage-10.md) / [#1686](https://github.com/pexisgle/ene/issues/1686) で扱います。D0 の要件・設計変更は Stage 10 の実装や実機受け入れを完了させません。既存の Stage 完了・probe の記録は、新しい音声 UX の検証結果ではありません。
 
 ## 2. 固定する契約
 
@@ -157,7 +157,7 @@ Learning の明示的な割り当て、未設定理由の表示、形成方式�
 
 **gate**: acceptance §4 と §5 の GUI 操作対象を通すこと。Unknown / 中断 / Failed / Cancelled / Completed、cancel の受付と作用の停止完了を区別します。resume は表示した Task revision / purpose に束縛し、stale を最新前提へ自動置換しません。
 
-この画面契約の変更は Stage 10 D0 で先に扱います。[#1687](https://github.com/pexisgle/ene/issues/1687) の GUI 削除は、音声操作・対象特定・権限・報告の代替経路と安全操作が成立した後です。
+上記は Stage 7 の first-party GUI 実装・検証範囲を示します。Stage 10 D0 で通常の Task 操作と報告の製品要件を会話中心へ更新し、専用一覧・選択・報告画面は [U1](stage-10.md#3-pr-分割と-gate) で代替経路が成立してから除きます。Stage 7 の当時の C2 証拠は音声の証拠に読み替えません。以後の安全性回帰では、Task の内部記録と現在値照合、キャンセル・拒否・復旧、成果物確認への到達性を維持します。
 
 ### C3: usage / cap・削除・安全な復旧の管理画面
 
@@ -187,7 +187,7 @@ renderer に渡す情報は必要なアセット参照と表示指示に限定�
 
 - timeline、Memory の根拠/履歴、Task report、検索/入力 draft、IME composition、undo、deferred frame など、GUI が実際に所有する本文コピーを inventory する。
 - deletion demand では該当コピーと旧 receipt / view を無効化・消去し、実際の消去確認後にだけ `wiped` を返す。
-- presentation ACK は、その receipt の項目を実際に提示した経路から返す。単なる受信を Presented にしない。
+- presentation ACK は、その receipt の項目を実際に提示した経路から返す。単なる受信を Presented にしない。Stage 10 の音声・テキスト併用後は、対象の要約本文全体の画面提示または音声再生完了を証拠とする。
 
 **gate**: 実 GUI adapter と serving Host を使い、Stage 6 完了後の遅延結果、Host restart 越しの Client delivery evidence、登録秘密の各画面/エラーへの非露出を回帰すること。
 
@@ -196,6 +196,8 @@ renderer に渡す情報は必要なアセット参照と表示指示に限定�
 **範囲**: §6 の全行を統合 tip の GUI から確認し、§7 の測定生データと結果を残す。測り方は [First-party desktop](../../design/concrete/first-party-desktop.md) 第8節。閾値は acceptance の Performance Gates。Body を除外しない。
 
 **gate**: A2、[Desktop 計画 D3](../follow-ups/desktop.md) の公式 VRM・物理 HiDPI、指定 OS の最終 acceptance、統合後の性能・安全性回帰を確認する。実施した OS・言語・asset・transport・exact SHA と測定生データを残し、未実施・失敗・暫定回避を成功と区別する。旧 transport の Windows / Linux 合格や、サンプル VRM の描画結果だけで Stage を完了しない。
+
+Stage 10 の実装が先に統合された場合、Task の §4・§5 の検証はその時点の会話経路と残る第一者安全経路で行い、C2 の旧画面を復活させる gate にはしません。Stage 7 の実機・性能・安全性 gate 自体は免除せず、音声の新規受け入れは [Stage 10 acceptance](../../requirements/acceptance.md#stage-10-音声中心の-task-操作の受け入れ条件) で別に判定します。
 
 Linux の事前検証は使用した distro / compositor を記録して進め、X11 の成功で KDE Wayland overlay を代替しない。正式 NixOS 26.11 を待たずに probe は行えるが、Support Matrix の指定環境での最終 acceptance は別に必要である。全 gate が揃うまで Stage 7 / Milestone 1 は未完了とする。後続 Stage の独立した着手は、この完了判定と区別する。
 
@@ -224,8 +226,8 @@ C1 / C2 / C3 は異なる owner と画面に分け、共通 Client boundary・DT
 | §2: Desktop Body | A0 / D | 実 desktop の同梱 `ene`、透過・移動・resize・非表示・待機/応答、renderer 故障中の text / management |
 | §3.1–§3.10: Memory | C1 | 会話由来の形成・訂正・状況変化・想起・統合・通常忘却と、scope / importance / 根拠 / revision の GUI 確認 |
 | §3.11–§3.12: Targeted Deletion | C3 / E | GUI での要求・control 確認・状態/復旧、GUI 一時コピーの消去 |
-| §4: Workspace Task | C2 | GUI からの会話→委任→並行会話/追加指示/cancel→結果 |
-| §5: S5-01〜S5-24 | A1 / A2 / C2 / E | 既存の全 Host 回帰と両 OS の実 WSS で、GUI close / reconnect / presentation ACK / manual resume を確認 |
+| §4: Workspace Task | C2 | Stage 7 の GUI からの会話→委任→並行会話/追加指示/cancel→結果。Stage 10 の統合後はその時点の会話経路で再確認 |
+| §5: S5-01〜S5-24 | A1 / A2 / C2 / E | 既存の全 Host 回帰と両 OS の実 WSS で、Client close / reconnect / presentation ACK / manual resume を確認。Stage 10 後は残る安全経路と会話経路を使用 |
 | §6: 障害とデータ保護 | B / C2 / C3 / D / E | 認証失敗、provider 不通、renderer/Agent crash、cancel、保存中終了。無断再実行ゼロ |
 | §7.1–§7.2: 費用と機密 | C3 / E | token と費用内訳の表示、Unknown の区別、登録秘密の非露出 |
 | Performance Gates | A0 / A2 / D / F | WSS 統一後に両 OS の全 process 計測、実描画 FPS と操作受付反映を確認。分母は first-party-desktop 第8節 |
