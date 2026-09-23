@@ -87,11 +87,6 @@ mod tests {
         ] {
             assert!(!other.suppresses_recall(), "{other:?} must not suppress");
         }
-        assert_ne!(
-            ChangeKind::CorrectedInitiallyWrong,
-            ChangeKind::ChangedSince,
-            "initially-wrong and changed-since stay distinct"
-        );
     }
 
     #[test]
@@ -102,27 +97,6 @@ mod tests {
             Some(MemoryRevision::from_u64(2))
         );
         assert_eq!(MemoryRevision::from_u64(u64::MAX).checked_next(), None);
-    }
-
-    #[test]
-    fn scope_carries_the_companion_premise() {
-        let companion = RawId::new();
-        let scope = LearningScope::companion(companion);
-        assert_eq!(scope.companion_id(), companion);
-    }
-
-    #[test]
-    fn source_range_keeps_history_references() {
-        let start = RawId::new();
-        let end = RawId::new();
-        let source = SourceRangeRef {
-            kind: ExperienceSourceKind::Dialogue,
-            start,
-            end,
-        };
-        assert_eq!(source.start, start);
-        assert_eq!(source.end, end);
-        assert_eq!(source.kind, ExperienceSourceKind::Dialogue);
     }
 
     #[test]

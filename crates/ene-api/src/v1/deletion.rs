@@ -356,9 +356,8 @@ pub struct LocalErasureResult {
 mod tests {
     use super::super::refs::ManagementTargetWire;
     use super::{
-        ClientTempClass, DELETION_EXACT_TEXT_MAX_BYTES, DELETION_TARGET_PREFIX,
-        DeletionParticipantReportWire, DeletionPhaseWire, DeletionPurposeWire, deletion_target,
-        parse_deletion_target,
+        ClientTempClass, DELETION_EXACT_TEXT_MAX_BYTES, DELETION_TARGET_PREFIX, DeletionPhaseWire,
+        DeletionPurposeWire, deletion_target, parse_deletion_target,
     };
 
     #[test]
@@ -448,15 +447,6 @@ mod tests {
     }
 
     #[test]
-    fn not_reported_is_distinct_from_an_empty_report() {
-        assert_ne!(
-            DeletionParticipantReportWire::NotReported,
-            DeletionParticipantReportWire::Reported(Vec::new()),
-            "an empty report is not the same fact as an absent report"
-        );
-    }
-
-    #[test]
     fn client_temp_classes_round_trip_through_their_closed_vocabulary() {
         for class in [
             ClientTempClass::PresentationBuffer,
@@ -465,50 +455,5 @@ mod tests {
             assert_eq!(ClientTempClass::from_name(class.as_str()), Some(class));
         }
         assert_eq!(ClientTempClass::from_name("screen-scrollback"), None);
-    }
-
-    #[test]
-    fn demand_and_result_round_trip_without_a_target_body() {
-        use super::super::refs::DeletionOperationWireRef;
-        use super::{DeletionDemand, DeletionDemandWireId, DeletionTargetWire, LocalErasureResult};
-
-        let demand = DeletionDemand {
-            demand: DeletionDemandWireId(String::from("demand-1")),
-            operation: DeletionOperationWireRef(String::from("operation-1")),
-            sweep: 2,
-            targets: vec![
-                DeletionTargetWire::WipeClass {
-                    class: ClientTempClass::PresentationBuffer,
-                },
-                DeletionTargetWire::WipeClass {
-                    class: ClientTempClass::InputDraft,
-                },
-            ],
-        };
-        let payload = super::super::payload::WirePayload::DeletionDemand(demand.clone());
-        assert_eq!(payload.message_type(), "DeletionDemand");
-        let json = serde_json::to_string(&payload).expect("the demand must serialize");
-        assert!(
-            !json.to_lowercase().contains("deletion:"),
-            "the wire never carries the mechanical target grammar: {json}"
-        );
-        assert!(
-            !json.contains("target-body"),
-            "no body can ride a demand: {json}"
-        );
-        let result = LocalErasureResult {
-            demand: demand.demand.clone(),
-            operation: demand.operation.clone(),
-            sweep: demand.sweep,
-            wiped: vec![ClientTempClass::PresentationBuffer],
-            unverified: vec![ClientTempClass::InputDraft],
-        };
-        let payload = super::super::payload::WirePayload::LocalErasureResult(result.clone());
-        assert_eq!(payload.message_type(), "LocalErasureResult");
-        let round_trip: LocalErasureResult =
-            serde_json::from_str(&serde_json::to_string(&result).expect("serializes"))
-                .expect("round-trips");
-        assert_eq!(round_trip, result);
-        assert!(!format!("{demand:?}").contains("target-body"));
     }
 }

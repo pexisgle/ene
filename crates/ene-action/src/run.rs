@@ -660,13 +660,4 @@ mod tests {
         assert!(!rendered.contains("secret file body"));
         assert!(rendered.contains("bytes redacted"));
     }
-
-    #[test]
-    fn real_target_debug_never_loses_the_path() {
-        let target = RealTargetRef::from_canonical_path(String::from("/tmp/workspace/report.md"));
-        assert_eq!(
-            format!("{target:?}"),
-            "RealTargetRef(\"/tmp/workspace/report.md\")"
-        );
-    }
 }

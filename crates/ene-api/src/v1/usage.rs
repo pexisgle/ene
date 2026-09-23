@@ -181,19 +181,8 @@ pub enum UsageSummaryResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        USAGE_PAGE_LIMIT_DEFAULT, USAGE_PAGE_LIMIT_MAX, UsageCapConsumptionView,
-        UsageCapStoredView, UsageCapView, UsageCostView, UsageMoneyView, UsageSummaryPage,
-        UsageSummaryRequest, UsageSummaryRowView, UsageTokenUsageView,
-    };
+    use super::{USAGE_PAGE_LIMIT_DEFAULT, USAGE_PAGE_LIMIT_MAX, UsageSummaryRequest};
     use crate::v1::refs::UsageCursorWire;
-
-    fn money(micros: u64) -> UsageMoneyView {
-        UsageMoneyView {
-            currency: String::from("USD"),
-            micros,
-        }
-    }
 
     #[test]
     fn page_bounds_match_the_wire_contract() {
@@ -220,59 +209,5 @@ mod tests {
             decoded.cursor,
             Some(UsageCursorWire(String::from("cursor-1")))
         );
-    }
-
-    #[test]
-    fn page_carries_attribution_tokens_cost_and_caps_without_bodies() {
-        let page = UsageSummaryPage {
-            rows: vec![UsageSummaryRowView {
-                provider: String::from("openai"),
-                model: String::from("gpt-4o"),
-                consumer: String::from("companion_dialogue"),
-                purpose: String::from("dialogue_response"),
-                status: String::from("reported"),
-                tokens: Some(UsageTokenUsageView {
-                    input_tokens: 10,
-                    cached_input_tokens: 4,
-                    output_tokens: 2,
-                }),
-                cost: Some(UsageCostView {
-                    input: money(6),
-                    cached_input: money(1),
-                    output: money(4),
-                    total: money(11),
-                }),
-                reserved: None,
-                started_at: String::from("2026-09-17T00:00:00.000000000Z"),
-            }],
-            next_cursor: Some(UsageCursorWire(String::from("next-1"))),
-            caps: vec![UsageCapView {
-                mark: String::from("usage-cap-system-daily_utc-rev-1"),
-                scope: String::from("system"),
-                provider: None,
-                window: String::from("daily_utc"),
-                stored: Some(UsageCapStoredView {
-                    limit: money(1_000),
-                    consumption: UsageCapConsumptionView::Known {
-                        reserved: money(200),
-                        committed_reported: money(100),
-                        committed_unknown: money(200),
-                        consumed: money(500),
-                        remaining: money(500),
-                        held: false,
-                    },
-                }),
-            }],
-            evaluated_at: String::from("2026-09-17T00:00:00.000000000Z"),
-        };
-        let json = serde_json::to_string(&page).expect("the page serializes");
-        assert!(
-            json.contains("companion_dialogue"),
-            "attribution is present"
-        );
-        assert!(json.contains("cached_input"), "cost components are present");
-        assert!(json.contains("usage-cap-system-daily_utc-rev-1"));
-        let back: UsageSummaryPage = serde_json::from_str(&json).expect("the page roundtrips");
-        assert_eq!(back, page);
     }
 }

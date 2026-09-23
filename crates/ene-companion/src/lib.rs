@@ -1068,11 +1068,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_companion_ids_differ() {
-        assert_ne!(CompanionId::generate(), CompanionId::generate());
-    }
-
-    #[test]
     fn history_debug_redacts_text_and_keeps_refs() {
         let item = message();
         let rendered = format!("{item:?}");

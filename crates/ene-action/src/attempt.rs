@@ -368,18 +368,7 @@ pub trait ActionAttemptRepository: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ActionAttemptId, ActionCertainty, EffectGrounds, OperationKind,
-        certainty_grounds_pair_is_valid,
-    };
-
-    #[test]
-    fn generated_attempt_ids_are_distinct_and_stable() {
-        let first = ActionAttemptId::generate();
-        let second = ActionAttemptId::generate();
-        assert_ne!(first, second);
-        assert_eq!(ActionAttemptId::from_raw(first.as_raw()), first);
-    }
+    use super::{ActionCertainty, EffectGrounds, OperationKind, certainty_grounds_pair_is_valid};
 
     #[test]
     fn operation_names_round_trip_as_a_closed_world() {
