@@ -12,8 +12,8 @@ use ene_task::{
     ResumeInstructionSource, Task, TaskAgentEphemeralId, TaskAgentObservationId,
     TaskAgentObservationPremise, TaskAgentOutput, TaskAgentResultArrival, TaskCancelOutcome,
     TaskCommitOutcome, TaskCommitPremise, TaskContextEntry, TaskContextEntryId, TaskContextItem,
-    TaskContextOrigin, TaskContextOriginKind, TaskCreationOutcome, TaskCreationPremise,
-    TaskFailureOutcome, TaskFailurePremise, TaskHeadline, TaskId, TaskProgress, TaskPurpose,
+    TaskContextOrigin, TaskContextOriginKind, TaskCreationPremise, TaskFailureOutcome,
+    TaskFailurePremise, TaskHeadline, TaskId, TaskProgress, TaskProposalOutcome, TaskPurpose,
     TaskPurposeRef, TaskRecord, TaskRef, TaskReportRow, TaskReportRowCursor, TaskReportRowKind,
     TaskReportSourcePage, TaskReportSourceRef, TaskRepository, TaskResultAcceptance,
     TaskResultAdoptionClaim, TaskResultArrivalOutcome, TaskResultId, TaskResultRecord,
@@ -148,9 +148,11 @@ const SQL_PAST_ATTEMPT_FACT: &str =
 
 const SQL_PAST_RESULT_FACT: &str =
     "SELECT task_revision, adopted_revision FROM task_result WHERE result_id = ?1";
-const SQL_LIST_TASKS_FIRST: &str = "SELECT task_id, revision, purpose_adopted_revision, progress, assignee, EXISTS(SELECT 1 FROM task_result r WHERE r.task_id = task.task_id AND r.adopted_revision = task.revision) FROM task ORDER BY task_id LIMIT ?1";
+/// The bounded Task-headline page. Both variants share one column list and
+/// decoder so a page boundary cannot change meaning.
+const SQL_LIST_TASKS_FIRST: &str = "SELECT task_id, revision, purpose_adopted_revision, progress FROM task ORDER BY task_id LIMIT ?1";
 
-const SQL_LIST_TASKS_AFTER: &str = "SELECT task_id, revision, purpose_adopted_revision, progress, assignee, EXISTS(SELECT 1 FROM task_result r WHERE r.task_id = task.task_id AND r.adopted_revision = task.revision) FROM task WHERE task_id > ?1 ORDER BY task_id LIMIT ?2";
+const SQL_LIST_TASKS_AFTER: &str = "SELECT task_id, revision, purpose_adopted_revision, progress FROM task WHERE task_id > ?1 ORDER BY task_id LIMIT ?2";
 
 const SQL_LIST_REPORT_ROWS_FIRST: &str = "SELECT row_kind, row_id, adopted FROM (SELECT 'action_attempt' AS row_kind, attempt_id AS row_id, NULL AS adopted, 0 AS rank FROM action_attempt WHERE task_id = ?1 UNION ALL SELECT 'task_result', result_id, adopted_revision, 1 FROM task_result WHERE task_id = ?1) ORDER BY rank, row_id LIMIT ?2";
 
@@ -292,7 +294,7 @@ fn create_task_sync(
     conn: &Mutex<Connection>,
     premise: TaskCreationPremise,
     currentness: Option<OwnerMessageCurrentness>,
-) -> Result<TaskCreationOutcome, TaskTechnicalError> {
+) -> Result<TaskProposalOutcome, TaskTechnicalError> {
     let revision = TaskRevision::initial();
     let reference = TaskRef {
         task: premise.task,
@@ -308,7 +310,7 @@ fn create_task_sync(
     if let Some(currentness) = currentness
         && !owner_message_is_current(&tx, &currentness)?
     {
-        return Ok(TaskCreationOutcome::Superseded);
+        return Ok(TaskProposalOutcome::Superseded);
     }
     let purpose_text = crate::preservation::redact_covered_text(&tx, &premise.purpose.text)
         .map_err(task_unavailable)?;
@@ -387,7 +389,7 @@ fn create_task_sync(
         },
     )?;
     tx.commit().map_err(task_unavailable)?;
-    Ok(TaskCreationOutcome::Created(reference))
+    Ok(TaskProposalOutcome::AcceptedAsTask(reference))
 }
 
 struct RawAdoptedPurpose {
@@ -1937,6 +1939,12 @@ fn load_task_action_attempts_sync(
         .collect())
 }
 
+/// Lists one bounded page of Task lifecycle headlines.
+///
+/// SELECT-only: the progress, revision, and purpose are read from the current
+/// rows, and no reconciliation, adoption, presence, or registration write
+/// runs. The `limit` clamp is applied before SQL so the bound is on the rows
+/// read.
 fn list_tasks_after_sync(
     conn: &Mutex<Connection>,
     after: Option<TaskId>,
@@ -1969,21 +1977,14 @@ fn list_tasks_after_sync(
     rows.into_iter().map(decode_headline).collect()
 }
 
-type RawHeadline = (String, i64, Option<i64>, Option<String>, String, bool);
+type RawHeadline = (String, i64, Option<i64>, Option<String>);
 
 fn raw_headline_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawHeadline> {
-    Ok((
-        row.get(0)?,
-        row.get(1)?,
-        row.get(2)?,
-        row.get(3)?,
-        row.get(4)?,
-        row.get(5)?,
-    ))
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
 }
 
 fn decode_headline(raw: RawHeadline) -> Result<TaskHeadline, TaskTechnicalError> {
-    let (task, revision, purpose_revision, progress, assignee, adopted_result) = raw;
+    let (task, revision, purpose_revision, progress) = raw;
     let task = TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?);
     Ok(TaskHeadline {
         task,
@@ -1996,8 +1997,6 @@ fn decode_headline(raw: RawHeadline) -> Result<TaskHeadline, TaskTechnicalError>
             )?,
         },
         progress: decode_progress(progress.as_deref())?,
-        assignee: decode_id(&assignee).map_err(task_unavailable)?,
-        adopted_result,
     })
 }
 
@@ -2971,9 +2970,12 @@ impl TaskRepository for Store {
         match self
             .hint_after_commit(run_blocking(move || create_task_sync(&conn, premise, None)).await)?
         {
-            TaskCreationOutcome::Created(reference) => Ok(reference),
-            TaskCreationOutcome::Superseded => Err(task_unavailable(
-                "unguarded task creation cannot answer supersession",
+            TaskProposalOutcome::AcceptedAsTask(reference) => Ok(reference),
+            // The unguarded creation has no currentness premise and cannot
+            // produce a steering outcome; anything else is a contract
+            // violation, not a domain answer.
+            _ => Err(task_unavailable(
+                "unguarded task creation cannot answer a non-creation outcome",
             )),
         }
     }
@@ -3155,7 +3157,7 @@ impl ConversationTaskRepository for Store {
         &self,
         premise: TaskCreationPremise,
         currentness: OwnerMessageCurrentness,
-    ) -> Result<TaskCreationOutcome, TaskTechnicalError> {
+    ) -> Result<TaskProposalOutcome, TaskTechnicalError> {
         let conn = Arc::clone(&self.conn);
         self.hint_after_commit(
             run_blocking(move || create_task_sync(&conn, premise, Some(currentness))).await,

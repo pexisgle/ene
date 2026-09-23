@@ -14,9 +14,8 @@ use crate::result::{
     TaskResultScrubPremise,
 };
 use crate::task::{
-    AssigneeRef, SteeringPremiseRef, TaskCommitPremise, TaskCreationOutcome, TaskCreationPremise,
-    TaskId, TaskInstructionAdoptionPremise, TaskProgress, TaskPurpose, TaskPurposeAdoptionPremise,
-    TaskRef,
+    AssigneeRef, SteeringPremiseRef, TaskCommitPremise, TaskCreationPremise, TaskId,
+    TaskInstructionAdoptionPremise, TaskProgress, TaskPurpose, TaskPurposeAdoptionPremise, TaskRef,
 };
 use crate::workspace::{WorkspaceAssocId, WorkspaceAssociationPremise, WorkspaceNeedRef};
 
@@ -38,11 +37,19 @@ pub async fn orchestrate_task_creation(
     Ok(TaskProposalOutcome::AcceptedAsTask(reference))
 }
 
+/// Orchestrates one conversation-sourced Task creation proposal.
+///
+/// Identical identity minting as [`orchestrate_task_creation`], but the commit
+/// additionally requires the relied Owner input to still be the newest
+/// accepted one: [`ConversationTaskRepository::create_task_from_conversation`]
+/// compares that premise inside the same short transaction as the creation
+/// unit, so a newer Owner input supersedes the turn and answers
+/// [`TaskProposalOutcome::Superseded`] with zero writes.
 pub async fn orchestrate_task_creation_current(
     repository: &impl ConversationTaskRepository,
     premise: TaskProposalPremise,
     currentness: OwnerMessageCurrentness,
-) -> Result<TaskCreationOutcome, TaskTechnicalError> {
+) -> Result<TaskProposalOutcome, TaskTechnicalError> {
     repository
         .create_task_from_conversation(task_creation_premise(premise), currentness)
         .await
@@ -87,6 +94,9 @@ pub struct SteeringProposalPremise {
 pub enum TaskProposalOutcome {
     AcceptedAsTask(TaskRef),
     AcceptedAsSteering(TaskRef),
+    /// A newer accepted Owner input superseded the relied utterance; nothing
+    /// was changed. Only the conversation-sourced guarded steering and
+    /// creation answer this.
     Superseded,
     /// The relied-on revision or purpose does not match the durable current
     /// state; nothing was changed and the caller re-evaluates.

@@ -7,6 +7,7 @@ use crate::delegation::{
 };
 use crate::failure::{TaskFailureOutcome, TaskFailurePremise};
 use crate::observation::{TaskAgentObservationId, TaskAgentObservationPremise};
+use crate::orchestrate::TaskProposalOutcome;
 use crate::report::{
     PastExecutedFactsPage, TaskHeadline, TaskReportRow, TaskReportRowCursor, TaskReportSourcePage,
     TaskReportSourceRef,
@@ -17,8 +18,7 @@ use crate::result::{
 };
 use crate::resume::{TaskResumeCommitPremise, TaskResumeOutcome};
 use crate::task::{
-    TaskCommitPremise, TaskCreationOutcome, TaskCreationPremise, TaskId, TaskProgress, TaskRecord,
-    TaskRef,
+    TaskCommitPremise, TaskCreationPremise, TaskId, TaskProgress, TaskRecord, TaskRef,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -156,6 +156,16 @@ pub trait TaskRepository: Send + Sync {
         task: TaskId,
     ) -> Result<Vec<RawId>, TaskTechnicalError>;
 
+    /// Lists one bounded page of Task lifecycle headlines in canonical
+    /// `TaskId` byte order, starting strictly after `after`.
+    ///
+    /// `limit` is clamped to `1..=REPORT_PAGE_MAX` and applied by the SQL
+    /// query, so the bound is on the rows read. Every headline is stored
+    /// facts only — current revision, progress, and purpose — never a body.
+    /// The read runs no reconciliation, starts no runner, and re-evaluates no
+    /// stored result: "currently executing" is Host memory, so a
+    /// non-terminal Task with no registration is reported as saved and not
+    /// running.
     async fn list_tasks_after(
         &self,
         after: Option<TaskId>,
@@ -196,7 +206,7 @@ pub trait ConversationTaskRepository: TaskRepository {
         &self,
         premise: TaskCreationPremise,
         currentness: OwnerMessageCurrentness,
-    ) -> Result<TaskCreationOutcome, TaskTechnicalError>;
+    ) -> Result<TaskProposalOutcome, TaskTechnicalError>;
 
     async fn forward_steering_from_conversation(
         &self,

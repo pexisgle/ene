@@ -241,18 +241,12 @@ fn main() -> Result<(), CliError> {
             provider,
             label,
         } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             run_approve_credential(&data_dir, provider.trim(), label.trim())?;
             Ok(())
         }
         CliCommand::ApproveDevice { config, pending } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             let Some(pending) = pending else {
                 list_pending_devices(&data_dir)?;
                 return Ok(());
@@ -266,10 +260,7 @@ fn main() -> Result<(), CliError> {
             Ok(())
         }
         CliCommand::Serve { config } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             run_serve(&data_dir)?;
             Ok(())
         }
@@ -278,18 +269,12 @@ fn main() -> Result<(), CliError> {
             after,
             limit,
         } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             run_pending_deletions(&data_dir, after.as_deref(), limit)?;
             Ok(())
         }
         CliCommand::ConfirmDeletion { config, request } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             let request = request.trim();
             if request.is_empty() {
                 return Err(CliError::Usage(
@@ -304,10 +289,7 @@ fn main() -> Result<(), CliError> {
             cursor,
             limit,
         } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             run_deletion_status(&data_dir, cursor.as_deref(), limit)?;
             Ok(())
         }
@@ -319,6 +301,20 @@ fn main() -> Result<(), CliError> {
     }
 }
 
+/// Loads the configuration and requires a resolvable data directory.
+fn load_data_dir(config: Option<&Path>) -> Result<PathBuf, CliError> {
+    let cfg = Config::load(config)?;
+    ene_config::resolve_data_dir(&cfg).ok_or_else(|| {
+        CliError::Serve(CoreError::Store(String::from("no data directory resolved")))
+    })
+}
+
+/// Builds the multi-threaded `Tokio` runtime the store-backed tasks run on
+/// and blocks on `task`.
+///
+/// A runtime that cannot be built is a [`CoreError::Store`] failure: the
+/// runtime is the async substrate of the store-backed Host, and no narrower
+/// variant names it.
 fn block_on<F>(task: F) -> Result<(), CoreError>
 where
     F: std::future::Future<Output = Result<(), CoreError>>,
@@ -513,7 +509,7 @@ fn run_pending_deletions(
             writeln!(
                 stdout,
                 "{} {} {}",
-                deletion_request_id_text(request),
+                raw_id_text(request.request().as_raw()),
                 request.purpose().as_str(),
                 request.owner_review_text()
             )
@@ -561,24 +557,24 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
     block_on(async move {
         let outcome = ene_core::host_control::confirm_targeted_deletion(
             data_dir,
-            &deletion_request_id_text_of(request_id),
+            &raw_id_text(request_id.as_raw()),
         )
         .await?;
         let mut stdout = std::io::stdout().lock();
         let line = match outcome {
             ConfirmTargetedDeletionOutcome::Started(operation) => format!(
                 "started {} sweep {}",
-                deletion_operation_text(operation),
+                raw_id_text(operation.operation.as_raw()),
                 operation.sweep.as_u64()
             ),
             ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(operation) => format!(
                 "already covered by {} sweep {}",
-                deletion_operation_text(operation),
+                raw_id_text(operation.operation.as_raw()),
                 operation.sweep.as_u64()
             ),
             ConfirmTargetedDeletionOutcome::HeldByOperation(operation) => format!(
                 "held by {} sweep {}",
-                deletion_operation_text(operation),
+                raw_id_text(operation.operation.as_raw()),
                 operation.sweep.as_u64()
             ),
             ConfirmTargetedDeletionOutcome::NeedsClarification => {
@@ -593,7 +589,7 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
                     "unknown deletion request {request:?}; pending: [{}]",
                     pending
                         .iter()
-                        .map(deletion_request_id_text)
+                        .map(|request| raw_id_text(request.request().as_raw()))
                         .collect::<Vec<String>>()
                         .join(", ")
                 )));
@@ -679,19 +675,6 @@ fn parse_deletion_request_id(raw: &str) -> Result<ene_preservation::DeletionRequ
         .map_err(|_| CoreError::Deletion(String::from("request ID is not a canonical UUID")))
 }
 
-fn deletion_request_id_text(request: &ene_preservation::TargetedDeletionRequest) -> String {
-    deletion_request_id_text_of(request.request())
-}
-
-fn deletion_request_id_text_of(request: ene_preservation::DeletionRequestId) -> String {
-    request.as_raw().as_uuid().as_hyphenated().to_string()
-}
-
-fn deletion_operation_text(operation: ene_preservation::DeletionOperationRef) -> String {
-    operation
-        .operation
-        .as_raw()
-        .as_uuid()
-        .as_hyphenated()
-        .to_string()
+fn raw_id_text(raw: ene_primitive::RawId) -> String {
+    raw.as_uuid().as_hyphenated().to_string()
 }

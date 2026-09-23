@@ -3,7 +3,8 @@ use super::*;
 use ene_action::{ActionCertainty, EffectGrounds};
 use ene_companion::UNDELIVERED_PAGE_MAX;
 use ene_task::{
-    REPORT_PAGE_MAX, TaskProgress, TaskReportRowCursor, TaskReportRowKind, TaskReportSourceRef,
+    REPORT_PAGE_MAX, TaskHeadline, TaskProgress, TaskReportRowCursor, TaskReportRowKind,
+    TaskReportSourceRef,
 };
 use rusqlite::{OptionalExtension, params};
 
@@ -106,6 +107,45 @@ async fn run_report_reads(store: &Store, companion: CompanionId, task: TaskId) {
 }
 
 #[tokio::test]
+async fn report_reads_do_not_initialize_a_companion_or_start_work() {
+    let store = open_memory().await.unwrap();
+    // A Task exists without any companion row: a report read must not create
+    // one, and it must not register notifications or run results.
+    let task = store.create_task(task_premise(None)).await.unwrap();
+    let companion = store
+        .load_task(task.task)
+        .await
+        .unwrap()
+        .unwrap()
+        .revision
+        .assignee
+        .companion;
+    let before = snapshot(&store, companion, task.task);
+    assert_eq!(before.companions, 0, "the fixture holds no companion");
+
+    for _ in 0..3 {
+        run_report_reads(&store, CompanionId::from_raw(companion), task.task).await;
+        let headlines = store.list_tasks_after(None, 10).await.unwrap();
+        assert_eq!(headlines.len(), 1);
+        assert_eq!(headlines[0].progress, TaskProgress::Started);
+        let _ = store
+            .load_report_source_bounded(
+                TaskReportSourceRef::RevisionPurpose {
+                    task: task.task,
+                    revision: task.revision,
+                },
+                0,
+                64,
+            )
+            .await
+            .unwrap();
+    }
+    let after = snapshot(&store, companion, task.task);
+    assert_eq!(after, before, "reads change no durable fact");
+    assert_eq!(after.companions, 0, "reads never ensure a companion");
+}
+
+#[tokio::test]
 async fn report_reads_are_read_only_over_a_running_and_stopped_store() {
     let store = open_memory().await.unwrap();
     let (companion, _) = running_companion(&store).await.unwrap();
@@ -142,7 +182,6 @@ async fn report_reads_are_read_only_over_a_running_and_stopped_store() {
             .expect("the task is listed");
         assert_eq!(headline.revision, task.revision);
         assert_eq!(headline.progress, TaskProgress::InProgress);
-        assert!(!headline.adopted_result);
         let rows = store
             .list_task_report_rows_after(task.task, None, REPORT_PAGE_MAX)
             .await

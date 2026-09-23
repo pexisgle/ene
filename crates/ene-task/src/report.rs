@@ -25,8 +25,6 @@ pub struct TaskHeadline {
     pub revision: TaskRevision,
     pub purpose: TaskPurposeRef,
     pub progress: TaskProgress,
-    pub assignee: RawId,
-    pub adopted_result: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

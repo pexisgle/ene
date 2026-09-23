@@ -56,13 +56,15 @@ impl HostHandle {
         let Some(limit) = checked_usage_limit(request.limit) else {
             return vec![field_reject(frame, live, "usage limit must be 1..=50")];
         };
-        let Some(consumer) = parse_consumer(request.consumer.as_deref()) else {
+        let Some(consumer) = parse_filter(request.consumer.as_deref(), ConsumerKind::from_name)
+        else {
             return vec![field_reject(frame, live, "unknown usage consumer filter")];
         };
-        let Some(purpose) = parse_purpose(request.purpose.as_deref()) else {
+        let Some(purpose) = parse_filter(request.purpose.as_deref(), PurposeKind::from_name) else {
             return vec![field_reject(frame, live, "unknown usage purpose filter")];
         };
-        let Some(status) = parse_status(request.status.as_deref()) else {
+        let Some(status) = parse_filter(request.status.as_deref(), UsageSummaryStatus::from_name)
+        else {
             return vec![field_reject(frame, live, "unknown usage status filter")];
         };
         let declared_to = match request.to.as_deref() {
@@ -247,17 +249,23 @@ impl HostHandle {
             return answer;
         }
         let Some(target) = parse_usage_cap_target(&intent.target) else {
-            return vec![self.cap_clarify(frame, intent, live).await];
+            return self
+                .clarify(frame, live, intent, INTENT_KIND_USAGE_CAP)
+                .await;
         };
         let scope = match target.provider {
             None => UsageCapScope::System,
             Some(provider) => UsageCapScope::Provider(provider),
         };
         let Some(window) = UsageCapWindow::from_name(&target.window) else {
-            return vec![self.cap_clarify(frame, intent, live).await];
+            return self
+                .clarify(frame, live, intent, INTENT_KIND_USAGE_CAP)
+                .await;
         };
         let Some(currency) = CurrencyCode::from_code(&target.currency) else {
-            return vec![self.cap_clarify(frame, intent, live).await];
+            return self
+                .clarify(frame, live, intent, INTENT_KIND_USAGE_CAP)
+                .await;
         };
         let expected = match parse_usage_cap_mark(&intent.base_view.0, &scope, window) {
             Some(None) => None,
@@ -311,44 +319,16 @@ impl HostHandle {
                 )]
             }
             Ok(SetUsageCapOutcome::InvalidLimit) => {
-                vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    self.record_decided(
-                        Self::intent_fingerprint(intent, INTENT_KIND_USAGE_CAP),
-                        IntentOutcome::NeedsClarification,
-                    )
-                    .await,
-                )]
+                self.clarify(frame, live, intent, INTENT_KIND_USAGE_CAP)
+                    .await
             }
-            Err(_) => vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::HeldByOperation,
-            )],
+            // Nothing was decided, so a retry is safe.
+            Err(_) => Self::hold(frame, live, intent),
         }
     }
 
-    async fn cap_clarify(
-        &self,
-        frame: &WireFrame,
-        intent: &ManagementIntent,
-        live: &LiveInput,
-    ) -> WireFrame {
-        outcome_frame(
-            frame,
-            live,
-            intent,
-            self.record_decided(
-                Self::intent_fingerprint(intent, INTENT_KIND_USAGE_CAP),
-                IntentOutcome::NeedsClarification,
-            )
-            .await,
-        )
-    }
-
+    /// Answers a face-stale base view with the rebuilt current mark, reading
+    /// the current cap without mutating anything.
     async fn cap_stale(
         &self,
         frame: &WireFrame,
@@ -412,24 +392,10 @@ fn default_from(to: WallClockWithTz) -> WallClockWithTz {
         .map_or(to, WallClockWithTz::from_datetime)
 }
 
-fn parse_consumer(name: Option<&str>) -> Option<Option<ConsumerKind>> {
+fn parse_filter<T>(name: Option<&str>, from_name: fn(&str) -> Option<T>) -> Option<Option<T>> {
     match name {
         None => Some(None),
-        Some(name) => ConsumerKind::from_name(name).map(Some),
-    }
-}
-
-fn parse_purpose(name: Option<&str>) -> Option<Option<PurposeKind>> {
-    match name {
-        None => Some(None),
-        Some(name) => PurposeKind::from_name(name).map(Some),
-    }
-}
-
-fn parse_status(name: Option<&str>) -> Option<Option<UsageSummaryStatus>> {
-    match name {
-        None => Some(None),
-        Some(name) => UsageSummaryStatus::from_name(name).map(Some),
+        Some(name) => from_name(name).map(Some),
     }
 }
 

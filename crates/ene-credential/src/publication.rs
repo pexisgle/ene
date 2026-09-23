@@ -226,35 +226,6 @@ pub trait CredentialPublicationRepository: Send + Sync {
         provider: &str,
         label: &str,
     ) -> Result<Option<SecretVersionId>, CredentialTechnicalError>;
-
-    /// Lists up to `limit` retired versions whose OS items are not yet
-    /// removed, oldest first.
-    ///
-    /// This is the read side of the bounded cleanup pass: each returned row
-    /// names the credential, the version, and the mutation whose phase stays
-    /// `CleanupPending` until the removal is recorded. A row is never returned
-    /// as swept; only [`Self::mark_credential_cleaned`] removes it.
-    async fn pending_credential_retirements(
-        &self,
-        limit: u32,
-    ) -> Result<Vec<RetiredCredentialVersion>, CredentialTechnicalError>;
-
-    /// Records that a retired version's OS item was removed, and completes the
-    /// mutation that retired it once no version it retired remains pending.
-    ///
-    /// Call only after the item's removal is confirmed: the durable row is the
-    /// retry record, so a failed or unconfirmed removal must leave it in place
-    /// (the phase stays `CleanupPending`). The call is idempotent — a version
-    /// already recorded as removed is not an error and is never counted as a
-    /// new removal — and it never completes a mutation while another version
-    /// it retired is still pending.
-    async fn mark_credential_cleaned(
-        &self,
-        mutation_id: &str,
-        provider: &str,
-        label: &str,
-        version: SecretVersionId,
-    ) -> Result<(), CredentialTechnicalError>;
 }
 
 #[cfg(test)]

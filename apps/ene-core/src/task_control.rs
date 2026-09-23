@@ -50,11 +50,11 @@ use ene_task::{
     ConversationTaskRepository as _, CreateDelegationCommand, DelegatedWorkspace, DelegationId,
     DelegationOutcome, DelegationScope, OwnerMessageCurrentness, ResumeInstructionSource,
     ResumeTaskCommand, SteeringPremiseRef, TaskCancelOutcome, TaskContextOrigin,
-    TaskContextOriginKind, TaskCreationOutcome, TaskId, TaskProgress, TaskProposalOutcome,
-    TaskPurpose, TaskRef, TaskRepository as _, TaskResultAcceptance, TaskResumeOutcome,
-    TaskResumeReadiness, TaskTechnicalError, WorkspaceFolderRef, WorkspaceNeedRef,
-    orchestrate_delegation, orchestrate_resume, orchestrate_resume_current,
-    reevaluate_result_adoption, resume_commit_premise, route_available_result,
+    TaskContextOriginKind, TaskId, TaskProgress, TaskProposalOutcome, TaskPurpose, TaskRef,
+    TaskRepository as _, TaskResultAcceptance, TaskResumeOutcome, TaskResumeReadiness,
+    TaskTechnicalError, WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_delegation,
+    orchestrate_resume, orchestrate_resume_current, reevaluate_result_adoption,
+    resume_commit_premise, route_available_result,
 };
 use thiserror::Error;
 
@@ -353,29 +353,41 @@ impl<'a> HostTaskControl<'a> {
         .await;
         match outcome {
             Err(_) => DialogueTaskControlReply::Unavailable,
-            Ok(TaskCreationOutcome::Superseded) => DialogueTaskControlReply::Unavailable,
-            Ok(TaskCreationOutcome::Created(task)) => match self.handle.delegate_task(task).await {
-                Err(_) => DialogueTaskControlReply::Unavailable,
-                Ok(DelegationOutcome::Delegated(delegation)) => {
-                    self.handle.conversation_tasks.record(
-                        self.companion,
-                        task.task,
-                        Some(delegation.delegation),
-                    );
-                    self.handle.launch_or_release(delegation.delegation);
-                    DialogueTaskControlReply::Answered(String::from(
-                        "Task accepted (status: in-progress). I will work on it.",
-                    ))
+            // The turn was superseded before the creation transaction: no
+            // Task, no delegation, no reply.
+            Ok(TaskProposalOutcome::Superseded) => DialogueTaskControlReply::Unavailable,
+            Ok(TaskProposalOutcome::AcceptedAsTask(task)) => {
+                match self.handle.delegate_task(task).await {
+                    Err(_) => DialogueTaskControlReply::Unavailable,
+                    Ok(DelegationOutcome::Delegated(delegation)) => {
+                        self.handle.conversation_tasks.record(
+                            self.companion,
+                            task.task,
+                            Some(delegation.delegation),
+                        );
+                        // Production launcher: the existing runner starts in
+                        // the background; this turn never awaits it. Without
+                        // a launcher the reservation is released and the
+                        // delegation stays durable and unexecuted.
+                        self.handle.launch_or_release(delegation.delegation);
+                        DialogueTaskControlReply::Answered(String::from(
+                            "Task accepted (status: in-progress). I will work on it.",
+                        ))
+                    }
+                    Ok(_) => {
+                        self.handle
+                            .conversation_tasks
+                            .record(self.companion, task.task, None);
+                        DialogueTaskControlReply::Answered(String::from(
+                            "Task accepted, but no execution could be delegated; it stays without an execution.",
+                        ))
+                    }
                 }
-                Ok(_) => {
-                    self.handle
-                        .conversation_tasks
-                        .record(self.companion, task.task, None);
-                    DialogueTaskControlReply::Answered(String::from(
-                        "Task accepted, but no execution could be delegated; it stays without an execution.",
-                    ))
-                }
-            },
+            }
+            // A fresh creation cannot answer a steering, staleness, terminal,
+            // missing, exhausted, or held-for-erasure outcome; refuse rather
+            // than inventing a reply for a state this path cannot produce.
+            Ok(_) => DialogueTaskControlReply::Unavailable,
         }
     }
 
@@ -796,13 +808,6 @@ impl HostHandle {
                 };
                 let outcome =
                     store.commit_task_resume_sync(resume_commit_premise(command, readiness))?;
-                if let TaskResumeOutcome::Resumed { delegation, .. } = &outcome
-                    && !registry.reserve(delegation.delegation, delegation.task.task)
-                {
-                    return Err(TaskTechnicalError::StorageUnavailable {
-                        reason: String::from("resume launch reservation lost its race"),
-                    });
-                }
                 Ok(outcome)
             })
         })
@@ -816,9 +821,7 @@ impl HostHandle {
         if let TaskResumeOutcome::ResultAvailable { task } = &outcome {
             route_available_result(&self.store, *task).await?;
         }
-        if let TaskResumeOutcome::Resumed { delegation, .. } = &outcome {
-            self.launch_or_release(delegation.delegation);
-        }
+        self.reserve_and_launch_resumed(&outcome)?;
         Ok(Some(outcome))
     }
 
@@ -926,27 +929,18 @@ impl HostHandle {
     pub async fn reconcile_sealed_results(
         &self,
     ) -> Result<ReconciliationSummary, TaskTechnicalError> {
-        self.reconcile_sealed_results_with_page_size(RECONCILIATION_PAGE_SIZE)
-            .await
-    }
-
-    async fn reconcile_sealed_results_with_page_size(
-        &self,
-        page_size: u64,
-    ) -> Result<ReconciliationSummary, TaskTechnicalError> {
-        debug_assert_ne!(page_size, 0, "reconciliation page size must be non-zero");
         let mut summary = ReconciliationSummary::default();
         let mut cursor = None;
         loop {
             let page = self
                 .store
-                .list_unadopted_results_after(cursor, page_size)
+                .list_unadopted_results_after(cursor, RECONCILIATION_PAGE_SIZE)
                 .await?;
             let Some(last) = page.last() else {
                 break;
             };
             cursor = Some(*last);
-            let full_page = page.len() as u64 == page_size;
+            let full_page = page.len() as u64 == RECONCILIATION_PAGE_SIZE;
             for candidate in page {
                 summary.evaluated += 1;
                 match reevaluate_result_adoption(&self.store, candidate.result).await {

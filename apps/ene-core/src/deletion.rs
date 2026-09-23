@@ -63,7 +63,7 @@ fn parse_status_cursor(raw: &str) -> Option<DeletionOperationId> {
 fn mint_status_cursor(operation: DeletionOperationId) -> DeletionStatusCursorWire {
     DeletionStatusCursorWire(format!(
         "{DELETION_STATUS_CURSOR_PREFIX}{}",
-        operation.as_raw().as_uuid().as_hyphenated()
+        encode_operation(operation)
     ))
 }
 
@@ -109,7 +109,7 @@ fn status_view(
 impl HostHandle {
     const INTENT_KIND_DELETION: &str = "deletion-targeted";
 
-    /// Body-free journal target for an inadmissible deletion inlet target.
+    /// Body-free journal target for any Owner-body-carrying intent target.
     ///
     /// It names the inlet family only: even a target the grammar refuses may
     /// carry the Owner's text (an unknown purpose token, an over-long body),
@@ -120,24 +120,9 @@ impl HostHandle {
         intent: &ManagementIntent,
         purpose: DeletionPurposeWire,
     ) -> IntentFingerprint {
-        Self::deletion_fingerprint_on(
-            intent,
-            format!("{DELETION_TARGET_PREFIX}{}", purpose.as_str()),
-        )
-    }
-
-    fn inadmissible_deletion_fingerprint(intent: &ManagementIntent) -> IntentFingerprint {
-        Self::deletion_fingerprint_on(intent, String::from(Self::DELETION_JOURNAL_FAMILY))
-    }
-
-    fn deletion_fingerprint_on(intent: &ManagementIntent, target: String) -> IntentFingerprint {
         IntentFingerprint {
-            intent_id: intent.intent_id.0.as_hyphenated().to_string(),
-            kind: Self::INTENT_KIND_DELETION.to_string(),
-            target,
-            base: intent.base_view.0.clone(),
-            rationale_origin: Self::rationale_origin_name(intent.rationale.origin).to_string(),
-            rationale_quote: None,
+            target: format!("{DELETION_TARGET_PREFIX}{}", purpose.as_str()),
+            ..Self::intent_fingerprint(intent, Self::INTENT_KIND_DELETION)
         }
     }
 
@@ -153,7 +138,7 @@ impl HostHandle {
                 live,
                 intent,
                 self.record_decided(
-                    Self::inadmissible_deletion_fingerprint(intent),
+                    Self::intent_fingerprint(intent, Self::INTENT_KIND_DELETION),
                     IntentOutcome::NeedsClarification,
                 )
                 .await,
