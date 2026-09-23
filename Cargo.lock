@@ -1313,8 +1313,10 @@ dependencies = [
 name = "ene-api"
 version = "0.1.0"
 dependencies = [
+ "rmp-serde",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
  "uuid",
  "zeroize",
 ]
@@ -1550,13 +1552,6 @@ dependencies = [
 [[package]]
 name = "ene-plugin-ipc"
 version = "0.1.0"
-dependencies = [
- "ene-api",
- "rmp-serde",
- "serde",
- "thiserror 2.0.20",
- "uuid",
-]
 
 [[package]]
 name = "ene-presence"

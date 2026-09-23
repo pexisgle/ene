@@ -1,3 +1,4 @@
+use ene_api::codec::WireFrame;
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
 use ene_api::v1::handshake::{AuthProof, CapabilityAdvertise, PairingRequest};
 use ene_api::v1::payload::WirePayload;
@@ -5,7 +6,6 @@ use ene_api::v1::refs::{
     ClientIncarnationId, CommandWireId, DeviceWireId, RequestWireId, WireMessageType,
 };
 use ene_api::v1::round::RoundTarget;
-use ene_plugin_ipc::WireFrame;
 
 pub fn proof_frame(
     proof: &str,

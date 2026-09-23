@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use ene_api::codec::WireFrame;
 use ene_api::v1::command::CommandReplayRejectWire;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{CompanionWireRef, ConnectionWireId, RoundWireId};
@@ -20,7 +21,6 @@ use ene_companion::{
     CompanionId, CompanionRepository, RecordResumeActivityCommand, ReportStatus, TaskFact,
     UndeliveredCursor, UndeliveredId, UndeliveredRef, UndeliveredRepository, UndeliveredSource,
 };
-use ene_plugin_ipc::WireFrame;
 use ene_presence::{ClientId, PresenceAttribution, PresenceRepository, PresenceState};
 use ene_preservation::{
     DeletionMaterialOutcome, MechanicalDeletionTarget, PreservationRepository as _,

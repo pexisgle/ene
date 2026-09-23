@@ -20,13 +20,13 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
 }
 
 #[cfg(any(unix, windows))]
+use ene_api::codec::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
+#[cfg(any(unix, windows))]
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::handshake::NegotiatedConnection;
 #[cfg(any(unix, windows))]
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageId};
-#[cfg(any(unix, windows))]
-use ene_plugin_ipc::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
@@ -764,13 +764,16 @@ async fn write_response(
     ) {
         *terminal = true;
     }
-    let Ok(encoded) = encode_frame(&response).map(zeroize::Zeroizing::new) else {
+    let Ok(body) = encode_frame(&response).map(zeroize::Zeroizing::new) else {
         return false;
     };
+    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(4 + body.len()));
+    bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&body);
     tokio::select! {
         biased;
         () = wait_for_shutdown(shutdown) => false,
-        result = stream.write_all(&encoded) => result.is_ok(),
+        result = stream.write_all(&bytes) => result.is_ok(),
     }
 }
 
@@ -791,12 +794,11 @@ where
         if claimed > MAX_FRAME_BYTES {
             break;
         }
-        let mut bytes = vec![0_u8; prefix.len() + claimed];
-        bytes[..prefix.len()].copy_from_slice(&prefix);
-        if read.read_exact(&mut bytes[prefix.len()..]).await.is_err() {
+        let mut body = vec![0_u8; claimed];
+        if read.read_exact(&mut body).await.is_err() {
             break;
         }
-        let Ok((frame, _)) = decode_frame(&bytes) else {
+        let Ok(frame) = decode_frame(&body) else {
             break;
         };
         if frames.send(frame).await.is_err() {

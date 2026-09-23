@@ -5,6 +5,7 @@ use super::frames::{
 use super::{HostHandle, LiveInput, device_client};
 use crate::conn::{ChallengeOutcome, ConnectionPhase, InstallOutcome, NonceAdmission};
 use crate::pairing_delivery::PendingResend;
+use ene_api::codec::WireFrame;
 use ene_api::v1::envelope::ProtocolVersion;
 use ene_api::v1::handshake::{
     AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, NegotiatedConnection,
@@ -13,7 +14,6 @@ use ene_api::v1::handshake::{
 use ene_api::v1::payload::WirePayload;
 use ene_companion::CompanionRepository;
 use ene_credential::DevicePairingRepository;
-use ene_plugin_ipc::WireFrame;
 use ene_presence::PresenceRepository;
 use uuid::Uuid;
 

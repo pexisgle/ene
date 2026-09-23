@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
 
+use ene_api::codec::WireFrame;
 use ene_api::v1::deletion::{ClientTempClass, DeletionDemand};
 use ene_api::v1::handshake::AuthResult;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::presence::PresenceAttributionWire;
 use ene_api::v1::refs::{ConnectionWireId, RoundWireId, WireMessageId};
 use ene_api::v1::round::RoundIntakeOutcomeWire;
-use ene_plugin_ipc::WireFrame;
 
 use super::frames::auth_rejected_guidance;
 

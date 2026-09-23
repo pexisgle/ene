@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(unix)]
+use ene_api::codec::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 use ene_api::v1::deletion::{
     DeletionParticipantReportWire, DeletionParticipantStatusWire, DeletionPhaseWire,
     DeletionPurposeWire, DeletionStatusPage, DeletionStatusRequest, DeletionStatusResponse,
@@ -50,8 +52,6 @@ use ene_ctl::client::{Client, ClientError, ConnectProgress, PendingPairingClient
 use ene_ctl::cmds;
 use ene_inference::cost::UsageEstimate;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport, RawUsage};
-#[cfg(unix)]
-use ene_plugin_ipc::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 use ene_preservation::{ConfirmTargetedDeletionOutcome, DeletionOperationRef};
 use ene_primitive::{RawId, WallClockWithTz};
 
@@ -5028,7 +5028,8 @@ async fn ingress_write_crafted(
 ) -> WireMessageId {
     let message_id = frame.envelope.message_id;
     let body = rmp_serde::to_vec_named(frame).expect("crafted frame must encode");
-    let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
+    let mut bytes = Vec::with_capacity(4 + body.len());
+    bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
     bytes.extend_from_slice(&body);
     ingress_write_bytes(stream, &bytes).await;
     message_id
@@ -5036,7 +5037,10 @@ async fn ingress_write_crafted(
 
 #[cfg(unix)]
 async fn ingress_write_wire(stream: &mut tokio::net::UnixStream, frame: &WireFrame) {
-    let bytes = encode_frame(frame).expect("wire frame must encode");
+    let body = encode_frame(frame).expect("wire frame must encode");
+    let mut bytes = Vec::with_capacity(4 + body.len());
+    bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&body);
     ingress_write_bytes(stream, &bytes).await;
 }
 
@@ -5051,14 +5055,12 @@ async fn ingress_read_reply(stream: &mut tokio::net::UnixStream) -> WireFrame {
         .expect("the reply prefix must be readable");
     let claimed = u32::from_be_bytes(prefix) as usize;
     assert!(claimed <= MAX_FRAME_BYTES, "host replies stay bounded");
-    let mut bytes = vec![0_u8; 4 + claimed];
-    bytes[..4].copy_from_slice(&prefix);
-    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut bytes[4..]))
+    let mut body = vec![0_u8; claimed];
+    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut body))
         .await
         .expect("the host must answer")
         .expect("the reply body must be readable");
-    let (decoded, consumed) = decode_frame(&bytes).expect("host reply must decode");
-    assert_eq!(consumed, bytes.len(), "one host reply per message");
+    let decoded = decode_frame(&body).expect("host reply must decode");
     match decoded {
         DecodedFrame::Known(frame) => frame,
         other => panic!("the host must reply with known frames, got {other:?}"),
@@ -5182,6 +5184,38 @@ async fn unknown_wire_values_are_typed_rejects_and_the_connection_stays_usable()
         ),
     }
 
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+    drop(std::fs::remove_file(conn::socket_path(dir.path())));
+}
+
+#[tokio::test]
+async fn an_oversize_length_prefix_closes_the_connection_without_allocating() {
+    use tokio::io::AsyncReadExt as _;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let mut stream = ingress_dial(dir.path()).await;
+    ingress_write_bytes(&mut stream, &1_073_741_824_u32.to_be_bytes()).await;
+    let mut probe = [0_u8; 1];
+    let outcome =
+        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut probe)).await;
+    assert!(
+        matches!(outcome, Ok(Err(_))),
+        "the Host must drop a connection that claims an oversize frame: {outcome:?}"
+    );
     stop.send_replace(true);
     let joined = tokio::time::timeout(Duration::from_secs(30), server)
         .await
