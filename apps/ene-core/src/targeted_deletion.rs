@@ -424,8 +424,6 @@ async fn settle_finalizing(
     current: DeletionOperationRef,
     outcome: &mut TargetedDeletionPassOutcome,
 ) -> Result<(), CoreError> {
-    #[cfg(any(test, feature = "test-support"))]
-    store.pause_deletion_finalizing_if_armed_for_tests().await;
     let _arrival_gate = if let Some(host) = &registry.host_transient {
         let gate = host.lock_arrival().await;
         host.publish_owed_arrivals_locked().await;

@@ -280,13 +280,16 @@ impl HostHandle {
         query: &DeletionStatusRequest,
     ) -> Vec<WireFrame> {
         match self
-            .read_deletion_status(query.cursor.as_ref(), query.limit)
+            .read_deletion_status(
+                query.cursor.as_ref().map(|cursor| cursor.0.as_str()),
+                query.limit,
+            )
             .await
         {
-            Ok(response) => vec![outgoing_frame(
+            Ok(page) => vec![outgoing_frame(
                 frame,
                 live,
-                WirePayload::DeletionStatusResponse(response),
+                WirePayload::DeletionStatusResponse(DeletionStatusResponse::Page(page)),
             )],
             Err(DeletionStatusQueryError::InvalidLimit) => {
                 vec![field_reject(frame, live, "query limit must be 1..=50")]
@@ -347,15 +350,15 @@ impl HostHandle {
 
     async fn read_deletion_status(
         &self,
-        cursor: Option<&DeletionStatusCursorWire>,
+        cursor: Option<&str>,
         limit: Option<u32>,
-    ) -> Result<DeletionStatusResponse, DeletionStatusQueryError> {
+    ) -> Result<DeletionStatusPage, DeletionStatusQueryError> {
         let limit = checked_limit(limit).ok_or(DeletionStatusQueryError::InvalidLimit)?;
         let after = match cursor {
             None => None,
-            Some(cursor) => Some(
-                parse_status_cursor(&cursor.0).ok_or(DeletionStatusQueryError::InvalidCursor)?,
-            ),
+            Some(cursor) => {
+                Some(parse_status_cursor(cursor).ok_or(DeletionStatusQueryError::InvalidCursor)?)
+            }
         };
         let records = self
             .store
@@ -382,20 +385,19 @@ impl HostHandle {
                 .map_err(|_| DeletionStatusQueryError::Unavailable)?;
             operations.push(status_view(record, participants));
         }
-        Ok(DeletionStatusResponse::Page(DeletionStatusPage {
+        Ok(DeletionStatusPage {
             mark: ViewMarkWire(mark.as_str().to_string()),
             operations,
             next_cursor,
-        }))
+        })
     }
 
     pub async fn deletion_status_page(
         &self,
         cursor: Option<&str>,
         limit: u32,
-    ) -> Result<DeletionStatusResponse, CoreError> {
-        let cursor = cursor.map(|raw| DeletionStatusCursorWire(raw.to_string()));
-        self.read_deletion_status(cursor.as_ref(), Some(limit))
+    ) -> Result<DeletionStatusPage, CoreError> {
+        self.read_deletion_status(cursor, Some(limit))
             .await
             .map_err(|error| match error {
                 DeletionStatusQueryError::InvalidLimit => {
@@ -461,43 +463,5 @@ impl HostHandle {
             self.kick_targeted_deletion().await;
         }
         Ok(outcome)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_deletion_finalizing_park_for_tests(&self) {
-        self.store.arm_deletion_finalizing_park_for_tests();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_deletion_finalizing_park_for_tests(&self) {
-        self.store.wait_deletion_finalizing_park_for_tests().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_deletion_finalizing_park_for_tests(&self) {
-        self.store.release_deletion_finalizing_park_for_tests();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn begin_deletion_finalizing_for_tests(
-        &self,
-        operation: &str,
-        sweep: u64,
-    ) -> Result<ene_preservation::DeletionFinalizationOutcome, CoreError> {
-        let Ok(uuid) = uuid::Uuid::parse_str(operation) else {
-            return Ok(ene_preservation::DeletionFinalizationOutcome::Missing);
-        };
-        let current = DeletionOperationRef {
-            operation: DeletionOperationId::from_raw(RawId::from_uuid(uuid)),
-            sweep: DeletionSweepGeneration::from_u64(sweep),
-        };
-        self.store
-            .begin_deletion_finalizing(current)
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))
     }
 }

@@ -10,7 +10,7 @@
 //! [`peer_same_user`] — the OS peer token check — before a single frame is
 //! read: an unprovable peer is dropped without a byte, exactly like the Unix
 //! uid-mismatch path. Frames, the `ConnectionTable`,
-//! and [`HostHandle::handle_frame`](crate::serve::HostHandle::handle_frame)
+//! and [`HostHandle::handle_frame_to`](crate::serve::HostHandle::handle_frame_to)
 //! are shared with the Unix socket path, so authentication, currentness, and
 //! the connection phase machine are identical on both transports.
 //!

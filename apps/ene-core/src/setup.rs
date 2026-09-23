@@ -350,22 +350,11 @@ impl HostHandle {
                 Self::hold(frame, live, intent)
             }
             Ok(RegistrationApply::AlreadyDecided) => {
-                let intent_key = intent.intent_id.0.as_hyphenated().to_string();
-                match self.store.lookup_intent_outcome(&intent_key).await {
-                    Ok(Some(stored)) if stored.fingerprint == fingerprint => vec![outcome_frame(
-                        frame,
-                        live,
-                        intent,
-                        Self::replayed_outcome(&stored.outcome),
-                    )],
-                    Ok(Some(_)) => vec![outcome_frame(
-                        frame,
-                        live,
-                        intent,
-                        ManagementOutcome::NeedsClarification,
-                    )],
-                    Ok(None) | Err(_) => Self::hold(frame, live, intent),
-                }
+                // Lost a cross-process race: answer from the journal winner
+                // through the one journal-resolution rule.
+                self.replay_or_hold(frame, live, intent, fingerprint)
+                    .await
+                    .unwrap_or_else(|| Self::hold(frame, live, intent))
             }
             Err(_) => Self::hold(frame, live, intent),
         }

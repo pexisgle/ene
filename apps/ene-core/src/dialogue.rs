@@ -25,7 +25,7 @@
 //! defensive only: [`ene_presentation::check_intake`] never emits its source
 //! variant.
 //!
-//! Infallible-frame mapping used here (no `Result`: [`HostHandle::handle_frame`]
+//! Infallible-frame mapping used here (no `Result`: [`HostHandle::handle_frame_to`]
 //! answers every frame):
 //!
 //! - Store failures before acceptance become
@@ -99,7 +99,7 @@ use ene_store::Store;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::serve::{
-    CredStore, FrameSink, HostHandle, LiveInput, attribution_to_wire, device_client, emit_end,
+    CredStore, HostHandle, LiveInput, attribution_to_wire, device_client, emit_control, emit_end,
     outgoing_fact, outgoing_frame, stale_reject, unpaired_close,
 };
 
@@ -381,8 +381,7 @@ impl HostHandle {
         submit: &SubmitTextInput,
         live: &LiveInput,
         transport: &impl ProviderTransport,
-        sink: &mut dyn FrameSink,
-        stream_tx: &tokio::sync::mpsc::Sender<WireFrame>,
+        sink: &tokio::sync::mpsc::Sender<WireFrame>,
     ) {
         let Some(device_wire) = live.paired_device.clone() else {
             return emit_end(sink, unpaired_close(frame, live));
@@ -518,7 +517,7 @@ impl HostHandle {
                         WirePayload::PresenceAttribution(attribution_to_wire(self, &attribution)),
                     );
                     if matches!(
-                        self.with_current_connection(live, || sink.emit(fact)),
+                        self.with_current_connection(live, || emit_control(sink, fact)),
                         Some(Ok(()))
                     ) {
                         for summary in self
@@ -526,7 +525,7 @@ impl HostHandle {
                             .await
                         {
                             if !matches!(
-                                self.with_current_connection(live, || sink.emit(summary)),
+                                self.with_current_connection(live, || emit_control(sink, summary)),
                                 Some(Ok(()))
                             ) {
                                 break;
@@ -759,14 +758,11 @@ impl HostHandle {
                 let fence_epoch = self.transient_fence.epoch();
                 let opened = if installed {
                     match self.with_current_connection(live, || {
-                        sink.emit(accept_frame(frame, live, &round_wire))?;
-                        sink.emit(open_frame(
-                            frame,
-                            live,
-                            &stream,
-                            &round_wire,
-                            generation_number,
-                        ))
+                        emit_control(sink, accept_frame(frame, live, &round_wire))?;
+                        emit_control(
+                            sink,
+                            open_frame(frame, live, &stream, &round_wire, generation_number),
+                        )
                     }) {
                         Some(Ok(())) => true,
                         Some(Err(_)) => return,
@@ -808,7 +804,7 @@ impl HostHandle {
                     generation: attribution.generation,
                     consent: admitted_consent,
                     credential_set,
-                    tx: stream_tx.clone(),
+                    tx: sink.clone(),
                     seq: 0,
                     opened,
                     fence_epoch,

@@ -197,13 +197,10 @@ impl FirstPartyControlSeat {
             .sessions
             .iter()
             .filter(|(_, session)| session.deadline <= now)
-            .map(|(session_id, session)| (*session_id, session.request_id.clone()))
+            .map(|(session_id, _)| *session_id)
             .collect::<Vec<_>>();
-        for (session_id, request_id) in expired {
-            inner.sessions.remove(&session_id);
-            if let Some(request) = inner.requests.get_mut(&request_id) {
-                request.state = RequestState::Rejected;
-            }
+        for session_id in expired {
+            Self::settle_expired_session(inner, session_id);
         }
     }
 
@@ -602,6 +599,26 @@ pub(crate) async fn serve_requester<S>(
     }
 }
 
+/// Admits one high-privilege requester request (first-party-desktop
+/// §5.1.5): start the confirmation surface, admit or hold, mint when a
+/// seat is live, and answer the Host-issued id.
+#[cfg(any(unix, windows))]
+async fn admit_requester(
+    handle: &Arc<HostHandle>,
+    op: ControlOp,
+    target: String,
+    pending: PendingOp,
+) -> FromHost {
+    drop(handle.open_desktop().await);
+    let Some((request_id, state)) = handle.control_seat.accept_request() else {
+        return FromHost::BackpressureHold;
+    };
+    if matches!(state, RequestState::AwaitingOwnerConfirmation) {
+        handle.control_seat.mint(&request_id, op, target, pending);
+    }
+    FromHost::RequestAccepted { request_id }
+}
+
 #[cfg(any(unix, windows))]
 async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHost {
     match request {
@@ -611,64 +628,39 @@ async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHo
             Err(_) => FromHost::Unavailable,
         },
         ToHost::RequestDeviceApprove { pending_id } => {
-            // first-party-desktop §5.1.5: when no GUI is live but one can
-            // start, start it and present the same request on it. Only an
-            // un-startable GUI is answered `ConfirmationUnavailable`.
-            drop(handle.open_desktop().await);
-            let Some((request_id, state)) = handle.control_seat.accept_request() else {
-                return FromHost::BackpressureHold;
-            };
-            if matches!(state, RequestState::AwaitingOwnerConfirmation) {
-                handle.control_seat.mint(
-                    &request_id,
-                    ControlOp::DeviceApprove,
-                    pending_id.clone(),
-                    PendingOp::DeviceApprove { pending_id },
-                );
-            }
-            FromHost::RequestAccepted { request_id }
+            admit_requester(
+                handle,
+                ControlOp::DeviceApprove,
+                pending_id.clone(),
+                PendingOp::DeviceApprove { pending_id },
+            )
+            .await
         }
         ToHost::RequestCredentialPut { provider, label } => {
-            // first-party-desktop §5.1.5: start the confirmation surface
-            // before admitting, so the request reaches its Owner.
-            drop(handle.open_desktop().await);
             let target = format!("{provider}:{label}");
-            let Some((request_id, state)) = handle.control_seat.accept_request() else {
-                return FromHost::BackpressureHold;
-            };
-            if matches!(state, RequestState::AwaitingOwnerConfirmation) {
-                handle.control_seat.mint(
-                    &request_id,
-                    ControlOp::CredentialPut,
-                    target,
-                    PendingOp::CredentialPut {
-                        provider,
-                        label,
-                        mutation_id: Uuid::new_v4().as_hyphenated().to_string(),
-                        secret: None,
-                    },
-                );
-            }
-            FromHost::RequestAccepted { request_id }
+            admit_requester(
+                handle,
+                ControlOp::CredentialPut,
+                target,
+                PendingOp::CredentialPut {
+                    provider,
+                    label,
+                    mutation_id: Uuid::new_v4().as_hyphenated().to_string(),
+                    // The secret arrives on the confirmation channel; the
+                    // requester only names the pair.
+                    secret: None,
+                },
+            )
+            .await
         }
         ToHost::RequestDeletionConfirm { request_id } => {
-            // first-party-desktop §5.1.5: start the confirmation surface
-            // before admitting, so the request reaches its Owner.
-            drop(handle.open_desktop().await);
-            let Some((accepted_id, state)) = handle.control_seat.accept_request() else {
-                return FromHost::BackpressureHold;
-            };
-            if matches!(state, RequestState::AwaitingOwnerConfirmation) {
-                handle.control_seat.mint(
-                    &accepted_id,
-                    ControlOp::DeletionConfirm,
-                    request_id.clone(),
-                    PendingOp::DeletionConfirm { request_id },
-                );
-            }
-            FromHost::RequestAccepted {
-                request_id: accepted_id,
-            }
+            admit_requester(
+                handle,
+                ControlOp::DeletionConfirm,
+                request_id.clone(),
+                PendingOp::DeletionConfirm { request_id },
+            )
+            .await
         }
         ToHost::PendingDeletions => match handle.pending_targeted_deletions(None, 50).await {
             Ok(list) => FromHost::PendingDeletions {
@@ -993,14 +985,17 @@ impl HostHandle {
     /// set first so a frame arriving during the drain is refused instead of
     /// being dispatched after the last observation.
     pub(crate) async fn join_confirmation_tasks(&self) {
-        self.confirmation_stopping
-            .store(true, std::sync::atomic::Ordering::Release);
         loop {
             let next = {
                 let mut tasks = self
                     .confirmation_tasks
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Set under the same guard the serve thread holds across its
+                // check-and-push, so a frame is either registered before this
+                // pop or refused after it.
+                self.confirmation_stopping
+                    .store(true, std::sync::atomic::Ordering::Release);
                 tasks.pop()
             };
             let Some(task) = next else {
@@ -1153,10 +1148,15 @@ impl HostHandle {
                             let Some(host) = handle.upgrade() else {
                                 break;
                             };
+                            let mut tasks = host
+                                .confirmation_tasks
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             if host
                                 .confirmation_stopping
                                 .load(std::sync::atomic::Ordering::Acquire)
                             {
+                                drop(tasks);
                                 match replies.send(ChannelEvent::Outbound(
                                     FromConfirmation::DeniedByBoundary,
                                 )) {
@@ -1176,10 +1176,6 @@ impl HostHandle {
                             // Owner's surface already admitted runs to
                             // completion before the serving authority goes
                             // away, and no task outlives the handle it borrows.
-                            let mut tasks = host
-                                .confirmation_tasks
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             tasks.retain(|task| !task.is_finished());
                             tasks.push(dispatched);
                         }

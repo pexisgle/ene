@@ -3,7 +3,7 @@
 //! The listener binds `ene.sock` inside the data directory and serves one
 //! task per connection. Each task reads length-prefixed
 //! [`ene_plugin_ipc::WireFrame`] values, runs them through
-//! [`HostHandle::handle_frame`], and writes the responses back. A terminal
+//! [`HostHandle::handle_frame_to`], and writes the responses back. A terminal
 //! refusal — a
 //! [`DisconnectNotice`](ene_api::v1::handshake::DisconnectNotice) or the
 //! negotiation-level
@@ -37,7 +37,7 @@
 //! authenticated connection, not a zero live-socket count.
 //!
 //! Each frame's [`LiveInput`] premises come from this table, never from Client
-//! self-reports; the ingress gate in [`HostHandle::handle_frame`] trusts
+//! self-reports; the ingress gate in [`HostHandle::handle_frame_to`] trusts
 //! exactly these conn-filled premises. [`LiveInput`] also carries the table
 //! handle, so the handshake phase operations (device bind, nonce consumption,
 //! auth install) and the close admission that runs the presence
@@ -58,7 +58,7 @@
 //! credential, closes the connection before any frame is read: an unprovable
 //! peer is a trust violation, not a protocol peer, so it receives no bytes
 //! (not even a denial, which would be an oracle). [`LiveInput::peer_uid_ok`]
-//! still travels into [`HostHandle::handle_frame`] for the pairing decision,
+//! still travels into [`HostHandle::handle_frame_to`] for the pairing decision,
 //! as defense in depth for direct handle callers.
 //!
 //! Corrupt or oversize frames close the connection without a reply: the frame
@@ -70,7 +70,7 @@
 //! exclusive first server instance for the data directory's pipe name (a
 //! second Host fails to create, like the Unix singleton probe), checks the OS
 //! peer token before any frame is read, and drives the same
-//! [`HostHandle::handle_frame`] seam, so authentication, currentness, and the
+//! [`HostHandle::handle_frame_to`] seam, so authentication, currentness, and the
 //! connection phase machine are identical on both transports. Other platforms
 //! have no listener and [`run`] returns
 //! [`CoreError::UnsupportedPlatform`] there.
@@ -96,12 +96,18 @@ const SINGLETON_PROBE_MILLIS: u64 = 200;
 #[cfg(any(unix, windows))]
 const DELETION_DRIVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Resolves the listener socket path for a data directory.
+///
+/// Public so integration tests derive the same path the Host binds. The
+/// sibling Client dialer keeps its own copy (`ene_client::socket_path`)
+/// because `ene-client` cannot depend on this crate, so a change to
+/// `SOCKET_NAME` must be mirrored there.
 #[must_use]
 pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join(SOCKET_NAME)
 }
 
-#[cfg(any(unix, windows, test))]
+#[cfg(any(unix, windows))]
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::handshake::NegotiatedConnection;
 #[cfg(any(unix, windows))]
@@ -112,7 +118,7 @@ use ene_plugin_ipc::{MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
-#[cfg(any(unix, windows, test))]
+#[cfg(any(unix, windows))]
 use crate::serve::LiveInput;
 
 #[cfg(any(unix, windows))]
@@ -201,14 +207,21 @@ struct ConnectionTableInner {
     device_current: HashMap<String, ConnectionWireId>,
 }
 
-impl ConnectionTable {
-    #[cfg(any(unix, windows))]
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: StdMutex::new(ConnectionTableInner::default()),
-        }
+impl ConnectionTableInner {
+    /// The one currentness predicate: `(phase, device)` names this connection
+    /// as authenticated and still its device's current one.
+    fn current_authenticated(
+        &self,
+        id: &ConnectionWireId,
+        phase: ConnectionPhase,
+        device: Option<&str>,
+    ) -> bool {
+        phase == ConnectionPhase::Authenticated
+            && device.is_some_and(|device| self.device_current.get(device) == Some(id))
     }
+}
 
+impl ConnectionTable {
     #[cfg(any(unix, windows))]
     pub(crate) fn note_accept(&self) -> ConnectionWireId {
         let id = ConnectionWireId(uuid::Uuid::new_v4());
@@ -377,16 +390,14 @@ impl ConnectionTable {
                 format!("incarnation-{}-{}", incarnation.counter, incarnation.random)
             }
         };
-        let current = device
-            .as_ref()
-            .is_some_and(|paired| table.device_current.get(paired) == Some(id));
+        let authed = table.current_authenticated(id, phase, device.as_deref());
         LiveDecision::Ready(LiveInput {
             client_ref,
             connection_live: true,
             peer_uid_ok: true,
             paired_device: device,
             connection_known: true,
-            authed: phase == ConnectionPhase::Authenticated && current,
+            authed,
             connection_id: *id,
             negotiated,
             phase,
@@ -407,13 +418,7 @@ impl ConnectionTable {
         let Some(record) = table.records.get(id) else {
             return false;
         };
-        if record.phase != ConnectionPhase::Authenticated {
-            return false;
-        }
-        let Some(device) = record.paired_device.as_ref() else {
-            return false;
-        };
-        table.device_current.get(device) == Some(id)
+        table.current_authenticated(id, record.phase, record.paired_device.as_deref())
     }
 
     #[cfg(any(unix, windows))]
@@ -458,11 +463,9 @@ impl ConnectionTable {
             if incarnation.counter != counter || incarnation.random != random {
                 return None;
             }
-            if record.phase != ConnectionPhase::Authenticated {
-                return None;
-            }
-            let device = record.paired_device.as_ref()?;
-            (table.device_current.get(device) == Some(id)).then_some(*id)
+            table
+                .current_authenticated(id, record.phase, record.paired_device.as_deref())
+                .then_some(*id)
         })
     }
 
@@ -473,11 +476,7 @@ impl ConnectionTable {
     ) -> Option<R> {
         let table = crate::lock_unpoison(&self.inner);
         let record = table.records.get(id)?;
-        if record.phase != ConnectionPhase::Authenticated {
-            return None;
-        }
-        let device = record.paired_device.as_ref()?;
-        if table.device_current.get(device) != Some(id) {
+        if !table.current_authenticated(id, record.phase, record.paired_device.as_deref()) {
             return None;
         }
         Some(commit())
@@ -488,14 +487,12 @@ impl ConnectionTable {
     /// Mirrors [`ConnectionTable::live_for`]'s premise derivation so the
     /// connection-owned subscription loop and direct handle tests can read
     /// the current premises without fabricating an inbound frame.
-    #[cfg(any(unix, windows, test))]
+    #[cfg(any(unix, windows))]
     pub(crate) fn snapshot(self: &Arc<Self>, id: &ConnectionWireId) -> Option<LiveInput> {
         let table = crate::lock_unpoison(&self.inner);
         let record = table.records.get(id)?;
         let device = record.paired_device.clone();
-        let current = device
-            .as_ref()
-            .is_some_and(|paired| table.device_current.get(paired) == Some(id));
+        let authed = table.current_authenticated(id, record.phase, device.as_deref());
         Some(LiveInput {
             client_ref: device.clone().unwrap_or_else(|| {
                 record
@@ -509,7 +506,7 @@ impl ConnectionTable {
             peer_uid_ok: true,
             paired_device: device,
             connection_known: true,
-            authed: record.phase == ConnectionPhase::Authenticated && current,
+            authed,
             connection_id: *id,
             negotiated: record.negotiated.clone(),
             phase: record.phase,
@@ -625,19 +622,7 @@ impl DeletionDriver {
 
 #[cfg(any(unix, windows))]
 pub(crate) async fn wait_for_shutdown(shutdown: &mut tokio::sync::watch::Receiver<bool>) {
-    loop {
-        if *shutdown.borrow_and_update() {
-            return;
-        }
-        if shutdown.changed().await.is_err() {
-            return;
-        }
-    }
-}
-
-#[cfg(any(unix, windows))]
-async fn serving_failure(_handle: &HostHandle) -> CoreError {
-    std::future::pending().await
+    drop(shutdown.wait_for(|stop| *stop).await);
 }
 
 #[cfg(any(unix, windows))]
@@ -774,7 +759,7 @@ where
         ));
         let _ = handle.install_task_launcher(launcher.clone());
         let task_owner = TaskAgentOwner(Arc::clone(&launcher));
-        let table = Arc::new(ConnectionTable::new());
+        let table = Arc::new(ConnectionTable::default());
         handle.install_client_connection_table(Arc::clone(&table));
         let driver = spawn_targeted_deletion_driver(Arc::clone(handle));
         let handlers = ServingHandlers::new();
@@ -814,7 +799,7 @@ where
 ///
 /// Binds [`socket_path`] through the singleton check, proves each peer
 /// against the socket owner, and spawns one frame-loop task per authorized
-/// connection, driving the fake-friendly [`HostHandle::handle_frame`] seam.
+/// connection, driving the fake-friendly [`HostHandle::handle_frame_to`] seam.
 /// The Host-local first-party control endpoint is bound in the same task and
 /// served by the same accept loop, so it lives and dies with this listener
 /// (one abort releases both). Production keeps an unsignalled shutdown
@@ -877,7 +862,6 @@ where
                     break Ok(());
                 }
             }
-            error = serving_failure(&handle) => break Err(error),
             accepted = listener.accept() => {
                 let (stream, _) = match accepted {
                     Ok(accepted) => accepted,
@@ -964,13 +948,11 @@ where
         if claimed > MAX_FRAME_BYTES {
             break;
         }
-        let mut body = vec![0_u8; claimed];
-        if read.read_exact(&mut body).await.is_err() {
+        let mut bytes = vec![0_u8; prefix.len() + claimed];
+        bytes[..prefix.len()].copy_from_slice(&prefix);
+        if read.read_exact(&mut bytes[prefix.len()..]).await.is_err() {
             break;
         }
-        let mut bytes = Vec::with_capacity(prefix.len() + body.len());
-        bytes.extend_from_slice(&prefix);
-        bytes.extend_from_slice(&body);
         let Ok((frame, _)) = decode_frame(&bytes) else {
             break;
         };
@@ -1181,12 +1163,10 @@ async fn serve_connection<S, T>(
                     // instead of queueing without limit.
                     let (frame_tx, mut frame_rx) =
                         tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
-                    let mut sink = frame_tx.clone();
                     let mut host = std::pin::pin!(handle.handle_frame_to(
                         frame,
                         live,
                         transport.as_ref(),
-                        &mut sink,
                         &frame_tx,
                     ));
                     let mut failed = false;
@@ -1375,6 +1355,24 @@ async fn drain_learning(
     failure
 }
 
+/// Serves the Windows named-pipe listener until the process ends.
+///
+/// Creates the exclusive first server instance for the data directory's pipe
+/// name (a live peer fails creation, like the Unix singleton probe — pipe
+/// instances vanish with their process, so there is no stale path to unlink),
+/// proves each peer with the OS token check, and spawns one frame-loop task
+/// per authorized connection over the shared [`HostHandle::handle_frame_to`]
+/// seam. Production keeps an unsignalled shutdown sender, matching Unix:
+/// the 15s Targeted Deletion driver keeps running until the process is
+/// killed. Dropping or aborting this future still aborts that driver as an
+/// emergency stop; graceful restart uses [`run_until_shutdown`] so a running
+/// tick can finish its started Store work. The same shutdown regressions
+/// exercise the Unix socket and Windows named-pipe transports.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Bind`] when the first pipe instance cannot be created
+/// (including a live peer) or a follow-up instance cannot be created.
 #[cfg(windows)]
 pub async fn run<T>(
     data_dir: PathBuf,
@@ -1420,7 +1418,6 @@ where
                         return Ok(());
                     }
                 }
-                error = serving_failure(&handle) => return Err(error),
                 connected = server.connect() => {
                     if connected.is_err() {
                         server = crate::conn_pipe::create_next_server(&pipe)?;

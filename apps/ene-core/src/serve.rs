@@ -2,7 +2,7 @@
 //!
 //! [`HostHandle`] is the testable seam: it owns the durable [`ene_store::Store`],
 //! the [`EvaluationTracker`], and the per-process Host maps, and
-//! [`HostHandle::handle_frame`] runs the full orchestration pipeline over one
+//! [`HostHandle::handle_frame_to`] runs the full orchestration pipeline over one
 //! [`WireFrame`] without touching any socket. [`serve`] wires a handle to the
 //! [`crate::conn`] listener with the production inference transport.
 //!
@@ -54,7 +54,7 @@
 //! - The single-writer `host.lock` ([`crate::host_lock`]) is taken before the
 //!   state open, so a second Host in the same data directory is refused
 //!   before any startup mutation (PR §6.4).
-//! - [`HostHandle::handle_frame`] is infallible by contract: infrastructure
+//! - [`HostHandle::handle_frame_to`] is infallible by contract: infrastructure
 //!   failures map to retry-safe outcome frames (hold or revalidate), never to
 //!   fabricated domain facts.
 //! - Decoded-but-unhandled inbound variants (reconnect, Client stream frames,
@@ -63,7 +63,7 @@
 //!   [`ene_api::v1::handshake::DisconnectNotice`] would carry the wrong
 //!   semantics for them. Silence is the explicit `Stage 2` decision.
 //! - The envelope discriminator must name the decoded payload:
-//!   [`HostHandle::handle_frame`] answers a typed
+//!   [`HostHandle::handle_frame_to`] answers a typed
 //!   [`Reject`](ene_api::v1::payload::WirePayload::Reject) with
 //!   `UnsupportedMessage` when they differ. A future/unknown payload variant
 //!   cannot reach that reject: [`WirePayload`] is a closed enum decoded as part
@@ -85,9 +85,9 @@ use ene_api::v1::refs::{ConnectionWireId, RoundWireId};
 use ene_api::v1::reject::RejectKind;
 use ene_companion::{CompanionId, CompanionRepository};
 use ene_credential::{
-    CredentialApprovalRepository, CredentialRef, CredentialRefRepository as _, CredentialStore,
-    CredentialTechnicalError, DevicePairingRepository, DeviceRecord, EnvCredentialStore,
-    FileDeviceAuthStore, MemoryCredentialStore, VersionedCredentialStore as _,
+    CredentialRef, CredentialRefRepository as _, CredentialStore, CredentialTechnicalError,
+    DevicePairingRepository, DeviceRecord, EnvCredentialStore, FileDeviceAuthStore,
+    MemoryCredentialStore, VersionedCredentialStore as _,
 };
 use ene_inference::{ProviderTransport, UsageRepository as _};
 use ene_permission::EvaluationTracker;
@@ -155,10 +155,6 @@ pub enum CoreError {
     HostUnavailable,
 }
 
-pub trait FrameSink: Send {
-    fn emit(&mut self, frame: WireFrame) -> Result<(), FrameDeliveryError>;
-}
-
 /// One control-frame delivery failure.
 ///
 /// The connection is gone or the control allowance broke: later sends stop,
@@ -169,28 +165,39 @@ pub trait FrameSink: Send {
 #[must_use = "a failed delivery must stop the operation, never drop silently"]
 pub struct FrameDeliveryError;
 
-pub(crate) fn emit_end(sink: &mut dyn FrameSink, frame: WireFrame) {
+/// Publishes one control frame to the connection's bounded outbound queue.
+///
+/// Synchronous and non-blocking: callers may hold the connection table while
+/// publishing, and this never performs socket I/O or re-enters connection
+/// ownership. The open stream's deltas share this queue, so a full queue is
+/// a delivery failure exactly like a closed one.
+pub(crate) fn emit_control(
+    sink: &tokio::sync::mpsc::Sender<WireFrame>,
+    frame: WireFrame,
+) -> Result<(), FrameDeliveryError> {
+    use tokio::sync::mpsc::error::TrySendError;
+
+    match sink.try_send(frame) {
+        Ok(()) => Ok(()),
+        // The receiver is gone because the connection is closing, or the
+        // control allowance broke: the operation ends undelivered either
+        // way, and durable state already committed stays untouched.
+        Err(TrySendError::Closed(_) | TrySendError::Full(_)) => Err(FrameDeliveryError),
+    }
+}
+
+/// Emits one terminal control frame, ending the operation.
+/// A delivery failure ends it identically: the frame never reached the
+/// client, so no outcome is treated as delivered and nothing further
+/// emits. Durable state already committed stays untouched.
+pub(crate) fn emit_end(sink: &tokio::sync::mpsc::Sender<WireFrame>, frame: WireFrame) {
     // Gone or full channel: the operation ends undelivered either way.
-    match sink.emit(frame) {
+    match emit_control(sink, frame) {
         Ok(()) | Err(_) => {}
     }
 }
 
 pub(crate) const STREAM_BUFFER_FRAMES: usize = 32;
-
-impl FrameSink for tokio::sync::mpsc::Sender<WireFrame> {
-    fn emit(&mut self, frame: WireFrame) -> Result<(), FrameDeliveryError> {
-        use tokio::sync::mpsc::error::TrySendError;
-
-        match self.try_send(frame) {
-            Ok(()) => Ok(()),
-            // The receiver is gone because the connection is closing, or the
-            // control allowance broke: the operation ends undelivered either
-            // way, and durable state already committed stays untouched.
-            Err(TrySendError::Closed(_) | TrySendError::Full(_)) => Err(FrameDeliveryError),
-        }
-    }
-}
 
 /// Bearer store behind the Host handle.
 ///
@@ -335,6 +342,27 @@ impl ene_credential::VersionedCredentialStore for CredStore {
     }
 }
 
+/// Transport-free liveness and authorization premises for one inbound frame.
+///
+/// The connection layer builds this per frame from its per-connection table:
+/// `client_ref` names the calling client opaquely (device key when paired,
+/// otherwise the incarnation pair), `connection_live` carries the out-of-band
+/// reachability premise, `peer_uid_ok` carries the same-user proof for this
+/// connection, `paired_device` carries the device wire string the connection
+/// table bound on this connection (if any), `connection_known` reports
+/// whether the connection table knows this connection at all, `authed`
+/// reports whether this connection completed the challenge/proof exchange and
+/// is still the device's current authenticated connection (a newer
+/// authentication by the same device supersedes it), and `connection_id` is
+/// the table key itself. `phase` is the connection's one-way phase snapshot
+/// (IPC §9.3): the gate answers a typed `StaleConnection` for superseded
+/// connections and only then treats the remaining premises as a terminal
+/// unpaired-close decision. `authority` is the table handle the handshake
+/// paths use to re-check phase, consume the nonce, and install currentness
+/// inside one short section, and the close admission uses it to serialize the
+/// presence compare/commit (CCT §10.4). The gate in
+/// [`HostHandle::handle_frame_to`] trusts these conn-filled premises; direct
+/// handle callers (tests) construct them explicitly through the table.
 #[derive(Debug, Clone)]
 pub struct LiveInput {
     pub client_ref: String,
@@ -403,7 +431,7 @@ pub(crate) fn device_client(device_wire: &str) -> ClientId {
 /// close path ([`HostHandle::close_connection`]) admits through the table's
 /// own section and answers `NoActive`; callers that already hold a
 /// table-derived snapshot (for example [`crate::conn::ConnectionTable`]
-/// polled via [`ConnectionTable::current_authenticated`](crate::conn::ConnectionTable::current_authenticated))
+/// polled via [`ConnectionTable::is_current_authenticated`](crate::conn::ConnectionTable::is_current_authenticated))
 /// pass it here so an eligible same-machine candidate can take the fallback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CurrentConnection {
@@ -801,27 +829,9 @@ impl HostHandle {
         &self.store
     }
 
-    #[doc(hidden)]
-    #[must_use]
-    pub fn credential_contains_for_tests(&self, provider: &str, label: &str) -> bool {
-        CredentialRef::new(provider, label).is_ok_and(|cred| self.cred_store.contains(&cred))
-    }
-
-    #[doc(hidden)]
-    #[must_use]
-    pub fn credential_matches_for_tests(
-        &self,
-        provider: &str,
-        label: &str,
-        expected: &str,
-    ) -> bool {
-        CredentialRef::new(provider, label).is_ok_and(|credential| {
-            self.cred_store
-                .with_bearer(&credential, |bearer| bearer == expected)
-                .unwrap_or(false)
-        })
-    }
-
+    /// How many serving-composition Targeted Deletion drivers currently hold
+    /// this handle. Production keeps this at 0 or 1. This is the async driver
+    /// future, not started `spawn_blocking` Store work.
     #[doc(hidden)]
     pub fn live_targeted_deletion_drivers_for_tests(&self) -> usize {
         self.deletion_drivers
@@ -926,32 +936,24 @@ impl HostHandle {
         self.transient_fence.epoch()
     }
 
-    /// Runs one bounded Targeted Deletion fan-out pass over the durable
-    /// unfinished operations.
+    /// Runs one bounded serving-time Targeted Deletion tick (lifecycle §14).
     ///
-    /// Active operations are driven through their participants and then
-    /// through the sealed completion boundary; held operations wait for an
-    /// explicit resume decision; finalizing operations resume the remaining
-    /// completion steps from their durable marker. Participants already
-    /// verified for the current sweep are never demanded again, so a crash
-    /// mid-fan-out continues with only the unfinished participants (§14); the
-    /// durable snapshot and the operation identity are never regenerated.
-    /// Production entries serialize on the process-local drive lock so one
-    /// in-flight demand cannot overlap another driver's completion.
+    /// The serving composition calls this periodically from a single driver
+    /// task. One tick issues at most one backed-off resume of a retryable
+    /// `Held(Unavailable)` operation and then exactly one bounded fan-out pass
+    /// ([`TargetedDeletionPass::default`](crate::targeted_deletion::TargetedDeletionPass::default));
+    /// a hold therefore cannot be
+    /// retried in a tight loop, and `Held(GenerationExhausted)` is never
+    /// resumed. Concurrent callers serialize on the process-local drive lock
+    /// (and then the retry schedule), so two ticks cannot double-drive one
+    /// hold or complete an operation while another demand is in-flight; the
+    /// durable store still owns every idempotency and completion premise.
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Deletion`] for invalid pass parameters or when the
-    /// canonical store refuses (torn participant state fails closed).
-    pub async fn drive_targeted_deletion(
-        &self,
-        pass: crate::targeted_deletion::TargetedDeletionPass,
-    ) -> Result<crate::targeted_deletion::TargetedDeletionPassOutcome, CoreError> {
-        let _drive = self.targeted_deletion_drive.lock().await;
-        let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
-        crate::targeted_deletion::drive_targeted_deletion(&self.store, &registry, pass).await
-    }
-
+    /// [`CoreError::Deletion`] when the canonical store refuses. A failed tick
+    /// must not stop serving and must not infer any outcome: the durable
+    /// operation state stays authoritative and a later tick re-derives it.
     pub async fn run_targeted_deletion_tick(
         &self,
     ) -> Result<crate::targeted_deletion::TargetedDeletionPassOutcome, CoreError> {
@@ -1047,48 +1049,27 @@ impl HostHandle {
         .await
     }
 
-    /// Runs the full orchestration pipeline for one inbound frame.
+    /// Runs the full orchestration pipeline for one inbound frame, emitting
+    /// every response incrementally as it is decided.
     ///
     /// Transport-free by design: framing, sockets, and peer checks live in
-    /// [`crate::conn`], while inference arrives as `transport` so tests pass a
-    /// fake and production passes the `OpenAI` transport. The envelope
-    /// `message_type`, the negotiated version, and the ingress gate
+    /// [`crate::conn`], while inference arrives as `transport` so a fake in
+    /// tests and the `OpenAI` transport in production share one seam. The
+    /// envelope `message_type`, the negotiated version, and the ingress gate
     /// (`Self::gate`/`Self::gate_refusal`) are checked in that order before
-    /// dispatch; unhandled
-    /// variants answer an empty vector.
-    pub async fn handle_frame(
-        &self,
-        frame: WireFrame,
-        live: LiveInput,
-        transport: &impl ProviderTransport,
-    ) -> Vec<WireFrame> {
-        let (stream_tx, stream_rx) = tokio::sync::mpsc::channel(STREAM_BUFFER_FRAMES);
-        let drain = tokio::spawn(async move {
-            let mut frames = Vec::new();
-            let mut stream_rx = stream_rx;
-            while let Some(frame) = stream_rx.recv().await {
-                frames.push(frame);
-            }
-            frames
-        });
-        let mut sink = stream_tx.clone();
-        self.handle_frame_to(frame, live, transport, &mut sink, &stream_tx)
-            .await;
-        drop(stream_tx);
-        drop(sink);
-        match drain.await {
-            Ok(frames) => frames,
-            Err(join) => std::panic::resume_unwind(join.into_panic()),
-        }
-    }
-
+    /// dispatch; decoded-but-unhandled variants answer nothing. Every response
+    /// is handed to `sink` at the point it is decided: for a text submit this
+    /// is what makes `AcceptedForRound` and provider deltas real, because the
+    /// connection loop forwards them to the socket while this future still
+    /// awaits the provider. One sender carries both control frames and the
+    /// open stream's ordered deltas, so emission order is wire order and the
+    /// bounded queue paces the provider through real backpressure.
     pub async fn handle_frame_to(
         &self,
         frame: WireFrame,
         live: LiveInput,
         transport: &impl ProviderTransport,
-        sink: &mut dyn FrameSink,
-        stream_tx: &tokio::sync::mpsc::Sender<WireFrame>,
+        sink: &tokio::sync::mpsc::Sender<WireFrame>,
     ) {
         if frame.envelope.message_type.0 != frame.payload.message_type() {
             return emit_end(
@@ -1130,7 +1111,7 @@ impl HostHandle {
                 ),
                 ConnectionPhase::Accepted => {
                     for response in self.pair(&frame, request, &live).await {
-                        if sink.emit(response).is_err() {
+                        if emit_control(sink, response).is_err() {
                             break;
                         }
                     }
@@ -1147,7 +1128,7 @@ impl HostHandle {
                 ),
                 ConnectionPhase::Accepted | ConnectionPhase::Paired => {
                     for response in self.advertise(&frame, advertise, &live).await {
-                        if sink.emit(response).is_err() {
+                        if emit_control(sink, response).is_err() {
                             break;
                         }
                     }
@@ -1164,7 +1145,7 @@ impl HostHandle {
                 ),
                 ConnectionPhase::Challenged => {
                     for response in self.verify_proof(&frame, proof, &live).await {
-                        if sink.emit(response).is_err() {
+                        if emit_control(sink, response).is_err() {
                             break;
                         }
                     }
@@ -1181,7 +1162,7 @@ impl HostHandle {
                 {
                     return emit_end(sink, refusal);
                 }
-                self.submit_text(&frame, submit, &live, transport, sink, stream_tx)
+                self.submit_text(&frame, submit, &live, transport, sink)
                     .await;
             }
             WirePayload::ConfirmPresentation(confirm) => {
@@ -1326,6 +1307,26 @@ impl HostHandle {
         }
     }
 
+    /// Decides what the domain gate does with `frame` under `live`.
+    ///
+    /// Pairing, capability, and proof frames never reach this gate (see
+    /// [`HostHandle::handle_frame_to`]): pairing is pre-pairing by definition,
+    /// capability predates authentication, and the proof is the
+    /// authentication. A frame from a superseded connection answers a typed
+    /// `StaleConnection` and the socket stays open (IPC §11.3): its
+    /// attribution is verifiable from the table, so silence or a drop would
+    /// lose the honest outcome. Every other non-serviceable frame needs all
+    /// four premises — a device bound on this connection, a known connection
+    /// entry, a completed authentication that is still current for the device
+    /// (a newer authentication by the same device supersedes this connection),
+    /// and an envelope connection id equal to the table id. Equality is the
+    /// auth binding: the id is minted per accept and revealed only in
+    /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted), so echoing
+    /// it proves the sender completed the challenge on this connection. A
+    /// failed premise answers the terminal unpaired close, not a
+    /// [`Reject`](ene_api::v1::payload::WirePayload::Reject): an
+    /// unauthenticated peer learns nothing beyond the drop, never an oracle
+    /// denial.
     fn gate(frame: &WireFrame, live: &LiveInput) -> GateDecision {
         if live.phase.is_superseded() {
             return GateDecision::Stale;
@@ -1355,7 +1356,7 @@ impl HostHandle {
         &self,
         frame: &WireFrame,
         live: &LiveInput,
-        sink: &mut dyn FrameSink,
+        sink: &tokio::sync::mpsc::Sender<WireFrame>,
         detail: &str,
         respond: F,
     ) where
@@ -1366,7 +1367,7 @@ impl HostHandle {
             return emit_end(sink, refusal);
         }
         for response in respond().await {
-            if sink.emit(response).is_err() {
+            if emit_control(sink, response).is_err() {
                 break;
             }
         }
@@ -1585,10 +1586,11 @@ impl HostHandle {
                         .await
                         .map_err(|error| CoreError::Store(error.to_string()))?
                         .as_u64();
-                let random = Uuid::new_v4();
-                let mut bytes = [0_u8; 8];
-                bytes.copy_from_slice(&random.as_bytes()[..8]);
-                let version = (u64::from_be_bytes(bytes) & (i64::MAX as u64)).max(1);
+                // The version is a non-secret random item identity, not the
+                // mutable set revision. Prepared records it before the OS write
+                // so a crash leaves an exact item to inspect and two concurrent
+                // writers never share a candidate slot.
+                let version = (Uuid::new_v4().as_u64_pair().0 & (i64::MAX as u64)).max(1);
                 (
                     self.store
                         .begin_credential_mutation(
@@ -1696,16 +1698,28 @@ impl HostHandle {
         }
     }
 
-    pub async fn pending_credentials(&self) -> Result<Vec<String>, CoreError> {
-        let pending = CredentialApprovalRepository::list_pending(&self.store)
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))?;
-        Ok(pending
-            .into_iter()
-            .map(|entry| format!("{}:{}", entry.provider, entry.label))
-            .collect())
-    }
-
+    /// Admits one transport close and runs the presence fallback if owned.
+    ///
+    /// The close decision and the presence compare/commit share one short
+    /// connection-table section inside `spawn_blocking` (CCT §10.4): the
+    /// table re-reads whether this connection is still the device's current
+    /// authenticated one before clearing it, so a close racing a newer
+    /// authentication never clears the new current, and a superseded
+    /// connection's close never triggers the fallback (#1384, S5-05). The
+    /// callback runs synchronously while the section is held, so the presence
+    /// commit cannot interleave with an authentication install; the lock order
+    /// is connection table → task registry → SQLite (this path takes the
+    /// table section, then SQLite, and never the registry in between).
+    ///
+    /// The fallback itself is a best-effort compare-and-commit to `NoActive`
+    /// for
+    /// [`DisconnectObserved`](ene_presence::ThinMoveReason::DisconnectObserved):
+    /// only a `Present` attribution owned by the deterministic mapping of the
+    /// closed device moves (compare-and-begin plus confirm with a not-live
+    /// premise); any other state, a lost compare race, or a store failure
+    /// leaves attribution untouched. Target selection for a Host-local
+    /// fallback client is a later slice; this keeps the single-step move to
+    /// `NoActive`.
     #[cfg(any(unix, windows))]
     pub(crate) async fn close_connection(
         &self,

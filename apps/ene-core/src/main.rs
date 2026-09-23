@@ -368,25 +368,38 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
 /// [`CoreError::Approve`] when the settled outcome cannot be shown, and
 /// [`CoreError::UnsupportedPlatform`] without a Host-local control transport.
 fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
+    run_requester(
+        data_dir,
+        "device approval",
+        ene_core::host_control::request_device_approve(data_dir, pending_id),
+    )
+}
+
+/// Runs one requester exchange under the serving-Host premise: an acquirable
+/// writer lock means no Host is serving, so the command refuses with
+/// `HostUnavailable` instead of opening the state offline
+/// (first-party-desktop §5.1.5).
+fn run_requester(
+    data_dir: &Path,
+    what: &str,
+    request: impl std::future::Future<Output = Result<ene_local_control::RequestState, CoreError>>,
+) -> Result<(), CoreError> {
     use ene_core::host_lock::HostLock;
 
-    block_on(async {
+    block_on(async move {
         match HostLock::acquire(data_dir) {
-            Ok(_lock) => Err(host_not_serving()),
+            Ok(_lock) => Err(CoreError::HostUnavailable),
             Err(CoreError::AlreadyRunning) => {
-                let state =
-                    ene_core::host_control::request_device_approve(data_dir, pending_id).await?;
-                show_requester_state("device approval", &state)
+                let state = request.await?;
+                show_requester_state(what, &state)
             }
             Err(error) => Err(error),
         }
     })
 }
 
-fn host_not_serving() -> CoreError {
-    CoreError::HostUnavailable
-}
-
+/// Shows one requester request's settled state. Secrets never appear here: the
+/// pairing provision and the credential value belong to their own channels.
 fn show_requester_state(
     what: &str,
     state: &ene_local_control::RequestState,
@@ -456,20 +469,11 @@ fn show_requester_state(
 /// [`CoreError::Approve`] when the settled outcome cannot be shown, and
 /// [`CoreError::UnsupportedPlatform`] without a Host-local control transport.
 fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
-    use ene_core::host_lock::HostLock;
-
-    block_on(async {
-        match HostLock::acquire(data_dir) {
-            Ok(_lock) => Err(host_not_serving()),
-            Err(CoreError::AlreadyRunning) => {
-                let state =
-                    ene_core::host_control::request_credential_put(data_dir, provider, label)
-                        .await?;
-                show_requester_state("credential registration", &state)
-            }
-            Err(error) => Err(error),
-        }
-    })
+    run_requester(
+        data_dir,
+        "credential registration",
+        ene_core::host_control::request_credential_put(data_dir, provider, label),
+    )
 }
 
 /// Prints the Targeted Deletion requests awaiting the Owner's confirmation,
@@ -618,16 +622,11 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
 fn run_deletion_status(data_dir: &Path, cursor: Option<&str>, limit: u32) -> Result<(), CoreError> {
     use std::io::Write as _;
 
-    use ene_api::v1::deletion::{DeletionParticipantReportWire, DeletionStatusResponse};
+    use ene_api::v1::deletion::DeletionParticipantReportWire;
 
     block_on(async move {
         let handle = HostHandle::open(data_dir).await?;
-        let response = handle.deletion_status_page(cursor, limit).await?;
-        let DeletionStatusResponse::Page(page) = response else {
-            return Err(CoreError::Deletion(String::from(
-                "deletion status is unavailable",
-            )));
-        };
+        let page = handle.deletion_status_page(cursor, limit).await?;
         let mut stdout = std::io::stdout().lock();
         writeln!(stdout, "mark {}", page.mark.0).map_err(|error| {
             CoreError::Store(format!("deletion status could not be shown: {error}"))
