@@ -5368,7 +5368,6 @@ async fn unknown_wire_values_are_typed_rejects_and_the_connection_stays_usable()
     joined.expect("the listener must shut down cleanly");
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn the_host_refuses_an_upgrade_without_the_current_local_token() {
     let dir = tempfile::tempdir().expect("temp dir");
