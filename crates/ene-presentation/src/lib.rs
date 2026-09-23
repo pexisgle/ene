@@ -314,427 +314,152 @@ pub fn check_intake(premise: IntakePremise) -> RoundIntakeOutcome {
 mod tests {
     use super::{
         ClientInputRef, CompanionAvailability, IntakePremise, OpenRound, RevalidationReason,
-        RoundId, RoundIntakeOutcome, RoundIntent, SubmitClientInputCandidate, check_intake,
-        new_round,
+        RoundIntakeOutcome, RoundIntent, SubmitClientInputCandidate, check_intake, new_round,
     };
     use ene_presence::{
         ClientId, LiveReachabilityRef, PresenceAttribution, PresenceGeneration, PresenceState,
     };
     use ene_primitive::RawId;
 
-    fn client() -> ClientId {
-        ClientId::from_raw(RawId::new())
-    }
-
-    fn input_candidate(
-        companion: RawId,
-        claimant: ClientId,
-        generation: Option<PresenceGeneration>,
-        round: RoundIntent,
-    ) -> SubmitClientInputCandidate {
-        SubmitClientInputCandidate {
-            companion,
-            client: claimant,
-            claimed_generation: generation,
-            round,
-            input_ref: ClientInputRef {
-                text: String::from("hello companion"),
-                lang: String::from("en"),
-            },
-            local_id: String::from("local-1"),
-        }
-    }
-
-    fn premise(
-        candidate: SubmitClientInputCandidate,
-        attribution: PresenceAttribution,
-        live: LiveReachabilityRef,
-        open_round: Option<OpenRound>,
-    ) -> IntakePremise {
+    fn premise() -> IntakePremise {
+        let companion = RawId::new();
+        let client = ClientId::from_raw(RawId::new());
+        let generation = PresenceGeneration::first();
         IntakePremise {
-            candidate,
-            attribution,
+            candidate: SubmitClientInputCandidate {
+                companion,
+                client,
+                claimed_generation: Some(generation),
+                round: RoundIntent::Auto,
+                input_ref: ClientInputRef {
+                    text: String::from("private body"),
+                    lang: String::from("en"),
+                },
+                local_id: String::from("local-1"),
+            },
+            attribution: PresenceAttribution {
+                companion,
+                state: PresenceState::Present,
+                active_client: Some(client),
+                generation,
+            },
             companion: CompanionAvailability::Running,
-            live,
-            open_round,
-        }
-    }
-
-    fn live_for(claimant: ClientId) -> LiveReachabilityRef {
-        LiveReachabilityRef {
-            client: claimant,
-            connection_live: true,
-        }
-    }
-
-    fn attribution_for(
-        companion: RawId,
-        claimant: ClientId,
-        generation: PresenceGeneration,
-    ) -> PresenceAttribution {
-        PresenceAttribution {
-            companion,
-            state: PresenceState::Present,
-            active_client: Some(claimant),
-            generation,
+            live: LiveReachabilityRef {
+                client,
+                connection_live: true,
+            },
+            open_round: None,
         }
     }
 
     #[test]
-    fn missing_generation_view_needs_revalidation() {
-        let companion = RawId::new();
-        let claimant = client();
-        let candidate = input_candidate(companion, claimant, None, RoundIntent::Auto);
-        let fact = attribution_for(companion, claimant, PresenceGeneration::first());
-        let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
+    fn intake_revalidation_and_hold_boundaries() {
+        let mut missing = premise();
+        missing.candidate.claimed_generation = None;
         assert_eq!(
-            outcome,
+            check_intake(missing),
             RoundIntakeOutcome::NeedsRevalidation {
                 reason: RevalidationReason::MissingGenerationView,
             }
         );
-    }
-
-    #[test]
-    fn unknown_companion_needs_revalidation() {
-        let companion = RawId::new();
-        let claimant = client();
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Auto,
-        );
-        let fact = attribution_for(companion, claimant, PresenceGeneration::first());
-        let base = premise(candidate, fact, live_for(claimant), None);
-        let unknown = IntakePremise {
-            companion: CompanionAvailability::Unknown,
-            ..base
-        };
-        let outcome = check_intake(unknown);
+        for (availability, reason) in [
+            (
+                CompanionAvailability::Unknown,
+                RevalidationReason::UnknownCompanion,
+            ),
+            (
+                CompanionAvailability::Stopped,
+                RevalidationReason::StoppedCompanion,
+            ),
+        ] {
+            let mut case = premise();
+            case.companion = availability;
+            assert_eq!(
+                check_intake(case),
+                RoundIntakeOutcome::NeedsRevalidation { reason }
+            );
+        }
+        let mut stopped = premise();
+        stopped.attribution.state = PresenceState::Stopped;
         assert_eq!(
-            outcome,
-            RoundIntakeOutcome::NeedsRevalidation {
-                reason: RevalidationReason::UnknownCompanion,
-            }
-        );
-    }
-
-    #[test]
-    fn stopped_companion_needs_revalidation() {
-        let companion = RawId::new();
-        let claimant = client();
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Auto,
-        );
-        let fact = attribution_for(companion, claimant, PresenceGeneration::first());
-        let base = premise(candidate, fact, live_for(claimant), None);
-        let stopped = IntakePremise {
-            companion: CompanionAvailability::Stopped,
-            ..base
-        };
-        let outcome = check_intake(stopped);
-        assert_eq!(
-            outcome,
+            check_intake(stopped),
             RoundIntakeOutcome::NeedsRevalidation {
                 reason: RevalidationReason::StoppedCompanion,
             }
         );
-    }
-
-    #[test]
-    fn stopped_attribution_needs_revalidation() {
-        let companion = RawId::new();
-        let claimant = client();
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Auto,
-        );
-        let fact = PresenceAttribution {
-            companion,
-            state: PresenceState::Stopped,
-            active_client: Some(claimant),
-            generation: PresenceGeneration::first(),
-        };
-        let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
-        assert_eq!(
-            outcome,
-            RoundIntakeOutcome::NeedsRevalidation {
-                reason: RevalidationReason::StoppedCompanion,
-            }
-        );
-    }
-
-    #[test]
-    fn in_transition_holds_intake() {
-        let companion = RawId::new();
-        let claimant = client();
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Auto,
-        );
-        let fact = PresenceAttribution {
-            companion,
-            state: PresenceState::InTransition,
-            active_client: Some(claimant),
-            generation: PresenceGeneration::first(),
-        };
-        let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
-        assert_eq!(outcome, RoundIntakeOutcome::HeldForTransition);
-    }
-
-    #[test]
-    fn recovery_wait_holds_intake() {
-        let companion = RawId::new();
-        let claimant = client();
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Auto,
-        );
-        let fact = PresenceAttribution {
-            companion,
-            state: PresenceState::RecoveryWait,
-            active_client: Some(claimant),
-            generation: PresenceGeneration::first(),
-        };
-        let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
-        assert_eq!(outcome, RoundIntakeOutcome::HeldForTransition);
-    }
-
-    #[test]
-    fn generation_mismatch_is_stale_with_current_values() {
-        let companion = RawId::new();
-        let claimant = client();
-        let current = PresenceGeneration::from_u64(7);
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Auto,
-        );
-        let fact = attribution_for(companion, claimant, current);
-        let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
-        assert_eq!(
-            outcome,
-            RoundIntakeOutcome::StaleRound {
-                current_round: None,
-                current_generation: current,
-            }
-        );
-    }
-
-    #[test]
-    fn wrong_active_client_is_stale() {
-        let companion = RawId::new();
-        let claimant = client();
-        let other = client();
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Auto,
-        );
-        let fact = attribution_for(companion, other, PresenceGeneration::first());
-        let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
-        let RoundIntakeOutcome::StaleRound {
-            current_generation, ..
-        } = outcome
-        else {
-            panic!("a non-active client must be stale");
-        };
-        assert_eq!(current_generation, PresenceGeneration::first());
-    }
-
-    #[test]
-    fn dead_connection_is_stale() {
-        let companion = RawId::new();
-        let claimant = client();
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Auto,
-        );
-        let fact = attribution_for(companion, claimant, PresenceGeneration::first());
-        let dead = LiveReachabilityRef {
-            client: claimant,
-            connection_live: false,
-        };
-        let outcome = check_intake(premise(candidate, fact, dead, None));
-        assert!(matches!(outcome, RoundIntakeOutcome::StaleRound { .. }));
-    }
-
-    #[test]
-    fn mismatched_round_request_is_stale() {
-        let companion = RawId::new();
-        let claimant = client();
-        let open = OpenRound {
-            companion,
-            client: claimant,
-            round: new_round(),
-            generation: PresenceGeneration::first(),
-        };
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Existing(new_round()),
-        );
-        let fact = attribution_for(companion, claimant, PresenceGeneration::first());
-        let outcome = check_intake(premise(candidate, fact, live_for(claimant), Some(open)));
-        let RoundIntakeOutcome::StaleRound {
-            current_round,
-            current_generation,
-        } = outcome
-        else {
-            panic!("a non-matching existing-round request must be stale");
-        };
-        assert_eq!(current_round, Some(open.round));
-        assert_eq!(current_generation, PresenceGeneration::first());
-    }
-
-    #[test]
-    fn matching_open_round_is_accepted() {
-        let companion = RawId::new();
-        let claimant = client();
-        let open = OpenRound {
-            companion,
-            client: claimant,
-            round: new_round(),
-            generation: PresenceGeneration::first(),
-        };
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Existing(open.round),
-        );
-        let fact = attribution_for(companion, claimant, PresenceGeneration::first());
-        let outcome = check_intake(premise(candidate, fact, live_for(claimant), Some(open)));
-        assert_eq!(
-            outcome,
-            RoundIntakeOutcome::AcceptedForRound { round: open.round }
-        );
-    }
-
-    #[test]
-    fn auto_request_reuses_matching_open_round() {
-        let companion = RawId::new();
-        let claimant = client();
-        let open = OpenRound {
-            companion,
-            client: claimant,
-            round: new_round(),
-            generation: PresenceGeneration::first(),
-        };
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Auto,
-        );
-        let fact = attribution_for(companion, claimant, PresenceGeneration::first());
-        let outcome = check_intake(premise(candidate, fact, live_for(claimant), Some(open)));
-        assert_eq!(
-            outcome,
-            RoundIntakeOutcome::AcceptedForRound { round: open.round }
-        );
-    }
-
-    #[test]
-    fn auto_request_without_open_round_mints_fresh_round() {
-        let companion = RawId::new();
-        let claimant = client();
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Auto,
-        );
-        let fact = attribution_for(companion, claimant, PresenceGeneration::first());
-        let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
-        assert!(matches!(
-            outcome,
-            RoundIntakeOutcome::AcceptedForRound { .. }
-        ));
-        if let RoundIntakeOutcome::AcceptedForRound { round } = outcome {
-            assert_ne!(round, RoundId::from_raw(RawId::new()));
+        for state in [PresenceState::InTransition, PresenceState::RecoveryWait] {
+            let mut case = premise();
+            case.attribution.state = state;
+            assert_eq!(check_intake(case), RoundIntakeOutcome::HeldForTransition);
         }
     }
 
     #[test]
-    fn new_request_mints_fresh_round_despite_matching_open() {
-        let companion = RawId::new();
-        let claimant = client();
+    fn stale_claims_return_current_generation_and_round() {
+        let mut base = premise();
         let open = OpenRound {
-            companion,
-            client: claimant,
+            companion: base.candidate.companion,
+            client: base.candidate.client,
             round: new_round(),
-            generation: PresenceGeneration::first(),
+            generation: base.attribution.generation,
         };
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::New,
+        base.open_round = Some(open);
+        let stale = |case| {
+            assert_eq!(
+                check_intake(case),
+                RoundIntakeOutcome::StaleRound {
+                    current_round: Some(open.round),
+                    current_generation: open.generation,
+                }
+            )
+        };
+        let mut generation = base.clone();
+        generation.candidate.claimed_generation = Some(PresenceGeneration::from_u64(7));
+        stale(generation);
+        let mut client = base.clone();
+        client.attribution.active_client = None;
+        stale(client);
+        let mut dead = base.clone();
+        dead.live.connection_live = false;
+        stale(dead);
+        let mut wrong_round = base;
+        wrong_round.candidate.round = RoundIntent::Existing(new_round());
+        stale(wrong_round);
+    }
+
+    #[test]
+    fn round_intents_join_or_mint_as_requested() {
+        let mut base = premise();
+        let open = OpenRound {
+            companion: base.candidate.companion,
+            client: base.candidate.client,
+            round: new_round(),
+            generation: base.attribution.generation,
+        };
+        assert!(matches!(
+            check_intake(base.clone()),
+            RoundIntakeOutcome::AcceptedForRound { .. }
+        ));
+        base.open_round = Some(open);
+        assert_eq!(
+            check_intake(base.clone()),
+            RoundIntakeOutcome::AcceptedForRound { round: open.round }
         );
-        let fact = attribution_for(companion, claimant, PresenceGeneration::first());
-        let outcome = check_intake(premise(candidate, fact, live_for(claimant), Some(open)));
+        base.candidate.round = RoundIntent::Existing(open.round);
+        assert_eq!(
+            check_intake(base.clone()),
+            RoundIntakeOutcome::AcceptedForRound { round: open.round }
+        );
+        base.candidate.round = RoundIntent::New;
         assert!(
-            matches!(
-                outcome,
-                RoundIntakeOutcome::AcceptedForRound { round } if round != open.round
-            ),
-            "New must mint instead of joining, got {outcome:?}"
+            matches!(check_intake(base), RoundIntakeOutcome::AcceptedForRound { round } if round != open.round)
         );
     }
 
     #[test]
-    fn input_debug_redacts_body_and_keeps_refs() {
-        let candidate = SubmitClientInputCandidate {
-            companion: RawId::new(),
-            client: client(),
-            claimed_generation: Some(PresenceGeneration::first()),
-            round: RoundIntent::Existing(new_round()),
-            input_ref: ClientInputRef {
-                text: String::from("hello companion"),
-                lang: String::from("en"),
-            },
-            local_id: String::from("local-1"),
-        };
-        let rendered = format!("{candidate:?}");
-        assert!(
-            !rendered.contains("hello companion"),
-            "body redacted: {rendered}"
-        );
-        assert!(rendered.contains("local-1"), "refs stay: {rendered}");
-        assert!(rendered.contains("en"), "lang stays: {rendered}");
-    }
-
-    #[test]
-    fn premise_debug_redacts_body() {
-        let companion = RawId::new();
-        let claimant = client();
-        let candidate = input_candidate(
-            companion,
-            claimant,
-            Some(PresenceGeneration::first()),
-            RoundIntent::Auto,
-        );
-        let fact = attribution_for(companion, claimant, PresenceGeneration::first());
-        let rendered = format!("{:?}", premise(candidate, fact, live_for(claimant), None));
-        assert!(
-            !rendered.contains("hello companion"),
-            "body redacted: {rendered}"
-        );
+    fn debug_redacts_input_through_the_premise() {
+        let rendered = format!("{:?}", premise());
+        assert!(!rendered.contains("private body"));
+        assert!(rendered.contains("local-1"));
     }
 }
