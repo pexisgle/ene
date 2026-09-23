@@ -50,7 +50,7 @@ fn last_error(context: &str) -> std::io::Error {
     )
 }
 
-fn sid_to_string(sid: PSID) -> Option<String> {
+unsafe fn sid_to_string(sid: PSID) -> Option<String> {
     // SAFETY: callers pass pointers obtained from GetNamedSecurityInfoW or
     // GetTokenInformation; IsValidSid validates them before the read.
     if unsafe { IsValidSid(sid) } == 0 {
@@ -101,8 +101,8 @@ fn current_user_sid_string() -> std::io::Result<String> {
     // SAFETY: `buffer` outlives the pointer and GetTokenInformation reported
     // success, so `User.Sid` points into the filled buffer.
     let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
-    // SAFETY: `buffer` outlives the pointer and GetTokenInformation reported
-    // success, so `User.Sid` points into the filled buffer.
+    // SAFETY: `user` references the filled buffer, so `User.Sid` is a live
+    // SID for `sid_to_string` to read.
     unsafe { sid_to_string((*user).User.Sid) }.ok_or_else(|| last_error("ConvertSidToStringSidW"))
 }
 
