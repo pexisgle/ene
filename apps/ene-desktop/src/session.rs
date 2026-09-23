@@ -210,7 +210,9 @@ pub async fn submit_and_collect(
             round
         }
         WirePayload::RoundIntakeOutcome(refusal) => {
-            return Err(DesktopError::Unavailable(describe_intake_refusal(&refusal)));
+            return Err(DesktopError::Unavailable(describe_intake_refusal(
+                lang, &refusal,
+            )));
         }
         other => {
             return Err(DesktopError::Protocol(format!(
@@ -233,12 +235,13 @@ pub async fn submit_and_collect(
                 }
                 break;
             }
-            // Protocol-defined interleavings the Client must absorb: a
-            // state-only presence fact (`Client::next_frame` already observed
-            // it) and an auto-presented backlog summary the explicit
-            // UndeliveredRequest path re-presents. A stream turn must not fail
-            // on either.
-            WirePayload::PresenceAttribution(_) | WirePayload::UndeliveredResponse(_) => {}
+            // Protocol-defined interleavings the Client must absorb: state-only
+            // facts (`Client::next_frame` already observed them) and an
+            // auto-presented backlog summary the explicit UndeliveredRequest
+            // path re-presents. A stream turn must not fail on any of them.
+            WirePayload::PresenceAttribution(_)
+            | WirePayload::UndeliveredResponse(_)
+            | WirePayload::BodyStateHint(_) => {}
             other => {
                 return Err(DesktopError::Protocol(format!(
                     "unexpected stream {}",
@@ -254,29 +257,36 @@ pub async fn submit_and_collect(
     })
 }
 
-/// Maps an intake refusal to the Owner-facing reason. The wire type defines
-/// these as distinct domain outcomes, so a hold, a stale round, and a
-/// revalidation demand must not read as one another.
-fn describe_intake_refusal(outcome: &RoundIntakeOutcomeWire) -> String {
+/// Maps an intake refusal to the Owner-facing reason in the Owner's locale.
+/// The wire type defines these as distinct domain outcomes, so a hold, a stale
+/// round, and a revalidation demand must not read as one another.
+fn describe_intake_refusal(lang: &str, outcome: &RoundIntakeOutcomeWire) -> String {
+    let ja = lang.eq_ignore_ascii_case("ja");
+    let text = |japanese: &str, english: &str| {
+        if ja {
+            String::from(japanese)
+        } else {
+            String::from(english)
+        }
+    };
     match outcome {
-        RoundIntakeOutcomeWire::StaleRound {
-            current_round,
-            current_generation,
-        } => match current_round {
-            Some(round) => format!(
-                "stale round; current round is {} at generation {current_generation}",
-                round.0
-            ),
-            None => format!("stale round; no round is open (generation {current_generation})"),
-        },
-        RoundIntakeOutcomeWire::HeldForTransition => {
-            String::from("held for a presence transition; retry after the transition settles")
-        }
-        RoundIntakeOutcomeWire::NeedsRevalidation { reason } => {
-            format!("needs revalidation: {}", reason.0)
-        }
+        RoundIntakeOutcomeWire::StaleRound { .. } => text(
+            "前回の状態が古くなっています。最新の状態を確認して、もう一度お送りください。",
+            "The previous state is stale. Review the current state and send again.",
+        ),
+        RoundIntakeOutcomeWire::HeldForTransition => text(
+            "パートナーの状態が切り替わっています。落ち着いてからもう一度お試しください。",
+            "A presence change is in progress; try again once it settles.",
+        ),
+        RoundIntakeOutcomeWire::NeedsRevalidation { .. } => text(
+            "送信前に最新の状態を確認してください。",
+            "Refresh the current state before sending.",
+        ),
         // The accepted variant is handled before this helper is reached.
-        RoundIntakeOutcomeWire::AcceptedForRound { .. } => String::from("intake was not accepted"),
+        RoundIntakeOutcomeWire::AcceptedForRound { .. } => text(
+            "送信は受け付けられませんでした。",
+            "The message was not accepted.",
+        ),
     }
 }
 

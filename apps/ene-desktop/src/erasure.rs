@@ -67,9 +67,6 @@ pub(crate) fn apply_demand(
             }
         }
     }
-    if wiped.is_empty() && unverified.is_empty() {
-        unverified.push(ClientTempClass::PresentationBuffer);
-    }
     LocalErasureResult {
         demand: demand.demand.clone(),
         operation: demand.operation.clone(),

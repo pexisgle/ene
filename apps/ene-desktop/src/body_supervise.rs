@@ -227,6 +227,11 @@ impl BodySupervisor {
                             self.native_ready = false;
                         }
                         BodyToParent::AssetReady(_) => self.asset_ready = true,
+                        // A rejected replacement leaves the previous avatar
+                        // live; this supervisor projects one asset per child, so
+                        // an `AssetFail` seen after readiness is about the
+                        // loaded asset.
+                        BodyToParent::AssetFail(_) => self.asset_ready = false,
                         BodyToParent::HealthTick(tick) => {
                             self.motion_ready =
                                 tick.motion == ene_body::ipc::FeatureSupport::Available;

@@ -1,11 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-#[derive(Debug)]
-pub struct DetachedHost {
-    pub pid: u32,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
     #[error("ene-core binary was not found")]
@@ -69,7 +64,11 @@ fn host_binary_name() -> &'static str {
     }
 }
 
-pub fn detach_serve(data_dir: &Path, host_bin: &Path) -> Result<DetachedHost, LaunchError> {
+/// Starts `ene-core serve` in a new process group / detached session.
+///
+/// A waiter thread reaps the direct child so this GUI does not accumulate
+/// zombies; that wait is not a kill, and returning does not signal the child.
+pub fn detach_serve(data_dir: &Path, host_bin: &Path) -> Result<(), LaunchError> {
     if !host_bin.is_file() {
         return Err(LaunchError::MissingBinary);
     }
@@ -95,22 +94,20 @@ pub fn detach_serve(data_dir: &Path, host_bin: &Path) -> Result<DetachedHost, La
     let mut child = command
         .spawn()
         .map_err(|error| LaunchError::Spawn(error.kind().to_string()))?;
-    let pid = child.id();
     std::thread::spawn(move || match child.wait() {
         Ok(_) | Err(_) => {}
     });
-    Ok(DetachedHost { pid })
+    Ok(())
 }
 
 /// Reuses a serving Host, otherwise starts one. The launcher and the GUI share
-/// this one bootstrap policy; `Command::spawn` never returns pid 0, so the
-/// detached pid is not re-checked here.
+/// this one bootstrap policy.
 pub fn ensure_serving(data_dir: &Path) -> Result<(), LaunchError> {
     if host_is_serving(data_dir) {
         return Ok(());
     }
     let binary = locate_host_binary().ok_or(LaunchError::MissingBinary)?;
-    let _detached = detach_serve(data_dir, &binary)?;
+    detach_serve(data_dir, &binary)?;
     Ok(())
 }
 
@@ -122,7 +119,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn detach_does_not_kill_child_on_drop() {
+    fn detach_does_not_kill_child() {
         let dir = tempfile::tempdir().expect("tempdir");
         let stub = dir.path().join("ene-core");
         let pid_file = dir.path().join("stub.pid");
@@ -132,7 +129,7 @@ mod tests {
         );
         fs::write(&stub, script).expect("write stub");
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod");
-        let detached = detach_serve(dir.path(), &stub).expect("detach");
+        detach_serve(dir.path(), &stub).expect("detach");
         let started = Instant::now();
         let pid = loop {
             if let Ok(text) = fs::read_to_string(&pid_file)
@@ -146,10 +143,6 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         };
-        assert_eq!(detached.pid, pid);
-        // Dropping the handle must not signal the child. `DetachedHost` holds
-        // only a pid and no `Drop` impl; the move into `_` drops it here.
-        let _ = detached;
         std::thread::sleep(Duration::from_millis(100));
         let still = std::path::Path::new("/proc").join(pid.to_string()).exists();
         match std::process::Command::new("kill")
@@ -158,6 +151,6 @@ mod tests {
         {
             Ok(_) | Err(_) => {}
         }
-        assert!(still, "Host stub must survive DetachedHost drop");
+        assert!(still, "Host stub must survive detach");
     }
 }

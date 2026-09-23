@@ -93,9 +93,14 @@ impl RequesterClient {
         }
     }
 
-    async fn request_accepted(&self, message: &ToHost) -> Result<String, DesktopError> {
+    /// Requests one high-privilege object under a Host-issued request id.
+    ///
+    /// # Errors
+    ///
+    /// As [`RequesterClient::request`].
+    async fn request_accepted(&self, message: &ToHost) -> Result<(), DesktopError> {
         match self.request(message).await? {
-            FromHost::RequestAccepted { request_id } => Ok(request_id),
+            FromHost::RequestAccepted { .. } => Ok(()),
             other => Err(DesktopError::Control(format!(
                 "the request was not accepted: {other:?}"
             ))),

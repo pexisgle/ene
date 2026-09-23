@@ -982,7 +982,8 @@ fn result_notice(ja: bool, result: Result<String, DesktopError>) -> (String, boo
             ene_desktop::i18n::control_deny(
                 if ja { Locale::Ja } else { Locale::En },
                 &ene_local_control::FromConfirmation::DeniedByBoundary,
-            ),
+            )
+            .to_string(),
             true,
         ),
         Err(_) => (
@@ -998,7 +999,7 @@ fn result_notice(ja: bool, result: Result<String, DesktopError>) -> (String, boo
 }
 fn outcome_notice(ja: bool, outcome: &ManagementOutcome) -> String {
     let locale = if ja { Locale::Ja } else { Locale::En };
-    ene_desktop::i18n::management_deny(locale, outcome)
+    ene_desktop::i18n::management_deny(locale, outcome).to_string()
 }
 fn control_notice(ja: bool, result: &ene_local_control::FromConfirmation) -> String {
     use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
@@ -1056,7 +1057,7 @@ fn control_notice(ja: bool, result: &ene_local_control::FromConfirmation) -> Str
         | FromConfirmation::DeniedByBoundary
         | FromConfirmation::Unavailable => {
             let locale = if ja { Locale::Ja } else { Locale::En };
-            return ene_desktop::i18n::control_deny(locale, result);
+            return ene_desktop::i18n::control_deny(locale, result).into();
         }
         _ => local(
             ja,

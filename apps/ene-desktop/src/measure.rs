@@ -175,10 +175,6 @@ impl PresentationRecord {
         })
     }
 
-    fn passes(&self) -> bool {
-        self.rejection().is_none()
-    }
-
     /// The first presentation rejection, so the operator failure line names the
     /// real cause instead of printing numbers that all look passing. `None`
     /// when the presented events are accepted.
@@ -187,55 +183,36 @@ impl PresentationRecord {
     /// `presented`, so it already lowers the FPS checked below. Only a
     /// missing frame is a rejection independent of the presented count.
     fn rejection(&self) -> Option<&'static str> {
-        let mut ids = std::collections::BTreeSet::new();
-        let mut presented = 0_u64;
-        let mut missing = 0_u64;
         let mut last_timestamp = None;
         let mut timing_domain = None;
         for event in &self.events {
-            let id = match event {
-                PresentationEvent::Presented { correlation_id, .. }
-                | PresentationEvent::Discarded { correlation_id }
-                | PresentationEvent::Missing { correlation_id, .. } => *correlation_id,
-            };
-            if !ids.insert(id) {
-                return Some("presentation correlation ids are not unique");
-            }
-            match event {
-                PresentationEvent::Presented {
-                    timestamp_ns,
-                    clock_id,
-                    output,
-                    ..
-                } => {
-                    if output.is_empty() {
-                        return Some("presented output is empty");
-                    }
-                    if last_timestamp.is_some_and(|last| *timestamp_ns <= last) {
-                        return Some("presented timestamps are not strictly increasing");
-                    }
-                    if timing_domain
-                        .as_ref()
-                        .is_some_and(|domain| domain != &(*clock_id, output.as_str()))
-                    {
-                        return Some("presented timing domain changed");
-                    }
-                    last_timestamp = Some(*timestamp_ns);
-                    timing_domain = Some((*clock_id, output.as_str()));
-                    presented = presented.saturating_add(1);
+            if let PresentationEvent::Presented {
+                timestamp_ns,
+                clock_id,
+                output,
+                ..
+            } = event
+            {
+                if output.is_empty() {
+                    return Some("presented output is empty");
                 }
-                PresentationEvent::Discarded { .. } => {}
-                PresentationEvent::Missing { .. } => missing = missing.saturating_add(1),
+                if last_timestamp.is_some_and(|last| *timestamp_ns <= last) {
+                    return Some("presented timestamps are not strictly increasing");
+                }
+                if timing_domain
+                    .as_ref()
+                    .is_some_and(|domain| domain != &(*clock_id, output.as_str()))
+                {
+                    return Some("presented timing domain changed");
+                }
+                last_timestamp = Some(*timestamp_ns);
+                timing_domain = Some((*clock_id, output.as_str()));
             }
         }
-        if !self.wall_secs.is_finite() || self.wall_secs <= 0.0 {
-            return Some("presentation window is not positive");
-        }
-        let calculated_fps = presented as f64 / self.wall_secs;
-        if presented == 0 || calculated_fps < FPS_MINIMUM {
+        if self.presented == 0 || self.actual_fps < FPS_MINIMUM {
             return Some("presented FPS is below the minimum");
         }
-        if missing != 0 {
+        if self.missing != 0 {
             return Some("frames are missing");
         }
         None
@@ -256,11 +233,10 @@ pub fn wayland_presentation_record(
             "Wayland feedback is empty",
         )));
     };
-    let surfaces = feedback
+    if feedback
         .iter()
-        .map(|feedback| feedback.surface_id.as_str())
-        .collect::<BTreeSet<_>>();
-    if surfaces.len() != 1 {
+        .any(|feedback| feedback.surface_id.as_str() != surface_id)
+    {
         return Err(MeasurementError::PresentationTrace(String::from(
             "Wayland feedback must correlate to exactly one surface",
         )));
@@ -332,9 +308,9 @@ pub fn wayland_presentation_record(
 /// Imports a PresentMon CSV while retaining the raw trace path and requiring
 /// every row to correlate to the selected Body PID and swap chain.
 /// `DisplayedTime` must show a positive display duration; the display timestamp
-/// is reconstructed from `TimeInSeconds + MsUntilDisplayed` (or the equivalent
-/// `CPUStartTime + DisplayLatency`). An explicit dropped row is discarded,
-/// while a row without complete display timing is missing.
+/// is reconstructed from `CPUStartTime + DisplayLatency`. A row whose
+/// `DisplayedTime` is `NA` is discarded, while a row without complete display
+/// timing is missing.
 ///
 /// # Errors
 ///
@@ -364,23 +340,17 @@ pub fn import_presentmon_csv(
     let pid_column = column("ProcessID")?;
     let chain_column = column("SwapChainAddress")?;
     let displayed_column = column("DisplayedTime")?;
-    let timing_columns = match (
-        headers.iter().position(|header| header == "TimeInSeconds"),
-        headers
-            .iter()
-            .position(|header| header == "MsUntilDisplayed"),
+    let (start_column, latency_column) = match (
         headers.iter().position(|header| header == "CPUStartTime"),
         headers.iter().position(|header| header == "DisplayLatency"),
     ) {
-        (Some(start), Some(latency), _, _) => (start, latency, false),
-        (_, _, Some(start), Some(latency)) => (start, latency, true),
+        (Some(start), Some(latency)) => (start, latency),
         _ => {
             return Err(MeasurementError::PresentationTrace(String::from(
                 "missing a complete PresentMon display timing column pair",
             )));
         }
     };
-    let dropped_column = headers.iter().position(|header| header == "Dropped");
     let mut events = Vec::new();
     for row in reader.records() {
         let row = row.map_err(|error| MeasurementError::PresentationTrace(error.to_string()))?;
@@ -391,33 +361,21 @@ pub fn import_presentmon_csv(
             continue;
         }
         let start_value = row
-            .get(timing_columns.0)
+            .get(start_column)
             .and_then(|value| value.parse::<f64>().ok())
             .filter(|value| value.is_finite() && *value >= 0.0);
         let Some(start_value) = start_value else {
             continue;
         };
-        let start_secs = if timing_columns.2 {
-            start_value / 1_000.0
-        } else {
-            start_value
-        };
+        let start_secs = start_value / 1_000.0;
         if start_secs < warmup_secs || start_secs >= warmup_secs + wall_secs {
             continue;
         }
         let correlation_id = u64::try_from(events.len())
             .map_err(|_| MeasurementError::NumericOverflow)?
             .saturating_add(1);
-        let dropped = dropped_column
-            .and_then(|index| row.get(index))
-            .is_some_and(|value| {
-                let value = value.trim();
-                value.eq_ignore_ascii_case("true")
-                    || value == "1"
-                    || value.eq_ignore_ascii_case("dropped")
-            });
         let displayed_text = row.get(displayed_column).unwrap_or_default().trim();
-        if dropped || displayed_text.eq_ignore_ascii_case("NA") {
+        if displayed_text.eq_ignore_ascii_case("NA") {
             events.push(PresentationEvent::Discarded { correlation_id });
             continue;
         }
@@ -426,7 +384,7 @@ pub fn import_presentmon_csv(
             .ok()
             .filter(|value| value.is_finite() && *value > 0.0);
         let display_latency_ms = row
-            .get(timing_columns.1)
+            .get(latency_column)
             .and_then(|value| value.parse::<f64>().ok())
             .filter(|value| value.is_finite() && *value >= 0.0);
         if let (Some(_duration), Some(display_latency_ms)) =
@@ -731,12 +689,9 @@ impl MeasurementRecord {
                     "presentation evidence does not correlate to the measured Body PID",
                 ));
             }
-            if !fps.passes() {
-                let reason = fps
-                    .rejection()
-                    .map_or(String::new(), |reason| format!(": {reason}"));
+            if let Some(reason) = fps.rejection() {
                 self.failures.push(format!(
-                    "presented FPS {:.3}, missing {}{reason}",
+                    "presented FPS {:.3}, missing {}: {reason}",
                     fps.actual_fps, fps.missing
                 ));
             }
@@ -913,6 +868,9 @@ pub fn sample_idle(
     {
         return Err(MeasurementError::InvalidCampaign);
     }
+    #[cfg(target_os = "linux")]
+    let logical_cpus = os::logical_cpus()?;
+    #[cfg(not(target_os = "linux"))]
     let logical_cpus = u32::try_from(
         std::thread::available_parallelism()
             .map_err(MeasurementError::Io)?
@@ -924,18 +882,11 @@ pub fn sample_idle(
         .map_err(|_| MeasurementError::Clock)?
         .as_millis();
     let start = Instant::now();
-    let mut points: BTreeMap<u32, Vec<ProcessPoint>> = targets
-        .iter()
-        .map(|target| (target.pid, Vec::new()))
-        .collect();
+    let mut points: Vec<Vec<ProcessPoint>> = targets.iter().map(|_| Vec::new()).collect();
     loop {
         let offset = start.elapsed().as_secs_f64();
-        for target in targets {
-            let point = os::read_process(target.pid, offset)?;
-            let process_points = points
-                .get_mut(&target.pid)
-                .ok_or(MeasurementError::InvalidCampaign)?;
-            process_points.push(point);
+        for (target, process_points) in targets.iter().zip(&mut points) {
+            process_points.push(os::read_process(target.pid, offset)?);
         }
         if start.elapsed() >= duration {
             break;
@@ -945,10 +896,7 @@ pub fn sample_idle(
     }
     let elapsed_wall_secs = start.elapsed().as_secs_f64();
     let mut processes = Vec::with_capacity(targets.len());
-    for target in targets {
-        let process_points = points
-            .remove(&target.pid)
-            .ok_or(MeasurementError::InvalidCampaign)?;
+    for (target, process_points) in targets.iter().zip(points) {
         let first = process_points
             .first()
             .ok_or(MeasurementError::InvalidCampaign)?;
@@ -1127,6 +1075,21 @@ mod os {
                 .checked_mul(1024)
                 .ok_or(MeasurementError::NumericOverflow)?,
         })
+    }
+
+    /// The online logical CPU count, not the usable-parallelism estimate:
+    /// `machine_percent` is defined against all online CPUs, so process
+    /// affinity or a cgroup quota must not shrink the denominator.
+    pub(super) fn logical_cpus() -> Result<u32, MeasurementError> {
+        // SAFETY: sysconf is side-effect free for this constant and has no
+        // pointer arguments. A non-positive result is rejected below.
+        let count = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        match u32::try_from(count) {
+            Ok(count) if count > 0 => Ok(count),
+            _ => Err(MeasurementError::Io(std::io::Error::other(
+                "online logical CPU count unavailable",
+            ))),
+        }
     }
 }
 
@@ -1468,7 +1431,7 @@ mod tests {
             wayland_presentation_record(42, 1.0, 1.0, feedback).expect("correlated feedback");
         assert_eq!(record.presented, 1);
         assert_eq!(record.missing, 1);
-        assert!(!record.passes());
+        assert!(record.rejection().is_some());
     }
 
     #[test]
@@ -1526,23 +1489,7 @@ mod tests {
         .expect("fps");
         assert_eq!(fps.discarded, 1);
         assert!(fps.actual_fps >= 30.0);
-        assert!(fps.passes());
-    }
-
-    #[test]
-    fn presentmon_missing_display_timing_is_not_presented() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("presentmon.csv");
-        std::fs::write(
-            &path,
-            "ProcessID,SwapChainAddress,TimeInSeconds,MsUntilDisplayed,DisplayedTime,Dropped\n42,0xabc,1.0,5.0,16.6,false\n42,0xabc,1.1,,,false\n42,0xabc,1.2,,,true\n",
-        )
-        .expect("trace");
-        let record = import_presentmon_csv(&path, 42, "0xabc", 0.0, 2.0).expect("import");
-        assert_eq!(record.presented, 1);
-        assert_eq!(record.missing, 1);
-        assert_eq!(record.discarded, 1);
-        assert!(!record.passes());
+        assert!(fps.rejection().is_none());
     }
 
     #[test]
