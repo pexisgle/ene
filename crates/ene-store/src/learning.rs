@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 use crate::Store;
 use crate::codec::{decode_id, decode_u64, encode_id, lock_shared};
-use crate::credential::SQL_SELECT_SET_REV;
+use crate::credential::current_set_revision;
 use crate::run_blocking;
 
 const SQL_SELECT_MEMORY_TARGET: &str =
@@ -24,11 +24,43 @@ const SQL_INSERT_MEMORY_REVISION: &str = "INSERT INTO learning_memory_revision (
 
 const SQL_INSERT_SUMMARY_IGNORE: &str = "INSERT OR IGNORE INTO learning_summary (summary_id, companion_id, content, source_kind, source_start, source_end, formed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
-const SQL_LIST_CURRENT: &str = "SELECT memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at FROM learning_memory WHERE companion_id = ?1 AND (?2 IS NULL OR rowid < (SELECT rowid FROM learning_memory WHERE memory_id = ?2)) ORDER BY rowid DESC LIMIT ?3";
+/// The Memory row projection every Memory read decodes with, in the exact
+/// order [`RawMemory`] consumes it. Single-sourced so a column cannot be
+/// added to one read and missed in another.
+macro_rules! memory_projection {
+    () => {
+        "memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at"
+    };
+}
+
+/// The qualified [`memory_projection`] for the recall union's lexical arm,
+/// which joins the derived token index and must qualify every column.
+macro_rules! qualified_memory_projection {
+    () => {
+        "m.memory_id, m.companion_id, m.revision, m.content, m.importance, m.temporal, m.recall_suppressed, m.updated_at"
+    };
+}
+
+/// The Summary row projection in the exact order [`RawSummary`] consumes it.
+macro_rules! summary_projection {
+    () => {
+        "summary_id, companion_id, content, source_kind, source_start, source_end, formed_at"
+    };
+}
+
+const SQL_LIST_CURRENT: &str = concat!(
+    "SELECT ",
+    memory_projection!(),
+    " FROM learning_memory WHERE companion_id = ?1 AND (?2 IS NULL OR rowid < (SELECT rowid FROM learning_memory WHERE memory_id = ?2)) ORDER BY rowid DESC LIMIT ?3"
+);
 
 const SQL_LIST_REVISIONS: &str = "SELECT memory_id, revision, companion_id, content, importance, temporal, recall_suppressed, change_kind, summary_id, at FROM learning_memory_revision WHERE memory_id = ?1 AND (?2 IS NULL OR revision > ?2) ORDER BY revision ASC LIMIT ?3";
 
-const SQL_SELECT_SUMMARY: &str = "SELECT summary_id, companion_id, content, source_kind, source_start, source_end, formed_at FROM learning_summary WHERE summary_id = ?1";
+const SQL_SELECT_SUMMARY: &str = concat!(
+    "SELECT ",
+    summary_projection!(),
+    " FROM learning_summary WHERE summary_id = ?1"
+);
 
 const SOURCE_KIND_DIALOGUE: &str = "dialogue";
 
@@ -47,11 +79,8 @@ fn commit_change_sync(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(learning_unavailable)?;
     if let Some(expected) = commit.secret_premise {
-        let stored: i64 = tx
-            .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
-            .map_err(learning_unavailable)?;
-        let current = decode_u64(stored).map_err(learning_unavailable)?;
-        if current != expected.as_u64() {
+        let current = current_set_revision(&tx).map_err(learning_unavailable)?;
+        if current != expected {
             return Ok(MemoryChangeOutcome::StaleCredentialSet);
         }
     }
@@ -198,6 +227,11 @@ fn insert_summary(
 /// the outcome and, for `Existing`, proved the row's scope and revision, so
 /// the upsert's conflict arm only ever overwrites that same row; the scope
 /// (`companion_id`) is deliberately not rewritten.
+///
+/// The derived recall token rows are rebuilt in the same transaction, so the
+/// index never observes a half-written recognition. Suppression needs no
+/// reindexing: the lexical arm filters suppressed rows at read time, and
+/// clearing the flag re-exposes the already-indexed tokens.
 fn insert_current(
     tx: &Transaction<'_>,
     memory: MemoryId,
@@ -218,20 +252,6 @@ fn insert_current(
         ],
     )
     .map_err(learning_unavailable)?;
-    refresh_memory_terms(tx, memory, change)?;
-    Ok(())
-}
-
-/// Re-derives the recall token rows for one Memory inside the commit
-/// transaction, so the index never observes a half-written recognition.
-/// Suppression needs no reindexing: the lexical arm filters suppressed rows
-/// at read time, and clearing the flag re-exposes the already-indexed
-/// tokens.
-fn refresh_memory_terms(
-    tx: &Transaction<'_>,
-    memory: MemoryId,
-    change: &MemoryChange,
-) -> Result<(), LearningTechnicalError> {
     rebuild_memory_terms_tx(
         tx,
         &encode_id(memory.as_raw()),
@@ -374,7 +394,7 @@ fn decode_summary(raw: RawSummary) -> Result<SummaryRecord, LearningTechnicalErr
 }
 
 pub(crate) fn recall_candidates_sql(term_count: usize) -> String {
-    let columns = "memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at, rowid AS insertion_order";
+    let columns = concat!(memory_projection!(), ", rowid AS insertion_order");
     let base = format!(
         "SELECT {columns} FROM learning_memory WHERE companion_id = ?1 AND recall_suppressed = 0"
     );
@@ -388,7 +408,8 @@ pub(crate) fn recall_candidates_sql(term_count: usize) -> String {
             .collect::<Vec<_>>()
             .join(",");
         sql.push_str(&format!(
-            " UNION ALL SELECT * FROM (SELECT m.memory_id, m.companion_id, m.revision, m.content, m.importance, m.temporal, m.recall_suppressed, m.updated_at, m.rowid AS insertion_order FROM learning_memory_term t JOIN learning_memory m ON m.memory_id = t.memory_id WHERE t.companion_id = ?1 AND t.term IN ({placeholders}) AND m.recall_suppressed = 0 LIMIT ?2)"
+            " UNION ALL SELECT * FROM (SELECT {}, m.rowid AS insertion_order FROM learning_memory_term t JOIN learning_memory m ON m.memory_id = t.memory_id WHERE t.companion_id = ?1 AND t.term IN ({placeholders}) AND m.recall_suppressed = 0 LIMIT ?2)",
+            qualified_memory_projection!()
         ));
     }
     sql
@@ -520,7 +541,8 @@ fn load_summaries_sync(
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT summary_id, companion_id, content, source_kind, source_start, source_end, formed_at FROM learning_summary WHERE summary_id IN ({placeholders})"
+        "SELECT {} FROM learning_summary WHERE summary_id IN ({placeholders})",
+        summary_projection!()
     );
     let guard = lock_shared(conn);
     let mut statement = guard.prepare(&sql).map_err(learning_unavailable)?;

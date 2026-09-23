@@ -19,7 +19,7 @@ use crate::codec::{
     encode_u64, encode_usage_source, encode_wall_clock, inference_unavailable, lock_shared,
     select_consent,
 };
-use crate::credential::SQL_SELECT_SET_REV;
+use crate::credential::current_set_revision;
 use crate::run_blocking;
 
 const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, capability, consumer, purpose, consent_id, consent_rev, credential_set_rev, provider, model, started_at, delegation_id, task_id, task_revision, data_use_count, pricing_snapshot) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
@@ -112,11 +112,12 @@ impl InferenceAttemptRepository for Store {
             if !current_matches {
                 return Ok(AttemptBeginOutcome::Stale);
             }
-            let stored_set: i64 = tx
-                .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
+            // The credential-set premise rides the same claim transaction:
+            // a prompt scrubbed before a credential became registered must
+            // not reach the provider, even though the consent still holds.
+            let current_set = current_set_revision(&tx)
                 .map_err(|error| inference_unavailable(error.to_string()))?;
-            let current_set = decode_u64(stored_set).map_err(inference_unavailable)?;
-            if current_set != attempt.expected_credential_set.as_u64() {
+            if current_set != attempt.expected_credential_set {
                 return Ok(AttemptBeginOutcome::Stale);
             }
             match check_task_agent_premise(&tx, attempt.task_agent.as_ref())? {

@@ -51,10 +51,19 @@ use super::{
 };
 
 /// Content columns of the Companion owner. The system-wide remainder probe
-/// (`remainder.rs` `SYSTEM_CONTENT`) mirrors this list independently, so a
-/// Companion column added here must also be added there.
-const COMPANION_CONTENT: &[(&str, &str)] =
+/// (`remainder.rs`) derives its Companion surface from this list, so a column
+/// added here is probed as well.
+pub(crate) const COMPANION_CONTENT: &[(&str, &str)] =
     &[("history_message", "body"), ("activity_record", "body")];
+
+/// Content columns of the Learning owner. The Learning sweep and the
+/// system-wide remainder probe both derive their surface from this list, so a
+/// column added here is swept and probed together.
+pub(crate) const LEARNING_CONTENT: &[(&str, &str)] = &[
+    ("learning_summary", "content"),
+    ("learning_memory", "content"),
+    ("learning_memory_revision", "content"),
+];
 
 const HISTORY_MESSAGE_KEY: &str = "message_id";
 const ACTIVITY_RECORD_KEY: &str = "activity_id";
@@ -140,28 +149,31 @@ fn exact_page(
     })
 }
 
-/// One page of the `undelivered` reference table: a row matches when its
+/// The dangling-reporting-reference predicate: a row matches when its
 /// canonical History or activity source no longer exists. The row itself
 /// carries no body, so the source side's erasure governs the content and only
-/// the dangling reference is removed here.
+/// the dangling reference is removed here. `?1`/`?2` are the History-message
+/// and activity-record source kinds; the sweep page and the system-wide
+/// remainder probe share this one declaration.
+pub(crate) const SQL_DANGLING_UNDELIVERED: &str = "(u.source_kind = ?1 AND NOT EXISTS (SELECT 1 FROM history_message h WHERE h.message_id = u.source_id)) OR (u.source_kind = ?2 AND NOT EXISTS (SELECT 1 FROM activity_record a WHERE a.activity_id = u.source_id))";
+
+/// One page of the `undelivered` reference table. Only the dangling
+/// reference is removed here; the referenced source body is the owning
+/// table's concern.
 fn undelivered_page(
     tx: &Transaction<'_>,
     request: &PageRequest<'_>,
 ) -> Result<PageOutcome, ErasurePageError> {
     let sql = format!(
-        "SELECT u.{UNDELIVERED_KEY}, \
-         ((u.source_kind = ?2 AND NOT EXISTS \
-             (SELECT 1 FROM history_message h WHERE h.{HISTORY_MESSAGE_KEY} = u.source_id)) \
-          OR (u.source_kind = ?3 AND NOT EXISTS \
-             (SELECT 1 FROM activity_record a WHERE a.{ACTIVITY_RECORD_KEY} = u.source_id))) \
-         FROM undelivered u WHERE u.{UNDELIVERED_KEY} > ?1 ORDER BY u.{UNDELIVERED_KEY} LIMIT ?4"
+        "SELECT u.{UNDELIVERED_KEY}, ({SQL_DANGLING_UNDELIVERED}) \
+         FROM undelivered u WHERE u.{UNDELIVERED_KEY} > ?3 ORDER BY u.{UNDELIVERED_KEY} LIMIT ?4"
     );
     let (keys, scanned, last) = {
         let mut statement = tx.prepare(&sql)?;
         let mut rows = statement.query(params![
-            request.after,
             SOURCE_KIND_HISTORY_MESSAGE,
             SOURCE_KIND_ACTIVITY_RECORD,
+            request.after,
             request.limit
         ])?;
         let mut keys: Vec<String> = Vec::new();
@@ -296,8 +308,9 @@ fn summary_page(
 ) -> Result<PageOutcome, ErasurePageError> {
     let (keys, scanned, last) = {
         let mut statement = tx.prepare(&format!(
-            "SELECT {SUMMARY_KEY}, source_start, source_end, instr(content, ?2) > 0 \
-             FROM learning_summary WHERE {SUMMARY_KEY} > ?1 ORDER BY {SUMMARY_KEY} LIMIT ?3"
+            "SELECT {SUMMARY_KEY}, source_start, source_end, instr({}, ?2) > 0 \
+             FROM learning_summary WHERE {SUMMARY_KEY} > ?1 ORDER BY {SUMMARY_KEY} LIMIT ?3",
+            LEARNING_CONTENT[0].1
         ))?;
         let mut rows = statement.query(params![request.after, request.target, request.limit])?;
         let mut keys: Vec<String> = Vec::new();
@@ -345,10 +358,11 @@ fn revision_page(
 ) -> Result<PageOutcome, ErasurePageError> {
     let (rows, scanned, last) = {
         let mut statement = tx.prepare(&format!(
-            "SELECT {MEMORY_KEY}, {REVISION_KEY}, summary_id, instr(content, ?3) > 0 \
+            "SELECT {MEMORY_KEY}, {REVISION_KEY}, summary_id, instr({}, ?3) > 0 \
              FROM learning_memory_revision \
              WHERE ({MEMORY_KEY}, {REVISION_KEY}) > (?1, ?2) \
-             ORDER BY {MEMORY_KEY}, {REVISION_KEY} LIMIT ?4"
+             ORDER BY {MEMORY_KEY}, {REVISION_KEY} LIMIT ?4",
+            LEARNING_CONTENT[2].1
         ))?;
         let mut rows = statement.query(params![
             request.after,
@@ -430,9 +444,9 @@ fn memory_page(
 ) -> Result<PageOutcome, ErasurePageError> {
     exact_page_with(
         tx,
-        "learning_memory",
+        LEARNING_CONTENT[1].0,
         MEMORY_KEY,
-        "content",
+        LEARNING_CONTENT[1].1,
         request,
         |keys| delete_memories(tx, keys),
     )

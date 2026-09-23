@@ -44,8 +44,8 @@ mod usage_cap;
 
 pub use companion::UndeliveredExcerpt;
 pub use erasure::{
-    ActionErasureParticipant, CompanionErasureParticipant, ERASURE_SCAN_ROWS,
-    InferenceErasureParticipant, LearningErasureParticipant, TaskErasureParticipant,
+    ActionErasureParticipant, CompanionErasureParticipant, InferenceErasureParticipant,
+    LearningErasureParticipant, TaskErasureParticipant,
 };
 pub use preservation::{HOST_TRANSIENT_ARRIVAL_PAGE, HostTransientArrivalOutcome};
 
@@ -204,7 +204,7 @@ impl Store {
         let text = text.to_owned();
         run_blocking(move || {
             let guard = crate::codec::lock_shared(&conn);
-            erasure::exact_remainder_probe(&guard, &text)
+            erasure::system_remainder(&guard, &text)
                 .map_err(|error| StoreError::OpenFailed(error.to_string()))
         })
         .await

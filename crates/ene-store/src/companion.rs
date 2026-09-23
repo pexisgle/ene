@@ -22,7 +22,8 @@ use crate::codec::{
     encode_undelivered_source, lock_shared, select_attribution, select_consent,
     undelivered_unavailable,
 };
-use crate::credential::SQL_SELECT_SET_REV;
+use crate::credential::current_set_revision;
+use crate::presence::SQL_UPSERT_HINT;
 use crate::run_blocking;
 
 const SQL_FIND_COMPANION: &str = "SELECT companion_id FROM companion LIMIT 1";
@@ -40,8 +41,6 @@ pub(crate) const SQL_SELECT_HISTORY_PREMISE: &str =
     "SELECT role, companion_id FROM history_message WHERE message_id = ?1";
 
 const SQL_INSERT_ATTRIBUTION: &str = "INSERT INTO presence_attribution (companion_id, state, active_client, generation) VALUES (?1, ?2, ?3, ?4)";
-
-const SQL_INSERT_HINT: &str = "INSERT INTO relocation_hint (companion_id, last_client, recovery_destination) VALUES (?1, NULL, NULL)";
 
 const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, at_utc, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)";
 
@@ -85,13 +84,10 @@ pub(crate) const SQL_SELECT_HISTORY_BY_MESSAGE: &str = concat!(
     ", companion_id FROM history_message WHERE message_id = ?1"
 );
 
-pub(crate) const SQL_SELECT_OWNER_ROWID: &str =
-    "SELECT rowid FROM history_message WHERE message_id = ?1";
-
 /// Durable identity of an Owner-message premise, scoped to the companion:
 /// the expected row must be this companion's Owner row, not merely a
 /// resolvable message id.
-const SQL_SELECT_OWNER_ROWID_SCOPED: &str =
+pub(crate) const SQL_SELECT_OWNER_ROWID_SCOPED: &str =
     "SELECT rowid FROM history_message WHERE message_id = ?1 AND companion_id = ?2 AND role = ?3";
 
 /// Supersession probe for one reply premise: any accepted Owner row for
@@ -259,11 +255,12 @@ fn append_history(
         }
     }
     if let Some(expected) = cmd.expected_credential_set {
-        let stored: i64 = tx
-            .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        let current = decode_u64(stored).map_err(companion_unavailable)?;
-        if current != expected.as_u64() {
+        // The text was scrubbed under this credential-set revision. A set
+        // that moved past it may have registered a value still present in
+        // the text, so nothing is written.
+        let current =
+            current_set_revision(&tx).map_err(|error| companion_unavailable(error.to_string()))?;
+        if current != expected {
             return Ok((HistoryAppendOutcome::StaleCredentialSet, None));
         }
     }
@@ -461,8 +458,14 @@ impl CompanionRepository for Store {
                 ],
             )
             .map_err(|error| companion_unavailable(error.to_string()))?;
-            tx.execute(SQL_INSERT_HINT, params![fresh_text])
-                .map_err(|error| companion_unavailable(error.to_string()))?;
+            // The relocation hint row is seeded empty with the companion: it
+            // records history only, and recovery writes are upserts that
+            // never invent a client.
+            tx.execute(
+                SQL_UPSERT_HINT,
+                params![fresh_text, Option::<String>::None, Option::<String>::None],
+            )
+            .map_err(|error| companion_unavailable(error.to_string()))?;
             tx.commit()
                 .map_err(|error| companion_unavailable(error.to_string()))?;
             Ok(CompanionId::from_raw(fresh))
@@ -797,7 +800,7 @@ fn compare_and_mark_reported(
         return Ok(ReportStatusTransition::StaleSource);
     }
     let (next, transition) = match (mark.presented, current) {
-        (true, ReportStatus::Pending | ReportStatus::PresentationUnknown) => (
+        (true, _) => (
             ReportStatus::Presented,
             ReportStatusTransition::PendingToPresented,
         ),
@@ -805,13 +808,13 @@ fn compare_and_mark_reported(
             ReportStatus::PresentationUnknown,
             ReportStatusTransition::MarkedPresentationUnknown,
         ),
-        (false, ReportStatus::PresentationUnknown) => (
+        // `Presented` returned already above; the remaining state is
+        // `PresentationUnknown`, and a not-presented mark against it is a
+        // current receipt that confirmed the item was not presented.
+        (false, _) => (
             ReportStatus::Pending,
             ReportStatusTransition::FailedToPending,
         ),
-        (_, ReportStatus::Presented) => {
-            return Ok(ReportStatusTransition::AlreadyPresented);
-        }
     };
     tx.execute(
         SQL_UPDATE_UNDELIVERED_STATUS,

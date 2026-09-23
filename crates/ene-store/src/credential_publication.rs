@@ -27,6 +27,23 @@ const SQL_UPSERT_ACTIVE: &str = "INSERT INTO credential_active (provider, label,
 const SQL_SELECT_ACTIVE: &str =
     "SELECT active_version FROM credential_active WHERE provider = ?1 AND label = ?2";
 
+/// The stored active version for one credential pair, or [`None`] when no
+/// version is active. A stored negative value cannot be a version this
+/// adapter wrote, so it is an unreadable counter, never an active one.
+fn stored_active_version(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    label: &str,
+) -> Result<Option<u64>, CredentialTechnicalError> {
+    let active: Option<Option<i64>> = conn
+        .query_row(SQL_SELECT_ACTIVE, params![provider, label], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|error| credential_unavailable(error.to_string()))?;
+    Ok(active.flatten().and_then(|value| u64::try_from(value).ok()))
+}
+
 /// Enqueues one replaced version. The primary key makes a repeated retirement
 /// of the same version a loud constraint failure, not a silent overwrite: a
 /// version can only stop being active once.
@@ -107,6 +124,15 @@ fn mutation_from_row(
         Some(None) => return Ok(None),
         Some(Some(outcome)) => Some(outcome),
     };
+    // A stored negative integer can only be a wrapped or tampered value:
+    // this adapter writes revisions and versions non-negative. It is an
+    // unreadable row, never "no premise".
+    if expected_revision.is_some_and(|value| value < 0)
+        || candidate_version.is_some_and(|value| value < 0)
+        || decided_revision.is_some_and(|value| value < 0)
+    {
+        return Ok(None);
+    }
     Ok(Some(ene_credential::CredentialMutation {
         mutation_id,
         kind,
@@ -120,6 +146,50 @@ fn mutation_from_row(
         outcome,
         decided_revision: decided_revision.and_then(|value| u64::try_from(value).ok()),
     }))
+}
+
+/// Reads one stored mutation. The outer [`Option`] is "no such mutation" and
+/// the inner one is a row that cannot be decoded; every caller keeps its own
+/// interpretation of the two.
+fn load_mutation(
+    conn: &rusqlite::Connection,
+    mutation_id: &str,
+) -> Result<Option<Option<ene_credential::CredentialMutation>>, CredentialTechnicalError> {
+    conn.query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
+        mutation_from_row(mutation_id.to_owned(), row)
+    })
+    .optional()
+    .map_err(|error| credential_unavailable(error.to_string()))
+}
+
+/// Abandons a mutation whose premise moved: sweeps the named bearers, records
+/// the durable `Stale` decision, and commits. The caller answers `Stale` from
+/// the revision it already read.
+fn abandon_stale(
+    tx: rusqlite::Transaction<'_>,
+    mutation_id: &str,
+    candidate_bearer: Option<&str>,
+    retired_bearer: Option<&str>,
+) -> Result<(), CredentialTechnicalError> {
+    if let Some(bearer) = candidate_bearer {
+        sweep_registered_secret(&tx, bearer)?;
+    }
+    if let Some(retired) = retired_bearer {
+        sweep_registered_secret(&tx, retired)?;
+    }
+    tx.execute(
+        SQL_DECIDE_MUTATION,
+        params![
+            mutation_id,
+            MutationPhase::Abandoned.as_str(),
+            outcome_text(&MutationOutcome::Stale),
+            Option::<i64>::None,
+        ],
+    )
+    .map_err(|error| credential_unavailable(error.to_string()))?;
+    tx.commit()
+        .map_err(|error| credential_unavailable(error.to_string()))?;
+    Ok(())
 }
 
 impl CredentialPublicationRepository for Store {
@@ -138,12 +208,9 @@ impl CredentialPublicationRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            let stored: Option<Option<ene_credential::CredentialMutation>> = tx
-                .query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
-                    mutation_from_row(mutation_id.clone(), row)
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
+            // Write-once: a retry observes the original attempt instead of
+            // starting a second one under the same id.
+            let stored = load_mutation(&tx, &mutation_id)?;
             if let Some(Some(stored)) = stored {
                 if stored.kind != kind
                     || stored.provider != provider
@@ -239,13 +306,7 @@ impl CredentialPublicationRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            let stored: Option<Option<ene_credential::CredentialMutation>> = tx
-                .query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
-                    mutation_from_row(mutation_id.clone(), row)
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let Some(Some(mutation)) = stored else {
+            let Some(Some(mutation)) = load_mutation(&tx, &mutation_id)? else {
                 return Ok(ActivationOutcome::Missing);
             };
             if let Some(outcome) = mutation.outcome {
@@ -264,22 +325,14 @@ impl CredentialPublicationRepository for Store {
             if let Some(expected) = mutation.expected_revision
                 && expected != current
             {
-                sweep_registered_secret(&tx, &candidate_bearer)?;
-                if let Some(retired) = retired_bearer.as_deref() {
-                    sweep_registered_secret(&tx, retired)?;
-                }
-                tx.execute(
-                    SQL_DECIDE_MUTATION,
-                    params![
-                        mutation_id,
-                        MutationPhase::Abandoned.as_str(),
-                        outcome_text(&MutationOutcome::Stale),
-                        Option::<i64>::None,
-                    ],
-                )
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-                tx.commit()
-                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                // The premise moved; the candidate is not adopted and its
+                // value is swept so nothing survives the refused attempt.
+                abandon_stale(
+                    tx,
+                    &mutation_id,
+                    Some(candidate_bearer.as_str()),
+                    retired_bearer.as_deref(),
+                )?;
                 return Ok(ActivationOutcome::Stale {
                     current_revision: current,
                 });
@@ -300,17 +353,7 @@ impl CredentialPublicationRepository for Store {
                 ],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
-            let previous: Option<Option<i64>> = tx
-                .query_row(
-                    SQL_SELECT_ACTIVE,
-                    params![mutation.provider, mutation.label],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let previous_active = previous
-                .flatten()
-                .and_then(|value| u64::try_from(value).ok());
+            let previous_active = stored_active_version(&tx, &mutation.provider, &mutation.label)?;
             // The replaced version is enqueued in this same transaction and a
             // later update never overwrites it. A candidate equal to the
             // current active version retires nothing: the item this commit
@@ -376,13 +419,7 @@ impl CredentialPublicationRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            let stored: Option<Option<ene_credential::CredentialMutation>> = tx
-                .query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
-                    mutation_from_row(mutation_id.clone(), row)
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let Some(Some(mutation)) = stored else {
+            let Some(Some(mutation)) = load_mutation(&tx, &mutation_id)? else {
                 return Ok(ActivationOutcome::Missing);
             };
             // A decided mutation answers from its stored outcome, so a retry
@@ -403,21 +440,7 @@ impl CredentialPublicationRepository for Store {
                 // The premise moved: nothing is invalidated, and the value
                 // named for retirement is swept so no plaintext of a
                 // registered value survives the refused attempt.
-                if let Some(retired) = retired_bearer.as_deref() {
-                    sweep_registered_secret(&tx, retired)?;
-                }
-                tx.execute(
-                    SQL_DECIDE_MUTATION,
-                    params![
-                        mutation_id,
-                        MutationPhase::Abandoned.as_str(),
-                        outcome_text(&MutationOutcome::Stale),
-                        Option::<i64>::None,
-                    ],
-                )
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-                tx.commit()
-                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                abandon_stale(tx, &mutation_id, None, retired_bearer.as_deref())?;
                 return Ok(ActivationOutcome::Stale {
                     current_revision: current,
                 });
@@ -428,17 +451,7 @@ impl CredentialPublicationRepository for Store {
             if let Some(retired) = retired_bearer.as_deref() {
                 sweep_registered_secret(&tx, retired)?;
             }
-            let previous: Option<Option<i64>> = tx
-                .query_row(
-                    SQL_SELECT_ACTIVE,
-                    params![mutation.provider, mutation.label],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let previous_active = previous
-                .flatten()
-                .and_then(|value| u64::try_from(value).ok());
+            let previous_active = stored_active_version(&tx, &mutation.provider, &mutation.label)?;
             // The invalidated version is enqueued in this same transaction,
             // alongside any earlier pending retirement, and its item stays
             // addressable until the cleanup records the removal.
@@ -531,13 +544,7 @@ impl CredentialPublicationRepository for Store {
         let mutation_id = mutation_id.to_owned();
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            guard
-                .query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
-                    mutation_from_row(mutation_id.clone(), row)
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))
-                .map(Option::flatten)
+            load_mutation(&guard, &mutation_id).map(Option::flatten)
         })
         .await
     }
@@ -552,16 +559,7 @@ impl CredentialPublicationRepository for Store {
         let label = label.to_owned();
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            let active: Option<Option<i64>> = guard
-                .query_row(SQL_SELECT_ACTIVE, params![provider, label], |row| {
-                    row.get(0)
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            Ok(active
-                .flatten()
-                .and_then(|value| u64::try_from(value).ok())
-                .map(SecretVersionId::from_u64))
+            Ok(stored_active_version(&guard, &provider, &label)?.map(SecretVersionId::from_u64))
         })
         .await
     }

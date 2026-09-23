@@ -54,8 +54,6 @@ use crate::run_blocking;
 /// match for a non-overlapping target.
 pub(crate) const ERASED_MARKER: &str = "[erased]";
 
-const MARKER_PASS_BOUND: usize = 8;
-
 /// Bounded rows mutated per table in one local erasure pass (lifecycle §9). A
 /// pass that hits the bound reports its remainder and the next demand re-scans
 /// from the start: erased rows no longer match, so re-scanning is progress and
@@ -64,9 +62,14 @@ pub(crate) const ERASURE_BATCH_ROWS: i64 = 500;
 
 /// Rows one bounded owner demand scans before reporting more work. The value
 /// bounds the SQL, the redaction work, and the caller's wait; a longer sweep
-/// simply spans more demands. The two local owners share the bound so their
+/// simply spans more demands, and the local owners share the bound so their
 /// sweep budgets cannot diverge.
-pub(crate) const ROWS_PER_DEMAND: u32 = 64;
+///
+/// The bound is on scanned rows, not matched rows: a table without a match is
+/// still walked one page at a time, so no demand performs an unbounded scan
+/// and the remainder check is a bounded traversal rather than one query that
+/// reads the whole table.
+pub(crate) const ERASURE_SCAN_ROWS: u32 = 64;
 
 /// One count-width policy for every owner's erasure result (`usize` row
 /// counts and `i64` remainders both widen to `u64`): a value that does not fit
@@ -80,11 +83,10 @@ pub(crate) fn erasure_count(value: impl TryInto<u64>) -> Result<u64, String> {
 /// Mechanically removes every occurrence of `target` from `text`.
 ///
 /// Returns [`None`] when the value contains no occurrence (no write needed).
-/// A replacement can join the surrounding text into a new occurrence, so the
-/// pass repeats until the value is clean; a target that overlaps the marker
-/// itself falls back to outright removal, which strictly shortens the value
-/// and therefore always reaches a clean fixpoint. The returned count is the
-/// number of occurrences removed.
+/// A value that still contains the target after the replacement (the target
+/// overlaps the marker or spans its boundary) falls back to outright removal,
+/// which strictly shortens the value and therefore always reaches a clean
+/// fixpoint. The returned count is the number of occurrences removed.
 ///
 /// This is the one mechanical predicate the A3 owner sweeps and the A4
 /// acceptance boundaries share: a body an accepting boundary redacts and a
@@ -95,13 +97,6 @@ pub(crate) fn redact_exact(text: &str, target: &str) -> Option<(String, u64)> {
     }
     let mut removed = count_occurrences(text, target);
     let mut current = text.replace(target, ERASED_MARKER);
-    for _ in 0..MARKER_PASS_BOUND {
-        if !current.contains(target) {
-            return Some((current, removed));
-        }
-        removed += count_occurrences(&current, target);
-        current = current.replace(target, ERASED_MARKER);
-    }
     while current.contains(target) {
         removed += count_occurrences(&current, target);
         current = current.replace(target, "");
@@ -112,14 +107,6 @@ pub(crate) fn redact_exact(text: &str, target: &str) -> Option<(String, u64)> {
 fn count_occurrences(text: &str, target: &str) -> u64 {
     text.matches(target).count() as u64
 }
-
-/// The public name of the shared per-demand scanned-row bound.
-///
-/// The bound is on scanned rows, not matched rows: a table without a match is
-/// still walked one page at a time, so no demand performs an unbounded scan
-/// and the remainder check is a bounded traversal rather than one query that
-/// reads the whole table.
-pub const ERASURE_SCAN_ROWS: u32 = ROWS_PER_DEMAND;
 
 /// One scanned page of one owner table or row set.
 #[derive(Debug, Default)]
@@ -386,6 +373,11 @@ fn run_local_demand(
     if cursor.verified {
         cursors.remove(&condition);
     } else {
+        // An older generation of the same operation can never become current
+        // again, so its continuation is dead weight.
+        cursors.retain(|existing, _| {
+            existing.operation != condition.operation || existing.sweep == condition.sweep
+        });
         cursors.insert(condition, cursor);
     }
     Ok(fact)
@@ -475,9 +467,3 @@ impl ErasureParticipant for LocalErasureParticipant {
         ))
     }
 }
-
-/// Test-support alias of the system-wide mechanical probe (see
-/// [`remainder::system_remainder`]). Tests assert `0` after an erasure pass
-/// instead of re-implementing the canonical content-surface list.
-#[cfg(feature = "test-support")]
-pub(crate) use remainder::system_remainder as exact_remainder_probe;

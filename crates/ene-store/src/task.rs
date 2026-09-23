@@ -312,8 +312,12 @@ fn owner_message_is_current(
 ) -> Result<bool, TaskTechnicalError> {
     let expected_rowid: Option<i64> = tx
         .query_row(
-            crate::companion::SQL_SELECT_OWNER_ROWID,
-            params![encode_id(currentness.message)],
+            crate::companion::SQL_SELECT_OWNER_ROWID_SCOPED,
+            params![
+                encode_id(currentness.message),
+                encode_id(currentness.companion),
+                crate::codec::encode_role(HistoryRole::Owner)
+            ],
             |row| row.get(0),
         )
         .optional()

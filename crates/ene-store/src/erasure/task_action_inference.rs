@@ -17,7 +17,7 @@
 //!   owner row, so the objective facts of the row (identity, revision,
 //!   progress, adoption, certainty, grounds, ticket, provider, model, usage)
 //!   stay exactly as committed;
-//! * the work is bounded per demand by `ROWS_PER_DEMAND`; the fan-out
+//! * the work is bounded per demand by `ERASURE_SCAN_ROWS`; the fan-out
 //!   re-demands until the participant reports `Verified`, and a crash or a
 //!   restart re-drives the same sweep idempotently because a redaction is a
 //!   no-op on an already-clean value;
@@ -172,6 +172,30 @@ const ACTION_STAGES: &[ErasureStage] = &[ErasureStage {
 
 const INFERENCE_STAGES: &[ErasureStage] = &[];
 
+/// The Task owner's `(table, content column)` surface, in stage order. The
+/// system-wide remainder probe derives its Task surface from these stages, so
+/// a stage column cannot be swept without being probed.
+pub(crate) fn task_content_surface() -> impl Iterator<Item = (&'static str, &'static str)> {
+    TASK_STAGES.iter().flat_map(|stage| {
+        stage
+            .columns
+            .iter()
+            .map(|column| (stage.table, column.name))
+    })
+}
+
+/// The Action owner's `(table, content column)` surface, in stage order. The
+/// system-wide remainder probe derives its Action surface from these stages.
+pub(crate) fn action_content_surface() -> impl Iterator<Item = (&'static str, &'static str)> {
+    ACTION_STAGES.iter().flat_map(|stage| {
+        stage
+            .columns
+            .iter()
+            .map(|column| (stage.table, column.name))
+    })
+}
+
+/// Redacted value planned for one stored column.
 struct ValueRedaction {
     column: &'static str,
     value: String,
@@ -313,7 +337,7 @@ fn plan_redactions(
             // substring of it. A target that overlaps the marker must go
             // through the same mechanical predicate as every other value
             // instead of being certified clean by identity.
-            let replacement = erase_exact(super::ERASED_MARKER, target).map_or_else(
+            let replacement = redact_exact(super::ERASED_MARKER, target).map_or_else(
                 || String::from(super::ERASED_MARKER),
                 |(redacted, _)| redacted,
             );
@@ -327,7 +351,7 @@ fn plan_redactions(
             continue;
         }
         let erased = match column.shape {
-            ErasureShape::Text => erase_exact(text, target),
+            ErasureShape::Text => redact_exact(text, target),
             ErasureShape::AbsolutePath => erase_path(text, target)?,
         };
         if let Some((value, removed)) = erased {
@@ -341,12 +365,13 @@ fn plan_redactions(
     Ok(planned)
 }
 
-fn erase_exact(text: &str, target: &str) -> Option<(String, u64)> {
-    redact_exact(text, target)
-}
-
+/// Redacts one stored filesystem locator, keeping it a readable canonical
+/// absolute path. A redaction that would break that shape (the match consumed
+/// the path root) is replaced by the fixed [`ERASED_LOCATOR`] marker; if even
+/// the marker contains the target, the value is unrepresentable and the sweep
+/// fails closed.
 fn erase_path(text: &str, target: &str) -> Result<Option<(String, u64)>, ErasurePageError> {
-    let Some((redacted, removed)) = erase_exact(text, target) else {
+    let Some((redacted, removed)) = redact_exact(text, target) else {
         return Ok(None);
     };
     if !std::path::Path::new(&redacted).is_absolute() {
