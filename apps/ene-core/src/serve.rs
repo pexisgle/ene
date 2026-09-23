@@ -67,6 +67,10 @@ pub enum CoreError {
     Deletion(String),
     #[error("host-local control failed: {0}")]
     Control(String),
+    #[error("protected store unavailable: {0}")]
+    ProtectedStore(String),
+    #[error("host runtime information could not be published: {0}")]
+    RuntimeInfo(String),
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(&'static str),
     #[error(

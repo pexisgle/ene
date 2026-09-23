@@ -49,6 +49,16 @@ fn ene_ctl_command() -> clap::Command {
                 .arg(Arg::new("text").value_name("TEXT").num_args(1..)),
         )
         .subcommand(
+            clap::Command::new("trust-host")
+                .about("Confirm and store the Host public key pin shown by a key-change refusal")
+                .arg(
+                    clap::Arg::new("pin")
+                        .long("pin")
+                        .value_name("PIN")
+                        .required(true),
+                ),
+        )
+        .subcommand(
             clap::Command::new("watch")
                 .about("Print one round's restored History items")
                 .arg(
@@ -286,6 +296,9 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
     let config = config.or_else(|| sub.get_one::<PathBuf>("config").cloned());
     let command = match name {
         "setup" => cmds::Command::Setup(setup_mode(sub)?),
+        "trust-host" => cmds::Command::TrustHost {
+            pin: sub.get_one::<String>("pin").cloned().unwrap_or_default(),
+        },
         "send" => cmds::Command::Send(send_args(sub)?),
         "watch" => cmds::Command::Watch {
             round: sub.get_one::<String>("round").cloned().unwrap_or_default(),
@@ -514,6 +527,10 @@ async fn run_command(
     language: &str,
     command: cmds::Command,
 ) -> Result<(), CliError> {
+    if let cmds::Command::TrustHost { pin } = &command {
+        let trusted = client::trust_host_pin(data_dir, pin)?;
+        return emit(&format!("trusted Host pin {trusted}"));
+    }
     let platform = client::platform_display();
     let mut session = match client::Client::begin_connect(data_dir, &platform, &platform).await? {
         client::ConnectProgress::Connected(session) => session,
@@ -526,6 +543,8 @@ async fn run_command(
         }
     };
     match command {
+        // Handled above, before any connection is opened.
+        cmds::Command::TrustHost { .. } => Ok(()),
         cmds::Command::Setup(mode) => run_setup(&mut session, mode).await,
         cmds::Command::Send(send) => run_send(&mut session, language, send).await,
         cmds::Command::Watch { round } => {

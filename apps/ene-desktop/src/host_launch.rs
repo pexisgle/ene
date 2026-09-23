@@ -11,25 +11,7 @@ pub enum LaunchError {
 
 #[must_use]
 pub fn host_is_serving(data_dir: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        std::os::unix::net::UnixStream::connect(ene_client::socket_path(data_dir)).is_ok()
-    }
-    #[cfg(windows)]
-    {
-        probe_windows_client_pipe(data_dir)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _data_dir = data_dir;
-        false
-    }
-}
-
-#[cfg(windows)]
-fn probe_windows_client_pipe(data_dir: &Path) -> bool {
-    let pipe = ene_plugin_ipc::pipe_name(data_dir);
-    std::fs::metadata(pipe).is_ok()
+    ene_client::host_is_serving(data_dir)
 }
 
 #[must_use]
