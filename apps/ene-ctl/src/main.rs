@@ -70,18 +70,12 @@ fn ene_ctl_command() -> clap::Command {
                 .arg(Arg::new("provider").long("provider").value_name("P"))
                 .arg(Arg::new("model").long("model").value_name("M")),
         )
-        .subcommand(clap::Command::new("status").about("Show the current setup view"))
         .subcommand(
             clap::Command::new("send")
                 .about("Send one text input; `--` ends option parsing")
                 .arg(Arg::new("new").long("new").action(ArgAction::SetTrue))
                 .arg(Arg::new("round").long("round").value_name("ROUND"))
-                .arg(
-                    Arg::new("text")
-                        .value_name("TEXT")
-                        .num_args(1..)
-                        .trailing_var_arg(true),
-                ),
+                .arg(Arg::new("text").value_name("TEXT").num_args(1..)),
         )
         .subcommand(
             clap::Command::new("watch")
@@ -273,12 +267,6 @@ fn ene_ctl_command() -> clap::Command {
         .subcommand(
             clap::Command::new("usage-cap")
                 .about("Set or update one system/provider daily/monthly usage cap")
-                .arg(
-                    Arg::new("scope")
-                        .long("scope")
-                        .value_name("system|provider")
-                        .default_value(DEFAULT_USAGE_CAP_SCOPE),
-                )
                 .arg(Arg::new("provider").long("provider").value_name("NAME"))
                 .arg(
                     Arg::new("window")
@@ -318,7 +306,6 @@ run `ene-ctl --help`",
 /// Defaults shared by the clap surface and the parser fallbacks so the two
 /// cannot drift apart.
 const DEFAULT_DELETION_PURPOSE: &str = "privacy";
-const DEFAULT_USAGE_CAP_SCOPE: &str = "system";
 const DEFAULT_USAGE_CAP_WINDOW: &str = "daily_utc";
 const DEFAULT_USAGE_CAP_CURRENCY: &str = "USD";
 
@@ -332,7 +319,6 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
     let config = config.or_else(|| sub.get_one::<PathBuf>("config").cloned());
     let command = match name {
         "setup" => cmds::Command::Setup(setup_mode(sub)?),
-        "status" => cmds::Command::Status,
         "send" => cmds::Command::Send(send_args(sub)?),
         "watch" => cmds::Command::Watch {
             round: sub.get_one::<String>("round").cloned().unwrap_or_default(),
@@ -404,10 +390,11 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
             else {
                 return Err(usage_error("--purpose must be privacy or security"));
             };
-            cmds::Command::Deletion {
-                text: sub.get_one::<String>("text").cloned().unwrap_or_default(),
-                purpose,
+            let text = sub.get_one::<String>("text").cloned().unwrap_or_default();
+            if text.trim().is_empty() {
+                return Err(usage_error("deletion requires a non-blank --text"));
             }
+            cmds::Command::Deletion { text, purpose }
         }
         "deletion-status" => cmds::Command::DeletionStatus {
             cursor: sub.get_one::<String>("cursor").cloned(),
@@ -428,26 +415,8 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
             limit: sub.get_one::<u32>("limit").copied(),
         }),
         "usage-cap" => {
-            let scope = sub
-                .get_one::<String>("scope")
-                .cloned()
-                .unwrap_or_else(|| String::from(DEFAULT_USAGE_CAP_SCOPE));
             let provider = sub.get_one::<String>("provider").cloned();
-            match (scope.as_str(), provider.as_deref()) {
-                ("system", None) => {}
-                ("provider", Some(_)) => {}
-                ("system", Some(_)) => {
-                    return Err(usage_error(
-                        "--provider is only valid with --scope provider",
-                    ));
-                }
-                ("provider", None) => {
-                    return Err(usage_error("--scope provider requires --provider NAME"));
-                }
-                _ => return Err(usage_error("--scope must be system or provider")),
-            }
             cmds::Command::UsageCap {
-                scope,
                 provider,
                 window: sub
                     .get_one::<String>("window")
@@ -537,6 +506,8 @@ fn main() -> ExitCode {
     }
 }
 
+/// Runs on a single-threaded Tokio runtime; the transport is a Host-local
+/// socket/pipe (no network today).
 fn run() -> Result<(), CliError> {
     let args = std::env::args_os().skip(1);
     let matches = match ene_ctl_command()
@@ -596,10 +567,6 @@ async fn run_command(
     };
     match command {
         cmds::Command::Setup(mode) => run_setup(&mut session, mode).await,
-        cmds::Command::Status => {
-            let view = request_view(&mut session, cmds::setup_view_request()).await?;
-            emit_setup_view(&view)
-        }
         cmds::Command::Send(send) => run_send(&mut session, language, send).await,
         cmds::Command::Watch { round } => {
             let items =
@@ -665,26 +632,13 @@ async fn run_command(
         }
         cmds::Command::DeletionStatus { cursor, limit } => {
             let response = request_deletion_status(&mut session, cursor.as_deref(), limit).await?;
-            if let ene_api::v1::deletion::DeletionStatusResponse::Page(_) = response {
-                emit(&cmds::render_deletion_status(&response))
-            } else {
-                Err(CliError::Client(ClientError::ServerOutcome(
-                    cmds::render_deletion_status(&response),
-                )))
-            }
+            emit(&cmds::render_deletion_status(&response)?)
         }
         cmds::Command::Usage(request) => {
             let response = request_usage(&mut session, &request).await?;
-            if let ene_api::v1::usage::UsageSummaryResponse::Page(_) = response {
-                emit(&cmds::render_usage_page(&response))
-            } else {
-                Err(CliError::Client(ClientError::ServerOutcome(
-                    cmds::render_usage_page(&response),
-                )))
-            }
+            emit(&cmds::render_usage_page(&response)?)
         }
         cmds::Command::UsageCap {
-            scope,
             provider,
             window,
             currency,
@@ -692,7 +646,6 @@ async fn run_command(
         } => {
             run_usage_cap(
                 &mut session,
-                &scope,
                 provider.as_deref(),
                 &window,
                 &currency,
@@ -752,7 +705,6 @@ async fn request_usage(
 
 async fn run_usage_cap(
     session: &mut client::Client,
-    scope: &str,
     provider: Option<&str>,
     window: &str,
     currency: &str,
@@ -775,7 +727,7 @@ async fn run_usage_cap(
             "usage is unavailable; cannot build a cap base view",
         ))));
     };
-    let Some(base) = cmds::usage_cap_mark_for(&page, scope, provider, window) else {
+    let Some(base) = cmds::usage_cap_mark_for(&page, provider, window) else {
         return Err(CliError::Client(ClientError::ServerOutcome(String::from(
             "the usage read did not name this cap slot; retry later",
         ))));
@@ -797,11 +749,6 @@ async fn run_deletion(
     text: &str,
     purpose: ene_api::v1::deletion::DeletionPurposeWire,
 ) -> Result<(), CliError> {
-    if text.trim().is_empty() {
-        return Err(CliError::Usage(String::from(
-            "deletion requires a non-blank --text",
-        )));
-    }
     let status = request_deletion_status(session, None, Some(1)).await?;
     let ene_api::v1::deletion::DeletionStatusResponse::Page(page) = status else {
         return Err(CliError::Client(ClientError::ServerOutcome(String::from(
@@ -893,7 +840,7 @@ fn stdout_flush(stdout: &mut std::io::Stdout) -> Result<(), CliError> {
     })
 }
 
-/// A setup/status view always carries the five Host setup sections when the
+/// A setup view always carries the five Host setup sections when the
 /// stores are readable; an empty section set is `unavailable_view()`, the only
 /// signal the view path has for an unreadable store (`ene-core` `setup.rs`).
 /// Both the read-only display and the assign flow must refuse that view before
@@ -933,41 +880,20 @@ async fn request_view(
     }
 }
 
-fn history_items(
-    response: ene_api::v1::round::HistoryResponse,
-) -> Result<Vec<ene_api::v1::round::HistoryItem>, CliError> {
-    use ene_api::v1::round::HistoryResponse;
-    match response {
-        HistoryResponse::Items(items) => Ok(items),
-        HistoryResponse::InvalidRequest => Err(CliError::Client(ClientError::ServerRejected(
-            String::from("invalid history request; correct the request fields and retry"),
-        ))),
-        HistoryResponse::Unavailable => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("history is unavailable; retry later"),
-        ))),
-        HistoryResponse::StaleCompanion => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("companion projection is stale; re-sync presence and retry"),
-        ))),
-    }
-}
-
 async fn request_history(
     session: &mut client::Client,
     round: Option<&str>,
     limit: u64,
 ) -> Result<Vec<ene_api::v1::round::HistoryItem>, CliError> {
     let companion = session.companion_ref();
-    let request = match round {
-        Some(round) => cmds::round_history_request(&companion, round, limit),
-        None => cmds::history_request(&companion, limit),
-    };
+    let request = cmds::history_request(&companion, round, limit);
     match answer(
         session
             .request(WirePayload::HistoryRequest(request))
             .await?,
         "history request",
     )? {
-        WirePayload::HistoryResponse(response) => history_items(response),
+        WirePayload::HistoryResponse(response) => cmds::describe_history(response),
         unexpected => Err(unexpected_payload(
             &unexpected,
             "reading history",
@@ -981,7 +907,6 @@ async fn request_task_list(
     cursor: Option<&str>,
     limit: Option<u32>,
 ) -> Result<ene_api::v1::undelivered::TaskListPage, CliError> {
-    use ene_api::v1::undelivered::TaskListResponse;
     match answer(
         session
             .request(WirePayload::ListTasks(cmds::list_tasks_request(
@@ -991,15 +916,7 @@ async fn request_task_list(
             .await?,
         "task list request",
     )? {
-        WirePayload::TaskListResponse(TaskListResponse::Page(page)) => Ok(page),
-        WirePayload::TaskListResponse(TaskListResponse::StaleBaseView { .. }) => {
-            Err(CliError::Client(ClientError::ServerOutcome(String::from(
-                "stale task-list cursor; re-query from the head",
-            ))))
-        }
-        WirePayload::TaskListResponse(TaskListResponse::Unavailable) => Err(CliError::Client(
-            ClientError::ServerOutcome(String::from("task list is unavailable; retry later")),
-        )),
+        WirePayload::TaskListResponse(response) => cmds::describe_task_list(response),
         unexpected => Err(unexpected_payload(
             &unexpected,
             "listing tasks",
@@ -1036,13 +953,15 @@ async fn request_task_report(
     cmds::describe_report(response)
 }
 
+/// One bounded source-body page; `describe_report_source` keeps
+/// `InputUnavailable` retryable (exit 2): the body exists but cannot be
+/// projected safely right now.
 async fn request_report_source(
     session: &mut client::Client,
     source: &str,
     cursor: Option<u64>,
     limit_bytes: Option<u32>,
 ) -> Result<ene_api::v1::undelivered::ReportSourcePageView, CliError> {
-    use ene_api::v1::undelivered::ReportSourceResponse;
     match answer(
         session
             .request(WirePayload::GetReportSource(cmds::report_source_request(
@@ -1053,17 +972,7 @@ async fn request_report_source(
             .await?,
         "report source request",
     )? {
-        WirePayload::ReportSourceResponse(ReportSourceResponse::Page(page)) => Ok(page),
-        WirePayload::ReportSourceResponse(ReportSourceResponse::UnknownRef) => {
-            Err(CliError::Client(ClientError::ServerOutcome(String::from(
-                "unknown report source; re-read the report and retry",
-            ))))
-        }
-        WirePayload::ReportSourceResponse(ReportSourceResponse::InputUnavailable) => {
-            Err(CliError::Client(ClientError::ServerOutcome(String::from(
-                "report source is unavailable; retry later",
-            ))))
-        }
+        WirePayload::ReportSourceResponse(response) => cmds::describe_report_source(response),
         unexpected => Err(unexpected_payload(
             &unexpected,
             "reading a report source",
@@ -1076,20 +985,13 @@ async fn request_select_task(
     session: &mut client::Client,
     task: &str,
 ) -> Result<ene_api::v1::undelivered::TaskSelected, CliError> {
-    use ene_api::v1::undelivered::SelectTaskResponse;
     match answer(
         session
             .request(WirePayload::SelectTask(cmds::select_task_request(task)))
             .await?,
         "task selection request",
     )? {
-        WirePayload::SelectTaskResponse(SelectTaskResponse::Selected(selected)) => Ok(selected),
-        WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef) => Err(CliError::Client(
-            ClientError::ServerOutcome(String::from("unknown task reference; re-list and retry")),
-        )),
-        WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable) => Err(CliError::Client(
-            ClientError::ServerOutcome(String::from("task selection is unavailable; retry later")),
-        )),
+        WirePayload::SelectTaskResponse(response) => cmds::describe_select_task(response),
         unexpected => Err(unexpected_payload(
             &unexpected,
             "selecting a task",
@@ -1467,18 +1369,21 @@ mod tests {
 
     #[test]
     fn config_is_global_and_keeps_the_last_value() {
-        let cli = parse(&["--config", "/tmp/ene.json", "status"]).expect("config plus status");
+        let cli =
+            parse(&["--config", "/tmp/ene.json", "setup", "--show"]).expect("config plus setup");
         assert!(cli.config == Some(PathBuf::from("/tmp/ene.json")));
-        assert!(cli.command == super::cmds::Command::Status);
+        assert!(cli.command == super::cmds::Command::Setup(super::cmds::SetupMode::Show));
         // `--config` after the subcommand is accepted as a global option.
-        let after = parse(&["status", "--config", "/tmp/ene.json"]).expect("config after status");
+        let after =
+            parse(&["setup", "--show", "--config", "/tmp/ene.json"]).expect("config after setup");
         assert!(after.config == Some(PathBuf::from("/tmp/ene.json")));
         let repeated = parse(&[
             "--config",
             "/tmp/a.json",
             "--config",
             "/tmp/b.json",
-            "status",
+            "setup",
+            "--show",
         ])
         .expect("a repeated --config keeps the last value");
         assert!(repeated.config == Some(PathBuf::from("/tmp/b.json")));
@@ -1486,7 +1391,8 @@ mod tests {
 
     #[test]
     fn config_value_named_serve_stays_data() {
-        let cli = parse(&["--config", "serve", "status"]).expect("the value is not a command");
+        let cli =
+            parse(&["--config", "serve", "setup", "--show"]).expect("the value is not a command");
         assert!(cli.config == Some(PathBuf::from("serve")));
     }
 
@@ -1575,6 +1481,17 @@ mod tests {
             fresh.command,
             super::cmds::Command::Send(super::cmds::SendArgs { fresh: true, .. })
         ));
+        let post_text = parse(&["send", "hi", "--round", "round-7"]).expect("flag after text");
+        assert!(
+            post_text.command
+                == super::cmds::Command::Send(super::cmds::SendArgs {
+                    round: Some(String::from("round-7")),
+                    fresh: false,
+                    text: String::from("hi"),
+                }),
+            "a flag after the first text word still parses: {:?}",
+            post_text.command
+        );
         for words in [
             &["send"][..],
             &["send", "--new", "--round", "r", "hi"][..],
@@ -1790,14 +1707,6 @@ mod tests {
             parse(&["tasks", "extra"]),
             Err(CliError::Usage(_))
         ));
-        assert!(matches!(
-            parse(&["status", "extra"]),
-            Err(CliError::Usage(_))
-        ));
-        assert!(matches!(
-            parse(&["status", "--verbose"]),
-            Err(CliError::Usage(_))
-        ));
         assert!(matches!(parse(&["frobnicate"]), Err(CliError::Usage(_))));
     }
 
@@ -1818,40 +1727,6 @@ mod tests {
             assert!(
                 error.exit_code() == std::process::ExitCode::FAILURE,
                 "usage and technical failures must exit 1, got {error:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn history_failures_keep_distinct_meanings() {
-        use ene_api::v1::round::HistoryResponse;
-
-        assert!(
-            super::history_items(HistoryResponse::Items(Vec::new())).is_ok(),
-            "an empty read is a success"
-        );
-        for (response, expected, what) in [
-            (
-                HistoryResponse::InvalidRequest,
-                std::process::ExitCode::FAILURE,
-                "invalid request",
-            ),
-            (
-                HistoryResponse::Unavailable,
-                std::process::ExitCode::from(2),
-                "unavailable",
-            ),
-            (
-                HistoryResponse::StaleCompanion,
-                std::process::ExitCode::from(2),
-                "stale projection",
-            ),
-        ] {
-            let error = super::history_items(response)
-                .expect_err("a failure variant must not answer items");
-            assert!(
-                error.exit_code() == expected,
-                "{what} must keep its exit class, got {error:?}"
             );
         }
     }
@@ -1943,74 +1818,6 @@ mod tests {
         );
         assert!(matches!(
             parse(&["usage", "--limit", "many"]),
-            Err(CliError::Usage(_))
-        ));
-    }
-
-    #[test]
-    fn usage_cap_forms_parse_and_validate_scope_pairing() {
-        use super::cmds::Command as Cmd;
-
-        let system = parse(&["usage-cap", "--limit-micros", "1000"])
-            .expect("the default system daily form parses");
-        assert!(
-            system.command
-                == Cmd::UsageCap {
-                    scope: String::from("system"),
-                    provider: None,
-                    window: String::from("daily_utc"),
-                    currency: String::from("USD"),
-                    limit_micros: 1_000,
-                }
-        );
-        let provider = parse(&[
-            "usage-cap",
-            "--scope",
-            "provider",
-            "--provider",
-            "openai",
-            "--window",
-            "monthly_utc",
-            "--currency",
-            "USD",
-            "--limit-micros",
-            "42",
-        ])
-        .expect("the provider monthly form parses");
-        assert!(
-            provider.command
-                == Cmd::UsageCap {
-                    scope: String::from("provider"),
-                    provider: Some(String::from("openai")),
-                    window: String::from("monthly_utc"),
-                    currency: String::from("USD"),
-                    limit_micros: 42,
-                }
-        );
-        // A scope/provider disagreement is a usage error, never a guessed
-        // slot.
-        assert!(matches!(
-            parse(&["usage-cap", "--scope", "provider", "--limit-micros", "1"]),
-            Err(CliError::Usage(_))
-        ));
-        assert!(matches!(
-            parse(&[
-                "usage-cap",
-                "--scope",
-                "system",
-                "--provider",
-                "openai",
-                "--limit-micros",
-                "1"
-            ]),
-            Err(CliError::Usage(_))
-        ));
-        assert!(matches!(
-            parse(&["usage-cap", "--scope", "global", "--limit-micros", "1"]),
-            Err(CliError::Usage(_))
-        ));
-        assert!(matches!(
-            parse(&["usage-cap", "--limit-micros", "many"]),
             Err(CliError::Usage(_))
         ));
     }

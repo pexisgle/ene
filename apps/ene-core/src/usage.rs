@@ -463,7 +463,6 @@ fn cap_view(
     };
     UsageCapView {
         mark: ViewMarkWire(mark),
-        scope: scope.as_str().to_string(),
         provider,
         window: window.as_str().to_string(),
         stored,

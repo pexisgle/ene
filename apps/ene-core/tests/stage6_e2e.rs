@@ -1234,7 +1234,7 @@ async fn history_texts(client: &mut Client) -> Vec<String> {
     let companion = client.companion_ref();
     let history = ask(
         client,
-        WirePayload::HistoryRequest(cmds::history_request(&companion, 100)),
+        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 100)),
         "history",
     )
     .await
@@ -1459,7 +1459,7 @@ async fn stage6_targeted_deletion_completes_system_wide() {
     let companion = served.client().companion_ref();
     let history = ask(
         served.client(),
-        WirePayload::HistoryRequest(cmds::history_request(&companion, 100)),
+        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 100)),
         "fresh history",
     )
     .await
@@ -2714,7 +2714,7 @@ async fn set_provider_monthly_cap(
     limit_micros: u64,
 ) -> ManagementOutcome {
     let page = usage_page_for(client, provider).await;
-    let mark = cmds::usage_cap_mark_for(&page, "provider", Some(provider), "monthly_utc")
+    let mark = cmds::usage_cap_mark_for(&page, Some(provider), "monthly_utc")
         .expect("the page names the provider monthly slot")
         .to_string();
     let answer = ask(
@@ -2744,7 +2744,7 @@ async fn set_system_daily_cap(
     limit_micros: u64,
 ) -> ManagementOutcome {
     let page = usage_page(client).await;
-    let mark = cmds::usage_cap_mark_for(&page, "system", None, "daily_utc")
+    let mark = cmds::usage_cap_mark_for(&page, None, "daily_utc")
         .expect("the page names the system daily slot")
         .to_string();
     let answer = ask(
@@ -3040,7 +3040,7 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
         after
             .caps
             .iter()
-            .filter(|cap| cap.scope == "system")
+            .filter(|cap| cap.provider.is_none())
             .count(),
         2,
         "the system daily and monthly slots are always reported"
@@ -3143,11 +3143,7 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     let provider_slot = observed
         .caps
         .iter()
-        .find(|cap| {
-            cap.scope == "provider"
-                && cap.provider.as_deref() == Some("openai")
-                && cap.window == "monthly_utc"
-        })
+        .find(|cap| cap.provider.as_deref() == Some("openai") && cap.window == "monthly_utc")
         .expect("the provider monthly slot");
     let UsageCapConsumptionView::Known {
         remaining: provider_remaining,
@@ -3167,7 +3163,7 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     let system_slot = observed
         .caps
         .iter()
-        .find(|cap| cap.scope == "system" && cap.window == "daily_utc")
+        .find(|cap| cap.provider.is_none() && cap.window == "daily_utc")
         .expect("the system daily slot");
     let UsageCapConsumptionView::Known {
         remaining: system_remaining,
@@ -3209,7 +3205,7 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     let system_daily = page
         .caps
         .iter()
-        .find(|cap| cap.scope == "system" && cap.window == "daily_utc")
+        .find(|cap| cap.provider.is_none() && cap.window == "daily_utc")
         .expect("the system daily slot");
     let stored = system_daily.stored.as_ref().expect("the cap is stored");
     let UsageCapConsumptionView::Known {
@@ -3307,7 +3303,7 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     assert_eq!(transport.sends(), sends_before);
 
     let observed = usage_page(served.client()).await;
-    let observed_mark = cmds::usage_cap_mark_for(&observed, "system", None, "daily_utc")
+    let observed_mark = cmds::usage_cap_mark_for(&observed, None, "daily_utc")
         .expect("the slot mark")
         .to_string();
     let old_mark = observed_mark.clone();
@@ -3423,7 +3419,7 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     let system_daily = page
         .caps
         .iter()
-        .find(|cap| cap.scope == "system" && cap.window == "daily_utc")
+        .find(|cap| cap.provider.is_none() && cap.window == "daily_utc")
         .expect("the system daily slot");
     let stored = system_daily.stored.as_ref().expect("the raised cap");
     let UsageCapConsumptionView::Known { consumed, .. } = &stored.consumption else {

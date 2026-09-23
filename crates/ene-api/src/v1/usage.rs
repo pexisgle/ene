@@ -55,12 +55,11 @@ pub struct UsageSummaryRowView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageCapView {
-    /// Opaque mark for this exact `(scope, provider, window)` slot. Echo it
+    /// Opaque mark for this exact `(provider, window)` slot. Echo it
     /// as a cap intent's `base_view`; it names the revision the reader saw,
     /// or the none state when `stored` is `None`.
     pub mark: ViewMarkWire,
-    /// `system` or `provider`.
-    pub scope: String,
+    /// Provider the slot scopes, or `None` for the system scope.
     pub provider: Option<String>,
     pub window: String,
     pub stored: Option<UsageCapStoredView>,
@@ -169,7 +168,6 @@ mod tests {
             next_cursor: Some(UsageCursorWire(String::from("next-1"))),
             caps: vec![UsageCapView {
                 mark: ViewMarkWire(String::from("usage-cap-system-daily_utc-rev-1")),
-                scope: String::from("system"),
                 provider: None,
                 window: String::from("daily_utc"),
                 stored: Some(UsageCapStoredView {

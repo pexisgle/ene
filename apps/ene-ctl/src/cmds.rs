@@ -35,14 +35,15 @@ use ene_api::v1::refs::{
     RoundWireId, TextLangWire,
 };
 use ene_api::v1::round::{
-    HistoryItem, HistoryRequest, HistoryRole, PresentationStatus, RoundIntakeOutcomeWire,
-    SubmitTextInput, TextBodyWire,
+    HistoryItem, HistoryRequest, HistoryResponse, HistoryRole, PresentationStatus,
+    RoundIntakeOutcomeWire, SubmitTextInput, TextBodyWire,
 };
 use ene_api::v1::undelivered::{
     GetReportSource, GetTaskReport, ListTasks, PageCursorWire, ReportSourcePageView,
-    ReportSourceWireRef, ResumeTask, ResumeTaskOutcomeWire, SelectTask, TaskListPage,
-    TaskReportPage, TaskReportResponse, TaskWireRef, UndeliveredAck, UndeliveredAckOutcome,
-    UndeliveredRequest, UndeliveredResponse, UndeliveredSummary,
+    ReportSourceResponse, ReportSourceWireRef, ResumeTask, ResumeTaskOutcomeWire, SelectTask,
+    SelectTaskResponse, TaskListPage, TaskListResponse, TaskReportPage, TaskReportResponse,
+    TaskSelected, TaskWireRef, UndeliveredAck, UndeliveredAckOutcome, UndeliveredRequest,
+    UndeliveredResponse, UndeliveredSummary,
 };
 use ene_api::v1::usage::{
     UsageCapConsumptionView, UsageMoneyView, UsageSummaryPage, UsageSummaryRequest,
@@ -55,7 +56,7 @@ pub const DEFAULT_HISTORY_LIMIT: u64 = 50;
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
 /// The CLI's copy of the documented Host setup section set: `HostHandle::build_view`
-/// in `apps/ene-core/src/setup.rs` renders exactly these for a setup or status
+/// in `apps/ene-core/src/setup.rs` renders exactly these for a setup view
 /// request. The in-file test below pins this literal and the setup request
 /// against this constant only; the Host side is exercised by the `ene-core`
 /// integration tests. An empty request is not the same set: the Host also
@@ -70,7 +71,6 @@ pub const SETUP_PROVIDER_OPENAI: &str = "openai";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Setup(SetupMode),
-    Status,
     Send(SendArgs),
     Watch {
         round: String,
@@ -129,7 +129,6 @@ pub enum Command {
     /// from a read, and the cap revision before the permission-owned command
     /// commits.
     UsageCap {
-        scope: String,
         provider: Option<String>,
         window: String,
         currency: String,
@@ -179,21 +178,17 @@ pub fn memory_view_request(
     }
 }
 
-pub fn history_request(companion: &str, limit: u64) -> HistoryRequest {
+/// `round` restricts the read to one Host-issued stored round projection;
+/// [`None`] reads the whole companion timeline. The Host filters by the stored
+/// projection, so a round stays addressable even after a Host restart dropped
+/// its transient wire map, and the result does not depend on the overall recent
+/// window.
+pub fn history_request(companion: &str, round: Option<&str>, limit: u64) -> HistoryRequest {
     HistoryRequest {
         companion: CompanionWireRef(companion.to_string()),
         since: None,
         limit,
-        round: None,
-    }
-}
-
-pub fn round_history_request(companion: &str, round: &str, limit: u64) -> HistoryRequest {
-    HistoryRequest {
-        companion: CompanionWireRef(companion.to_string()),
-        since: None,
-        limit,
-        round: Some(RoundWireId(round.to_string())),
+        round: round.map(|round| RoundWireId(round.to_string())),
     }
 }
 
@@ -218,7 +213,10 @@ pub fn submit_input(
     }
 }
 
-pub fn new_local_id() -> ClientLocalId {
+/// Mints a client-local correspondence ID from a v4 UUID: unique per
+/// connection for this process, which is all `local_id` needs (it matches
+/// acks to sends within one Client and is never Host-canonical).
+fn new_local_id() -> ClientLocalId {
     ClientLocalId(uuid::Uuid::new_v4().to_string())
 }
 
@@ -451,10 +449,10 @@ pub fn deletion_intent(
 /// Renders the bounded deletion status page: the surface mark an intent builds
 /// on, one line per operation, and the `next ` cursor while a later page
 /// exists. No target body, search material, or credential is in this page.
-#[must_use]
-pub fn render_deletion_status(response: &DeletionStatusResponse) -> String {
+/// `Unavailable` stays a retryable outcome, never an empty page.
+pub fn render_deletion_status(response: &DeletionStatusResponse) -> Result<String, CliError> {
     let DeletionStatusResponse::Page(page) = response else {
-        return String::from("deletion status is unavailable; retry later");
+        return Err(retryable("deletion status is unavailable; retry later"));
     };
     let mut lines = vec![format!("mark {}", page.mark.0)];
     for operation in &page.operations {
@@ -479,7 +477,7 @@ pub fn render_deletion_status(response: &DeletionStatusResponse) -> String {
     if let Some(next) = &page.next_cursor {
         lines.push(format!("next {}", next.0));
     }
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 /// Builds one cap set/update intent. The target grammar is shared with the
@@ -507,31 +505,27 @@ pub fn usage_cap_intent(
 #[must_use]
 pub fn usage_cap_mark_for<'a>(
     page: &'a UsageSummaryPage,
-    scope: &str,
     provider: Option<&str>,
     window: &str,
 ) -> Option<&'a str> {
     page.caps
         .iter()
-        .find(|cap| {
-            cap.scope == scope && cap.provider.as_deref() == provider && cap.window == window
-        })
+        .find(|cap| cap.provider.as_deref() == provider && cap.window == window)
         .map(|cap| cap.mark.0.as_str())
 }
 
 /// Renders one bounded usage page: one line per row, one line per cap slot,
 /// and the `next ` cursor while a later page exists. Unavailable and stale
-/// answers keep their distinct meaning instead of an empty page.
-#[must_use]
-pub fn render_usage_page(response: &UsageSummaryResponse) -> String {
+/// answers stay retryable outcomes instead of an empty page.
+pub fn render_usage_page(response: &UsageSummaryResponse) -> Result<String, CliError> {
     match response {
-        UsageSummaryResponse::Unavailable => String::from("usage is unavailable; retry later"),
+        UsageSummaryResponse::Unavailable => Err(retryable("usage is unavailable; retry later")),
         UsageSummaryResponse::StaleBaseView { current } => match current {
-            Some(current) => format!(
+            Some(current) => Err(retryable(format!(
                 "usage cursor is stale; restart from the head (current {})",
                 current.0
-            ),
-            None => String::from("usage cursor is stale; restart from the head"),
+            ))),
+            None => Err(retryable("usage cursor is stale; restart from the head")),
         },
         UsageSummaryResponse::Page(page) => {
             let mut lines = vec![format!("evaluated-at {}", page.evaluated_at)];
@@ -618,7 +612,7 @@ pub fn render_usage_page(response: &UsageSummaryResponse) -> String {
             if let Some(next) = &page.next_cursor {
                 lines.push(format!("next {}", next.0));
             }
-            lines.join("\n")
+            Ok(lines.join("\n"))
         }
     }
 }
@@ -635,7 +629,17 @@ pub fn render_view(view: &ManagementView) -> String {
         .join("\n")
 }
 
-pub fn role_label(role: HistoryRole) -> &'static str {
+/// One retryable Host-domain answer (exit 2); the message is operational only.
+fn retryable(message: impl Into<String>) -> CliError {
+    CliError::Client(ClientError::ServerOutcome(message.into()))
+}
+
+/// One terminal Host-domain decline (exit 1); the message is operational only.
+fn rejected(message: impl Into<String>) -> CliError {
+    CliError::Client(ClientError::ServerRejected(message.into()))
+}
+
+fn role_label(role: HistoryRole) -> &'static str {
     match role {
         HistoryRole::Owner => "owner",
         HistoryRole::Companion => "companion",
@@ -648,6 +652,23 @@ pub fn render_history(items: &[HistoryItem]) -> String {
         .map(|item| format!("[{}] {}", role_label(item.role), item.text))
         .collect::<Vec<String>>()
         .join("\n")
+}
+
+/// One explicit History read. A successful empty result is distinct from an
+/// invalid request, an unreadable store, and a rotated companion projection;
+/// each failure keeps its own meaning and exit class instead of being shown
+/// as an empty timeline.
+pub fn describe_history(response: HistoryResponse) -> Result<Vec<HistoryItem>, CliError> {
+    match response {
+        HistoryResponse::Items(items) => Ok(items),
+        HistoryResponse::InvalidRequest => Err(rejected(
+            "invalid history request; correct the request fields and retry",
+        )),
+        HistoryResponse::Unavailable => Err(retryable("history is unavailable; retry later")),
+        HistoryResponse::StaleCompanion => Err(retryable(
+            "companion projection is stale; re-sync presence and retry",
+        )),
+    }
 }
 
 /// Intake-routing for a [`RoundIntakeOutcomeWire`]: the accepted round on
@@ -667,16 +688,14 @@ pub fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> Result<String, CliEr
                 ),
                 None => format!("stale round; no round is open (generation {current_generation})"),
             };
-            Err(CliError::Client(ClientError::ServerOutcome(message)))
+            Err(retryable(message))
         }
-        RoundIntakeOutcomeWire::HeldForTransition => {
-            Err(CliError::Client(ClientError::ServerOutcome(String::from(
-                "held for a presence transition; retry after the transition settles",
-            ))))
+        RoundIntakeOutcomeWire::HeldForTransition => Err(retryable(String::from(
+            "held for a presence transition; retry after the transition settles",
+        ))),
+        RoundIntakeOutcomeWire::NeedsRevalidation { reason } => {
+            Err(retryable(format!("needs revalidation: {}", reason.0)))
         }
-        RoundIntakeOutcomeWire::NeedsRevalidation { reason } => Err(CliError::Client(
-            ClientError::ServerOutcome(format!("needs revalidation: {}", reason.0)),
-        )),
     }
 }
 
@@ -689,24 +708,20 @@ pub fn describe_ack(outcome: &UndeliveredAckOutcome) -> Result<(), CliError> {
         | UndeliveredAckOutcome::AlreadyPresented
         | UndeliveredAckOutcome::ReturnedToPending { .. }
         | UndeliveredAckOutcome::KeptUnknown => Ok(()),
-        UndeliveredAckOutcome::UnknownRef => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("unknown receipt; re-query for a new receipt and retry"),
+        UndeliveredAckOutcome::UnknownRef => Err(retryable(String::from(
+            "unknown receipt; re-query for a new receipt and retry",
         ))),
-        UndeliveredAckOutcome::StalePresentation => {
-            Err(CliError::Client(ClientError::ServerOutcome(String::from(
-                "stale presentation; re-query for a new receipt and retry",
-            ))))
-        }
-        UndeliveredAckOutcome::StaleConnection => {
-            Err(CliError::Client(ClientError::ServerOutcome(String::from(
-                "stale connection; re-query on this connection and retry",
-            ))))
-        }
-        UndeliveredAckOutcome::HeldForErasure => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("items are under deletion; re-query after it settles"),
+        UndeliveredAckOutcome::StalePresentation => Err(retryable(String::from(
+            "stale presentation; re-query for a new receipt and retry",
         ))),
-        UndeliveredAckOutcome::Unavailable => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("presentation confirmation is unavailable; retry later"),
+        UndeliveredAckOutcome::StaleConnection => Err(retryable(String::from(
+            "stale connection; re-query on this connection and retry",
+        ))),
+        UndeliveredAckOutcome::HeldForErasure => Err(retryable(String::from(
+            "items are under deletion; re-query after it settles",
+        ))),
+        UndeliveredAckOutcome::Unavailable => Err(retryable(String::from(
+            "presentation confirmation is unavailable; retry later",
         ))),
     }
 }
@@ -723,51 +738,43 @@ pub fn describe_resume(outcome: &ResumeTaskOutcomeWire) -> Result<String, CliErr
         } => Ok(format!(
             "resumed at revision {revision} (delegation {delegation})"
         )),
-        ResumeTaskOutcomeWire::StalePremise { current_revision } => {
-            Err(CliError::Client(ClientError::ServerRejected(format!(
-                "stale premise; current revision is {current_revision}"
-            ))))
+        ResumeTaskOutcomeWire::StalePremise { current_revision } => Err(rejected(format!(
+            "stale premise; current revision is {current_revision}"
+        ))),
+        ResumeTaskOutcomeWire::Superseded => {
+            Err(rejected(String::from("superseded by a newer Owner input")))
         }
-        ResumeTaskOutcomeWire::Superseded => Err(CliError::Client(ClientError::ServerRejected(
-            String::from("superseded by a newer Owner input"),
-        ))),
-        ResumeTaskOutcomeWire::TaskTerminal { progress } => Err(CliError::Client(
-            ClientError::ServerRejected(format!("task is already {progress}")),
-        )),
-        ResumeTaskOutcomeWire::AlreadyRunning => Err(CliError::Client(
-            ClientError::ServerRejected(String::from("task is already running")),
-        )),
-        ResumeTaskOutcomeWire::HeldByUnknownEffects => Err(CliError::Client(
-            ClientError::ServerRejected(String::from("held by unknown effects; settle them first")),
-        )),
-        ResumeTaskOutcomeWire::ResultAvailable => {
-            Err(CliError::Client(ClientError::ServerRejected(String::from(
-                "a sealed result is available to review first",
-            ))))
+        ResumeTaskOutcomeWire::TaskTerminal { progress } => {
+            Err(rejected(format!("task is already {progress}")))
         }
-        ResumeTaskOutcomeWire::NeedsRevalidation { hold } => Err(CliError::Client(
-            ClientError::ServerRejected(format!("needs revalidation: {hold}")),
-        )),
-        ResumeTaskOutcomeWire::MissingTask => Err(CliError::Client(ClientError::ServerRejected(
-            String::from("no such task"),
-        ))),
-        ResumeTaskOutcomeWire::RevisionExhausted => Err(CliError::Client(
-            ClientError::ServerRejected(String::from("the task cannot take another change")),
-        )),
-        ResumeTaskOutcomeWire::InFlight => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("resume already in flight; retry for its outcome"),
-        ))),
-        ResumeTaskOutcomeWire::UnknownRef => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("unknown task reference; re-list and retry"),
-        ))),
-        ResumeTaskOutcomeWire::StaleConnection => {
-            Err(CliError::Client(ClientError::ServerOutcome(String::from(
-                "stale sender epoch; re-prepare on this connection and retry",
-            ))))
+        ResumeTaskOutcomeWire::AlreadyRunning => {
+            Err(rejected(String::from("task is already running")))
         }
-        ResumeTaskOutcomeWire::Unavailable => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("host unavailable; retry later"),
+        ResumeTaskOutcomeWire::HeldByUnknownEffects => Err(rejected(String::from(
+            "held by unknown effects; settle them first",
         ))),
+        ResumeTaskOutcomeWire::ResultAvailable => Err(rejected(String::from(
+            "a sealed result is available to review first",
+        ))),
+        ResumeTaskOutcomeWire::NeedsRevalidation { hold } => {
+            Err(rejected(format!("needs revalidation: {hold}")))
+        }
+        ResumeTaskOutcomeWire::MissingTask => Err(rejected(String::from("no such task"))),
+        ResumeTaskOutcomeWire::RevisionExhausted => Err(rejected(String::from(
+            "the task cannot take another change",
+        ))),
+        ResumeTaskOutcomeWire::InFlight => Err(retryable(String::from(
+            "resume already in flight; retry for its outcome",
+        ))),
+        ResumeTaskOutcomeWire::UnknownRef => Err(retryable(String::from(
+            "unknown task reference; re-list and retry",
+        ))),
+        ResumeTaskOutcomeWire::StaleConnection => Err(retryable(String::from(
+            "stale sender epoch; re-prepare on this connection and retry",
+        ))),
+        ResumeTaskOutcomeWire::Unavailable => {
+            Err(retryable(String::from("host unavailable; retry later")))
+        }
     }
 }
 
@@ -776,22 +783,20 @@ pub fn describe_resume(outcome: &ResumeTaskOutcomeWire) -> Result<String, CliErr
 pub fn describe_fetch(response: UndeliveredResponse) -> Result<UndeliveredSummary, CliError> {
     match response {
         UndeliveredResponse::Summary(summary) => Ok(summary),
-        UndeliveredResponse::FrameTooLarge => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("frame too large; retry with a smaller limit"),
+        UndeliveredResponse::FrameTooLarge => Err(retryable(String::from(
+            "frame too large; retry with a smaller limit",
         ))),
-        UndeliveredResponse::NoCurrentPresence => {
-            Err(CliError::Client(ClientError::ServerOutcome(String::from(
-                "no current presence; summon first, then retry",
-            ))))
-        }
-        UndeliveredResponse::UnknownCompanion => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("unknown companion; re-sync presence and retry"),
+        UndeliveredResponse::NoCurrentPresence => Err(retryable(String::from(
+            "no current presence; summon first, then retry",
         ))),
-        UndeliveredResponse::StaleBaseView { .. } => Err(CliError::Client(
-            ClientError::ServerOutcome(String::from("stale base view; re-query from the head")),
-        )),
-        UndeliveredResponse::Unavailable => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("undelivered items are unavailable; retry later"),
+        UndeliveredResponse::UnknownCompanion => Err(retryable(String::from(
+            "unknown companion; re-sync presence and retry",
+        ))),
+        UndeliveredResponse::StaleBaseView { .. } => Err(retryable(String::from(
+            "stale base view; re-query from the head",
+        ))),
+        UndeliveredResponse::Unavailable => Err(retryable(String::from(
+            "undelivered items are unavailable; retry later",
         ))),
     }
 }
@@ -801,15 +806,60 @@ pub fn describe_fetch(response: UndeliveredResponse) -> Result<UndeliveredSummar
 pub fn describe_report(response: TaskReportResponse) -> Result<TaskReportPage, CliError> {
     match response {
         TaskReportResponse::Page(page) => Ok(page),
-        TaskReportResponse::UnknownRef => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("unknown task reference; re-list and retry"),
+        TaskReportResponse::UnknownRef => Err(retryable(String::from(
+            "unknown task reference; re-list and retry",
         ))),
-        TaskReportResponse::StaleBaseView { .. } => Err(CliError::Client(
-            ClientError::ServerOutcome(String::from("stale cursor; re-query from the head")),
+        TaskReportResponse::StaleBaseView { .. } => Err(retryable(String::from(
+            "stale cursor; re-query from the head",
+        ))),
+        TaskReportResponse::Unavailable => {
+            Err(retryable(String::from("host unavailable; retry later")))
+        }
+    }
+}
+
+/// Task-list routing for a [`TaskListResponse`]: the page on success, a
+/// retryable `ServerOutcome` otherwise. Stale cursors and rejections keep
+/// their own exit classes instead of rendering as an empty list.
+pub fn describe_task_list(response: TaskListResponse) -> Result<TaskListPage, CliError> {
+    match response {
+        TaskListResponse::Page(page) => Ok(page),
+        TaskListResponse::StaleBaseView { .. } => {
+            Err(retryable("stale task-list cursor; re-query from the head"))
+        }
+        TaskListResponse::Unavailable => Err(retryable("task list is unavailable; retry later")),
+    }
+}
+
+/// Source-body routing for a [`ReportSourceResponse`]: the page on success.
+/// `InputUnavailable` is retryable (exit 2): the body exists but cannot be
+/// projected safely right now.
+pub fn describe_report_source(
+    response: ReportSourceResponse,
+) -> Result<ReportSourcePageView, CliError> {
+    match response {
+        ReportSourceResponse::Page(page) => Ok(page),
+        ReportSourceResponse::UnknownRef => Err(retryable(
+            "unknown report source; re-read the report and retry",
         )),
-        TaskReportResponse::Unavailable => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("host unavailable; retry later"),
-        ))),
+        ReportSourceResponse::InputUnavailable => {
+            Err(retryable("report source is unavailable; retry later"))
+        }
+    }
+}
+
+/// Task-selection routing for a [`SelectTaskResponse`]: the selection on
+/// success, a retryable `ServerOutcome` otherwise. Selection is in-memory
+/// display state, never an execution start.
+pub fn describe_select_task(response: SelectTaskResponse) -> Result<TaskSelected, CliError> {
+    match response {
+        SelectTaskResponse::Selected(selected) => Ok(selected),
+        SelectTaskResponse::UnknownRef => {
+            Err(retryable("unknown task reference; re-list and retry"))
+        }
+        SelectTaskResponse::Unavailable => {
+            Err(retryable("task selection is unavailable; retry later"))
+        }
     }
 }
 
@@ -823,17 +873,18 @@ pub fn describe_management(outcome: &ManagementOutcome) -> Result<String, CliErr
         ManagementOutcome::StoredAsRuleView { revision } => {
             Ok(format!("stored as a rule at revision {}", revision.0))
         }
-        ManagementOutcome::NeedsClarification => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("nothing was applied; the request needs clarification"),
+        ManagementOutcome::NeedsClarification => Err(retryable(String::from(
+            "nothing was applied; the request needs clarification",
         ))),
-        ManagementOutcome::DeniedByBoundary => Err(CliError::Client(ClientError::ServerRejected(
-            String::from("denied by the control boundary"),
+        ManagementOutcome::DeniedByBoundary => {
+            Err(rejected(String::from("denied by the control boundary")))
+        }
+        ManagementOutcome::StaleBaseView { current } => Err(retryable(format!(
+            "stale base view; current mark is {}",
+            current.0
         ))),
-        ManagementOutcome::StaleBaseView { current } => Err(CliError::Client(
-            ClientError::ServerOutcome(format!("stale base view; current mark is {}", current.0)),
-        )),
-        ManagementOutcome::HeldByOperation => Err(CliError::Client(ClientError::ServerOutcome(
-            String::from("held by a concurrent operation; retry later"),
+        ManagementOutcome::HeldByOperation => Err(retryable(String::from(
+            "held by a concurrent operation; retry later",
         ))),
     }
 }
@@ -853,7 +904,7 @@ mod tests {
         SETUP_PROVIDER_OPENAI, assignment_intent, consent_target_for, credential_id_for,
         credential_intent, credential_target_for, describe_intake, describe_management,
         history_request, memory_view_request, new_local_id, render_history, render_view,
-        round_history_request, setup_view_request, submit_input,
+        setup_view_request, submit_input,
     };
     use ene_client::ClientError;
 
@@ -1070,7 +1121,7 @@ mod tests {
             revisions.memory_after.is_none(),
             "a revision request is not a list page: {revisions:?}"
         );
-        let history = history_request("companion-1", 7);
+        let history = history_request("companion-1", None, 7);
         assert!(
             history.companion.0 == "companion-1" && history.limit == 7,
             "history echoes the learned companion: {history:?}"
@@ -1079,7 +1130,7 @@ mod tests {
             history.round.is_none(),
             "plain history reads the whole timeline: {history:?}"
         );
-        let scoped = round_history_request("companion-1", "round-9", 7);
+        let scoped = history_request("companion-1", Some("round-9"), 7);
         assert!(
             scoped.round == Some(RoundWireId(String::from("round-9"))),
             "round-scoped history carries the projection: {scoped:?}"
@@ -1479,14 +1530,16 @@ mod tests {
                 "deletion-status:op-1",
             ))),
         });
-        let rendered = super::render_deletion_status(&page);
+        let rendered = super::render_deletion_status(&page).expect("a page renders");
         assert!(rendered.contains("mark deletion-view/1/-/1/op-1"));
         assert!(rendered.contains("op-1 finalizing privacy sweep=2"));
         assert!(rendered.contains("participants=not-reported"));
         assert!(rendered.contains("next deletion-status:op-1"));
         assert!(!rendered.contains("Debug"));
+        let unavailable = super::render_deletion_status(&DeletionStatusResponse::Unavailable)
+            .expect_err("an unavailable read is not a rendered page");
         assert_eq!(
-            super::render_deletion_status(&DeletionStatusResponse::Unavailable),
+            expect_outcome(unavailable),
             "deletion status is unavailable; retry later"
         );
     }
@@ -1538,7 +1591,6 @@ mod tests {
             caps: vec![
                 UsageCapView {
                     mark: ViewMarkWire(String::from("usage-cap-system-daily_utc-rev-0")),
-                    scope: String::from("system"),
                     provider: None,
                     window: String::from("daily_utc"),
                     stored: Some(UsageCapStoredView {
@@ -1573,7 +1625,6 @@ mod tests {
                 },
                 UsageCapView {
                     mark: ViewMarkWire(String::from("usage-cap-provider-openai-daily_utc-none")),
-                    scope: String::from("provider"),
                     provider: Some(String::from("openai")),
                     window: String::from("daily_utc"),
                     stored: None,
@@ -1619,28 +1670,25 @@ mod tests {
     fn usage_cap_mark_for_selects_exactly_one_slot() {
         let page = fixture_usage_page();
         assert_eq!(
-            usage_cap_mark_for(&page, "system", None, "daily_utc"),
+            usage_cap_mark_for(&page, None, "daily_utc"),
             Some("usage-cap-system-daily_utc-rev-0")
         );
         assert_eq!(
-            usage_cap_mark_for(&page, "provider", Some("openai"), "daily_utc"),
+            usage_cap_mark_for(&page, Some("openai"), "daily_utc"),
             Some("usage-cap-provider-openai-daily_utc-none")
         );
         assert_eq!(
-            usage_cap_mark_for(&page, "system", None, "monthly_utc"),
+            usage_cap_mark_for(&page, None, "monthly_utc"),
             None,
             "an unnamed slot yields no mark instead of a guess"
         );
-        assert_eq!(
-            usage_cap_mark_for(&page, "provider", Some("other"), "daily_utc"),
-            None
-        );
+        assert_eq!(usage_cap_mark_for(&page, Some("other"), "daily_utc"), None);
     }
 
     #[test]
     fn render_usage_page_prints_rows_caps_and_the_cursor() {
         let response = UsageSummaryResponse::Page(fixture_usage_page());
-        let rendered = render_usage_page(&response);
+        let rendered = render_usage_page(&response).expect("a page renders");
         for needle in [
             "evaluated-at 2026-09-17T00:00:00.000000000Z",
             "openai/gpt-x",
@@ -1672,10 +1720,14 @@ mod tests {
     fn render_usage_page_keeps_stale_and_unavailable_distinct() {
         let stale = render_usage_page(&UsageSummaryResponse::StaleBaseView {
             current: Some(UsageCursorWire(String::from("cursor-9"))),
-        });
+        })
+        .expect_err("a stale page is not a rendered page");
+        let stale = expect_outcome(stale);
         assert!(stale.contains("stale"), "stale must say so: {stale}");
         assert!(stale.contains("cursor-9"));
-        let unavailable = render_usage_page(&UsageSummaryResponse::Unavailable);
+        let unavailable = render_usage_page(&UsageSummaryResponse::Unavailable)
+            .expect_err("an unavailable read is not a rendered page");
+        let unavailable = expect_outcome(unavailable);
         assert!(
             unavailable.contains("unavailable"),
             "unavailable must not read as an empty page: {unavailable}"

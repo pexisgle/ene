@@ -23,7 +23,6 @@ pub struct UsagePanel {
     page: Option<UsageSummaryPage>,
     notice: String,
     cap_limit_micros: u64,
-    cap_scope: String,
     cap_provider: Option<String>,
     cap_window: String,
     cap_currency: String,
@@ -46,7 +45,6 @@ impl Default for UsagePanel {
             page: None,
             notice: String::new(),
             cap_limit_micros: 1_000_000,
-            cap_scope: String::from("system"),
             cap_provider: None,
             cap_window: String::from("daily_utc"),
             cap_currency: String::from("USD"),
@@ -216,14 +214,7 @@ impl UsagePanel {
         self.cap_limit_micros = micros;
     }
 
-    pub fn set_cap_slot(
-        &mut self,
-        scope: String,
-        provider: Option<String>,
-        window: String,
-        currency: String,
-    ) {
-        self.cap_scope = scope;
+    pub fn set_cap_slot(&mut self, provider: Option<String>, window: String, currency: String) {
         self.cap_provider = provider;
         self.cap_window = window;
         self.cap_currency = currency;
@@ -258,7 +249,6 @@ impl UsagePanel {
     ) -> Result<ManagementOutcome, DesktopError> {
         let mark = cap_mark_for(
             self.page.as_ref(),
-            &self.cap_scope,
             self.cap_provider.as_deref(),
             &self.cap_window,
         )
@@ -337,16 +327,13 @@ impl UsagePanel {
 
 fn cap_mark_for(
     page: Option<&UsageSummaryPage>,
-    scope: &str,
     provider: Option<&str>,
     window: &str,
 ) -> Option<ViewMarkWire> {
     page?
         .caps
         .iter()
-        .find(|cap| {
-            cap.scope == scope && cap.provider.as_deref() == provider && cap.window == window
-        })
+        .find(|cap| cap.provider.as_deref() == provider && cap.window == window)
         .map(|cap| cap.mark.clone())
 }
 

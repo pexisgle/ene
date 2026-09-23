@@ -1016,12 +1016,11 @@ impl DesktopRuntime {
 
     pub fn set_usage_cap_slot(
         &mut self,
-        scope: String,
         provider: Option<String>,
         window: String,
         currency: String,
     ) {
-        self.usage.set_cap_slot(scope, provider, window, currency);
+        self.usage.set_cap_slot(provider, window, currency);
     }
 
     pub fn set_deletion_purpose(&mut self, purpose: ene_api::v1::deletion::DeletionPurposeWire) {
