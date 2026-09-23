@@ -1,4 +1,5 @@
-use ene_desktop_ui::{ChatWindow, ManagementWindow, discard_secret_input, erase_surface_copies};
+use ene_desktop::ui::presentation::{discard_secret_input, erase_surface_copies};
+use ene_desktop_ui::{ChatWindow, ManagementWindow};
 use slint::platform::{
     Platform, WindowAdapter,
     software_renderer::{MinimalSoftwareWindow, RepaintBufferType},

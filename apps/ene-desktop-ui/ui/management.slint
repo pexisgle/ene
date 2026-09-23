@@ -1,75 +1,6 @@
 import { ScrollView, AboutSlint } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Action, NavItem, Heading, Caption, BodyText, Field, Notice, EmptyState, RowCard, Item } from "components.slint";
-
-component SetupPane inherits Rectangle {
-    in property <bool> japanese;
-    in-out property <int> step;
-    in property <bool> busy;
-    in property <bool> credential-present;
-    in-out property <string> model;
-    in-out property <string> secret-draft;
-    callback next();
-    callback back();
-    callback language(bool);
-    callback credential(string);
-    callback assign(string);
-    public function clear-secret() { root.secret-draft = ""; }
-    VerticalLayout {
-        spacing: 24px; alignment: start;
-        Caption { text: root.japanese ? "はじめの設定 · " + (root.step + 1) + " / 5" : "GETTING STARTED · " + (root.step + 1) + " / 5"; }
-        HorizontalLayout {
-            spacing: 6px; height: 3px;
-            for n in 5: Rectangle { height: 3px; border-radius: 2px; background: n <= root.step ? Theme.accent : Theme.border; }
-        }
-        Heading { text:
-            root.step == 0 ? (root.japanese ? "使いやすい言語で。" : "Make yourself at home.") :
-            root.step == 1 ? (root.japanese ? "あなたのパートナー、ene。" : "Meet your partner, ene.") :
-            root.step == 2 ? (root.japanese ? "送信するデータと費用" : "Your data and costs") :
-            root.step == 3 ? (root.japanese ? "AI に接続する準備" : "Connect your AI provider") :
-            (root.japanese ? "会話に使うモデル" : "Choose a model for conversation");
-        }
-        BodyText { text:
-            root.step == 0 ? (root.japanese ? "表示言語は、あとから設定で変更できます。" : "You can change the display language in Settings at any time.") :
-            root.step == 1 ? (root.japanese ? "ene と会話したり、作業を頼んだりできます。アバターが利用できなくても、会話と設定は使えます。" : "Talk with ene and ask for a hand with your work. Chat and settings work even without an avatar.") :
-            root.step == 2 ? (root.japanese ? "会話には OpenAI を使用します。メッセージや必要な会話の文脈がクラウドに送られ、利用に応じた料金が発生します。API キーの登録だけでは送信されません。" : "Conversation uses OpenAI. Your messages and necessary context are sent to the cloud and usage incurs a cost. Registering a key alone does not send a request.") :
-            root.step == 3 ? (root.japanese ? "OpenAI API キーを登録します。保存に対応していない環境では、登録できないことをお知らせします。" : "Register your OpenAI API key. If protected storage is unavailable, registration cannot complete.") :
-            (root.japanese ? "モデル名を確認してください。割り当てを確定すると、このモデルを会話に利用することに同意します。" : "Check the model name. Assigning it authorizes this model for conversation.");
-        }
-        if root.step == 0: HorizontalLayout {
-            spacing: 12px;
-            Action { text: "日本語"; selected: root.japanese; clicked => { root.language(true); } }
-            Action { text: "English"; selected: !root.japanese; clicked => { root.language(false); } }
-        }
-        key-field := Field {
-            visible: root.step == 3;
-            height: root.step == 3 ? 76px : 0px;
-            value <=> root.secret-draft;
-            label: "OpenAI API key"; hint: "sk-…"; password: true; enabled: !root.busy;
-        }
-        if root.step == 4: Field { label: root.japanese ? "モデル名" : "Model name"; hint: "gpt-5.6-luna"; value <=> root.model; enabled: !root.busy; }
-        HorizontalLayout {
-            spacing: 12px;
-            Action { text: root.japanese ? "戻る" : "Back"; enabled: root.step > 0 && !root.busy; clicked => { key-field.value = ""; root.back(); } }
-            Rectangle { horizontal-stretch: 1; }
-            Action {
-                text: root.busy ? (root.japanese ? "処理中…" : "Working…") :
-                    root.step == 3 ? (root.japanese ? "キーを登録" : "Register key") :
-                    root.step == 4 ? (root.japanese ? "同意して割り当て" : "Agree and assign") : (root.japanese ? "次へ" : "Continue");
-                primary: true;
-                // Credential presence in the setup view describes the assigned
-                // route. Before the first assignment it is false even after
-                // registration; the Host validates the selected credential.
-                enabled: !root.busy && (root.step != 3 || key-field.value != "") && (root.step != 4 || root.model != "");
-                clicked => {
-                    if root.step == 3 { root.credential(key-field.value); key-field.value = ""; }
-                    else if root.step == 4 { root.assign(root.model); }
-                    else { root.next(); }
-                }
-            }
-        }
-    }
-}
+import { Action, NavItem, Heading, Caption, BodyText, Field, Notice, EmptyState, RowCard, StaticRowCard, Item } from "components.slint";
 
 export component ManagementWindow inherits Window {
     title: japanese ? "ene — 設定・管理" : "ene — Settings";
@@ -90,6 +21,8 @@ export component ManagementWindow inherits Window {
     in property <bool> setup-ready;
     in property <bool> credential-present;
     in property <bool> consent-assigned;
+    /// The Host's durable model assignment; the wizard draft is `model`.
+    in property <string> assigned-model;
     in property <bool> avatar-available;
     in property <bool> avatar-visible;
     in property <bool> memory-more;
@@ -130,7 +63,6 @@ export component ManagementWindow inherits Window {
     callback resume-deletion();
     callback confirm-owner();
     callback cancel-owner();
-    callback draft-changed();
     callback show-avatar();
     callback hide-avatar();
     public function clear-secret() { root.secret-draft = ""; }
@@ -140,6 +72,14 @@ export component ManagementWindow inherits Window {
         root.selected-memory = ""; root.selected-deletion = ""; root.notice = "";
         root.confirmation-target = ""; root.confirmation-key = ""; root.confirmation-title = ""; root.confirmation-description = ""; root.can-confirm = false;
     }
+    function page-title(page: int) -> string {
+        return page == 0 ? (root.japanese ? "一般" : "General") :
+            page == 1 ? (root.japanese ? "AI・接続" : "AI & connection") :
+            page == 2 ? (root.japanese ? "記憶" : "Memory") :
+            page == 3 ? (root.japanese ? "利用量・上限" : "Usage & limits") :
+            page == 4 ? (root.japanese ? "データ削除" : "Data deletion") :
+            (root.japanese ? "ene について" : "About ene");
+    }
     if root.content-live: HorizontalLayout {
         spacing: 0px;
         Rectangle {
@@ -148,16 +88,16 @@ export component ManagementWindow inherits Window {
                 padding: 16px; spacing: 8px;
                 Text { text: "ene"; color: Theme.text; font-size: 24px; font-weight: 600; height: 52px; }
                 Caption { text: root.japanese ? "設定" : "PREFERENCES"; }
-                NavItem { text: root.japanese ? "一般" : "General"; selected: root.page == 0; clicked => { root.navigate(0); } }
-                NavItem { text: root.japanese ? "AI・接続" : "AI & connection"; selected: root.page == 1 || root.page == 6; clicked => { root.navigate(1); } }
+                NavItem { text: root.page-title(0); selected: root.page == 0; clicked => { root.navigate(0); } }
+                NavItem { text: root.page-title(1); selected: root.page == 1 || root.page == 6; clicked => { root.navigate(1); } }
                 Rectangle { height: 16px; }
                 Caption { text: root.japanese ? "データ管理" : "YOUR DATA"; }
-                NavItem { text: root.japanese ? "記憶" : "Memory"; selected: root.page == 2; clicked => { root.navigate(2); } }
-                NavItem { text: root.japanese ? "利用量・上限" : "Usage & limits"; selected: root.page == 3; clicked => { root.navigate(3); } }
-                NavItem { text: root.japanese ? "データ削除" : "Data deletion"; selected: root.page == 4; clicked => { root.navigate(4); } }
+                NavItem { text: root.page-title(2); selected: root.page == 2; clicked => { root.navigate(2); } }
+                NavItem { text: root.page-title(3); selected: root.page == 3; clicked => { root.navigate(3); } }
+                NavItem { text: root.page-title(4); selected: root.page == 4; clicked => { root.navigate(4); } }
                 Rectangle { vertical-stretch: 1; }
                 Caption { text: root.status; }
-                NavItem { text: root.japanese ? "ene について" : "About ene"; selected: root.page == 5; clicked => { root.navigate(5); } }
+                NavItem { text: root.page-title(5); selected: root.page == 5; clicked => { root.navigate(5); } }
                 Action { text: root.japanese ? "会話を開く" : "Open chat"; clicked => { root.open-chat(); } }
             }
         }
@@ -166,32 +106,68 @@ export component ManagementWindow inherits Window {
             VerticalLayout {
                 padding: 32px; spacing: 20px;
                 if root.page < 6: HorizontalLayout {
-                    Heading { text: root.page == 0 ? (root.japanese ? "一般" : "General") :
-                        root.page == 1 ? (root.japanese ? "AI・接続" : "AI & connection") :
-                        root.page == 2 ? (root.japanese ? "記憶" : "Memory") :
-                        root.page == 3 ? (root.japanese ? "利用量・上限" : "Usage & limits") :
-                        root.page == 4 ? (root.japanese ? "データ削除" : "Data deletion") :
-                        (root.japanese ? "ene について" : "About ene");
-                    }
+                    Heading { text: root.page-title(root.page); }
                     if root.page > 0 && root.page < 5: Action { text: root.busy ? (root.japanese ? "取得中…" : "Loading…") : (root.japanese ? "更新" : "Refresh"); enabled: !root.busy && root.connected; clicked => { root.refresh(); } }
                 }
                 if root.notice != "": Notice { text: root.notice; error: root.notice-error; }
-                content := Rectangle {
+                Rectangle {
                     vertical-stretch: 1;
                     if root.page == 6: ScrollView {
                       content-width: self.width;
                       VerticalLayout { alignment: start;
-                       setup := SetupPane {
-                        secret-draft <=> root.secret-draft;
+                       VerticalLayout {
+                        spacing: 24px; alignment: start;
                         max-width: 560px; horizontal-stretch: 1;
-                        japanese: root.japanese; step: root.step; busy: root.busy;
-                        credential-present: root.credential-present;
-                        model <=> root.model;
-                        next => { root.wizard-next(); }
-                        back => { root.wizard-back(); }
-                        language(ja) => { root.language(ja); }
-                        credential(value) => { root.register-secret(value); }
-                        assign(value) => { root.assign-model(value); }
+                        Caption { text: root.japanese ? "はじめの設定 · " + (root.step + 1) + " / 5" : "GETTING STARTED · " + (root.step + 1) + " / 5"; }
+                        HorizontalLayout {
+                            spacing: 6px; height: 3px;
+                            for n in 5: Rectangle { height: 3px; border-radius: 2px; background: n <= root.step ? Theme.accent : Theme.border; }
+                        }
+                        Heading { text:
+                            root.step == 0 ? (root.japanese ? "使いやすい言語で。" : "Make yourself at home.") :
+                            root.step == 1 ? (root.japanese ? "あなたのパートナー、ene。" : "Meet your partner, ene.") :
+                            root.step == 2 ? (root.japanese ? "送信するデータと費用" : "Your data and costs") :
+                            root.step == 3 ? (root.japanese ? "AI に接続する準備" : "Connect your AI provider") :
+                            (root.japanese ? "会話に使うモデル" : "Choose a model for conversation");
+                        }
+                        BodyText { text:
+                            root.step == 0 ? (root.japanese ? "表示言語は、あとから設定で変更できます。" : "You can change the display language in Settings at any time.") :
+                            root.step == 1 ? (root.japanese ? "ene と会話したり、作業を頼んだりできます。アバターが利用できなくても、会話と設定は使えます。" : "Talk with ene and ask for a hand with your work. Chat and settings work even without an avatar.") :
+                            root.step == 2 ? (root.japanese ? "会話には OpenAI を使用します。メッセージや必要な会話の文脈がクラウドに送られ、利用に応じた料金が発生します。API キーの登録だけでは送信されません。" : "Conversation uses OpenAI. Your messages and necessary context are sent to the cloud and usage incurs a cost. Registering a key alone does not send a request.") :
+                            root.step == 3 ? (root.japanese ? "OpenAI API キーを登録します。保存に対応していない環境では、登録できないことをお知らせします。" : "Register your OpenAI API key. If protected storage is unavailable, registration cannot complete.") :
+                            (root.japanese ? "モデル名を確認してください。割り当てを確定すると、このモデルを会話に利用することに同意します。" : "Check the model name. Assigning it authorizes this model for conversation.");
+                        }
+                        if root.step == 0: HorizontalLayout {
+                            spacing: 12px;
+                            Action { text: "日本語"; selected: root.japanese; clicked => { root.language(true); } }
+                            Action { text: "English"; selected: !root.japanese; clicked => { root.language(false); } }
+                        }
+                        if root.step == 3: Field {
+                            height: 76px;
+                            value <=> root.secret-draft;
+                            label: root.japanese ? "OpenAI API キー" : "OpenAI API key"; hint: "sk-…"; password: true; enabled: !root.busy;
+                        }
+                        if root.step == 4: Field { label: root.japanese ? "モデル名" : "Model name"; hint: "gpt-5.6-luna"; value <=> root.model; enabled: !root.busy; }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Action { text: root.japanese ? "戻る" : "Back"; enabled: root.step > 0 && !root.busy; clicked => { root.secret-draft = ""; root.wizard-back(); } }
+                            Rectangle { horizontal-stretch: 1; }
+                            Action {
+                                text: root.busy ? (root.japanese ? "処理中…" : "Working…") :
+                                    root.step == 3 ? (root.japanese ? "キーを登録" : "Register key") :
+                                    root.step == 4 ? (root.japanese ? "同意して割り当て" : "Agree and assign") : (root.japanese ? "次へ" : "Continue");
+                                primary: true;
+                                // Credential presence in the setup view describes the assigned
+                                // route. Before the first assignment it is false even after
+                                // registration; the Host validates the selected credential.
+                                enabled: !root.busy && (root.step != 3 || root.secret-draft != "") && (root.step != 4 || root.model != "");
+                                clicked => {
+                                    if root.step == 3 { root.register-secret(root.secret-draft); root.secret-draft = ""; }
+                                    else if root.step == 4 { root.assign-model(root.model); }
+                                    else { root.wizard-next(); }
+                                }
+                            }
+                        }
                        }
                       }
                     }
@@ -222,9 +198,9 @@ export component ManagementWindow inherits Window {
                             if root.page == 1: VerticalLayout {
                                 spacing: 16px;
                                 Caption { text: root.japanese ? "接続と登録の状態" : "Connection and registration"; }
-                                RowCard { item: { title: "OpenAI", body: root.japanese ? "会話に使う AI プロバイダー" : "AI provider for conversation", state: root.connected ? (root.japanese ? "接続済み" : "Connected") : (root.japanese ? "未接続" : "Disconnected") }; }
-                                RowCard { item: { title: root.japanese ? "API キー" : "API key", body: root.japanese ? "キーの値はここには表示されません。" : "Your key is never displayed here.", state: root.credential-present ? (root.japanese ? "登録済み" : "Registered") : (root.japanese ? "未登録" : "Not registered") }; }
-                                RowCard { item: { title: root.japanese ? "モデルの割り当て" : "Model assignment", body: root.model, state: root.consent-assigned ? (root.japanese ? "同意済み" : "Authorized") : (root.japanese ? "未設定" : "Not configured") }; }
+                                StaticRowCard { item: { title: "OpenAI", body: root.japanese ? "会話に使う AI プロバイダー" : "AI provider for conversation", state: root.connected ? (root.japanese ? "接続済み" : "Connected") : (root.japanese ? "未接続" : "Disconnected") }; }
+                                StaticRowCard { item: { title: root.japanese ? "API キー" : "API key", body: root.japanese ? "キーの値はここには表示されません。" : "Your key is never displayed here.", state: root.credential-present ? (root.japanese ? "登録済み" : "Registered") : (root.japanese ? "未登録" : "Not registered") }; }
+                                StaticRowCard { item: { title: root.japanese ? "モデルの割り当て" : "Model assignment", body: root.assigned-model, state: root.consent-assigned ? (root.japanese ? "同意済み" : "Authorized") : (root.japanese ? "未設定" : "Not configured") }; }
                                 Action { text: root.japanese ? "セットアップを開く" : "Open setup"; primary: true; clicked => { root.navigate(6); } }
                             }
                             if root.page == 2: VerticalLayout {
@@ -234,7 +210,7 @@ export component ManagementWindow inherits Window {
                                 for memory in root.memories: RowCard { item: memory; selected: memory.key == root.selected-memory; clicked(key) => { if !root.busy { root.select-memory(key); } } }
                                 if root.memory-more: Action { text: root.japanese ? "さらに読み込む" : "Load more"; enabled: !root.busy; clicked => { root.next-memory(); } }
                                 if root.selected-memory != "": Heading { text: root.japanese ? "根拠と変更履歴" : "Sources & revisions"; font-size: 18px; }
-                                for revision in root.revisions: RowCard { item: revision; }
+                                for revision in root.revisions: StaticRowCard { item: revision; }
                                 if root.revisions-more: Action { text: root.japanese ? "履歴をさらに読む" : "More revisions"; enabled: !root.busy; clicked => { root.next-revisions(); } }
                             }
                             if root.page == 3: VerticalLayout {
@@ -258,22 +234,22 @@ export component ManagementWindow inherits Window {
                                 }
                                 if root.usage-more: Action { text: root.japanese ? "次のページ" : "Next page"; enabled: !root.busy; clicked => { root.next-usage(); } }
                                 Heading { text: root.japanese ? "利用上限" : "Spending limits"; font-size: 18px; }
-                                for cap in root.caps: RowCard { item: cap; }
+                                for cap in root.caps: StaticRowCard { item: cap; }
                                 Field { label: root.japanese ? "全体の日次上限 · USD / UTC 日" : "System daily limit · USD / UTC day"; hint: "1.00"; value <=> root.cap-amount; enabled: !root.busy; }
                                 Action { text: root.japanese ? "日次上限を更新" : "Update daily limit"; enabled: !root.busy && root.connected; clicked => { root.apply-cap(root.cap-amount); } }
                             }
                             if root.page == 4: VerticalLayout {
                                 spacing: 16px;
                                 Notice { text: root.japanese ? "指定した情報を履歴や記憶から完全に削除します。会話で「忘れて」と伝える操作とは異なり、取り消せません。" : "Permanently remove matching information from history and memory. This differs from asking ene to forget and cannot be undone."; }
-                                Field { label: root.japanese ? "完全に削除する文字列" : "Exact text to erase"; hint: root.japanese ? "対象の文字列を入力" : "Enter the exact text"; value <=> root.deletion-draft; enabled: !root.busy; edited => { root.draft-changed(); } }
+                                Field { label: root.japanese ? "完全に削除する文字列" : "Exact text to erase"; hint: root.japanese ? "対象の文字列を入力" : "Enter the exact text"; value <=> root.deletion-draft; enabled: !root.busy; }
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Action { text: root.japanese ? "削除を要求" : "Request deletion"; danger: true; enabled: !root.busy && root.connected && root.deletion-draft != ""; clicked => { root.request-deletion(root.deletion-draft); root.deletion-draft = ""; } }
+                                    Action { text: root.japanese ? "削除を要求" : "Request deletion"; danger: true; enabled: !root.busy && root.connected && root.deletion-draft != ""; clicked => { root.request-deletion(root.deletion-draft); } }
                                     Action { text: root.japanese ? "確認へ進む" : "Review request"; enabled: !root.busy && root.connected && root.selected-deletion != ""; clicked => { root.confirm-deletion(); } }
                                 }
                                 Heading { text: root.japanese ? "処理の状況" : "Operation status"; font-size: 18px; }
                                 if root.deletions.length == 0: Caption { text: root.japanese ? "取得済みの削除処理はありません。" : "No deletion operations have been retrieved."; }
-                                for operation in root.deletions: RowCard { item: operation; selected: operation.key == root.selected-deletion; clicked(key) => { root.select-deletion(key); } }
+                                for operation in root.deletions: RowCard { item: operation; selected: operation.key == root.selected-deletion; clicked(key) => { if !root.busy { root.select-deletion(key); } } }
                                 Action { text: root.japanese ? "選択した処理を再開" : "Resume selected operation"; enabled: root.can-resume-deletion && !root.busy; clicked => { root.resume-deletion(); } }
                             }
                             if root.page == 5: VerticalLayout {

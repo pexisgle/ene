@@ -1,9 +1,65 @@
+//! One-to-one text round trip: intake, reply, stream, ack, timeline.
+//!
+//! `HostHandle::submit_text` mediates one accepted input: durable idempotent
+//! replay, presence attach, presentation intake, then the companion-owned
+//! turn (`ene_companion::dialogue`), whose inference boundary
+//! (`ene_inference::InferenceExecutor`) owns admission, the attempt claim,
+//! the provider call, adoption, and usage accounting. The Host maps the
+//! resulting domain outcome to frames and records the open round between the
+//! owner append and dispatch. A companion reply carrying a
+//! `[task-control]` directive is interpreted by the companion and executed
+//! through `HostTaskControl` against the existing Task
+//! owner boundaries before the reply is stored; the stored reply is the
+//! owner-derived text, never the directive. `HostHandle::confirm_presentation`
+//! applies presentation observations, and `HostHandle::answer_history`
+//! restores the filtered timeline.
+//!
+//! `Stage 2` wire reason vocabulary for
+//! [`NeedsRevalidation`](ene_api::v1::round::RoundIntakeOutcomeWire::NeedsRevalidation)
+//! outcomes: `intake_reason` maps [`ene_presentation::RevalidationReason`]
+//! to `"missing-generation-view"`, `"unknown-companion"`,
+//! `"stopped-companion"`, `"missing-command-id"`, and `"input-over-limit"`;
+//! `admission_reason` maps the admission declines to `"setup-incomplete"`,
+//! `"consent-stale"`, `"not-in-allowlist"`, and `"evaluation-consumed"`.
+//!
+//! Infallible-frame mapping used here (no `Result`: [`HostHandle::handle_frame_to`]
+//! answers every frame):
+//!
+//! - Store failures before acceptance become
+//!   [`HeldForTransition`](ene_api::v1::round::RoundIntakeOutcomeWire::HeldForTransition):
+//!   no work started, so a later retry is safe.
+//! - A reused command key with a different [`RequestFingerprint`] becomes the
+//!   typed
+//!   [`CommandReplayReject`](ene_api::v1::payload::WirePayload::CommandReplayReject)
+//!   (`CommandIdConflict`), judged by the companion's fingerprint comparison
+//!   shared with the store's in-transaction pre-check: declined without side
+//!   effects, never an intake outcome, never a retry signal.
+//! - A stale or held owner append becomes the matching outcome frame. Its
+//!   projection entry stays mapped but unpublished: no open-round record was
+//!   made and no ack carried it, so later intakes surface the round as stale
+//!   rather than rebinding anything onto it.
+//! - An admission decline becomes `NeedsRevalidation` with the setup/consent
+//!   reason above: the Client recovers by running the setup flow, then retries
+//!   with a fresh local id.
+//! - Any failure after acceptance (inference not sent, transport error, reply
+//!   append lost) becomes the accept ack plus a stream closed as
+//!   [`Interrupted`](ene_api::v1::round::StreamClose::Interrupted). Usage
+//!   accounting follows certainty, never adoption (owned by
+//!   `ene-inference`): never-sent calls record no fact, uncertain attempts
+//!   record [`Unknown`](ene_inference::UsageSource::Unknown) counts, and
+//!   reported counts are kept even when the reply cannot be adopted. A
+//!   usage-record failure after a durable reply keeps the `Completed` close:
+//!   the reply happened, and the usage gap is the documented `Stage 2`
+//!   follow-up (retry queue), not a reason to misreport the stream.
+//! - Presentation observations and unresolvable confirmation rounds produce no
+//!   reply: confirmation is an observation, never a report of completion.
+
+use ene_api::v1::command::CommandReplayRejectWire;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{CommandWireId, RoundWireId, StreamWireId};
 use ene_api::v1::refs::{ConnectionWireId, RevalidationReasonWire};
-use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::{
-    ConfirmPresentationWire, HistoryItem, HistoryRequest, HistoryResponse,
+    ConfirmPresentationWire, HISTORY_LIMIT_MAX, HistoryItem, HistoryRequest, HistoryResponse,
     HistoryRole as HistoryRoleWire, PresentationStatus, RoundIntakeOutcomeWire, StreamClose,
     SubmitTextInput, TextStreamClose, TextStreamFrameWire, TextStreamOpen,
 };
@@ -40,29 +96,44 @@ use ene_store::Store;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::serve::{
-    CredStore, FrameSink, HostHandle, LiveInput, attribution_to_wire, device_client, emit_end,
-    outgoing_fact, outgoing_frame, reject_frame, stale_reject, unpaired_close,
+    CredStore, HostHandle, LiveInput, attribution_to_wire, device_client, emit_control, emit_end,
+    outgoing_fact, outgoing_frame, stale_reject, unpaired_close,
 };
 
+/// An absent command id yields [`None`] (no replay key); the caller declines
+/// the submit with `missing-command-id`, because idempotency keys are
+/// mandatory. Transport retry reuses the same command ID with a fresh message
+/// ID within one sender incarnation; the store answers replays with the
+/// original acceptance instead of re-appending.
 fn command_id_for(envelope: &ene_api::v1::envelope::WireEnvelope) -> Option<CommandId> {
     let CommandWireId(id) = envelope.correlation.command_id?;
     Some(CommandId(ene_primitive::RawId::from_uuid(id)))
 }
 
-enum RoundPremise {
-    Auto,
-    Existing(String),
-}
-
-fn canonical_round_premise(
+/// Canonical client round premise of one [`SubmitTextInput`] send.
+///
+/// The payload names the premise (`SubmitTextInput.round`); the envelope
+/// `round_view` is the mirror the Client relied on (IPC §5: comparison
+/// material, not a claim) and must agree with it once populated. A
+/// disagreement means two different round premises: neither side is adopted
+/// — the caller answers stale with current values and the Client re-syncs.
+///
+/// A force-new request is the design's round-less new-round request
+/// (IPC §13.1: `round = None`, `round_view = None`), so it names no premise
+/// at all. A force-new frame carrying a premise in either carrier is
+/// self-contradictory and is rejected here, never silently reinterpreted as
+/// the flag or joined on the hint.
+fn canonical_round_intent(
     submit: &SubmitTextInput,
     round_view: Option<&RoundWireId>,
-) -> Option<RoundPremise> {
+) -> Option<RoundIntentMark> {
+    if submit.fresh {
+        return (submit.round.is_none() && round_view.is_none()).then_some(RoundIntentMark::New);
+    }
     match (&submit.round, round_view) {
-        (None, None) => Some(RoundPremise::Auto),
-        (Some(round), None) if !submit.fresh => Some(RoundPremise::Existing(round.0.clone())),
-        (Some(round), Some(view)) if !submit.fresh && view == round => {
-            Some(RoundPremise::Existing(round.0.clone()))
+        (None, None) => Some(RoundIntentMark::Auto),
+        (Some(round), view) if view.is_none_or(|view| view == round) => {
+            Some(RoundIntentMark::Existing(round.0.clone()))
         }
         _ => None,
     }
@@ -75,7 +146,6 @@ fn intake_reason(reason: &RevalidationReason) -> &'static str {
         RevalidationReason::StoppedCompanion => "stopped-companion",
         RevalidationReason::MissingCommandId => "missing-command-id",
         RevalidationReason::InputOverLimit => "input-over-limit",
-        RevalidationReason::UnknownReasonTag => "unknown-reason",
     }
 }
 
@@ -157,10 +227,15 @@ fn revalidate_frame(frame: &WireFrame, live: &LiveInput, reason: &str) -> WireFr
     )
 }
 
-fn command_conflict_detail(command: &CommandId) -> String {
-    format!(
-        "command {} reused with a different request",
-        command.0.as_uuid().as_hyphenated()
+/// Builds the typed command-id-conflict reject for `command`: the reused id
+/// travels structured, never inside an untyped detail string (IPC §24).
+fn command_conflict_frame(frame: &WireFrame, live: &LiveInput, command: &CommandId) -> WireFrame {
+    outgoing_frame(
+        frame,
+        live,
+        WirePayload::CommandReplayReject(CommandReplayRejectWire::CommandIdConflict {
+            command_id: CommandWireId(command.0.as_uuid()),
+        }),
     )
 }
 
@@ -186,16 +261,6 @@ pub(crate) enum AttachOutcome {
 }
 
 impl HostHandle {
-    pub(crate) fn open_wire_for(
-        &self,
-        connection: &ConnectionWireId,
-        companion_key: &str,
-    ) -> Option<RoundWireId> {
-        let open = self.open_round_for(connection, companion_key)?;
-        let wire = self.wire_for_round(&open.round)?;
-        Some(RoundWireId(wire))
-    }
-
     pub(crate) fn stale_frame(
         &self,
         frame: &WireFrame,
@@ -203,7 +268,10 @@ impl HostHandle {
         companion_key: &str,
         generation: u64,
     ) -> WireFrame {
-        let current_round = self.open_wire_for(&live.connection_id, companion_key);
+        let current_round = self
+            .open_round_for(&live.connection_id, companion_key)
+            .and_then(|open| self.wire_for_round(&open.round))
+            .map(RoundWireId);
         stale_frame_with(frame, live, current_round, generation)
     }
 
@@ -214,12 +282,9 @@ impl HostHandle {
         connection_live: bool,
         expected_state: PresenceState,
         expected_generation: PresenceGeneration,
+        companion: CompanionId,
     ) -> AttachOutcome {
         let client = device_client(device_wire);
-        let companion = match self.store.ensure_running_companion().await {
-            Ok(companion) => companion,
-            Err(_) => return AttachOutcome::Raced,
-        };
         let store = self.store.clone();
         let expected = PresenceCheckRef {
             expected_generation,
@@ -256,14 +321,63 @@ impl HostHandle {
         }
     }
 
+    /// Mediates one [`SubmitTextInput`] frame into the companion turn.
+    ///
+    /// Order: companion mapping, mandatory command key, durable idempotent
+    /// replay, presence attach, presentation intake, dialogue prompt
+    /// assembly, then the companion-owned turn
+    /// (`ene_companion::dialogue::begin_turn_committed`/`finish_turn`) with its
+    /// inference boundary. The assembled prompt's canonical read-set rides
+    /// the admission as the attempt's `data_use`, so the claim gate and the
+    /// deletion admission see the exact provenance the provider input was
+    /// built from. Admission precedes the append so a declined input leaves
+    /// neither history rows nor transient round claims behind; the round
+    /// projection is minted atomically with its map entry (one domain round,
+    /// one wire), and a racy duplicate that lands on
+    /// [`HistoryAppendOutcome::AlreadyCommittedAs`] answers the original
+    /// accept without re-running inference. The canonical round premise comes
+    /// from the input `round`, a populated envelope `round_view` must agree
+    /// with it, and a force-new request carries no premise at all — a
+    /// contradictory frame answers stale with current values instead of
+    /// adopting either side; a present-but-unresolvable round is stale, never
+    /// rebound.
+    ///
+    /// Presence attach runs when the loaded attribution is `NoActive` or
+    /// `RecoveryWait`, and only on the envelope's observed generation
+    /// premise: a missing `presence_generation_view` revalidates, a view
+    /// that does not equal the current generation answers stale with the
+    /// current values, and only then does the compare-and-commit run.
+    ///
+    /// A committed attach publishes the resulting attribution fact to this
+    /// connection (IPC §12.2): the fact is unsolicited — it names no
+    /// `reply_to`, so a Client awaiting this submit's answer absorbs it
+    /// instead of mistaking it for one — and it precedes the
+    /// auto-presented absence summary as well as this submit's own accept,
+    /// open, and stream frames. The order is load-bearing: the summary's
+    /// receipt carries the fresh generation and the Client's first ACK for
+    /// it echoes the generation it observed, so a summary delivered ahead
+    /// of its fact could only be answered `StalePresentation`.
+    ///
+    /// Idempotency is durable over the envelope `command_id`, looked up
+    /// through [`lookup_command`](HistoryRepository::lookup_command) and
+    /// judged by the same [`RequestFingerprint`] the store compares
+    /// in-transaction (role, body, language, sender incarnation, and the
+    /// canonical round intent — never the Host-decided round or its
+    /// projection): an exact retry replays the stored accept ack verbatim
+    /// without re-appending or re-streaming anything, including after a
+    /// restart, while a different request answers a typed wire rejection
+    /// (`CommandIdConflict`), never an intake outcome. Provider deltas may
+    /// be presented before durable reply adoption while the presentation
+    /// premise remains current. Durable completion/replay is reported only
+    /// after the final reply append succeeds. Stream outcome replay is
+    /// explicitly out of scope: only the accept ack replays.
     pub(crate) async fn submit_text(
         &self,
         frame: &WireFrame,
         submit: &SubmitTextInput,
         live: &LiveInput,
         transport: &impl ProviderTransport,
-        sink: &mut dyn FrameSink,
-        stream_tx: &tokio::sync::mpsc::Sender<WireFrame>,
+        sink: &tokio::sync::mpsc::Sender<WireFrame>,
     ) {
         let Some(device_wire) = live.paired_device.clone() else {
             return emit_end(sink, unpaired_close(frame, live));
@@ -300,8 +414,11 @@ impl HostHandle {
                 ),
             );
         };
-        let Some(round_premise) =
-            canonical_round_premise(submit, frame.envelope.observed.round_view.as_ref())
+        // Canonical round premise first: the two carriers must agree before
+        // anything else is judged, so a contradictory frame is declined
+        // stale with current values instead of adopting one side.
+        let Some(round_intent) =
+            canonical_round_intent(submit, frame.envelope.observed.round_view.as_ref())
         else {
             return emit_end(
                 sink,
@@ -317,14 +434,9 @@ impl HostHandle {
         };
         let credential_set = scrubbed.credential_set();
         let text = scrubbed.into_text();
-        let round_intent = if submit.fresh {
-            RoundIntentMark::New
-        } else {
-            match &round_premise {
-                RoundPremise::Auto => RoundIntentMark::Auto,
-                RoundPremise::Existing(reference) => RoundIntentMark::Existing(reference.clone()),
-            }
-        };
+        // The request fingerprint is the immutable client semantics: role,
+        // body, language, sending incarnation, and the canonical round
+        // intent derived above.
         let incoming_fingerprint = RequestFingerprint {
             role: HistoryRole::Owner,
             text: text.clone(),
@@ -336,30 +448,14 @@ impl HostHandle {
             round_intent: round_intent.clone(),
         };
         match classify_replay(&self.store, companion, &command, incoming_fingerprint).await {
-            ReplayClassification::Replay { round, round_wire } => {
-                for response in self.replay_frames(
-                    frame,
-                    live,
-                    round,
-                    round_wire,
-                    attribution.generation.as_u64(),
-                ) {
-                    if sink.emit(response).is_err() {
-                        break;
-                    }
-                }
-                return;
-            }
-            ReplayClassification::Conflict => {
+            ReplayClassification::Replay { round_wire, .. } => {
                 return emit_end(
                     sink,
-                    reject_frame(
-                        frame,
-                        live,
-                        RejectKind::ConflictingCommand,
-                        command_conflict_detail(&command),
-                    ),
+                    self.replay_frame(frame, live, round_wire, attribution.generation.as_u64()),
                 );
+            }
+            ReplayClassification::Conflict => {
+                return emit_end(sink, command_conflict_frame(frame, live, &command));
             }
             ReplayClassification::Held => {
                 return emit_end(sink, held_frame(frame, live));
@@ -367,7 +463,14 @@ impl HostHandle {
             ReplayClassification::None => {}
         }
         if !ene_companion::dialogue::dialogue_input_fits(&text) {
-            return emit_end(sink, revalidate_frame(frame, live, "input-over-limit"));
+            return emit_end(
+                sink,
+                revalidate_frame(
+                    frame,
+                    live,
+                    intake_reason(&RevalidationReason::InputOverLimit),
+                ),
+            );
         }
         let mut attached_generation: Option<PresenceGeneration> = None;
         if matches!(
@@ -377,7 +480,11 @@ impl HostHandle {
             let Some(viewed) = frame.envelope.observed.presence_generation_view else {
                 return emit_end(
                     sink,
-                    revalidate_frame(frame, live, "missing-generation-view"),
+                    revalidate_frame(
+                        frame,
+                        live,
+                        intake_reason(&RevalidationReason::MissingGenerationView),
+                    ),
                 );
             };
             if viewed != attribution.generation.as_u64() {
@@ -393,6 +500,7 @@ impl HostHandle {
                     live.connection_live,
                     attribution.state,
                     attribution.generation,
+                    companion,
                 )
                 .await
             {
@@ -405,7 +513,7 @@ impl HostHandle {
                         WirePayload::PresenceAttribution(attribution_to_wire(self, &attribution)),
                     );
                     if matches!(
-                        self.with_current_connection(live, || sink.emit(fact)),
+                        self.with_current_connection(live, || emit_control(sink, fact)),
                         Some(Ok(()))
                     ) {
                         for summary in self
@@ -413,7 +521,7 @@ impl HostHandle {
                             .await
                         {
                             if !matches!(
-                                self.with_current_connection(live, || sink.emit(summary)),
+                                self.with_current_connection(live, || emit_control(sink, summary)),
                                 Some(Ok(()))
                             ) {
                                 break;
@@ -426,23 +534,29 @@ impl HostHandle {
                     else {
                         return emit_end(sink, held_frame(frame, live));
                     };
-                    if matches!(
-                        current.state,
-                        PresenceState::InTransition | PresenceState::RecoveryWait
-                    ) {
-                        return emit_end(sink, held_frame(frame, live));
-                    }
-                    {
-                        return emit_end(
-                            sink,
-                            self.stale_frame(
-                                frame,
-                                live,
-                                &companion_key,
-                                current.generation.as_u64(),
-                            ),
-                        );
+                    match current.state {
+                        PresenceState::InTransition | PresenceState::RecoveryWait => {
+                            return emit_end(sink, held_frame(frame, live));
+                        }
+                        // A companion stopped under this submit's feet is a
+                        // revalidation premise, not an expired round: the
+                        // Client recovers by re-running the setup flow.
+                        PresenceState::Stopped => {
+                            return emit_end(
+                                sink,
+                                revalidate_frame(
+                                    frame,
+                                    live,
+                                    intake_reason(&RevalidationReason::StoppedCompanion),
+                                ),
+                            );
+                        }
+                        _ => {}
                     };
+                    return emit_end(
+                        sink,
+                        self.stale_frame(frame, live, &companion_key, current.generation.as_u64()),
+                    );
                 }
                 AttachOutcome::Superseded => {
                     return emit_end(
@@ -452,9 +566,8 @@ impl HostHandle {
                 }
             }
         }
-        let requested = match &round_premise {
-            RoundPremise::Auto => None,
-            RoundPremise::Existing(reference) => match self.round_for(reference) {
+        let requested = match &round_intent {
+            RoundIntentMark::Existing(reference) => match self.round_for(reference) {
                 Some(round) => Some(round),
                 None => {
                     return emit_end(
@@ -468,11 +581,15 @@ impl HostHandle {
                     );
                 }
             },
+            RoundIntentMark::Auto | RoundIntentMark::New => None,
         };
-        let intent = if submit.fresh {
-            RoundIntent::New
-        } else {
-            requested.map_or(RoundIntent::Auto, RoundIntent::Existing)
+        // One meaning per value, matching the fingerprint's round intent:
+        // force-new mints and never joins; a resolved premise joins that
+        // round; no premise joins-or-mints.
+        let intent = match (&round_intent, requested) {
+            (RoundIntentMark::New, _) => RoundIntent::New,
+            (RoundIntentMark::Existing(_), Some(round)) => RoundIntent::Existing(round),
+            _ => RoundIntent::Auto,
         };
         let Ok(lifecycle) = self.store.load_lifecycle(companion).await else {
             return emit_end(sink, held_frame(frame, live));
@@ -493,7 +610,6 @@ impl HostHandle {
                     text: text.clone(),
                     lang: submit.body.lang.0.clone(),
                 },
-                local_id: submit.local_id.0.clone(),
             },
             attribution,
             companion: match lifecycle {
@@ -509,10 +625,13 @@ impl HostHandle {
         };
         let accepted = match check_intake(premise) {
             RoundIntakeOutcome::AcceptedForRound { round } => round,
-            RoundIntakeOutcome::StaleRound { .. } => {
+            RoundIntakeOutcome::StaleRound { current_round, .. } => {
+                let current_round = current_round
+                    .and_then(|round| self.wire_for_round(&round))
+                    .map(RoundWireId);
                 return emit_end(
                     sink,
-                    self.stale_frame(frame, live, &companion_key, attribution.generation.as_u64()),
+                    stale_frame_with(frame, live, current_round, attribution.generation.as_u64()),
                 );
             }
             RoundIntakeOutcome::HeldForTransition => {
@@ -562,12 +681,27 @@ impl HostHandle {
             Err(_) => return emit_end(sink, held_frame(frame, live)),
         };
         let inference_claim = authorized.ticket().0;
+        // The consent premise the admission was granted under. The stream
+        // baseline must be this admitted premise, not a fresh read taken after
+        // the append: a consent move committing in that window would otherwise
+        // become the baseline, presenting post-move deltas as current while
+        // the reply append compares against the admitted premise and refuses.
+        let admitted_consent = {
+            let (id, rev) = authorized.consent_premise();
+            (id.to_owned(), rev)
+        };
+        // Test-only race gate: pause after admission and before the guarded
+        // acceptance section, so a test can supersede the connection in
+        // between and pin that nothing commits.
+        #[cfg(test)]
+        if let Some(gate) = self.submit_accept_gate() {
+            gate.pause().await;
+        }
         let store = self.store.clone();
-        let commit_input = input.clone();
         let committed = self
             .with_current_connection_blocking(live, move || {
                 begin_turn_committed(
-                    commit_input,
+                    input,
                     prompt,
                     authorized,
                     |owner| store.append_message_sync(owner),
@@ -586,9 +720,21 @@ impl HostHandle {
         };
         match begin {
             DialogueBegin::Ready(turn) => {
+                // The connection-bound open round is installed under the
+                // ownership section: a replacement that wins this section
+                // leaves the durable Owner row and the reply's durable
+                // adoption to continue (the reply registers as undelivered
+                // for the new connection), while this connection opens no
+                // round and its stream aborts before any further publication.
+                #[cfg(test)]
+                {
+                    let gate = crate::lock_unpoison(&self.submit_open_gate).clone();
+                    if let Some(gate) = gate {
+                        gate.pause().await;
+                    }
+                }
                 let installed = self.record_open_round(
                     live,
-                    &live.client_ref,
                     &companion_key,
                     OpenRound {
                         companion: companion.as_raw(),
@@ -597,18 +743,22 @@ impl HostHandle {
                         generation: attribution.generation,
                     },
                 );
+                #[cfg(test)]
+                {
+                    let gate = crate::lock_unpoison(&self.submit_publish_gate).clone();
+                    if let Some(gate) = gate {
+                        gate.pause().await;
+                    }
+                }
                 let stream = StreamWireId(RawId::new().as_uuid());
                 let fence_epoch = self.transient_fence.epoch();
                 let opened = if installed {
                     match self.with_current_connection(live, || {
-                        sink.emit(accept_frame(frame, live, &round_wire))?;
-                        sink.emit(open_frame(
-                            frame,
-                            live,
-                            &stream,
-                            &round_wire,
-                            generation_number,
-                        ))
+                        emit_control(sink, accept_frame(frame, live, &round_wire))?;
+                        emit_control(
+                            sink,
+                            open_frame(frame, live, &stream, &round_wire, generation_number),
+                        )
                     }) {
                         Some(Ok(())) => true,
                         Some(Err(_)) => return,
@@ -617,8 +767,17 @@ impl HostHandle {
                 } else {
                     false
                 };
-                let Ok(Some(consent)) = self.store.load_current(CapabilityKind::Dialogue).await
-                else {
+                // Baselines the gate on the current record: the owner append
+                // committed under the admission consent, and any move or
+                // unreadable read since means the stream can no longer be
+                // proven to run under the admitted premise. Abort before
+                // baselining on the changed value.
+                let consent_current = match self.store.load_current(CapabilityKind::Dialogue).await
+                {
+                    Ok(Some(record)) => (record.id, record.rev.as_u64()) == admitted_consent,
+                    _ => false,
+                };
+                if !consent_current {
                     if opened {
                         self.with_current_connection(live, || {
                             emit_end(
@@ -628,8 +787,7 @@ impl HostHandle {
                         });
                     }
                     return;
-                };
-                let consent = (consent.id, consent.rev.as_u64());
+                }
                 let mut gate = StreamGate {
                     handle: self,
                     frame,
@@ -640,9 +798,9 @@ impl HostHandle {
                     stream,
                     round: accepted,
                     generation: attribution.generation,
-                    consent,
+                    consent: admitted_consent,
                     credential_set,
-                    tx: stream_tx.clone(),
+                    tx: sink.clone(),
                     seq: 0,
                     opened,
                     fence_epoch,
@@ -675,7 +833,7 @@ impl HostHandle {
                 match outcome {
                     DialogueOutcome::Completed { input, .. } => {
                         {
-                            let _pin = self.acquire_learning_pin().await;
+                            let _pin = self.host_transient_arrival.acquire_pin().await;
                             if let Some(experience) = pin_experience(&input, &self.store).await {
                                 #[cfg(any(test, feature = "test-support"))]
                                 self.store
@@ -691,42 +849,37 @@ impl HostHandle {
                     }
                 }
             }
-            DialogueBegin::Replayed { round, round_wire } => {
-                for response in
-                    self.replay_frames(frame, live, round, round_wire, generation_number)
-                {
-                    if sink.emit(response).is_err() {
-                        break;
-                    }
-                }
+            DialogueBegin::Replayed { round_wire, .. } => {
+                emit_end(
+                    sink,
+                    self.replay_frame(frame, live, round_wire, generation_number),
+                );
             }
             DialogueBegin::StaleExpected { current } => {
                 emit_end(sink, stale_frame_with(frame, live, None, current.as_u64()));
             }
             DialogueBegin::StaleConsent => {
-                emit_end(sink, revalidate_frame(frame, live, "consent-stale"));
+                emit_end(
+                    sink,
+                    revalidate_frame(frame, live, admission_reason(NotSentReason::ConsentStale)),
+                );
             }
             DialogueBegin::StaleCredentialSet => {
                 emit_end(sink, held_frame(frame, live));
             }
-            DialogueBegin::Conflict => emit_end(
-                sink,
-                reject_frame(
-                    frame,
-                    live,
-                    RejectKind::ConflictingCommand,
-                    command_conflict_detail(&command),
-                ),
-            ),
+            DialogueBegin::Conflict => {
+                emit_end(sink, command_conflict_frame(frame, live, &command));
+            }
             DialogueBegin::Held => emit_end(sink, held_frame(frame, live)),
             DialogueBegin::HeldForErasure => emit_end(sink, held_frame(frame, live)),
             DialogueBegin::HeldByLifecycle(_) => {
-                emit_end(sink, revalidate_frame(frame, live, "stopped-companion"));
-            }
-            DialogueBegin::Declined(reason) => {
                 emit_end(
                     sink,
-                    revalidate_frame(frame, live, admission_reason(reason)),
+                    revalidate_frame(
+                        frame,
+                        live,
+                        intake_reason(&RevalidationReason::StoppedCompanion),
+                    ),
                 );
             }
         }
@@ -734,7 +887,6 @@ impl HostHandle {
 
     pub(crate) async fn confirm_presentation(
         &self,
-        _frame: &WireFrame,
         live: &LiveInput,
         confirm: &ConfirmPresentationWire,
     ) -> Vec<WireFrame> {
@@ -782,9 +934,9 @@ impl HostHandle {
         request: &HistoryRequest,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let coverage = self.current_coverage().await;
         let response = match self.read_history(request).await {
             HistoryResponse::Items(items) => {
+                let coverage = self.current_coverage().await;
                 let had_body = items.iter().any(|item| !item.text.is_empty());
                 let items: Vec<_> = items
                     .into_iter()
@@ -813,6 +965,14 @@ impl HostHandle {
     }
 
     async fn read_history(&self, request: &HistoryRequest) -> HistoryResponse {
+        // An over-limit read is refused before any store work: the bound
+        // rides the storage query, never a full scan truncated afterward.
+        if request.limit > HISTORY_LIMIT_MAX {
+            return HistoryResponse::InvalidRequest;
+        }
+        // The same companion mapping as submits: an unknown ref means the
+        // Client's projection rotated, and it recovers by re-reading
+        // presence, never by treating the timeline as empty.
         let companion = match self.resolve_companion(&request.companion.0).await {
             Err(_) => return HistoryResponse::Unavailable,
             Ok(None) => return HistoryResponse::StaleCompanion,
@@ -838,45 +998,44 @@ impl HostHandle {
             .load_timeline(companion, since, round, request.limit)
             .await
         {
-            Ok(items) => HistoryResponse::Items(
-                items
-                    .iter()
-                    .map(|item| HistoryItem {
-                        round: RoundWireId(
-                            item.round_wire
-                                .clone()
-                                .or_else(|| self.wire_for_round_value(item.round))
-                                .unwrap_or_else(|| item.round.as_uuid().to_string()),
-                        ),
+            Ok(items) => {
+                let mut mapped = Vec::with_capacity(items.len());
+                for item in &items {
+                    // The current writers always persist the wire; a row
+                    // without one is unreadable, never a license to publish
+                    // the domain id as a wire ref.
+                    let Some(wire) = item.round_wire.clone() else {
+                        return HistoryResponse::Unavailable;
+                    };
+                    mapped.push(HistoryItem {
+                        round: RoundWireId(wire),
                         role: match item.role {
                             HistoryRole::Owner => HistoryRoleWire::Owner,
                             HistoryRole::Companion => HistoryRoleWire::Companion,
                         },
                         text: item.text.clone(),
                         at: item.at.to_rfc3339(),
-                    })
-                    .collect(),
-            ),
+                    });
+                }
+                HistoryResponse::Items(mapped)
+            }
             Err(_) => HistoryResponse::Unavailable,
         }
     }
 
-    fn wire_for_round_value(&self, round: RawId) -> Option<String> {
-        self.wire_for_round(&RoundId::from_raw(round))
-    }
-
-    fn replay_frames(
+    /// The stored round wire travels verbatim, so a retry after a restart
+    /// replays instead of going stale on the dropped transient map; a missing
+    /// wire is stale, and the Client recovers missed items through history.
+    fn replay_frame(
         &self,
         frame: &WireFrame,
         live: &LiveInput,
-        round: RawId,
         stored_wire: Option<String>,
         generation: u64,
-    ) -> Vec<WireFrame> {
-        let wire = stored_wire.or_else(|| self.wire_for_round_value(round));
-        match wire {
-            Some(wire) => vec![accept_frame(frame, live, &RoundWireId(wire))],
-            None => vec![stale_frame_with(frame, live, None, generation)],
+    ) -> WireFrame {
+        match stored_wire {
+            Some(wire) => accept_frame(frame, live, &RoundWireId(wire)),
+            None => stale_frame_with(frame, live, None, generation),
         }
     }
 
@@ -896,14 +1055,32 @@ impl HostHandle {
         .await;
     }
 
-    async fn acquire_learning_pin(&self) -> crate::transient_erasure::LearningPinGuard {
-        self.host_transient_arrival.acquire_pin().await
-    }
-
+    /// Whether a queued formation pass is waiting.
     pub(crate) fn has_pending_learning(&self) -> bool {
         !crate::lock_unpoison(&self.learning_queue).is_empty()
     }
 
+    /// Drains queued Learning formation passes, one pinned premise at a time.
+    ///
+    /// The queue is in-memory and best-effort: a crash before the drain loses
+    /// only the pending derived updates, exactly as a crash during the
+    /// previous synchronous pass did. No pass is durable, so a restart never
+    /// replays an old one and cannot duplicate a formation. The worker lock
+    /// serializes passes; the repository's compare-before-commit additionally
+    /// keeps a genuine overlap from overwriting newer recognition. Stopped
+    /// companions are skipped because stopping must not start new internal
+    /// activity. A pass failure drops its item, so there is no retry storm,
+    /// and a pass the erasure gate refused is reported as held, never as an
+    /// empty pass: its origin is old, so it is dropped rather than re-queued
+    /// while the durable association holds it until erasure clears.
+    ///
+    /// Taking a candidate off the pending queue parks it in the worker-owned
+    /// `taken` slot until a body-free formation identity is published. HostTransient
+    /// can no longer drop that transcript as a queue entry; it also cannot
+    /// report Verified while the slot still carries a covered body. After the
+    /// identity commits, deletion correspondence outlives the slot, so a
+    /// deletion that completes before the Learning claim still refuses the
+    /// stale origin at the provider gate.
     pub(crate) async fn run_pending_learning<T: ProviderTransport>(&self, transport: &T) {
         let _serialized = self.learning_worker.lock().await;
         loop {
@@ -959,6 +1136,10 @@ impl HostHandle {
                 refs: &self.store,
                 store: &self.cred_store,
             };
+            // A HeldForErasure decision changes nothing here: the origin is
+            // settled below and never re-queued or re-claimed under a fresh
+            // identity, and the correspondence row keeps it held until erasure
+            // clears it.
             drop(
                 ene_companion::dialogue::propose_experience(
                     experience,
@@ -1098,10 +1279,14 @@ impl StreamGate<'_> {
             .is_current_authenticated(&self.live.connection_id)
     }
 
-    async fn current(&self) -> bool {
-        if !self.connection_current() {
-            return false;
-        }
+    /// Re-reads the durable presentation premises only: the round,
+    /// attribution, consent, lifecycle, credential set, erasure fence, and
+    /// inference claim. A replaced connection does not fail here, so a
+    /// refusal to publish on the wire stays distinct from a moved premise.
+    async fn durable_current(&self) -> bool {
+        // A Targeted Deletion invalidated Host transient payloads since this
+        // stream opened: the remaining deltas can no longer prove they are
+        // uncovered, so they fail closed instead of publishing.
         if self.handle.transient_fence_epoch() != self.fence_epoch {
             return false;
         }
@@ -1169,7 +1354,7 @@ impl StreamGate<'_> {
     }
 
     async fn finish(&mut self) {
-        if !self.connection_current() || !self.current().await {
+        if !self.connection_current() || !self.durable_current().await {
             self.interrupt().await;
             return;
         }
@@ -1228,7 +1413,22 @@ impl DeltaSink for StreamGate<'_> {
         delta: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DeltaFlow> + Send + 'a>> {
         Box::pin(async move {
-            if !self.opened || !self.current().await {
+            // Fast path: read the premise before reserving, so an
+            // already-stale stream never reserves capacity. The permit is
+            // then deliberately held across the post-reserve re-checks
+            // (dropped on any refusal) so the bounded channel paces the
+            // provider while still refusing a stale delta.
+            if !self.opened || !self.connection_current() {
+                // CCT §10.4: a refused install or a replacement before
+                // publication opens no wire stream and sends no close, but
+                // the accepted turn's dispatch/adoption contract still runs.
+                // Only a moved durable premise aborts.
+                if !self.durable_current().await {
+                    return DeltaFlow::Abort("the presentation premise went stale");
+                }
+                return DeltaFlow::Continue;
+            }
+            if !self.durable_current().await {
                 return DeltaFlow::Abort("the presentation premise went stale");
             }
             let frame = self.delta_frame(delta, false);
@@ -1236,24 +1436,50 @@ impl DeltaSink for StreamGate<'_> {
                 Ok(permit) => permit,
                 Err(_) => return DeltaFlow::Abort("the client connection is gone"),
             };
-            if !self.current().await {
+            // Re-check after the capacity wait: the premise may have gone
+            // stale while parked, and a stale delta must never publish. A
+            // replacement during the wait only suppresses the wire copy.
+            if !self.durable_current().await {
                 drop(permit);
                 return DeltaFlow::Abort("the presentation premise went stale");
             }
+            if !self.connection_current() {
+                drop(permit);
+                return DeltaFlow::Continue;
+            }
+            // Write-ahead delivery evidence: the delta body may only leave the
+            // Host after this incarnation's durable evidence row is committed,
+            // so a crash between the send and the record cannot lose the copy
+            // (lifecycle §8.1). A failed commit aborts the provider read
+            // instead of creating an unaccountable copy; the turn is not
+            // adopted, so no partial copy is published.
             if !self.handle.note_client_body_delivery(self.live).await {
                 drop(permit);
                 return DeltaFlow::Abort("the delivery evidence could not be committed");
             }
-            if !self.current().await {
+            // Final premise check after the durable write: the write awaited,
+            // so a condition, fence, or connection that moved meanwhile must
+            // still stop this delta before it is published. The evidence row,
+            // when written, is conservative and re-derived by a later demand.
+            if !self.durable_current().await {
                 drop(permit);
                 return DeltaFlow::Abort("the presentation premise went stale");
+            }
+            // Final connection currentness check, synchronous and after the
+            // last await: a same-device replacement during the premise reads
+            // must not let this stream publish one more delta (IPC §9.3).
+            // The accepted turn still completes and is adopted, so it is
+            // delivered through its presentation subscription instead.
+            if !self.connection_current() {
+                drop(permit);
+                return DeltaFlow::Continue;
             }
             if self
                 .handle
                 .with_current_connection(self.live, || permit.send(frame))
                 .is_none()
             {
-                return DeltaFlow::Abort("the connection was replaced");
+                return DeltaFlow::Continue;
             }
             self.seq += 1;
             DeltaFlow::Continue

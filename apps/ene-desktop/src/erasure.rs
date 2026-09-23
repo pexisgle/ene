@@ -1,3 +1,13 @@
+//! GUI erasure participant: every copy this process actually holds.
+//!
+//! Inventory (Stage 7 E): timeline, Memory grounds/history, Task report,
+//! input draft, IME composition, undo, deferred frames (Client),
+//! usage/deletion panel bodies, and presented chat receipts. Registered
+//! secrets are not user content and are not wiped through this path; C1
+//! secret intake is zeroized by crate-private `SecretIntake`.
+//!
+//! `wiped` is returned only after the named copies are confirmed empty.
+
 use ene_api::v1::deletion::{
     ClientTempClass, DeletionDemand, DeletionTargetWire, LocalErasureResult,
 };
@@ -13,7 +23,6 @@ pub(crate) struct GuiOwned<'a> {
     pub timeline: &'a mut Vec<crate::ui::presentation::Message>,
     pub history: &'a mut Vec<HistoryItem>,
     pub composer: &'a mut Composer,
-    pub search_draft: &'a mut String,
     pub memory: &'a mut MemoryPage,
     pub tasks: &'a mut TaskPanel,
     pub usage: &'a mut UsagePanel,
@@ -33,8 +42,8 @@ pub(crate) fn apply_demand(
                 class: ClientTempClass::InputDraft,
             } => {
                 copies.composer.wipe();
-                copies.search_draft.clear();
-                if input_draft_gone(copies.composer, copies.search_draft) {
+                copies.deletion.wipe_exact_text();
+                if input_draft_gone(copies) {
                     wiped.push(ClientTempClass::InputDraft);
                 } else {
                     unverified.push(ClientTempClass::InputDraft);
@@ -46,7 +55,7 @@ pub(crate) fn apply_demand(
                 copies.timeline.clear();
                 copies.history.clear();
                 copies.memory.wipe();
-                copies.tasks.wipe_owned_copies();
+                copies.tasks.reset_connection_state();
                 copies.usage.wipe_body();
                 copies.deletion.wipe_exact_text();
                 *copies.chat_receipt = None;
@@ -58,9 +67,6 @@ pub(crate) fn apply_demand(
             }
         }
     }
-    if wiped.is_empty() && unverified.is_empty() {
-        unverified.push(ClientTempClass::PresentationBuffer);
-    }
     LocalErasureResult {
         demand: demand.demand.clone(),
         operation: demand.operation.clone(),
@@ -70,11 +76,11 @@ pub(crate) fn apply_demand(
     }
 }
 
-fn input_draft_gone(composer: &Composer, search_draft: &str) -> bool {
-    composer.draft().is_empty()
-        && !composer.composing()
-        && composer.undo_len() == 0
-        && search_draft.is_empty()
+fn input_draft_gone(copies: &GuiOwned<'_>) -> bool {
+    copies.composer.draft().is_empty()
+        && !copies.composer.composing()
+        && copies.composer.undo_len() == 0
+        && copies.deletion.exact_text_cleared()
 }
 
 fn presentation_gone(copies: &GuiOwned<'_>) -> bool {

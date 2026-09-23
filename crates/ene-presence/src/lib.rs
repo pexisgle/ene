@@ -1,7 +1,7 @@
 use ene_primitive::{GenerationInner, RawId};
 
 mod erasure;
-pub use erasure::{PresenceErasureOutcome, PresenceErasureParticipant, PresenceErasureRepository};
+pub use erasure::{PresenceErasureParticipant, PresenceErasureRepository};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientId(RawId);
@@ -15,11 +15,6 @@ impl ClientId {
     #[must_use]
     pub fn as_raw(self) -> RawId {
         self.0
-    }
-
-    #[must_use]
-    pub fn generate() -> Self {
-        Self(RawId::new())
     }
 }
 
@@ -204,4 +199,76 @@ pub trait PresenceRepository {
 pub enum ConfirmTransitionOutcome {
     Confirmed(PresenceAttribution),
     RejectedAsStalePresence { current: PresenceAttribution },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClientId, FallbackCandidate, RawId, select_fallback_candidate};
+    use uuid::Uuid;
+
+    fn client(hex: &str) -> ClientId {
+        let uuid = Uuid::parse_str(hex).expect("fixture uuid");
+        ClientId::from_raw(RawId::from_uuid(uuid))
+    }
+
+    fn candidate(
+        client: ClientId,
+        current_authenticated: bool,
+        same_machine: bool,
+        device_permitted: bool,
+    ) -> FallbackCandidate {
+        FallbackCandidate {
+            client,
+            current_authenticated,
+            same_machine,
+            device_permitted,
+        }
+    }
+
+    #[test]
+    fn generated_client_ids_differ() {
+        assert_ne!(
+            ClientId::from_raw(RawId::new()),
+            ClientId::from_raw(RawId::new())
+        );
+    }
+
+    #[test]
+    fn fallback_requires_current_same_machine_and_permitted() {
+        let closing = client("00000000-0000-0000-0000-000000000001");
+        let other = client("00000000-0000-0000-0000-000000000002");
+        for (current, same_machine, permitted) in [
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let candidates = [candidate(other, current, same_machine, permitted)];
+            assert_eq!(
+                select_fallback_candidate(closing, &candidates),
+                None,
+                "a candidate missing current/same-machine/permitted must not be eligible"
+            );
+        }
+        let eligible = [candidate(other, true, true, true)];
+        assert_eq!(select_fallback_candidate(closing, &eligible), Some(other));
+    }
+
+    #[test]
+    fn fallback_excludes_the_closing_client() {
+        let closing = client("00000000-0000-0000-0000-000000000001");
+        let candidates = [candidate(closing, true, true, true)];
+        assert_eq!(select_fallback_candidate(closing, &candidates), None);
+    }
+
+    #[test]
+    fn fallback_picks_the_lexicographically_smallest_client_bytes() {
+        let closing = client("00000000-0000-0000-0000-000000000001");
+        let small = client("00000000-0000-0000-0000-0000000000ff");
+        let large = client("ffffffff-ffff-ffff-ffff-ffffffffffff");
+        let candidates = [
+            candidate(large, true, true, true),
+            candidate(small, true, true, true),
+        ];
+        assert_eq!(select_fallback_candidate(closing, &candidates), Some(small));
+    }
 }

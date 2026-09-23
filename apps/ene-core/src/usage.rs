@@ -2,7 +2,7 @@ use ene_api::v1::management::{
     ManagementIntent, ManagementOutcome, USAGE_CAP_TARGET_PREFIX, parse_usage_cap_target,
 };
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::refs::UsageCursorWire;
+use ene_api::v1::refs::{UsageCursorWire, ViewMarkWire};
 use ene_api::v1::usage::{
     USAGE_PAGE_LIMIT_DEFAULT, USAGE_PAGE_LIMIT_MAX, UsageCapConsumptionView, UsageCapStoredView,
     UsageCapView, UsageCostView, UsageMoneyView, UsageSummaryPage, UsageSummaryRequest,
@@ -56,13 +56,15 @@ impl HostHandle {
         let Some(limit) = checked_usage_limit(request.limit) else {
             return vec![field_reject(frame, live, "usage limit must be 1..=50")];
         };
-        let Some(consumer) = parse_consumer(request.consumer.as_deref()) else {
+        let Some(consumer) = parse_filter(request.consumer.as_deref(), ConsumerKind::from_name)
+        else {
             return vec![field_reject(frame, live, "unknown usage consumer filter")];
         };
-        let Some(purpose) = parse_purpose(request.purpose.as_deref()) else {
+        let Some(purpose) = parse_filter(request.purpose.as_deref(), PurposeKind::from_name) else {
             return vec![field_reject(frame, live, "unknown usage purpose filter")];
         };
-        let Some(status) = parse_status(request.status.as_deref()) else {
+        let Some(status) = parse_filter(request.status.as_deref(), UsageSummaryStatus::from_name)
+        else {
             return vec![field_reject(frame, live, "unknown usage status filter")];
         };
         let declared_to = match request.to.as_deref() {
@@ -142,6 +144,9 @@ impl HostHandle {
                 )];
             }
         };
+        // The rows are bounded by the walk's effective window (a declared past
+        // `to`, or the bounds frozen in the cursor); the cap section is the
+        // live state at `now`, reported through `evaluated_at`.
         let caps = match self
             .store
             .load_usage_cap_status(UsageCapStatusQuery {
@@ -171,6 +176,9 @@ impl HostHandle {
                 &conn,
                 request.cursor.as_ref().map(|cursor| cursor.0.as_str()),
             );
+            if request.cursor.is_none() {
+                Self::supersede_usage_cursors(state, &conn);
+            }
             if rows.len() as u32 == limit
                 && let Some(last) = rows.last()
             {
@@ -213,6 +221,16 @@ impl HostHandle {
         )]
     }
 
+    /// Maps one `ManageRuleConsentCap` intent whose target carries the shared
+    /// `cap:` grammar onto the permission-owned command (`usage-cost-cap`
+    /// §13/§17).
+    ///
+    /// Currentness is re-checked here, not trusted from the Client: the
+    /// `base_view` mark names exactly `(scope, window)` at one revision (or
+    /// the none state), and the command serializes the compare with the send
+    /// admission. A face-stale mark, an unknown window/currency, or an
+    /// unrepresentable limit clarifies with zero writes; a store failure
+    /// holds (nothing decided, a retry is safe).
     pub(crate) async fn set_usage_cap_intent(
         &self,
         frame: &WireFrame,
@@ -231,18 +249,23 @@ impl HostHandle {
             return answer;
         }
         let Some(target) = parse_usage_cap_target(&intent.target) else {
-            return vec![self.cap_clarify(frame, intent, live).await];
+            return self
+                .clarify(frame, live, intent, INTENT_KIND_USAGE_CAP)
+                .await;
         };
-        let scope = match (target.scope.as_str(), target.provider) {
-            ("system", None) => UsageCapScope::System,
-            ("provider", Some(provider)) => UsageCapScope::Provider(provider),
-            _ => return vec![self.cap_clarify(frame, intent, live).await],
+        let scope = match target.provider {
+            None => UsageCapScope::System,
+            Some(provider) => UsageCapScope::Provider(provider),
         };
         let Some(window) = UsageCapWindow::from_name(&target.window) else {
-            return vec![self.cap_clarify(frame, intent, live).await];
+            return self
+                .clarify(frame, live, intent, INTENT_KIND_USAGE_CAP)
+                .await;
         };
         let Some(currency) = CurrencyCode::from_code(&target.currency) else {
-            return vec![self.cap_clarify(frame, intent, live).await];
+            return self
+                .clarify(frame, live, intent, INTENT_KIND_USAGE_CAP)
+                .await;
         };
         let expected = match parse_usage_cap_mark(&intent.base_view.0, &scope, window) {
             Some(None) => None,
@@ -296,44 +319,16 @@ impl HostHandle {
                 )]
             }
             Ok(SetUsageCapOutcome::InvalidLimit) => {
-                vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    self.record_decided(
-                        Self::intent_fingerprint(intent, INTENT_KIND_USAGE_CAP),
-                        IntentOutcome::NeedsClarification,
-                    )
-                    .await,
-                )]
+                self.clarify(frame, live, intent, INTENT_KIND_USAGE_CAP)
+                    .await
             }
-            Err(_) => vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::HeldByOperation,
-            )],
+            // Nothing was decided, so a retry is safe.
+            Err(_) => Self::hold(frame, live, intent),
         }
     }
 
-    async fn cap_clarify(
-        &self,
-        frame: &WireFrame,
-        intent: &ManagementIntent,
-        live: &LiveInput,
-    ) -> WireFrame {
-        outcome_frame(
-            frame,
-            live,
-            intent,
-            self.record_decided(
-                Self::intent_fingerprint(intent, INTENT_KIND_USAGE_CAP),
-                IntentOutcome::NeedsClarification,
-            )
-            .await,
-        )
-    }
-
+    /// Answers a face-stale base view with the rebuilt current mark, reading
+    /// the current cap without mutating anything.
     async fn cap_stale(
         &self,
         frame: &WireFrame,
@@ -397,27 +392,19 @@ fn default_from(to: WallClockWithTz) -> WallClockWithTz {
         .map_or(to, WallClockWithTz::from_datetime)
 }
 
-fn parse_consumer(name: Option<&str>) -> Option<Option<ConsumerKind>> {
+fn parse_filter<T>(name: Option<&str>, from_name: fn(&str) -> Option<T>) -> Option<Option<T>> {
     match name {
         None => Some(None),
-        Some(name) => ConsumerKind::from_name(name).map(Some),
+        Some(name) => from_name(name).map(Some),
     }
 }
 
-fn parse_purpose(name: Option<&str>) -> Option<Option<PurposeKind>> {
-    match name {
-        None => Some(None),
-        Some(name) => PurposeKind::from_name(name).map(Some),
-    }
-}
-
-fn parse_status(name: Option<&str>) -> Option<Option<UsageSummaryStatus>> {
-    match name {
-        None => Some(None),
-        Some(name) => UsageSummaryStatus::from_name(name).map(Some),
-    }
-}
-
+/// The cap slots the response reports: the system scope always (it budgets
+/// every provider), plus the provider the query names (its slots appear even
+/// without a stored cap, so the Client receives the none-state mark it must
+/// echo to create the first cap). Stored caps of every provider are included
+/// with their slots in an unfiltered read; a read that names a provider
+/// reports only the system scope and that provider.
 fn build_cap_views(
     provider_filter: Option<&str>,
     statuses: &[UsageCapStatus],
@@ -475,8 +462,7 @@ fn cap_view(
         None => (usage_cap_mark(scope, window, None), None),
     };
     UsageCapView {
-        mark,
-        scope: scope.as_str().to_string(),
+        mark: ViewMarkWire(mark),
         provider,
         window: window.as_str().to_string(),
         stored,

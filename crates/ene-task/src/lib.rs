@@ -58,10 +58,9 @@ pub use resume::{
     resume_commit_premise, route_available_result,
 };
 pub use task::{
-    AssigneeRef, SteeringPremiseRef, Task, TaskCommitPremise, TaskCreationOutcome,
-    TaskCreationPremise, TaskId, TaskInstructionAdoptionPremise, TaskProgress, TaskPurpose,
-    TaskPurposeAdoptionPremise, TaskPurposeRef, TaskRecord, TaskRef, TaskRevision,
-    TaskRevisionRecord,
+    AssigneeRef, SteeringPremiseRef, Task, TaskCommitPremise, TaskCreationPremise, TaskId,
+    TaskInstructionAdoptionPremise, TaskProgress, TaskPurpose, TaskPurposeAdoptionPremise,
+    TaskPurposeRef, TaskRecord, TaskRef, TaskRevision, TaskRevisionRecord,
 };
 pub use workspace::{
     WorkspaceAssocId, WorkspaceAssociation, WorkspaceAssociationPremise, WorkspaceFolderRef,

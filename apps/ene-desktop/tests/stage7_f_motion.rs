@@ -14,7 +14,7 @@ fn the_bundled_motion_pack_is_projected_to_the_body() {
     write_generated_vrm(&asset).expect("vrm fixture");
     let clip = dir
         .path()
-        .join(ene_desktop::BUNDLED_MOTION_DIR)
+        .join(ene_desktop::motion::BUNDLED_MOTION_DIR)
         .join("VRMA_06.vrma");
     write_generated_vrma(
         &clip,
@@ -27,20 +27,20 @@ fn the_bundled_motion_pack_is_projected_to_the_body() {
     .expect("vrma fixture");
 
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    let plan = desktop.motion_plan();
-    assert_eq!(plan.source, clip.parent().map(std::path::Path::to_path_buf));
-    assert_eq!(plan.clips.len(), 1);
-    assert_eq!(plan.clips[0].pose, PoseHint::Idle);
-    assert_eq!(plan.set().expect("assignment").clips.len(), 1);
+    let clips = desktop.motion_plan();
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0].pose, PoseHint::Idle);
 
     let Some(exe) = BodySupervisor::locate_binary() else {
         return;
     };
     desktop.try_spawn_body(&exe);
     desktop.tick();
-    if desktop.snapshot().body_status != "Spawned" {
-        return;
-    }
+    let status = desktop.snapshot().body_status;
+    assert_eq!(
+        status, "Spawned",
+        "the Body child must stay up for the motion projection, got {status}"
+    );
     let mut motion_ready = false;
     for _ in 0..200 {
         desktop.tick();

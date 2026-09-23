@@ -8,9 +8,12 @@ pub const TASK_TARGET_PREFIX: &str = "task:";
 pub const WORKSPACE_TARGET_PREFIX: &str = "workspace:";
 pub const USAGE_CAP_TARGET_PREFIX: &str = "cap:";
 
+/// Parsed usage-cap target: exactly the assignment parameters. The scope is
+/// carried by [`Self::provider`] alone (`None` is the system scope), so an
+/// inconsistent `(scope, provider)` pair cannot exist.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageCapTarget {
-    pub scope: String,
+    /// Provider name for the provider scope, `None` for the system scope.
     pub provider: Option<String>,
     pub window: String,
     pub currency: String,
@@ -19,7 +22,6 @@ pub struct UsageCapTarget {
 
 #[must_use]
 pub fn usage_cap_target(
-    scope: &str,
     provider: Option<&str>,
     window: &str,
     currency: &str,
@@ -27,53 +29,41 @@ pub fn usage_cap_target(
 ) -> ManagementTargetWire {
     match provider {
         Some(provider) => ManagementTargetWire(format!(
-            "{USAGE_CAP_TARGET_PREFIX}{scope}:{provider}:{window}:{currency}:{limit_micros}"
+            "{USAGE_CAP_TARGET_PREFIX}provider:{provider}:{window}:{currency}:{limit_micros}"
         )),
         None => ManagementTargetWire(format!(
-            "{USAGE_CAP_TARGET_PREFIX}{scope}:{window}:{currency}:{limit_micros}"
+            "{USAGE_CAP_TARGET_PREFIX}system:{window}:{currency}:{limit_micros}"
         )),
     }
 }
 
+/// Exact rule: strip the `cap:` prefix and parse the two shapes of
+/// [`USAGE_CAP_TARGET_PREFIX`]. The first token fixes the shape, every part
+/// must be non-empty, and the limit must be a plain decimal `u64`; anything
+/// else is `None`, never a guessed cap. The closed window/currency
+/// vocabularies are validated by the owner at command time, so the grammar
+/// stays vocabulary-neutral.
 #[must_use]
 pub fn parse_usage_cap_target(target: &ManagementTargetWire) -> Option<UsageCapTarget> {
     let rest = target.0.strip_prefix(USAGE_CAP_TARGET_PREFIX)?;
     let mut parts = rest.split(':');
-    let scope = parts.next()?;
-    match scope {
-        "system" => {
-            let window = non_empty(parts.next()?)?;
-            let currency = non_empty(parts.next()?)?;
-            let limit_micros = parts.next()?.parse::<u64>().ok()?;
-            if parts.next().is_some() {
-                return None;
-            }
-            Some(UsageCapTarget {
-                scope: String::from("system"),
-                provider: None,
-                window,
-                currency,
-                limit_micros,
-            })
-        }
-        "provider" => {
-            let provider = non_empty(parts.next()?)?;
-            let window = non_empty(parts.next()?)?;
-            let currency = non_empty(parts.next()?)?;
-            let limit_micros = parts.next()?.parse::<u64>().ok()?;
-            if parts.next().is_some() {
-                return None;
-            }
-            Some(UsageCapTarget {
-                scope: String::from("provider"),
-                provider: Some(provider),
-                window,
-                currency,
-                limit_micros,
-            })
-        }
-        _ => None,
+    let provider = match parts.next()? {
+        "system" => None,
+        "provider" => Some(non_empty(parts.next()?)?),
+        _ => return None,
+    };
+    let window = non_empty(parts.next()?)?;
+    let currency = non_empty(parts.next()?)?;
+    let limit_micros = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None;
     }
+    Some(UsageCapTarget {
+        provider,
+        window,
+        currency,
+        limit_micros,
+    })
 }
 
 fn non_empty(part: &str) -> Option<String> {
@@ -157,6 +147,9 @@ pub fn parse_consent_target(
     ))
 }
 
+/// Management intent kinds (IPC §18.2). The kind name never decides the
+/// trust class: the Host classifies by operation, target, and impact, and
+/// each owner alone may accept its kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManagementIntentKind {
     StopCompanion,
@@ -190,13 +183,28 @@ pub struct ManagementIntent {
     pub confirmed: bool,
 }
 
+impl ManagementIntent {
+    /// Whether this intent's target carries the Owner's deletion body,
+    /// independent of the client-declared `kind`: the wire fields are
+    /// independent, so the target grammar — never the self-declared kind —
+    /// decides whether the body may be rendered or journaled.
+    #[must_use]
+    pub fn target_carries_owner_body(&self) -> bool {
+        self.kind.target_carries_owner_body()
+            || self
+                .target
+                .0
+                .starts_with(super::deletion::DELETION_TARGET_PREFIX)
+    }
+}
+
 impl core::fmt::Debug for ManagementIntent {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut builder = formatter.debug_struct("ManagementIntent");
         builder
             .field("intent_id", &self.intent_id)
             .field("kind", &self.kind);
-        if self.kind.target_carries_owner_body() {
+        if self.target_carries_owner_body() {
             builder.field("target", &"[redacted]");
         } else {
             builder.field("target", &self.target);
@@ -244,11 +252,23 @@ pub enum ManagementOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManagementViewRequest {
     pub sections: Vec<String>,
-    #[serde(default)]
+    /// Current Memory id the `memory` section continues after, exclusive.
+    ///
+    /// The Host renders at most one page of the memory section and ends it
+    /// with a `next: <id>` line while older memories remain; passing that id
+    /// back here reads the next page. `None` starts at the newest. The field
+    /// is the typed read query for the one paged section, never a query
+    /// syntax embedded in a section name.
     pub memory_after: Option<String>,
-    #[serde(default)]
+    /// When set, the `memory` section renders one Memory's revision history
+    /// (with grounds) instead of the current list. The value is the Memory id
+    /// from the list. The revision history is paged independently, so it is
+    /// never inflated into the list page.
     pub memory_revisions_of: Option<String>,
-    #[serde(default)]
+    /// Revision number the revision page continues after, exclusive, oldest
+    /// first. Semantics mirror [`memory_after`](Self::memory_after); the Host
+    /// ends the page with a `next-revision: <n>` line while newer revisions
+    /// remain. `None` or zero starts at the first revision.
     pub memory_revisions_after: Option<u64>,
 }
 
@@ -278,14 +298,15 @@ pub struct ManagementView {
 
 #[cfg(test)]
 mod tests {
-    use super::super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire};
-    use super::ViewSection;
+    use super::super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, ViewMarkWire};
     use super::{
         IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin,
-        UsageCapTarget, consent_target, credential_target, parse_consent_target,
-        parse_credential_target, parse_task_target, parse_usage_cap_target, parse_workspace_target,
-        task_target, usage_cap_target, workspace_target,
+        SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, UsageCapTarget, consent_target,
+        credential_target, parse_consent_target, parse_credential_target, parse_task_target,
+        parse_usage_cap_target, parse_workspace_target, task_target, usage_cap_target,
+        workspace_target,
     };
+    use super::{ManagementOutcome, ViewSection};
     use uuid::Uuid;
 
     fn intent() -> ManagementIntent {
@@ -348,6 +369,34 @@ mod tests {
     }
 
     #[test]
+    fn deletion_body_is_redacted_even_under_a_mismatched_kind() {
+        let mut intent = intent();
+        intent.kind = ManagementIntentKind::ManageSchedule;
+        intent.target = ManagementTargetWire(String::from("deletion:privacy:raw secret body"));
+        let rendered = format!("{intent:?}");
+        assert!(
+            !rendered.contains("raw secret body"),
+            "the target grammar, not the declared kind, decides redaction: {rendered}"
+        );
+        assert!(
+            intent.target_carries_owner_body(),
+            "a deletion target carries an Owner body whatever the kind claims"
+        );
+    }
+
+    #[test]
+    fn stale_base_view_points_at_the_current_mark() {
+        let outcome = ManagementOutcome::StaleBaseView {
+            current: ViewMarkWire(String::from("mark-2")),
+        };
+        let rendered = format!("{outcome:?}");
+        assert!(
+            rendered.contains("mark-2"),
+            "current mark stays visible: {rendered}"
+        );
+    }
+
+    #[test]
     fn section_debug_redacts_body() {
         let section = ViewSection {
             kind: String::from("setup"),
@@ -360,26 +409,38 @@ mod tests {
     }
 
     #[test]
-    fn credential_target_spelling_and_parse_preserve_the_label() {
-        let target = credential_target("openai", "personal:main");
-        assert_eq!(target.0, "credential:openai:personal:main");
+    fn credential_builder_spells_the_shared_grammar() {
+        let target = credential_target("openai", "personal");
+        assert_eq!(target.0.as_str(), "credential:openai:personal");
+    }
+
+    #[test]
+    fn consent_builder_spells_the_shared_grammar() {
+        let target = consent_target("dialogue", "openai", "gpt-x", "cred-1");
+        assert_eq!(target.0.as_str(), "consent:dialogue:openai:gpt-x:cred-1");
+        let learning = consent_target("learning", "openai", "gpt-x", "cred-1");
+        assert_eq!(learning.0.as_str(), "consent:learning:openai:gpt-x:cred-1");
+    }
+
+    #[test]
+    fn credential_builder_parser_roundtrip() {
+        let target = credential_target("openai", "personal");
         assert_eq!(
             parse_credential_target(&target),
-            Some((String::from("openai"), String::from("personal:main")))
+            Some((String::from("openai"), String::from("personal")))
         );
     }
 
     #[test]
-    fn consent_target_spelling_and_parse_preserve_the_credential_id() {
-        let target = consent_target("learning", "openai", "gpt-x", "cred:with:colons");
-        assert_eq!(target.0, "consent:learning:openai:gpt-x:cred:with:colons");
+    fn consent_builder_parser_roundtrip() {
+        let target = consent_target("learning", "openai", "gpt-x", "cred-1");
         assert_eq!(
             parse_consent_target(&target),
             Some((
                 String::from("learning"),
                 String::from("openai"),
                 String::from("gpt-x"),
-                String::from("cred:with:colons")
+                String::from("cred-1")
             ))
         );
     }
@@ -389,8 +450,12 @@ mod tests {
         for raw in [
             "credential::personal",
             "credential:openai:",
+            "credential::",
             "credential:openai",
+            "credential:",
             "consent:dialogue:openai:gpt-x:cred-1",
+            "setup:show",
+            "",
         ] {
             let target = ManagementTargetWire(String::from(raw));
             assert!(parse_credential_target(&target).is_none());
@@ -405,12 +470,41 @@ mod tests {
             "consent:dialogue:openai::cred-1",
             "consent:dialogue:openai:gpt-x:",
             "consent:dialogue:openai:gpt-x",
+            "consent:dialogue:openai",
+            "consent:dialogue",
+            "consent:",
             "consent:openai:gpt-x:cred-1",
             "credential:openai:personal",
+            "setup:complete",
+            "",
         ] {
             let target = ManagementTargetWire(String::from(raw));
             assert!(parse_consent_target(&target).is_none());
         }
+    }
+
+    #[test]
+    fn consent_parser_preserves_colons_in_credential_id() {
+        let target = consent_target("dialogue", "openai", "gpt-x", "cred:with:colons");
+        assert_eq!(
+            target.0.as_str(),
+            "consent:dialogue:openai:gpt-x:cred:with:colons"
+        );
+        assert_eq!(
+            parse_consent_target(&target),
+            Some((
+                String::from("dialogue"),
+                String::from("openai"),
+                String::from("gpt-x"),
+                String::from("cred:with:colons")
+            ))
+        );
+    }
+
+    #[test]
+    fn setup_command_targets_are_fixed_strings() {
+        assert_eq!(SETUP_SHOW_TARGET, "setup:show");
+        assert_eq!(SETUP_COMPLETE_TARGET, "setup:complete");
     }
 
     #[test]
@@ -450,20 +544,34 @@ mod tests {
     }
 
     #[test]
+    fn setup_command_targets_parse_as_neither_shape() {
+        for raw in [SETUP_SHOW_TARGET, SETUP_COMPLETE_TARGET] {
+            let target = ManagementTargetWire(String::from(raw));
+            assert!(
+                parse_credential_target(&target).is_none(),
+                "setup target is not a credential target: {raw:?}"
+            );
+            assert!(
+                parse_consent_target(&target).is_none(),
+                "setup target is not a consent target: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
     fn usage_cap_target_roundtrips_both_scopes() {
-        let system = usage_cap_target("system", None, "daily_utc", "USD", 1_000_000);
+        let system = usage_cap_target(None, "daily_utc", "USD", 1_000_000);
         assert_eq!(system.0.as_str(), "cap:system:daily_utc:USD:1000000");
         assert_eq!(
             parse_usage_cap_target(&system),
             Some(UsageCapTarget {
-                scope: String::from("system"),
                 provider: None,
                 window: String::from("daily_utc"),
                 currency: String::from("USD"),
                 limit_micros: 1_000_000,
             })
         );
-        let provider = usage_cap_target("provider", Some("openai"), "monthly_utc", "USD", 42);
+        let provider = usage_cap_target(Some("openai"), "monthly_utc", "USD", 42);
         assert_eq!(
             provider.0.as_str(),
             "cap:provider:openai:monthly_utc:USD:42"
@@ -471,7 +579,6 @@ mod tests {
         assert_eq!(
             parse_usage_cap_target(&provider),
             Some(UsageCapTarget {
-                scope: String::from("provider"),
                 provider: Some(String::from("openai")),
                 window: String::from("monthly_utc"),
                 currency: String::from("USD"),
@@ -504,9 +611,8 @@ mod tests {
                 None
             );
         }
-        assert!(
-            parse_usage_cap_target(&usage_cap_target("system", None, "daily_utc", "USD", 0))
-                .is_some()
-        );
+        // Zero is representable text; the owner refuses it as a limit, so the
+        // grammar does not pre-decide that domain outcome.
+        assert!(parse_usage_cap_target(&usage_cap_target(None, "daily_utc", "USD", 0)).is_some());
     }
 }

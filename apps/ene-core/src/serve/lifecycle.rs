@@ -19,12 +19,6 @@ impl CredentialStore for ServingCredentials {
     fn contains(&self, cred: &CredentialRef) -> bool {
         self.0.cred_store.contains(cred)
     }
-
-    fn put(&self, _cred: &CredentialRef, _secret: &str) -> Result<(), CredentialTechnicalError> {
-        Err(CredentialTechnicalError::StorageUnavailable {
-            reason: String::from("transport credentials are read-only; use Host publication"),
-        })
-    }
 }
 
 #[cfg(unix)]
@@ -54,6 +48,33 @@ pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// Runs the `Stage 2` Host.
+///
+/// The inference transport is credential-agnostic: every provider request
+/// carries the credential the admission resolved for that use, so a consent
+/// reassignment bills the new credential on the next request without any
+/// transport rebinding. The environment bearer store serves the `openai`
+/// provider until real OS stores arrive. Socket-path assembly stays inside
+/// [`crate::conn`]: this entry point passes
+/// the data directory, never the socket path.
+///
+/// Startup is ordered around the single-writer lock (PR §6.4): the `0700`
+/// data directory and the exclusive `host.lock` come first, then the store
+/// open (which runs migrations), then the explicit startup mutations (the
+/// presence normalization, the unapproved-pairing cleanup, the credential
+/// publication reconciliation, the credential sweep, the bounded
+/// retired-credential cleanup, sealed-result
+/// reconciliation, orphaned usage-reservation reconciliation, and Targeted
+/// Deletion recovery), and only then the
+/// listener. A second Host in the same directory is refused before any of
+/// that runs.
+///
+/// # Errors
+///
+/// Returns [`CoreError::AlreadyRunning`] when another Host holds the data
+/// directory, [`CoreError::Store`] when the state cannot be opened, and
+/// [`CoreError::Bind`] (or [`CoreError::UnsupportedPlatform`]) when the
+/// listener cannot run.
 pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
     let _lock = crate::host_lock::HostLock::acquire(data_dir)?;
     let handle = HostHandle::open(data_dir).await?;
@@ -67,4 +88,45 @@ pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
         OpenAiResponsesTransport::new(base_url, ServingCredentials(Arc::clone(&handle)))
             .map_err(|error| CoreError::Inference(error.to_string()))?;
     crate::conn::run(data_dir.to_path_buf(), handle, Arc::new(transport)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serve::CredStore;
+    use ene_credential::{MemoryVersionedStore, VersionedCredentialStore};
+
+    #[tokio::test]
+    async fn transport_reads_host_publications_and_rotations() {
+        let dir = tempfile::tempdir().expect("data directory");
+        let host = Arc::new(
+            HostHandle::open_with_cred_store(
+                dir.path(),
+                CredStore::MemoryVersioned(MemoryVersionedStore::new()),
+            )
+            .await
+            .expect("Host"),
+        );
+        let transport_store = ServingCredentials(Arc::clone(&host));
+        let cred = CredentialRef::new("openai", "main").expect("reference");
+        assert!(!transport_store.contains(&cred));
+        let CredStore::MemoryVersioned(store) = &host.cred_store else {
+            panic!("versioned store");
+        };
+        for (version, secret) in [(1, "first-test-value"), (2, "rotated-test-value")] {
+            store
+                .put_version(&cred, version, secret)
+                .expect("candidate");
+            store.activate(store.prepare_snapshot(&cred, version).expect("snapshot"));
+            assert!(transport_store.contains(&cred));
+            assert!(
+                transport_store
+                    .with_bearer(&cred, |value| value == secret)
+                    .expect("borrow")
+            );
+        }
+        store.deactivate(&cred);
+        assert!(!transport_store.contains(&cred));
+        assert!(transport_store.with_bearer(&cred, |_| ()).is_err());
+    }
 }

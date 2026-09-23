@@ -91,15 +91,7 @@ impl Composer {
         }
     }
 
-    pub fn undo(&mut self) {
-        if self.composing {
-            return;
-        }
-        if let Some(previous) = self.undo.pop() {
-            self.draft = previous;
-        }
-    }
-
+    /// Returns the committed draft when IME is not composing.
     pub fn take_sendable(&mut self) -> Option<String> {
         if self.composing {
             return None;
@@ -147,34 +139,22 @@ impl Composer {
 pub struct GuiSnapshot {
     pub locale: String,
     pub page: String,
-    pub wizard_step: String,
     pub timeline: Vec<String>,
     pub history: Vec<String>,
     pub draft: String,
     pub composing: bool,
-    pub connection: String,
-    pub presence: String,
-    pub deny_reason: String,
-    pub challenge_target: Option<String>,
     pub tasks: Vec<String>,
     pub task_detail: String,
-    pub about_slint: bool,
     pub body_status: String,
-    pub ui_ticks: u64,
     pub setup_ready: bool,
     pub credential_present: bool,
     pub consent_assigned: bool,
     pub secret_visible: bool,
-    pub wizard_body: String,
     pub memories: Vec<MemoryRow>,
     pub memory_revisions: Vec<MemoryRevisionRow>,
-    pub memory_next: Option<String>,
-    pub memory_revisions_of: Option<String>,
-    pub memory_revisions_next: Option<u64>,
     pub memory_panel: String,
     pub usage_body: String,
     pub deletion_body: String,
-    pub search_draft: String,
 }
 
 impl GuiSnapshot {
@@ -196,14 +176,62 @@ pub enum DesktopError {
     Control(String),
     #[error("host launch: {0}")]
     HostLaunch(String),
-    #[error("confirmation seat is occupied")]
-    SeatOccupied,
     #[error("denied by the control boundary")]
     DeniedByBoundary,
     #[error("{0}")]
     Protocol(String),
+    /// The Host could not answer technically; the request changed nothing and
+    /// is retryable. Distinct from [`DesktopError::Protocol`], which reports a
+    /// peer that violated the shape of the exchange.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
+    /// The Host answered a stale cursor / moved premise: a domain outcome, not
+    /// a protocol violation; restart from the head.
+    #[error("stale: {0}")]
+    Stale(String),
+    /// The Host refused admission because its requester queue is saturated
+    /// (`FromHost::BackpressureHold`). A hold, not a technical failure and not
+    /// a boundary refusal: nothing was accepted, the Owner's surface shows the
+    /// retry guidance, and no path resends the held request automatically.
+    #[error("the Host requester queue is saturated; retry shortly")]
+    BackpressureHold,
     #[error(transparent)]
     Client(#[from] ClientError),
+}
+
+/// Default budget for one bounded panel request.
+pub(crate) const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Sends one Client request under a caller-chosen budget. The only shared
+/// difference between panels is the timeout, so it stays a parameter.
+pub(crate) async fn request_with_timeout(
+    client: &mut ene_client::Client,
+    payload: ene_api::v1::payload::WirePayload,
+    timeout: std::time::Duration,
+) -> Result<ene_api::v1::payload::WirePayload, DesktopError> {
+    timed_request(client.request(payload), timeout).await
+}
+
+/// [`request_with_timeout`] on the observed request form, which also carries
+/// the presentation round and presence generation.
+pub(crate) async fn request_observed_with_timeout(
+    client: &mut ene_client::Client,
+    payload: ene_api::v1::payload::WirePayload,
+    round: Option<ene_api::v1::refs::RoundWireId>,
+    generation: Option<u64>,
+    timeout: std::time::Duration,
+) -> Result<ene_api::v1::payload::WirePayload, DesktopError> {
+    timed_request(client.request_observed(payload, round, generation), timeout).await
+}
+
+async fn timed_request(
+    request: impl std::future::Future<Output = Result<ene_api::v1::payload::WirePayload, ClientError>>,
+    timeout: std::time::Duration,
+) -> Result<ene_api::v1::payload::WirePayload, DesktopError> {
+    tokio::time::timeout(timeout, request)
+        .await
+        .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
+        .map_err(DesktopError::Client)
 }
 
 pub(crate) fn history_lines(items: &[HistoryItem]) -> Vec<String> {

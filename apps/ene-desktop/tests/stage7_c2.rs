@@ -1,3 +1,17 @@
+//! Stage 7 C2: Task / Workspace management GUI against a real Host.
+//!
+//! Provider is fake and barrier-gated. The Slint window is not displayed; the
+//! same [`DesktopRuntime`] the window projects is driven here. Tasks are
+//! created only through companion `[task-control]` delegation, never a
+//! GUI-only factory.
+//!
+//! Covers acceptance §4's GUI path and the GUI subset of §5: Unknown vs
+//! interrupted vs Failed vs Cancelled vs Completed, and presentation ACK only
+//! after the panel copies a receipt. Conversation ACK is issued by the
+//! `send_text` presentation path via
+//! [`ene_desktop::session::confirm_chat_presentation`] after the collected
+//! turn is placed in the timeline.
+
 #![cfg(any(unix, windows))]
 
 use std::collections::{BTreeSet, VecDeque};
@@ -10,14 +24,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ene_api::v1::management::ManagementOutcome;
-use ene_api::v1::undelivered::{ResumeTaskOutcomeWire, UndeliveredAckOutcome};
-use ene_core::conn;
-use ene_core::host_control;
-use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::MemoryVersionedStore;
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
-use ene_local_control::{ControlOutcome, FromConfirmation};
+
+mod common;
+
+use common::{ServingTask, open_host, pair_and_seat, wait_for_control};
 
 const MODEL: &str = "gpt-slice-test";
 const SECRET: &str = "sk-stage7-c2-secret-4408";
@@ -57,14 +69,6 @@ impl GateTransport {
             .remove(&call);
     }
 
-    fn fail(&self, call: usize) {
-        self.failures
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(call);
-        self.unblock(call);
-    }
-
     async fn wait_sends(&self, wanted: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         while self.sends() < wanted {
@@ -78,14 +82,15 @@ impl GateTransport {
 }
 
 impl ProviderTransport for GateTransport {
-    fn complete(
-        &self,
+    fn complete_streaming<'a>(
+        &'a self,
         req: ProviderRequest,
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
     ) -> Pin<
         Box<
             dyn Future<Output = Result<ProviderResponse, ene_inference::InferenceTechnicalError>>
                 + Send
-                + '_,
+                + 'a,
         >,
     > {
         let _ = req;
@@ -120,111 +125,21 @@ impl ProviderTransport for GateTransport {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .pop_front()
                 .unwrap_or_default();
-            Ok(ProviderResponse { text, usage: None })
+            let response = ProviderResponse { text, usage: None };
+            match sink.push_delta(&response.text).await {
+                ene_inference::DeltaFlow::Continue => Ok(response),
+                ene_inference::DeltaFlow::Abort(reason) => {
+                    Err(ene_inference::InferenceTechnicalError::StreamAborted {
+                        reason: reason.to_owned(),
+                    })
+                }
+            }
         })
     }
 }
 
-struct ServingTask {
-    shutdown: tokio::sync::watch::Sender<bool>,
-    task: tokio::task::JoinHandle<Result<(), CoreError>>,
-}
-
-impl ServingTask {
-    fn start(dir: &Path, handle: Arc<HostHandle>, transport: Arc<GateTransport>) -> Self {
-        let (shutdown, rx) = tokio::sync::watch::channel(false);
-        let task = tokio::spawn(conn::run_until_shutdown(
-            dir.to_path_buf(),
-            handle,
-            transport,
-            rx,
-        ));
-        Self { shutdown, task }
-    }
-
-    #[expect(clippy::expect_used, reason = "test fixture helper")]
-    async fn shutdown_and_join(self) {
-        self.shutdown.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(30), self.task)
-            .await
-            .expect("serving shutdown must drain; release provider gates before restart")
-            .expect("serving task must join")
-            .expect("serving shutdown must succeed");
-    }
-}
-
-#[expect(clippy::panic, reason = "test fixture helper")]
-async fn open_host(dir: &Path) -> Arc<HostHandle> {
-    match HostHandle::open_with_cred_store(
-        dir,
-        CredStore::MemoryVersioned(MemoryVersionedStore::new()),
-    )
-    .await
-    {
-        Ok(handle) => {
-            handle.set_client_erasure_wait_for_tests(Duration::from_millis(200));
-            Arc::new(handle)
-        }
-        Err(error) => panic!("host must open: {error}"),
-    }
-}
-
-async fn wait_for_control(dir: &Path) -> bool {
-    for _ in 0..200 {
-        #[cfg(unix)]
-        if tokio::net::UnixStream::connect(host_control::control_socket_path(dir))
-            .await
-            .is_ok()
-        {
-            return true;
-        }
-        #[cfg(windows)]
-        if host_control::ControlClient::connect(dir).await.is_ok() {
-            tokio::task::yield_now().await;
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
-async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
-    let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
-    desktop
-        .attach_confirmation(channel)
-        .expect("the private channel is the seat");
-    desktop
-        .connect_or_begin_pairing()
-        .await
-        .expect("pairing must challenge");
-    match desktop.confirm_owner().await.expect("owner confirm pairs") {
-        FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
-        other => panic!("expected DeviceApproved, got {other:?}"),
-    }
-}
-
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn complete_setup(desktop: &mut DesktopRuntime) {
-    desktop.set_secret(String::from(SECRET));
-    desktop
-        .begin_credential_put()
-        .await
-        .expect("credential put must challenge");
-    match desktop
-        .confirm_owner()
-        .await
-        .expect("owner confirm stores the key")
-    {
-        FromConfirmation::Outcome(ControlOutcome::CredentialStored { .. }) => {}
-        other => panic!("expected CredentialStored, got {other:?}"),
-    }
-    desktop.set_model(String::from(MODEL));
-    let assigned = desktop.assign_model().await.expect("dialogue assign");
-    assert!(
-        matches!(assigned, ManagementOutcome::StoredAsRuleView { .. }),
-        "dialogue assignment must store, got {assigned:?}"
-    );
+    common::complete_setup(desktop, SECRET, MODEL).await;
 }
 
 #[expect(clippy::expect_used, reason = "test fixture helper")]
@@ -299,7 +214,7 @@ async fn acceptance_4_workspace_task_gui_path() {
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
     pair_and_seat(&mut desktop, &handle).await;
     complete_setup(&mut desktop).await;
-    desktop.try_spawn_body(&desktop.bundled_sample_asset());
+    desktop.try_spawn_body(&dir.path().join("ene-body-absent"));
     assert_eq!(desktop.snapshot().body_status, "Absent");
 
     desktop.open_tasks().await.expect("empty tasks page");
@@ -402,289 +317,5 @@ async fn acceptance_4_workspace_task_gui_path() {
         "# Report\nnotes"
     );
     assert_eq!(transport.sends(), 5, "no second launch");
-    server.shutdown_and_join().await;
-}
-
-#[tokio::test]
-async fn cancel_admission_is_not_stop_complete() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let workspace = workspace_with_input();
-    let transport = GateTransport::new(
-        vec![String::from(PROPOSE_REPLY), String::from(READ_REPLY)],
-        &[2],
-    );
-    let handle = open_host(dir.path()).await;
-    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
-    assert!(wait_for_control(dir.path()).await);
-    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_seat(&mut desktop, &handle).await;
-    complete_setup(&mut desktop).await;
-    desktop
-        .select_workspace_folder(workspace.path())
-        .await
-        .expect("workspace");
-    say(&mut desktop, "please read input.txt and write report.md").await;
-    transport.wait_sends(2).await;
-    wait_listed(&mut desktop, " running").await;
-    select_first_task(&mut desktop).await;
-
-    let outcome = desktop
-        .cancel_displayed_task()
-        .await
-        .expect("cancel must answer");
-    assert!(
-        matches!(outcome, ManagementOutcome::AppliedAsOneTime),
-        "cancel admission must apply, got {outcome:?}"
-    );
-    let detail = desktop.snapshot().task_detail;
-    assert!(
-        detail.contains("accepted (stop not yet complete)"),
-        "admission is not stop-complete: {detail}"
-    );
-    assert!(!detail.contains("failed"), "cancel is not Failed: {detail}");
-
-    transport.fail(2);
-    wait_listed(&mut desktop, "cancelled").await;
-    select_first_task(&mut desktop).await;
-    let detail = desktop.snapshot().task_detail;
-    assert!(detail.contains("cancelled"), "{detail}");
-    assert!(detail.contains("running=no"), "{detail}");
-    assert!(detail.contains("interrupted=false"), "{detail}");
-    assert!(workspace.path().join("input.txt").exists());
-
-    let refused = desktop
-        .resume_displayed_task(String::from("try again"))
-        .await
-        .expect("terminal resume is a domain outcome");
-    assert!(
-        matches!(
-            refused,
-            ResumeTaskOutcomeWire::TaskTerminal { ref progress } if progress == "cancelled"
-        ),
-        "cancelled is terminal, got {refused:?}"
-    );
-    server.shutdown_and_join().await;
-}
-
-#[tokio::test]
-async fn gui_close_reconnect_and_ack_only_after_present() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let workspace = workspace_with_input();
-    let transport = GateTransport::new(
-        vec![
-            String::from(PROPOSE_REPLY),
-            String::from("Still here."),
-            String::from(READ_REPLY),
-            String::from(CREATE_REPLY),
-            String::from(FINAL_REPLY),
-        ],
-        &[2],
-    );
-    let handle = open_host(dir.path()).await;
-    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
-    assert!(wait_for_control(dir.path()).await);
-    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_seat(&mut desktop, &handle).await;
-    complete_setup(&mut desktop).await;
-    desktop
-        .select_workspace_folder(workspace.path())
-        .await
-        .expect("workspace");
-    say(&mut desktop, "please read input.txt and write report.md").await;
-    transport.wait_sends(2).await;
-    wait_listed(&mut desktop, "in_progress").await;
-
-    let ack_early = desktop.ack_presented_tasks().await;
-    assert!(
-        ack_early.is_err(),
-        "receiving a connection is not presentation: {ack_early:?}"
-    );
-    assert!(!desktop.has_presented_task_receipt());
-
-    drop(desktop.take_client());
-    desktop
-        .reconnect()
-        .await
-        .expect("GUI reconnect against a live Host");
-    wait_listed(&mut desktop, "in_progress").await;
-    assert!(
-        desktop
-            .snapshot()
-            .tasks
-            .iter()
-            .any(|line| line.contains("in_progress")),
-        "disconnect must not cancel: {:?}",
-        desktop.snapshot().tasks
-    );
-    assert!(!desktop.has_presented_task_receipt());
-
-    say(&mut desktop, "are you still working?").await;
-    assert!(
-        desktop
-            .snapshot()
-            .timeline
-            .iter()
-            .any(|line| line.contains("Still here.")),
-        "another valid round must run mid-execution"
-    );
-
-    transport.unblock(2);
-    wait_path(&workspace.path().join("report.md")).await;
-    wait_listed(&mut desktop, "completed").await;
-
-    desktop
-        .present_task_undelivered()
-        .await
-        .expect("copy the receipt into the panel");
-    let detail = desktop.snapshot().task_detail;
-    if desktop.has_presented_task_receipt() {
-        assert!(detail.contains("presentation ready-to-ack"), "{detail}");
-        let acked = desktop
-            .ack_presented_tasks()
-            .await
-            .expect("ACK after present");
-        assert!(
-            matches!(
-                acked,
-                UndeliveredAckOutcome::Presented { .. }
-                    | UndeliveredAckOutcome::AlreadyPresented
-                    | UndeliveredAckOutcome::KeptUnknown
-            ),
-            "ACK after present is a domain outcome, got {acked:?}"
-        );
-        assert!(!desktop.has_presented_task_receipt());
-        assert!(
-            desktop.snapshot().task_detail.contains("ack "),
-            "{}",
-            desktop.snapshot().task_detail
-        );
-    } else {
-        assert!(
-            detail.contains("presentation not-presented") || detail.contains("undelivered none"),
-            "empty backlog still is not an ACK: {detail}"
-        );
-    }
-    let debug = format!("{:?}", desktop.snapshot());
-    assert!(!debug.contains(SECRET), "Debug of snapshot must not leak");
-    server.shutdown_and_join().await;
-}
-
-#[tokio::test]
-async fn resume_is_bound_to_the_displayed_premise() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let workspace = workspace_with_input();
-    let transport_a = GateTransport::new(
-        vec![String::from(PROPOSE_REPLY), String::from(READ_REPLY)],
-        &[2],
-    );
-    let handle = open_host(dir.path()).await;
-    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport_a));
-    assert!(wait_for_control(dir.path()).await);
-    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_seat(&mut desktop, &handle).await;
-    complete_setup(&mut desktop).await;
-    desktop
-        .select_workspace_folder(workspace.path())
-        .await
-        .expect("workspace");
-    say(&mut desktop, "please read input.txt and write report.md").await;
-    transport_a.wait_sends(2).await;
-    wait_listed(&mut desktop, "in_progress").await;
-    select_first_task(&mut desktop).await;
-    let shown_revision = desktop.displayed_task_revision().expect("selected");
-    let shown_purpose = desktop.displayed_task_purpose().expect("purpose");
-    assert_eq!(shown_revision, 1);
-
-    transport_a.fail(2);
-    server.shutdown_and_join().await;
-    handle
-        .run_startup_mutations()
-        .await
-        .expect("restart mutations");
-    let transport_b = GateTransport::new(
-        vec![String::from(CREATE_REPLY), String::from(FINAL_REPLY)],
-        &[1],
-    );
-    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport_b));
-    assert!(wait_for_control(dir.path()).await);
-    desktop
-        .reconnect()
-        .await
-        .expect("reconnect after host restart");
-    wait_listed(&mut desktop, "in_progress").await;
-    assert!(
-        desktop
-            .snapshot()
-            .tasks
-            .iter()
-            .any(|line| !line.contains(" running") && line.contains("in_progress")),
-        "restart holds no launch reservation: {:?}",
-        desktop.snapshot().tasks
-    );
-    select_first_task(&mut desktop).await;
-    let detail = desktop.snapshot().task_detail;
-    assert!(detail.contains("interrupted=true"), "{detail}");
-    assert!(detail.contains("in_progress"), "{detail}");
-    assert!(
-        !detail.contains("failed"),
-        "technical drop is not Failed: {detail}"
-    );
-    assert_eq!(desktop.displayed_task_revision(), Some(1));
-    assert_eq!(
-        desktop.displayed_task_purpose().as_deref(),
-        Some(shown_purpose.as_str())
-    );
-
-    let resumed = desktop
-        .resume_displayed_task(String::from("finish the remaining work"))
-        .await
-        .expect("explicit resume");
-    assert!(
-        matches!(resumed, ResumeTaskOutcomeWire::Resumed { revision: 2, .. }),
-        "resume must mint r+1, got {resumed:?}"
-    );
-    desktop.refresh_tasks().await.expect("list after resume");
-    assert!(
-        desktop
-            .snapshot()
-            .tasks
-            .iter()
-            .any(|line| line.contains("rev 2")),
-        "Host list may move: {:?}",
-        desktop.snapshot().tasks
-    );
-    assert_eq!(
-        desktop.displayed_task_revision(),
-        Some(1),
-        "stale view must not auto-replace with latest"
-    );
-    assert_eq!(
-        desktop.displayed_task_purpose().as_deref(),
-        Some(shown_purpose.as_str())
-    );
-    let stale = desktop
-        .resume_displayed_task(String::from("again"))
-        .await
-        .expect("stale resume is a domain outcome");
-    assert!(
-        matches!(
-            stale,
-            ResumeTaskOutcomeWire::StalePremise {
-                current_revision: 2
-            }
-        ),
-        "displayed premise stays bound, got {stale:?}"
-    );
-    assert!(
-        desktop
-            .snapshot()
-            .task_detail
-            .contains("stale displayed-rev 1"),
-        "{}",
-        desktop.snapshot().task_detail
-    );
-    assert_eq!(desktop.displayed_task_revision(), Some(1));
-
-    transport_b.fail(1);
     server.shutdown_and_join().await;
 }

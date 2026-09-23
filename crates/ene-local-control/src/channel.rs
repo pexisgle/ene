@@ -1,6 +1,38 @@
 pub const CONFIRMATION_MODE_ENV: &str = "ENE_CONFIRMATION_CHANNEL";
 pub const CONFIRMATION_MODE_STDIO: &str = "stdio";
-pub const MAX_CONFIRMATION_FRAME_BYTES: u32 = 16 * 1024;
+
+/// Upper bound on one control frame, shared by the confirmation channel and
+/// the requester listener. The secret-bearing credential frame is the largest
+/// legal message; anything bigger is not this protocol.
+pub const MAX_CONTROL_FRAME_BYTES: u32 = 16 * 1024;
+
+/// Serializes one frame body and checks it against
+/// [`MAX_CONTROL_FRAME_BYTES`].
+///
+/// # Errors
+///
+/// Fails when the value cannot serialize or exceeds the bound.
+pub fn encode_body<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
+    let body = serde_json::to_vec(value)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if body.len() > MAX_CONTROL_FRAME_BYTES as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "control frame exceeds the bound",
+        ));
+    }
+    Ok(body)
+}
+
+/// Decodes one frame body, mapping a decode failure to `InvalidData`.
+///
+/// # Errors
+///
+/// Returns `InvalidData` when the body does not decode.
+pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> std::io::Result<T> {
+    serde_json::from_slice(body)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChannelEvent {
@@ -11,21 +43,30 @@ pub enum ChannelEvent {
 
 use crate::{FromConfirmation, ToConfirmation};
 
+/// Encodes one frame as a `u32` big-endian length followed by JSON.
+///
+/// # Errors
+///
+/// Fails when the value cannot serialize or exceeds
+/// [`MAX_CONTROL_FRAME_BYTES`].
 pub fn encode_frame<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
-    let body = serde_json::to_vec(value)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    if body.len() > MAX_CONFIRMATION_FRAME_BYTES as usize {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "confirmation frame exceeds the bound",
-        ));
-    }
+    let body = zeroize::Zeroizing::new(encode_body(value)?);
     let mut out = Vec::with_capacity(body.len() + 4);
     out.extend_from_slice(&(body.len() as u32).to_be_bytes());
     out.extend_from_slice(&body);
     Ok(out)
 }
 
+/// Reads one framed message.
+///
+/// `Ok(None)` is terminal for the channel and means the peer closed or the
+/// length prefix was zero or over [`MAX_CONTROL_FRAME_BYTES`].
+///
+/// # Errors
+///
+/// Propagates transport failures, including a truncated body, and returns
+/// `InvalidData` for a body that fails to decode; both are terminal for the
+/// channel, and a malformed frame never becomes a guessed message.
 pub fn read_frame<R, T>(reader: &mut R) -> std::io::Result<Option<T>>
 where
     R: std::io::Read,
@@ -38,14 +79,12 @@ where
         Err(error) => return Err(error),
     }
     let length = u32::from_be_bytes(prefix);
-    if length == 0 || length > MAX_CONFIRMATION_FRAME_BYTES {
+    if length == 0 || length > MAX_CONTROL_FRAME_BYTES {
         return Ok(None);
     }
-    let mut body = vec![0_u8; length as usize];
+    let mut body = zeroize::Zeroizing::new(vec![0_u8; length as usize]);
     reader.read_exact(&mut body)?;
-    serde_json::from_slice(&body)
-        .map(Some)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    decode_body(&body).map(Some)
 }
 
 pub fn write_frame<W, T>(writer: &mut W, value: &T) -> std::io::Result<()>
@@ -53,14 +92,14 @@ where
     W: std::io::Write,
     T: serde::Serialize,
 {
-    let encoded = encode_frame(value)?;
-    writer.write_all(&encoded)?;
+    let bytes = zeroize::Zeroizing::new(encode_frame(value)?);
+    writer.write_all(&bytes)?;
     writer.flush()
 }
 
 #[cfg(unix)]
 mod platform {
-    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
     use std::os::unix::net::UnixStream;
 
     use crate::{FromConfirmation, ToConfirmation};
@@ -124,12 +163,28 @@ mod platform {
             Ok((Self { stream: gui }, HostChannel { stream: host }))
         }
 
+        /// Adopts the channel the Host passed as this process's stdin.
+        ///
+        /// The descriptor is re-armed close-on-exec, so no descendant this
+        /// process execs can inherit the confirmation endpoint; the channel
+        /// is never re-handed to Body, tools, or plugins.
+        ///
+        /// # Errors
+        ///
+        /// Returns the OS failure when stdin cannot be taken or its
+        /// close-on-exec flag cannot be set.
         pub fn adopt_stdio() -> std::io::Result<Self> {
             // SAFETY: fd 0 is this process's stdin, which the Host set to the
             // child end of the pair before exec. Taking ownership here keeps a
-            // single owner and never re-hands the channel to Body, tools, or
-            // plugins.
+            // single owner.
             let fd = unsafe { OwnedFd::from_raw_fd(0) };
+            // The Host's dup2 during spawn cleared FD_CLOEXEC; re-arm it so no
+            // exec'd descendant inherits the confirmation endpoint.
+            // SAFETY: `fd` is a valid open descriptor and `fcntl` with F_SETFD
+            // does not transfer ownership.
+            if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(Self {
                 stream: UnixStream::from(fd),
             })
@@ -150,7 +205,9 @@ mod platform {
     use std::fs::File;
     use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
 
-    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
     use windows_sys::Win32::System::Pipes::CreatePipe;
 
     use crate::{FromConfirmation, ToConfirmation};
@@ -258,11 +315,35 @@ mod platform {
             ))
         }
 
+        /// Adopts the channel the Host passed as this process's stdio.
+        ///
+        /// The standard handles' inherit bit is cleared after the private
+        /// duplicates are taken, so no descendant this process spawns can
+        /// carry the confirmation endpoint; the channel is never re-handed to
+        /// Body, tools, or plugins.
+        ///
+        /// # Errors
+        ///
+        /// Returns the OS failure when the standard handles are unusable or
+        /// their inherit flag cannot be cleared.
         pub fn adopt_stdio() -> std::io::Result<Self> {
-            use std::os::windows::io::AsHandle as _;
+            use std::os::windows::io::{AsHandle as _, AsRawHandle as _};
 
             let from_host = std::io::stdin().as_handle().try_clone_to_owned()?;
             let to_host = std::io::stdout().as_handle().try_clone_to_owned()?;
+            // `try_clone_to_owned` duplicates without inheritance, but the
+            // original std handles stay inheritable. Clear the bit so no
+            // descendant that inherits stdio can carry the endpoint onward.
+            for handle in [
+                std::io::stdin().as_raw_handle(),
+                std::io::stdout().as_raw_handle(),
+            ] {
+                // SAFETY: `handle` is a live process standard handle; the call
+                // only clears the inherit flag and does not take ownership.
+                if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             Ok(Self {
                 from_host: File::from(from_host),
                 to_host: File::from(to_host),
@@ -280,3 +361,43 @@ mod platform {
 }
 
 pub use platform::{ChildHandles, GuiChannel, HostChannel};
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_CONTROL_FRAME_BYTES, encode_frame, read_frame, write_frame};
+    use crate::ToConfirmation;
+
+    /// A frame that is too large is refused, never truncated.
+    #[test]
+    fn an_oversize_frame_is_refused() {
+        let huge = "x".repeat(MAX_CONTROL_FRAME_BYTES as usize + 1);
+        assert!(encode_frame(&huge).is_err());
+    }
+
+    /// Frames round-trip through the encoder, so both ends agree on shape.
+    #[test]
+    fn frames_round_trip() {
+        let mut buffer = Vec::new();
+        let frame = ToConfirmation::SessionComplete {
+            session_id: uuid::Uuid::nil(),
+            nonce: crate::RedactedSecret::new("n"),
+        };
+        write_frame(&mut buffer, &frame).expect("encode");
+        let mut cursor = std::io::Cursor::new(buffer);
+        let decoded: Option<ToConfirmation> = read_frame(&mut cursor).expect("decode");
+        assert_eq!(decoded, Some(frame));
+    }
+
+    /// A frame whose declared length is not there ends the channel rather than
+    /// guessing at partial content. A truncated body is a transport failure,
+    /// not a message: the reader reports it and the caller closes the channel.
+    #[test]
+    fn a_truncated_frame_ends_the_channel() {
+        let mut cursor = std::io::Cursor::new(vec![0_u8, 0, 0, 8, b'x']);
+        let decoded: Result<Option<ToConfirmation>, _> = read_frame(&mut cursor);
+        assert!(
+            decoded.is_err(),
+            "a truncated body must surface as a failure, got {decoded:?}"
+        );
+    }
+}

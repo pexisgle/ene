@@ -1,32 +1,67 @@
 use std::sync::Arc;
 
 use ene_credential::{
-    ActivationOutcome, ActiveVersion, CredentialPublicationRepository, CredentialTechnicalError,
-    MutationKind, MutationOutcome, MutationPhase, SecretVersionId,
+    ActivationOutcome, CredentialPublicationRepository, CredentialRef, CredentialTechnicalError,
+    MutationKind, MutationOutcome, MutationPhase, RetiredCredentialVersion, SecretVersionId,
+    UncommittedMutationOutcome, VersionedCredentialStore,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{credential_unavailable, lock_shared};
-use crate::credential::{SQL_SELECT_SET_REV, sweep_registered_secret};
+use crate::credential::{
+    SQL_UPSERT_CREDENTIAL, advance_credential_set, current_set_revision, sweep_registered_secret,
+};
 use crate::run_blocking;
 
-const SQL_INSERT_MUTATION: &str = "INSERT INTO credential_mutation (mutation_id, op, provider, label, expected_revision, candidate_version, phase, decided_outcome, decided_revision, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8)";
+const SQL_INSERT_MUTATION: &str = "INSERT INTO credential_mutation (mutation_id, op, provider, label, expected_revision, candidate_version, phase, decided_outcome, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)";
 
-const SQL_SELECT_MUTATION: &str = "SELECT op, provider, label, expected_revision, candidate_version, phase, decided_outcome, decided_revision FROM credential_mutation WHERE mutation_id = ?1";
+const SQL_SELECT_MUTATION: &str = "SELECT op, provider, label, expected_revision, candidate_version, phase, decided_outcome FROM credential_mutation WHERE mutation_id = ?1";
 
 const SQL_MARK_STAGED: &str = "UPDATE credential_mutation SET phase = ?3 WHERE mutation_id = ?1 AND candidate_version = ?2 AND phase = ?4 AND decided_outcome IS NULL";
 
-const SQL_DECIDE_MUTATION: &str = "UPDATE credential_mutation SET phase = ?2, decided_outcome = ?3, decided_revision = ?4 WHERE mutation_id = ?1 AND decided_outcome IS NULL";
+const SQL_DECIDE_MUTATION: &str = "UPDATE credential_mutation SET phase = ?2, decided_outcome = ?3 WHERE mutation_id = ?1 AND decided_outcome IS NULL";
 
-const SQL_UPSERT_ACTIVE: &str = "INSERT INTO credential_active (provider, label, active_version, cleanup_version) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (provider, label) DO UPDATE SET active_version = excluded.active_version, cleanup_version = excluded.cleanup_version";
+const SQL_UPSERT_ACTIVE: &str = "INSERT INTO credential_active (provider, label, active_version) VALUES (?1, ?2, ?3) ON CONFLICT (provider, label) DO UPDATE SET active_version = excluded.active_version";
 
-const SQL_SELECT_ACTIVE: &str = "SELECT active_version, cleanup_version FROM credential_active WHERE provider = ?1 AND label = ?2";
+const SQL_SELECT_ACTIVE: &str =
+    "SELECT active_version FROM credential_active WHERE provider = ?1 AND label = ?2";
 
-const SQL_CLEAR_CLEANUP: &str = "UPDATE credential_active SET cleanup_version = NULL WHERE provider = ?1 AND label = ?2 AND cleanup_version = ?3";
+/// The stored active version for one credential pair, or [`None`] when no
+/// version is active. A stored negative value cannot be a version this
+/// adapter wrote, so it is an unreadable counter, never an active one.
+fn stored_active_version(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    label: &str,
+) -> Result<Option<u64>, CredentialTechnicalError> {
+    let active: Option<Option<i64>> = conn
+        .query_row(SQL_SELECT_ACTIVE, params![provider, label], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|error| credential_unavailable(error.to_string()))?;
+    Ok(active.flatten().and_then(|value| u64::try_from(value).ok()))
+}
 
-const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
+/// Enqueues one replaced version. The primary key makes a repeated retirement
+/// of the same version a loud constraint failure, not a silent overwrite: a
+/// version can only stop being active once.
+const SQL_ENQUEUE_RETIRED: &str = "INSERT INTO credential_retired (provider, label, version, mutation_id, retired_at) VALUES (?1, ?2, ?3, ?4, ?5)";
 
+const SQL_PENDING_RETIRED: &str = "SELECT provider, label, version, mutation_id FROM credential_retired ORDER BY rowid ASC LIMIT ?1";
+
+const SQL_DELETE_RETIRED: &str =
+    "DELETE FROM credential_retired WHERE provider = ?1 AND label = ?2 AND version = ?3";
+
+/// Completes the retiring mutation only when it committed an outcome and no
+/// version it retired is still pending. The `phase` guard keeps a retry from
+/// rewriting an already-completed mutation, and the `NOT EXISTS` probe makes
+/// the transition depend on the whole retired set, not just this row.
+const SQL_COMPLETE_RETIRED_MUTATION: &str = "UPDATE credential_mutation SET phase = ?2 WHERE mutation_id = ?1 AND phase = ?3 AND decided_outcome IS NOT NULL AND NOT EXISTS (SELECT 1 FROM credential_retired WHERE mutation_id = ?1)";
+
+/// A stored outcome is written as its own durable text, so a later phase move
+/// never rewrites what the Owner decided.
 fn outcome_text(outcome: &MutationOutcome) -> String {
     match outcome {
         MutationOutcome::Activated { revision } => format!("activated:{revision}"),
@@ -35,6 +70,19 @@ fn outcome_text(outcome: &MutationOutcome) -> String {
         MutationOutcome::Rejected => String::from("rejected"),
         MutationOutcome::Refused => String::from("refused"),
         MutationOutcome::Unknown => String::from("unknown"),
+    }
+}
+
+/// Widens a non-committing journal outcome to the full vocabulary written to
+/// the durable `decided_outcome` column. The mapping is the only place the
+/// uncommitted type meets a commit outcome, so `Activated`/`Revoked` can never
+/// enter the non-committing path.
+fn uncommitted_outcome(outcome: UncommittedMutationOutcome) -> MutationOutcome {
+    match outcome {
+        UncommittedMutationOutcome::Stale => MutationOutcome::Stale,
+        UncommittedMutationOutcome::Rejected => MutationOutcome::Rejected,
+        UncommittedMutationOutcome::Refused => MutationOutcome::Refused,
+        UncommittedMutationOutcome::Unknown => MutationOutcome::Unknown,
     }
 }
 
@@ -67,7 +115,6 @@ fn mutation_from_row(
     let candidate_version: Option<i64> = row.get(4)?;
     let phase: String = row.get(5)?;
     let decided_outcome: Option<String> = row.get(6)?;
-    let decided_revision: Option<i64> = row.get(7)?;
     let (Some(kind), Some(phase)) = (MutationKind::parse(&op), MutationPhase::parse(&phase)) else {
         return Ok(None);
     };
@@ -76,6 +123,14 @@ fn mutation_from_row(
         Some(None) => return Ok(None),
         Some(Some(outcome)) => Some(outcome),
     };
+    // A stored negative integer can only be a wrapped or tampered value:
+    // this adapter writes revisions and versions non-negative. It is an
+    // unreadable row, never "no premise".
+    if expected_revision.is_some_and(|value| value < 0)
+        || candidate_version.is_some_and(|value| value < 0)
+    {
+        return Ok(None);
+    }
     Ok(Some(ene_credential::CredentialMutation {
         mutation_id,
         kind,
@@ -87,8 +142,50 @@ fn mutation_from_row(
             .map(SecretVersionId::from_u64),
         phase,
         outcome,
-        decided_revision: decided_revision.and_then(|value| u64::try_from(value).ok()),
     }))
+}
+
+/// Reads one stored mutation. The outer [`Option`] is "no such mutation" and
+/// the inner one is a row that cannot be decoded; every caller keeps its own
+/// interpretation of the two.
+fn load_mutation(
+    conn: &rusqlite::Connection,
+    mutation_id: &str,
+) -> Result<Option<Option<ene_credential::CredentialMutation>>, CredentialTechnicalError> {
+    conn.query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
+        mutation_from_row(mutation_id.to_owned(), row)
+    })
+    .optional()
+    .map_err(|error| credential_unavailable(error.to_string()))
+}
+
+/// Abandons a mutation whose premise moved: sweeps the named bearers, records
+/// the durable `Stale` decision, and commits. The caller answers `Stale` from
+/// the revision it already read.
+fn abandon_stale(
+    tx: rusqlite::Transaction<'_>,
+    mutation_id: &str,
+    candidate_bearer: Option<&str>,
+    retired_bearer: Option<&str>,
+) -> Result<(), CredentialTechnicalError> {
+    if let Some(bearer) = candidate_bearer {
+        sweep_registered_secret(&tx, bearer)?;
+    }
+    if let Some(retired) = retired_bearer {
+        sweep_registered_secret(&tx, retired)?;
+    }
+    tx.execute(
+        SQL_DECIDE_MUTATION,
+        params![
+            mutation_id,
+            MutationPhase::Abandoned.as_str(),
+            outcome_text(&MutationOutcome::Stale),
+        ],
+    )
+    .map_err(|error| credential_unavailable(error.to_string()))?;
+    tx.commit()
+        .map_err(|error| credential_unavailable(error.to_string()))?;
+    Ok(())
 }
 
 impl CredentialPublicationRepository for Store {
@@ -107,12 +204,9 @@ impl CredentialPublicationRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            let stored: Option<Option<ene_credential::CredentialMutation>> = tx
-                .query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
-                    mutation_from_row(mutation_id.clone(), row)
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
+            // Write-once: a retry observes the original attempt instead of
+            // starting a second one under the same id.
+            let stored = load_mutation(&tx, &mutation_id)?;
             if let Some(Some(stored)) = stored {
                 if stored.kind != kind
                     || stored.provider != provider
@@ -145,14 +239,16 @@ impl CredentialPublicationRepository for Store {
                 ],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
-            let created: Option<ene_credential::CredentialMutation> = tx
-                .query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
-                    mutation_from_row(mutation_id.clone(), row)
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?
-                .flatten();
-            let created = created.ok_or_else(|| credential_unavailable("mutation read back"))?;
+            let created = ene_credential::CredentialMutation {
+                mutation_id,
+                kind,
+                provider,
+                label,
+                expected_revision,
+                candidate_version,
+                phase: MutationPhase::Prepared,
+                outcome: None,
+            };
             tx.commit()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(created)
@@ -168,11 +264,8 @@ impl CredentialPublicationRepository for Store {
         let conn = Arc::clone(&self.conn);
         let mutation_id = mutation_id.to_owned();
         run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let changed = tx
+            let guard = lock_shared(&conn);
+            let changed = guard
                 .execute(
                     SQL_MARK_STAGED,
                     params![
@@ -188,8 +281,6 @@ impl CredentialPublicationRepository for Store {
                     "the mutation is already decided or unknown",
                 ));
             }
-            tx.commit()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(())
         })
         .await
@@ -210,13 +301,7 @@ impl CredentialPublicationRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            let stored: Option<Option<ene_credential::CredentialMutation>> = tx
-                .query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
-                    mutation_from_row(mutation_id.clone(), row)
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let Some(Some(mutation)) = stored else {
+            let Some(Some(mutation)) = load_mutation(&tx, &mutation_id)? else {
                 return Ok(ActivationOutcome::Missing);
             };
             if let Some(outcome) = mutation.outcome {
@@ -225,37 +310,31 @@ impl CredentialPublicationRepository for Store {
             let Some(candidate) = mutation.candidate_version else {
                 return Ok(ActivationOutcome::Missing);
             };
-            let current: i64 = tx
-                .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let current = u64::try_from(current)
-                .map_err(|_| credential_unavailable("credential set revision out of range"))?;
+            // Design §3 step 4: the commit transaction re-verifies the
+            // operation phase, so a mutation that was never staged through
+            // the OS `put` is not activated here.
+            if mutation.phase != MutationPhase::Staged {
+                return Ok(ActivationOutcome::Missing);
+            }
+            let current = current_set_revision(&tx)?.as_u64();
             if let Some(expected) = mutation.expected_revision
                 && expected != current
             {
-                sweep_registered_secret(&tx, &candidate_bearer)?;
-                if let Some(retired) = retired_bearer.as_deref() {
-                    sweep_registered_secret(&tx, retired)?;
-                }
-                tx.execute(
-                    SQL_DECIDE_MUTATION,
-                    params![
-                        mutation_id,
-                        MutationPhase::Abandoned.as_str(),
-                        outcome_text(&MutationOutcome::Stale),
-                        Option::<i64>::None,
-                    ],
-                )
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-                tx.commit()
-                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                // The premise moved; the candidate is not adopted and its
+                // value is swept so nothing survives the refused attempt.
+                abandon_stale(
+                    tx,
+                    &mutation_id,
+                    Some(candidate_bearer.as_str()),
+                    retired_bearer.as_deref(),
+                )?;
                 return Ok(ActivationOutcome::Stale {
                     current_revision: current,
                 });
             }
-            let next = current
-                .checked_add(1)
-                .ok_or_else(|| credential_unavailable("credential set revision exhausted"))?;
+            // Sweep first: the new value and any value it replaces are removed
+            // from stored content in this same transaction, so a premise taken
+            // before the commit is covered by it.
             sweep_registered_secret(&tx, &candidate_bearer)?;
             if let Some(retired) = retired_bearer.as_deref() {
                 sweep_registered_secret(&tx, retired)?;
@@ -269,38 +348,45 @@ impl CredentialPublicationRepository for Store {
                 ],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
-            let previous: Option<(Option<i64>, Option<i64>)> = tx
-                .query_row(
-                    SQL_SELECT_ACTIVE,
-                    params![mutation.provider, mutation.label],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+            let previous_active = stored_active_version(&tx, &mutation.provider, &mutation.label)?;
+            // The replaced version is enqueued in this same transaction and a
+            // later update never overwrites it. A candidate equal to the
+            // current active version retires nothing: the item this commit
+            // activates must never enter the cleanup set.
+            let retired = previous_active.filter(|version| *version != candidate.as_u64());
+            if let Some(version) = retired {
+                tx.execute(
+                    SQL_ENQUEUE_RETIRED,
+                    params![
+                        mutation.provider,
+                        mutation.label,
+                        version as i64,
+                        mutation_id.as_str(),
+                        ene_primitive::WallClockWithTz::now().to_rfc3339(),
+                    ],
                 )
-                .optional()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            let (previous_active, previous_cleanup) = previous.unwrap_or((None, None));
-            let retired = previous_cleanup.or(previous_active);
+            }
             tx.execute(
                 SQL_UPSERT_ACTIVE,
-                params![
-                    mutation.provider,
-                    mutation.label,
-                    candidate.as_u64() as i64,
-                    retired,
-                ],
+                params![mutation.provider, mutation.label, candidate.as_u64() as i64],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
-            tx.execute(
-                "UPDATE credential_set SET rev = ?1 WHERE id = 1",
-                params![next as i64],
-            )
-            .map_err(|error| credential_unavailable(error.to_string()))?;
+            let next = advance_credential_set(&tx)?;
+            // The active reference and revision commit here: the phase is
+            // `Activated` when nothing was retired, and `CleanupPending` when
+            // the version enqueued above still needs removal.
+            let phase = if retired.is_some() {
+                MutationPhase::CleanupPending
+            } else {
+                MutationPhase::Activated
+            };
             tx.execute(
                 SQL_DECIDE_MUTATION,
                 params![
                     mutation_id,
-                    MutationPhase::CleanupPending.as_str(),
+                    phase.as_str(),
                     outcome_text(&MutationOutcome::Activated { revision: next }),
-                    next as i64,
                 ],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
@@ -308,9 +394,111 @@ impl CredentialPublicationRepository for Store {
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(ActivationOutcome::Activated {
                 revision: next,
-                retired: retired
-                    .and_then(|value| u64::try_from(value).ok())
-                    .map(SecretVersionId::from_u64),
+                retired: retired.map(SecretVersionId::from_u64),
+            })
+        })
+        .await
+    }
+
+    async fn revoke_credential(
+        &self,
+        mutation_id: &str,
+        retired_bearer: Option<&str>,
+    ) -> Result<ActivationOutcome, CredentialTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        let mutation_id = mutation_id.to_owned();
+        let retired_bearer = retired_bearer.map(str::to_owned);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let Some(Some(mutation)) = load_mutation(&tx, &mutation_id)? else {
+                return Ok(ActivationOutcome::Missing);
+            };
+            // A decided mutation answers from its stored outcome, so a retry
+            // never invalidates a newer reference.
+            if let Some(outcome) = mutation.outcome {
+                return Ok(ActivationOutcome::AlreadyDecided(outcome));
+            }
+            // Only an undecided `Revoke` recorded before any OS write has a
+            // durable premise to invalidate; a registration mutation or an
+            // unexpected phase is not revoked here.
+            if mutation.kind != MutationKind::Revoke || mutation.phase != MutationPhase::Prepared {
+                return Ok(ActivationOutcome::Missing);
+            }
+            let current = current_set_revision(&tx)?.as_u64();
+            if let Some(expected) = mutation.expected_revision
+                && expected != current
+            {
+                // The premise moved: nothing is invalidated, and the value
+                // named for retirement is swept so no plaintext of a
+                // registered value survives the refused attempt.
+                abandon_stale(tx, &mutation_id, None, retired_bearer.as_deref())?;
+                return Ok(ActivationOutcome::Stale {
+                    current_revision: current,
+                });
+            }
+            // Sweep the invalidated value in the same transaction that clears
+            // the reference: a premise taken before the commit is covered by
+            // the sweep or refused by the revision below.
+            if let Some(retired) = retired_bearer.as_deref() {
+                sweep_registered_secret(&tx, retired)?;
+            }
+            let previous_active = stored_active_version(&tx, &mutation.provider, &mutation.label)?;
+            // The invalidated version is enqueued in this same transaction,
+            // alongside any earlier pending retirement, and its item stays
+            // addressable until the cleanup records the removal.
+            let retired = previous_active;
+            if let Some(version) = retired {
+                tx.execute(
+                    SQL_ENQUEUE_RETIRED,
+                    params![
+                        mutation.provider,
+                        mutation.label,
+                        version as i64,
+                        mutation_id.as_str(),
+                        ene_primitive::WallClockWithTz::now().to_rfc3339(),
+                    ],
+                )
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            }
+            tx.execute(
+                SQL_UPSERT_ACTIVE,
+                params![mutation.provider, mutation.label, Option::<i64>::None],
+            )
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+            tx.execute(
+                "DELETE FROM credential_ref WHERE provider = ?1 AND label = ?2",
+                params![mutation.provider, mutation.label],
+            )
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+            let next = advance_credential_set(&tx)?;
+            // A revoked reference with a version still to remove stays
+            // `CleanupPending`; one with nothing to remove is `Completed`.
+            let phase = if retired.is_some() {
+                MutationPhase::CleanupPending
+            } else {
+                MutationPhase::Completed
+            };
+            tx.execute(
+                SQL_DECIDE_MUTATION,
+                params![
+                    mutation_id,
+                    phase.as_str(),
+                    outcome_text(&MutationOutcome::Revoked { revision: next }),
+                ],
+            )
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+            tx.commit()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            // `Activated` is the committed transaction answer for both
+            // `activate_credential` and `revoke_credential`; the committed
+            // outcome distinguishes the operation, and `retired` names the
+            // version whose item still needs removal.
+            Ok(ActivationOutcome::Activated {
+                revision: next,
+                retired: retired.map(SecretVersionId::from_u64),
             })
         })
         .await
@@ -319,26 +507,21 @@ impl CredentialPublicationRepository for Store {
     async fn record_credential_mutation_outcome(
         &self,
         mutation_id: &str,
-        outcome: MutationOutcome,
+        outcome: UncommittedMutationOutcome,
     ) -> Result<(), CredentialTechnicalError> {
         let conn = Arc::clone(&self.conn);
         let mutation_id = mutation_id.to_owned();
         run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            tx.execute(
-                SQL_DECIDE_MUTATION,
-                params![
-                    mutation_id,
-                    MutationPhase::Abandoned.as_str(),
-                    outcome_text(&outcome),
-                    Option::<i64>::None,
-                ],
-            )
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-            tx.commit()
+            let guard = lock_shared(&conn);
+            guard
+                .execute(
+                    SQL_DECIDE_MUTATION,
+                    params![
+                        mutation_id,
+                        MutationPhase::Abandoned.as_str(),
+                        outcome_text(&uncommitted_outcome(outcome)),
+                    ],
+                )
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(())
         })
@@ -353,13 +536,7 @@ impl CredentialPublicationRepository for Store {
         let mutation_id = mutation_id.to_owned();
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            guard
-                .query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
-                    mutation_from_row(mutation_id.clone(), row)
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))
-                .map(Option::flatten)
+            load_mutation(&guard, &mutation_id).map(Option::flatten)
         })
         .await
     }
@@ -368,54 +545,118 @@ impl CredentialPublicationRepository for Store {
         &self,
         provider: &str,
         label: &str,
-    ) -> Result<ActiveVersion, CredentialTechnicalError> {
+    ) -> Result<Option<SecretVersionId>, CredentialTechnicalError> {
         let conn = Arc::clone(&self.conn);
         let provider = provider.to_owned();
         let label = label.to_owned();
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            let row: Option<(Option<i64>, Option<i64>)> = guard
-                .query_row(SQL_SELECT_ACTIVE, params![provider, label], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let (active, cleanup) = row.unwrap_or((None, None));
-            Ok(ActiveVersion {
-                active: active
-                    .and_then(|value| u64::try_from(value).ok())
-                    .map(SecretVersionId::from_u64),
-                cleanup: cleanup
-                    .and_then(|value| u64::try_from(value).ok())
-                    .map(SecretVersionId::from_u64),
-            })
+            Ok(stored_active_version(&guard, &provider, &label)?.map(SecretVersionId::from_u64))
         })
         .await
     }
+}
 
-    async fn mark_credential_cleaned(
+impl Store {
+    /// One bounded retirement-cleanup pass.
+    ///
+    /// Reads at most `limit` pending retired versions (oldest first), removes
+    /// each one's OS item through `values`, and records the confirmed removals
+    /// in one short transaction. Recording a removal also completes the
+    /// retiring mutation once no version it retired remains pending. The pass
+    /// never reports a version swept whose item removal was not confirmed: a
+    /// failed removal leaves its row pending for a later pass, and a crash
+    /// after the removal but before the state write leaves the row so the
+    /// removal is re-attempted (the backends treat a missing item as success).
+    /// A row whose credential identity cannot be parsed stays pending as well.
+    ///
+    /// The batch bound is what keeps one pass from doing unbounded work; the
+    /// durable set and the startup/publication cadence drain a backlog across
+    /// passes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
+    /// pending set cannot be read or the state transaction cannot commit.
+    /// Per-version OS removal failures are not errors: those rows stay
+    /// pending and are retried by a later pass.
+    pub fn sweep_retired_credentials<S: VersionedCredentialStore>(
         &self,
-        provider: &str,
-        label: &str,
-        version: SecretVersionId,
-    ) -> Result<(), CredentialTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        let provider = provider.to_owned();
-        let label = label.to_owned();
-        run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+        values: &S,
+        limit: u32,
+    ) -> Result<u32, CredentialTechnicalError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let pending: Vec<RetiredCredentialVersion> = {
+            let guard = lock_shared(&self.conn);
+            let mut query = guard
+                .prepare(SQL_PENDING_RETIRED)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
+            let rows = query
+                .query_map(params![i64::from(limit)], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let mut retired = Vec::new();
+            for row in rows {
+                let (provider, label, version, mutation_id) =
+                    row.map_err(|error| credential_unavailable(error.to_string()))?;
+                let version = u64::try_from(version)
+                    .map_err(|_| credential_unavailable("retired version out of range"))?;
+                retired.push(RetiredCredentialVersion {
+                    provider,
+                    label,
+                    version: SecretVersionId::from_u64(version),
+                    mutation_id,
+                });
+            }
+            retired
+        };
+        // OS I/O happens outside the connection lock and the state
+        // transaction: a removal cannot hold the store's single connection.
+        let mut confirmed = Vec::new();
+        for row in pending {
+            let Ok(credential) = CredentialRef::new(row.provider.clone(), row.label.clone()) else {
+                continue;
+            };
+            if values
+                .delete_version(&credential, row.version.as_u64())
+                .is_ok()
+            {
+                confirmed.push(row);
+            }
+        }
+        if confirmed.is_empty() {
+            return Ok(0);
+        }
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        for row in &confirmed {
             tx.execute(
-                SQL_CLEAR_CLEANUP,
-                params![provider, label, version.as_u64() as i64],
+                SQL_DELETE_RETIRED,
+                params![row.provider, row.label, row.version.as_u64() as i64],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
-            tx.commit()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            Ok(())
-        })
-        .await
+            tx.execute(
+                SQL_COMPLETE_RETIRED_MUTATION,
+                params![
+                    row.mutation_id,
+                    MutationPhase::Completed.as_str(),
+                    MutationPhase::CleanupPending.as_str(),
+                ],
+            )
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        Ok(confirmed.len() as u32)
     }
 }

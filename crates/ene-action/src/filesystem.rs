@@ -31,7 +31,13 @@ pub enum ListEntryKind {
 pub enum ActionOutput {
     Bytes(Vec<u8>),
     Listing(Vec<ListEntry>),
-    Created { target: RealTargetRef },
+    /// The created marker of a successful `Create`, carrying the exact
+    /// [`RealTargetRef`] the attempt was recorded and executed under; the
+    /// request path is never reconstructed into the result.
+    Created {
+        target: RealTargetRef,
+    },
+    /// The updated marker of a successful `Edit`.
     Updated,
 }
 
@@ -113,7 +119,7 @@ impl WorkspaceRoot {
                         }
                     }
                 }
-                Ok(canonical_target(canonical))
+                Ok(canonical_target(canonical)?)
             }
             OperationKind::Create => {
                 let Some((file_name, parent_names)) = names.split_last() else {
@@ -148,7 +154,7 @@ impl WorkspaceRoot {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(map_io_error(&error)),
                 }
-                Ok(canonical_target(destination))
+                Ok(canonical_target(destination)?)
             }
         }
     }
@@ -164,31 +170,41 @@ impl WorkspaceRoot {
             OperationKind::List => self.list_directory(target),
             OperationKind::Read => {
                 let destination = Path::new(target.as_path());
-                if self
-                    .verified_existing_metadata(destination, false)
-                    .is_none()
-                {
+                if !self.verified_existing_metadata(destination, false) {
                     return refused();
                 }
                 match fs::read(destination) {
-                    Ok(bytes) => ObservedEffect {
-                        certainty: ActionCertainty::ConfirmedSuccess,
-                        grounds: EffectGrounds::ObservedAtTarget,
-                        output: Some(ActionOutput::Bytes(bytes)),
-                    },
+                    Ok(bytes) => confirmed(ActionOutput::Bytes(bytes)),
                     Err(_) => refused(),
                 }
             }
             OperationKind::Create => {
-                self.write_atomically(target, content.unwrap_or_default(), false)
+                let Some(bytes) = content else {
+                    return refused();
+                };
+                self.write_atomically(target, bytes, false)
             }
-            OperationKind::Edit => self.write_atomically(target, content.unwrap_or_default(), true),
+            OperationKind::Edit => {
+                let Some(bytes) = content else {
+                    return refused();
+                };
+                self.write_atomically(target, bytes, true)
+            }
         }
     }
 
+    /// Observes one directory as a sorted, non-recursive entry listing.
+    ///
+    /// Each direct child is classified from no-follow metadata: symlinks,
+    /// Windows reparse points, junctions, mounts/cross-device entries,
+    /// special files, and entries whose name is not valid UTF-8 are excluded
+    /// from the result rather than followed, mapped to `file`/`dir`, or
+    /// reported under a lossy name; an excluded child never fails the whole
+    /// listing. A partial read of the directory is a confirmed refusal (a
+    /// listing changes nothing).
     fn list_directory(&self, target: &RealTargetRef) -> ObservedEffect {
         let destination = Path::new(target.as_path());
-        if self.verified_existing_metadata(destination, true).is_none() {
+        if !self.verified_existing_metadata(destination, true) {
             return refused();
         }
         let Ok(entries) = fs::read_dir(destination) else {
@@ -202,15 +218,13 @@ impl WorkspaceRoot {
             let Some(kind) = self.listable_child(&entry.path()) else {
                 continue;
             };
-            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
             listing.push(ListEntry { name, kind });
         }
         listing.sort_by(|left, right| left.name.cmp(&right.name));
-        ObservedEffect {
-            certainty: ActionCertainty::ConfirmedSuccess,
-            grounds: EffectGrounds::ObservedAtTarget,
-            output: Some(ActionOutput::Listing(listing)),
-        }
+        confirmed(ActionOutput::Listing(listing))
     }
 
     fn listable_child(&self, path: &Path) -> Option<ListEntryKind> {
@@ -273,83 +287,67 @@ impl WorkspaceRoot {
             Err(_) => return refused(),
         };
         if persisted.sync_all().is_err() {
-            return ObservedEffect {
-                certainty: ActionCertainty::Unknown,
-                grounds: EffectGrounds::OutcomeUnverified,
-                output: None,
-            };
+            // The rename landed but the content durability is unconfirmed.
+            return unverified();
         }
         match fs::read(destination) {
-            Ok(read_back) if read_back == bytes => ObservedEffect {
-                certainty: ActionCertainty::ConfirmedSuccess,
-                grounds: EffectGrounds::ObservedAtTarget,
-                output: Some(if replace {
-                    ActionOutput::Updated
-                } else {
-                    ActionOutput::Created {
-                        target: target.clone(),
-                    }
-                }),
-            },
-            _ => ObservedEffect {
-                certainty: ActionCertainty::Unknown,
-                grounds: EffectGrounds::OutcomeUnverified,
-                output: None,
-            },
+            Ok(read_back) if read_back == bytes => confirmed(if replace {
+                ActionOutput::Updated
+            } else {
+                ActionOutput::Created {
+                    target: target.clone(),
+                }
+            }),
+            // Something is at the destination but not what we intended; an
+            // effect occurred, but it cannot be confirmed as the intended one.
+            _ => unverified(),
         }
     }
 
-    fn verified_existing_metadata(
-        &self,
-        destination: &Path,
-        want_directory: bool,
-    ) -> Option<fs::Metadata> {
-        let canonical = fs::canonicalize(destination).ok()?;
+    /// Best-effort re-verification immediately before the effect.
+    ///
+    /// Edit requires the target to still canonicalize to itself inside the
+    /// root and remain on the root's filesystem entity; create requires the
+    /// canonical parent to still be inside the root and on the same entity,
+    /// and the destination to still be absent.
+    ///
+    /// Read and list use [`Self::verified_existing_metadata`]: the stored
+    /// target must still canonicalize to itself, stay inside the root, and
+    /// remain on the root's filesystem entity. A forged [`RealTargetRef`]
+    /// pointing outside the workspace (even on the same device) is refused.
+    fn verified_existing_metadata(&self, destination: &Path, want_directory: bool) -> bool {
+        let Ok(canonical) = fs::canonicalize(destination) else {
+            return false;
+        };
         if canonical != destination || !canonical.starts_with(&self.root) {
-            return None;
+            return false;
         }
-        let metadata = fs::metadata(&canonical).ok()?;
-        if metadata.is_dir() != want_directory {
-            return None;
-        }
-        if !self.boundary_holds(&canonical, &metadata) {
-            return None;
-        }
-        Some(metadata)
+        let Ok(metadata) = fs::metadata(&canonical) else {
+            return false;
+        };
+        metadata.is_dir() == want_directory && self.boundary_holds(&canonical, &metadata)
     }
 
     fn reverifies_at_effect(&self, destination: &Path, replace: bool) -> bool {
         if replace {
-            match (fs::canonicalize(destination), fs::metadata(destination)) {
-                (Ok(canonical), Ok(metadata)) => {
-                    canonical == destination
-                        && canonical.starts_with(&self.root)
-                        && self.boundary_holds(&canonical, &metadata)
-                }
-                _ => false,
-            }
-        } else {
-            let Some(parent) = destination.parent() else {
-                return false;
-            };
-            match (fs::canonicalize(parent), fs::metadata(parent)) {
-                (Ok(canonical_parent), Ok(metadata)) => {
-                    canonical_parent == parent
-                        && canonical_parent.starts_with(&self.root)
-                        && self.boundary_holds(&canonical_parent, &metadata)
-                        && fs::symlink_metadata(destination).is_err()
-                }
-                _ => false,
-            }
+            return self.verified_existing_metadata(destination, false);
         }
+        let Some(parent) = destination.parent() else {
+            return false;
+        };
+        self.verified_existing_metadata(parent, true) && fs::symlink_metadata(destination).is_err()
     }
 
-    fn boundary_holds(&self, target: &Path, metadata: &fs::Metadata) -> bool {
-        self.boundary_holds_impl(target, metadata)
-    }
-
+    /// Whether `target` is on the same filesystem entity as the workspace root
+    /// and no nested mount/reparse boundary lies between them.
+    ///
+    /// Linux: root and target must share a device, and no mount point from
+    /// `/proc/self/mountinfo` may sit strictly below the root on the target's
+    /// path (an unreadable mount table fails closed). Other Unix: device
+    /// equality. Windows: volume serial number equality. Undeterminable
+    /// boundaries are refused, never assumed inside.
     #[cfg(unix)]
-    fn boundary_holds_impl(&self, target: &Path, metadata: &fs::Metadata) -> bool {
+    fn boundary_holds(&self, target: &Path, metadata: &fs::Metadata) -> bool {
         use std::os::unix::fs::MetadataExt;
 
         let Ok(root_metadata) = fs::metadata(&self.root) else {
@@ -373,7 +371,10 @@ impl WorkspaceRoot {
     }
 
     #[cfg(windows)]
-    fn boundary_holds_impl(&self, target: &Path, _metadata: &fs::Metadata) -> bool {
+    fn boundary_holds(&self, target: &Path, _metadata: &fs::Metadata) -> bool {
+        // A nested mounted volume or reparse target lives on a different
+        // volume serial; an undeterminable serial fails closed. Create passes
+        // its canonical parent, so the same equality covers it.
         match (
             Self::volume_serial_of(&self.root),
             Self::volume_serial_of(target),
@@ -496,8 +497,29 @@ fn refused() -> ObservedEffect {
     }
 }
 
-fn canonical_target(path: PathBuf) -> RealTargetRef {
-    RealTargetRef::from_canonical_path(path.to_string_lossy().into_owned())
+fn confirmed(output: ActionOutput) -> ObservedEffect {
+    ObservedEffect {
+        certainty: ActionCertainty::ConfirmedSuccess,
+        grounds: EffectGrounds::ObservedAtTarget,
+        output: Some(output),
+    }
+}
+
+fn unverified() -> ObservedEffect {
+    ObservedEffect {
+        certainty: ActionCertainty::Unknown,
+        grounds: EffectGrounds::OutcomeUnverified,
+        output: None,
+    }
+}
+
+fn canonical_target(path: PathBuf) -> Result<RealTargetRef, TargetRejection> {
+    match path.to_str() {
+        Some(text) => Ok(RealTargetRef::from_canonical_path(text.to_owned())),
+        // A non-UTF-8 resolved component cannot be represented as the
+        // persisted target text; refusing is safer than a lossy identity.
+        None => Err(TargetRejection::TargetUnavailable),
+    }
 }
 
 fn map_io_error(error: &std::io::Error) -> TargetRejection {
@@ -507,17 +529,16 @@ fn map_io_error(error: &std::io::Error) -> TargetRejection {
     }
 }
 
+/// Splits one requested path into normal component names.
+///
+/// Everything that is not a normal UTF-8 component is malformed: `..`,
+/// absolute roots and prefixes, `.`, and a request that yields no components
+/// at all are refused, so a traversal never reaches the filesystem.
 fn requested_components(requested: &str) -> Option<Vec<String>> {
     let mut names = Vec::new();
     for component in Path::new(requested).components() {
         match component {
-            Component::Normal(name) => {
-                let name = name.to_str()?;
-                if name.is_empty() {
-                    return None;
-                }
-                names.push(name.to_owned());
-            }
+            Component::Normal(name) => names.push(name.to_str()?.to_owned()),
             Component::RootDir
             | Component::Prefix(_)
             | Component::ParentDir
@@ -543,6 +564,18 @@ mod tests {
         let root = WorkspaceRoot::open(&directory.path().to_string_lossy())
             .expect("an existing directory opens");
         (directory, root)
+    }
+
+    #[test]
+    fn open_refuses_missing_and_non_directory_folders() {
+        assert!(WorkspaceRoot::open("/nonexistent/ene/workspace").is_err());
+        let directory = tempdir().expect("temporary directory");
+        let file = directory.path().join("a.txt");
+        fs::write(&file, b"x").expect("fixture write");
+        assert!(
+            WorkspaceRoot::open(&file.to_string_lossy()).is_err(),
+            "a regular file is not a workspace folder"
+        );
     }
 
     #[test]
@@ -621,6 +654,22 @@ mod tests {
                 .is_ok(),
             "every existing ancestor in a nested path is walked"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_through_an_inside_symlink_parent_resolves_inside() {
+        let (directory, root) = workspace();
+        let sub = directory.path().join("sub");
+        fs::create_dir(&sub).expect("inside subdirectory");
+        std::os::unix::fs::symlink(&sub, directory.path().join("link")).expect("inside symlink");
+        let resolved = root
+            .resolve("link/new.txt", OperationKind::Create)
+            .expect("an inside symlink parent never leaves the workspace");
+        let expected = fs::canonicalize(&sub)
+            .expect("canonical subdirectory")
+            .join("new.txt");
+        assert_eq!(resolved.as_path(), expected.to_string_lossy());
     }
 
     #[cfg(unix)]
@@ -724,13 +773,6 @@ mod tests {
             crate::attempt::ActionCertainty::ConfirmedSuccess
         );
         assert_eq!(
-            created.output,
-            Some(ActionOutput::Created {
-                target: create_target.clone(),
-            }),
-            "Create reports the exact resolved target it was recorded and executed under"
-        );
-        assert_eq!(
             fs::read(directory.path().join("report.md")).expect("created file"),
             b"# report"
         );
@@ -829,6 +871,33 @@ mod tests {
     }
 
     #[test]
+    fn debug_redacts_read_output() {
+        let effect = super::ObservedEffect {
+            certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
+            grounds: crate::attempt::EffectGrounds::ObservedAtTarget,
+            output: Some(ActionOutput::Bytes(b"secret file body".to_vec())),
+        };
+        let rendered = format!("{effect:?}");
+        assert!(!rendered.contains("secret file body"));
+        assert!(rendered.contains("bytes redacted"));
+    }
+
+    #[test]
+    fn debug_redacts_listing_names() {
+        let effect = super::ObservedEffect {
+            certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
+            grounds: crate::attempt::EffectGrounds::ObservedAtTarget,
+            output: Some(ActionOutput::Listing(vec![ListEntry {
+                name: String::from("private-notes.md"),
+                kind: ListEntryKind::File,
+            }])),
+        };
+        let rendered = format!("{effect:?}");
+        assert!(!rendered.contains("private-notes.md"));
+        assert!(rendered.contains("entries redacted"));
+    }
+
+    #[test]
     fn list_requires_a_directory_and_observes_a_sorted_listing() {
         let (directory, root) = workspace();
         fs::write(directory.path().join("b.txt"), b"b").expect("fixture write");
@@ -898,6 +967,26 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn list_excludes_special_files() {
+        let (directory, root) = workspace();
+        fs::write(directory.path().join("regular.txt"), b"x").expect("fixture file");
+        let _socket = std::os::unix::net::UnixListener::bind(directory.path().join("sock"))
+            .expect("fixture socket");
+        let target = root
+            .resolve(".", OperationKind::List)
+            .expect("root listing");
+        let effect = root.execute(&target, OperationKind::List, None);
+        assert_eq!(
+            effect.output,
+            Some(ActionOutput::Listing(vec![ListEntry {
+                name: String::from("regular.txt"),
+                kind: ListEntryKind::File,
+            }]))
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_mount_boundary_rejects_nested_mount_points() {
@@ -932,6 +1021,22 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_mountinfo_lines_decode_kernel_escapes() {
+        use std::path::PathBuf;
+
+        use super::{decode_mountinfo_escape, parse_mount_point};
+
+        let line = "36 35 98:0 /mnt1 /srv/my\\040workspace rw,noatime master:1 - ext3 /dev/root rw,errors=continue";
+        assert_eq!(
+            parse_mount_point(line),
+            Some(PathBuf::from("/srv/my workspace"))
+        );
+        assert_eq!(decode_mountinfo_escape("/a\\134b"), "/a\\b");
+        assert_eq!(parse_mount_point("too short"), None);
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_inside_targets_share_the_root_volume_serial() {
@@ -940,6 +1045,9 @@ mod tests {
         let canonical =
             fs::canonicalize(directory.path().join("input.txt")).expect("canonical fixture");
         let target_metadata = fs::metadata(&canonical).expect("target metadata");
+        // A nested mounted volume presents a different volume serial, so the
+        // same equality refuses it; an undeterminable serial (None) fails
+        // closed by the matches! guard in boundary_holds.
         assert_eq!(
             WorkspaceRoot::volume_serial_of(root.as_path()),
             WorkspaceRoot::volume_serial_of(&canonical),

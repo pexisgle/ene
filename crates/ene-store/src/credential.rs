@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
 use ene_credential::{
-    CredentialApprovalRepository, CredentialErasureOutcome, CredentialErasureRepository,
-    CredentialIntentRepository, CredentialRef, CredentialRefRepository, CredentialSetRepository,
-    CredentialSetRevision, CredentialStore, CredentialTechnicalError, DeviceId,
-    DevicePairingRepository, DeviceRecord, PairingSecretMaterial, PendingCredentialApproval,
-    PendingPairing, REDACTED_CREDENTIAL, RegistrationApply, RegistrationFingerprint,
-    RegistrationState,
+    CredentialErasureOutcome, CredentialErasureRepository, CredentialIntentRepository,
+    CredentialRef, CredentialRefRepository, CredentialSetRepository, CredentialSetRevision,
+    CredentialStore, CredentialTechnicalError, DeviceId, DevicePairingRepository, DeviceRecord,
+    PairingSecretMaterial, PendingPairing, REDACTED_CREDENTIAL, RegistrationApply,
+    RegistrationFingerprint, RegistrationState,
 };
 use ene_permission::{IntentFingerprint, IntentOutcome};
 use ene_preservation::ErasureConditionRef;
@@ -16,13 +15,14 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use crate::Store;
 use crate::codec::{
     SQL_INSERT_CREDENTIAL_PENDING_IGNORE, SQL_SELECT_CREDENTIAL, credential_pair_is_blank,
-    credential_unavailable, decode_device_record, decode_pending_credential,
-    decode_pending_pairing, encode_id, insert_decided_row_tx, lock_shared, select_intent_row_tx,
+    credential_unavailable, decode_device_record, decode_pending_pairing, encode_id,
+    insert_decided_row_tx, lock_shared, select_intent_row,
 };
+use crate::erasure::{ERASURE_BATCH_ROWS, erasure_count};
 use crate::preservation::condition_is_current;
 use crate::run_blocking;
 
-const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
+pub(crate) const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
 
 pub(crate) const SQL_SELECT_SET_REV: &str = "SELECT rev FROM credential_set WHERE id = 1";
 
@@ -53,9 +53,7 @@ const SQL_SELECT_CREDENTIAL_PENDING: &str = "SELECT provider, label, requested_a
 const SQL_DELETE_CREDENTIAL_PENDING: &str =
     "DELETE FROM credential_pending WHERE provider = ?1 AND label = ?2";
 
-const SQL_LIST_CREDENTIAL_PENDING: &str =
-    "SELECT provider, label, requested_at FROM credential_pending ORDER BY rowid ASC";
-
+/// Secrets are never stored in SQLite and remain zeroizing in memory.
 fn fresh_pairing_secret() -> PairingSecretMaterial {
     PairingSecretMaterial::new(RawId::new().as_uuid().to_string())
 }
@@ -108,6 +106,24 @@ impl Store {
     }
 }
 
+/// Marker-language passes bounded before the fallback removal. A replacement
+/// can re-form the bearer across the marker, and a bearer that is a substring
+/// of the marker keeps re-matching, so the sweep repeats and then removes.
+const SWEEP_PASS_BOUND: usize = 8;
+
+/// Table and column pairs holding quarantined plaintext content.
+///
+/// The derived recall token index is deliberately absent: a registered value
+/// is replaced as a whole string, while tokens hold its fragments, so a
+/// replace would leave credential-derived pieces behind. Token rows are
+/// rebuilt from the swept canonical text instead (see below).
+///
+/// Task and activity bodies are included because they are canonical sources
+/// for the Task report, the management view, and undelivered excerpts: a
+/// purpose, instruction activity, or final result recorded while the value
+/// was still ordinary text must be redacted by the same boundary, or the
+/// report/presentation would keep reading the raw value out of the owner row
+/// after the value became a registered credential.
 const SWEEP_TARGETS: &[(&str, &str)] = &[
     ("activity_record", "body"),
     ("history_message", "body"),
@@ -139,13 +155,38 @@ pub(crate) fn sweep_registered_secret(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| credential_unavailable(error.to_string()))?
     };
+    // Table and column names are compile-time constants; the bearer travels
+    // only as a bound parameter. The bounded marker passes and the removal
+    // fallback mirror `erasure::redact_exact`: a single `replace` can re-form
+    // the bearer across the marker (or reproduce a bearer that is a substring
+    // of it), and removal strictly shortens the value so it reaches a clean
+    // fixpoint. Every matched row is modified, so `changed == 0` proves no
+    // row matches; no separate residual probe can find one.
     for (table, column) in SWEEP_TARGETS {
-        let sql = format!(
+        let replace = format!(
             "UPDATE {table} SET {column} = replace({column}, ?1, ?2) \
              WHERE {column} IS NOT NULL AND instr({column}, ?1) > 0"
         );
-        tx.execute(&sql, params![bearer, REDACTED_CREDENTIAL])
-            .map_err(|error| credential_unavailable(error.to_string()))?;
+        for _ in 0..SWEEP_PASS_BOUND {
+            let changed = tx
+                .execute(&replace, params![bearer, REDACTED_CREDENTIAL])
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            if changed == 0 {
+                break;
+            }
+        }
+        let remove = format!(
+            "UPDATE {table} SET {column} = replace({column}, ?1, '') \
+             WHERE {column} IS NOT NULL AND instr({column}, ?1) > 0"
+        );
+        loop {
+            let changed = tx
+                .execute(&remove, params![bearer])
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            if changed == 0 {
+                break;
+            }
+        }
     }
     for (memory, companion) in &affected {
         let content: String = tx
@@ -161,21 +202,27 @@ pub(crate) fn sweep_registered_secret(
     Ok(())
 }
 
-fn advance_credential_set(tx: &rusqlite::Transaction<'_>) -> Result<(), CredentialTechnicalError> {
+/// Advances the credential-set revision inside the caller's transaction and
+/// returns the new revision.
+pub(crate) fn advance_credential_set(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<u64, CredentialTechnicalError> {
     let current: i64 = tx
         .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
         .map_err(|error| credential_unavailable(error.to_string()))?;
     let next = current
         .checked_add(1)
         .ok_or_else(|| credential_unavailable("credential set revision exhausted"))?;
-    u64::try_from(next)
+    // Refuse a stored count that cannot be a revision (a corrupt negative
+    // value) before it can persist.
+    let revision = u64::try_from(next)
         .map_err(|_| credential_unavailable("credential set revision out of range"))?;
     tx.execute(
         "UPDATE credential_set SET rev = ?1 WHERE id = 1",
         params![next],
     )
     .map_err(|error| credential_unavailable(error.to_string()))?;
-    Ok(())
+    Ok(revision)
 }
 
 pub(crate) fn current_set_revision(
@@ -276,25 +323,12 @@ impl DevicePairingRepository for Store {
                 params![fresh, descriptor, requested_text, origin_connection],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
-            let stored: Option<(String, String, String, String)> = tx
-                .query_row(SQL_SELECT_PENDING_BY_ID, params![fresh], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let Some((stored_id, stored_descriptor, stored_requested, stored_origin)) = stored
-            else {
-                return Err(credential_unavailable(String::from(
-                    "pairing request vanished after insert",
-                )));
+            let pending = PendingPairing {
+                pending_id: fresh,
+                descriptor,
+                requested_at: requested,
+                origin_connection,
             };
-            let pending = decode_pending_pairing(
-                stored_id,
-                stored_descriptor,
-                &stored_requested,
-                stored_origin,
-            )
-            .map_err(credential_unavailable)?;
             tx.commit()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(pending)
@@ -331,6 +365,11 @@ impl DevicePairingRepository for Store {
             if stored_origin != origin_connection {
                 return Ok(None);
             }
+            // The pending delete and the paired insert share one transaction
+            // keyed on both columns (compare-and-swap), so an approval never
+            // strands a pending in both tables or neither. The wire projection
+            // is minted fresh here, unrelated to the device identity bytes: it
+            // is the only device string that ever crosses the wire.
             let wire = RawId::new().as_uuid().to_string();
             let deleted = tx
                 .execute(SQL_DELETE_PENDING, params![stored_id, stored_origin])
@@ -381,7 +420,7 @@ impl DevicePairingRepository for Store {
         let wire = wire.to_owned();
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            let found: Option<(String, String, String, Option<String>)> = guard
+            let found: Option<(String, String, String, String)> = guard
                 .query_row(SQL_SELECT_DEVICE_BY_WIRE, params![wire], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                 })
@@ -449,40 +488,6 @@ impl DevicePairingRepository for Store {
     }
 }
 
-impl CredentialApprovalRepository for Store {
-    async fn list_pending(
-        &self,
-    ) -> Result<Vec<PendingCredentialApproval>, CredentialTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let guard = lock_shared(&conn);
-            let mut query = guard
-                .prepare(SQL_LIST_CREDENTIAL_PENDING)
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let rows = query
-                .query_map((), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let mut pending = Vec::new();
-            for row in rows {
-                let (provider, label, requested_text) =
-                    row.map_err(|error| credential_unavailable(error.to_string()))?;
-                pending.push(
-                    decode_pending_credential(provider, label, &requested_text)
-                        .map_err(credential_unavailable)?,
-                );
-            }
-            Ok(pending)
-        })
-        .await
-    }
-}
-
 impl CredentialIntentRepository for Store {
     async fn request_registration_with_intent(
         &self,
@@ -510,7 +515,10 @@ impl CredentialIntentRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            if select_intent_row_tx(&tx, &journal.intent_id)
+            // Write-once claim first: an existing row decides without
+            // touching credential state; the caller answers from the
+            // journal.
+            if select_intent_row(&tx, &journal.intent_id)
                 .map_err(credential_unavailable)?
                 .is_some()
             {
@@ -538,21 +546,21 @@ impl CredentialIntentRepository for Store {
                     IntentOutcome::HeldByOperation,
                 )
             };
-            match insert_decided_row_tx(&tx, &journal, &outcome).map_err(credential_unavailable)? {
-                None => {
-                    tx.commit()
-                        .map_err(|error| credential_unavailable(error.to_string()))?;
-                    Ok(RegistrationApply::Decided(state))
-                }
-                Some(_winner) => Ok(RegistrationApply::AlreadyDecided),
-            }
+            insert_decided_row_tx(&tx, &journal, &outcome).map_err(credential_unavailable)?;
+            tx.commit()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            Ok(RegistrationApply::Decided(state))
         })
         .await
     }
 }
 
-const ERASURE_BATCH_ROWS: i64 = 500;
-
+/// Deletes usable refs whose derived identity, provider, or label carries the
+/// target. Deleting the ref is the local erasure: the derived
+/// `provider:label` identity can never be redacted without breaking the ref
+/// grammar, and the pair must not stay usable under a textless identity. The
+/// protected bearer value is not touched here (K-C); the pair simply stops
+/// being resolvable, and the set revision advances below.
 const SQL_ERASE_CREDENTIAL_REF: &str = "DELETE FROM credential_ref
      WHERE id IN (
          SELECT id FROM credential_ref
@@ -594,10 +602,6 @@ const SQL_COUNT_CREDENTIAL_METADATA_TARGET: &str = "SELECT
    + (SELECT COUNT(*) FROM pairing_pending
       WHERE instr(pending_id, ?1) > 0 OR instr(descriptor, ?1) > 0
          OR instr(origin_connection, ?1) > 0)";
-
-fn erasure_count(value: i64) -> Result<u64, CredentialTechnicalError> {
-    u64::try_from(value).map_err(|_| credential_unavailable("count out of range"))
-}
 
 impl CredentialErasureRepository for Store {
     fn erase_target_text(
@@ -655,11 +659,9 @@ impl CredentialErasureRepository for Store {
                         |row| row.get(0),
                     )
                     .map_err(|error| credential_unavailable(error.to_string()))?;
-                let erased = erasure_count(
-                    i64::try_from(refs + pendings + devices + pairing)
-                        .map_err(|_| credential_unavailable("count out of range"))?,
-                )?;
-                let remainder = erasure_count(remainder)?;
+                let erased = erasure_count(refs + pendings + devices + pairing)
+                    .map_err(credential_unavailable)?;
+                let remainder = erasure_count(remainder).map_err(credential_unavailable)?;
                 tx.commit()
                     .map_err(|error| credential_unavailable(error.to_string()))?;
                 Ok(CredentialErasureOutcome::Applied { erased, remainder })

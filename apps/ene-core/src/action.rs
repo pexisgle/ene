@@ -42,10 +42,10 @@ pub enum WorkspaceActionHostOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkspaceActionHostError {
-    #[error("task storage unavailable: {reason}")]
-    TaskUnavailable { reason: String },
-    #[error("action storage unavailable: {reason}")]
-    ActionUnavailable { reason: String },
+    #[error(transparent)]
+    Task(#[from] TaskTechnicalError),
+    #[error(transparent)]
+    Action(#[from] ActionTechnicalError),
 }
 
 pub async fn run_workspace_action(
@@ -55,15 +55,11 @@ pub async fn run_workspace_action(
     requested_path: String,
     content: Option<Vec<u8>>,
 ) -> Result<WorkspaceActionHostOutcome, WorkspaceActionHostError> {
-    let Some(correspondence) = store
-        .load_delegation(delegation)
-        .await
-        .map_err(task_unavailable)?
-    else {
+    let Some(correspondence) = store.load_delegation(delegation).await? else {
         return Ok(WorkspaceActionHostOutcome::MissingDelegation { delegation });
     };
     let task = correspondence.task.task;
-    let Some(record) = store.load_task(task).await.map_err(task_unavailable)? else {
+    let Some(record) = store.load_task(task).await? else {
         return Ok(WorkspaceActionHostOutcome::MissingTask { task });
     };
     if record.task.reference != correspondence.task {
@@ -77,12 +73,7 @@ pub async fn run_workspace_action(
             progress: record.task.progress,
         });
     }
-    if store
-        .load_delegation_result(delegation)
-        .await
-        .map_err(task_unavailable)?
-        .is_some()
-    {
+    if store.load_delegation_result(delegation).await?.is_some() {
         return Ok(WorkspaceActionHostOutcome::ExecutionSealed { delegation });
     }
     let Some(workspace) = record.workspace else {
@@ -105,10 +96,7 @@ pub async fn run_workspace_action(
         content,
     };
     let mut tracker = ActionEvaluationTracker::new();
-    match orchestrate_workspace_action(store, &mut tracker, command)
-        .await
-        .map_err(action_unavailable)?
-    {
+    match orchestrate_workspace_action(store, &mut tracker, command).await? {
         ActionRunOutcome::Completed {
             attempt,
             effect,
@@ -119,7 +107,7 @@ pub async fn run_workspace_action(
             fact_recorded,
         }),
         ActionRunOutcome::NotStarted(ActionNotStarted::TaskTerminal) => {
-            match store.load_task(task).await.map_err(task_unavailable)? {
+            match store.load_task(task).await? {
                 Some(record) => Ok(WorkspaceActionHostOutcome::TaskTerminal {
                     task,
                     progress: record.task.progress,
@@ -131,21 +119,5 @@ pub async fn run_workspace_action(
             Ok(WorkspaceActionHostOutcome::ExecutionSealed { delegation })
         }
         ActionRunOutcome::NotStarted(reason) => Ok(WorkspaceActionHostOutcome::NotStarted(reason)),
-    }
-}
-
-fn task_unavailable(error: TaskTechnicalError) -> WorkspaceActionHostError {
-    match error {
-        TaskTechnicalError::StorageUnavailable { reason } => {
-            WorkspaceActionHostError::TaskUnavailable { reason }
-        }
-    }
-}
-
-fn action_unavailable(error: ActionTechnicalError) -> WorkspaceActionHostError {
-    match error {
-        ActionTechnicalError::StorageUnavailable { reason } => {
-            WorkspaceActionHostError::ActionUnavailable { reason }
-        }
     }
 }

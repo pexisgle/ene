@@ -24,9 +24,3 @@ unused_qualifications = "allow"
 
 [lints.clippy]
 all = { level = "allow", priority = -1 }
-unwrap_used = "allow"
-expect_used = "allow"
-panic = "allow"
-todo = "allow"
-unimplemented = "allow"
-let_underscore_must_use = "allow"

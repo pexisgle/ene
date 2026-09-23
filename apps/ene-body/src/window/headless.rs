@@ -1,67 +1,21 @@
-use crate::ipc::{LocalUiFact, PlacementBox};
+//! In-process overlay for when no OS compositor backend has been probe-adopted.
+//!
+//! Its only output is the explicit unavailability reason; hide here is still
+//! not Companion stop.
 
 #[derive(Debug)]
 pub struct HeadlessOverlay {
-    visible: bool,
-    placement: PlacementBox,
-    local_ui: Option<LocalUiFact>,
-    unavailable_reason: Option<String>,
+    reason: String,
 }
 
 impl HeadlessOverlay {
     #[must_use]
-    pub fn new() -> Self {
-        Self {
-            visible: false,
-            placement: PlacementBox::default(),
-            local_ui: None,
-            unavailable_reason: None,
-        }
-    }
-
-    #[must_use]
     pub fn unavailable(reason: String) -> Self {
-        Self {
-            unavailable_reason: Some(reason),
-            ..Self::new()
-        }
+        Self { reason }
     }
 
     #[must_use]
-    pub fn unavailable_reason(&self) -> Option<&str> {
-        self.unavailable_reason.as_deref()
-    }
-
-    pub fn set_visible(&mut self, visible: bool) {
-        self.visible = visible;
-    }
-
-    #[must_use]
-    pub fn visible(&self) -> bool {
-        self.visible
-    }
-
-    pub fn set_placement(&mut self, placement: PlacementBox) {
-        self.placement = placement;
-    }
-
-    #[must_use]
-    pub fn placement(&self) -> PlacementBox {
-        self.placement
-    }
-
-    pub fn push_local_ui(&mut self, fact: LocalUiFact) {
-        self.local_ui = Some(fact);
-    }
-
-    #[must_use]
-    pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
-        self.local_ui.take()
-    }
-}
-
-impl Default for HeadlessOverlay {
-    fn default() -> Self {
-        Self::new()
+    pub fn reason(&self) -> &str {
+        &self.reason
     }
 }

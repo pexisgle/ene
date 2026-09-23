@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-const CURRENT_VERSION: i64 = 37;
+pub(crate) const CURRENT_VERSION: i64 = 42;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -69,16 +69,32 @@ expected_revision INTEGER NULL,
 candidate_version INTEGER NULL,
 phase TEXT NOT NULL,
 decided_outcome TEXT NULL,
-decided_revision INTEGER NULL,
 created_at TEXT NOT NULL
 );
 CREATE TABLE credential_active (
 provider TEXT NOT NULL,
 label TEXT NOT NULL,
 active_version INTEGER NULL,
-cleanup_version INTEGER NULL,
 PRIMARY KEY (provider, label)
 );
+-- Retired credential versions whose OS item removal is not yet confirmed.
+-- One row per retired version, written in the same transaction that moves the
+-- active pointer (activation/rotation) or clears it (revocation), so a later
+-- update can never overwrite a pending retirement: the set accumulates and a
+-- bounded cleanup pass drains it. The row is the durable `pending` cleanup
+-- state; it is deleted only in the transaction that records the confirmed
+-- removal and completes the retiring mutation, so a crash between the OS
+-- erase and the state write leaves the row and the erase is re-attempted
+-- (idempotently). Non-secret references only: the OS item holds the value.
+CREATE TABLE credential_retired (
+provider TEXT NOT NULL,
+label TEXT NOT NULL,
+version INTEGER NOT NULL,
+mutation_id TEXT NOT NULL,
+retired_at TEXT NOT NULL,
+PRIMARY KEY (provider, label, version)
+);
+CREATE INDEX idx_credential_retired_mutation ON credential_retired (mutation_id);
 CREATE TABLE delegation (
 delegation_id TEXT PRIMARY KEY,
 task_id TEXT NOT NULL,
@@ -273,7 +289,7 @@ consent_rev INTEGER NOT NULL,
 provider TEXT NOT NULL,
 model TEXT NOT NULL,
 started_at TEXT NOT NULL,
-capability TEXT NOT NULL DEFAULT 'dialogue',
+capability TEXT NOT NULL,
 consumer TEXT NULL,
 purpose TEXT NULL,
 credential_set_rev INTEGER NULL,
@@ -504,16 +520,22 @@ save_target TEXT
 CREATE INDEX idx_action_attempt_delegation ON action_attempt (delegation_id);
 CREATE INDEX idx_action_attempt_task ON action_attempt (task_id);
 CREATE INDEX idx_erasure_condition_source_source ON erasure_condition_source (source);
+-- The per-read unfinished-operation probe and the keyset walk read only the
+-- unfinished set. Completed operations are retained forever (lifecycle §13),
+-- so without this partial index the probe scans every completed row.
+CREATE INDEX idx_deletion_operation_unfinished ON deletion_operation (operation_id)
+ WHERE phase != 'completed';
 -- Admission associates already-claimed uses by joining their ordered source
 -- correlation against the operation's covered sources; this index serves that
 -- probe from the (bounded) covered set instead of scanning every attempt's
 -- correlation rows.
 CREATE INDEX idx_inference_attempt_data_use_source ON inference_attempt_data_use (source);
 CREATE INDEX idx_history_message_companion ON history_message (companion_id);
-CREATE INDEX idx_history_message_companion_at ON history_message (companion_id, at_utc);
+-- The round lookup reads one (companion, wire) row; the composite index
+-- keeps that a bounded seek instead of a companion-history scan.
+CREATE INDEX idx_history_message_companion_wire ON history_message (companion_id, round_wire);
 CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
 CREATE INDEX idx_history_message_companion_role ON history_message (companion_id, role);
-CREATE INDEX idx_history_message_round ON history_message (round_id);
 CREATE INDEX idx_inference_attempt_delegation ON inference_attempt (delegation_id);
 -- Bounded first-party usage summary (usage-cost-cap §16): the newest-first
 -- keyset page reads this index, so the SQL LIMIT bounds the rows read and no
@@ -523,12 +545,19 @@ CREATE INDEX idx_learning_memory_companion ON learning_memory (companion_id);
 CREATE INDEX idx_learning_memory_recall_importance ON learning_memory (companion_id, importance DESC) WHERE recall_suppressed = 0;
 CREATE INDEX idx_learning_memory_recall_newest ON learning_memory (companion_id) WHERE recall_suppressed = 0;
 CREATE INDEX idx_learning_memory_term_memory ON learning_memory_term (memory_id);
-CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
+-- The system-wide remainder probe tests `term = ?1` inside the completion
+-- transaction; the composite primary key cannot seek on `term` alone, so this
+-- index keeps that probe a bounded lookup instead of a whole-table walk.
+CREATE INDEX idx_learning_memory_term_term ON learning_memory_term (term);
 CREATE UNIQUE INDEX idx_paired_device_wire ON paired_device (wire);
 CREATE INDEX idx_task_context_entry_task ON task_context_entry (task_id, revision);
 CREATE INDEX idx_task_result_task ON task_result (task_id, result_id);
 CREATE INDEX idx_task_result_unadopted ON task_result (recorded_at, result_id) WHERE adopted_revision IS NULL;
 CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status, row_seq);
+-- The system-wide remainder probe tests `NOT EXISTS ... (source_kind,
+-- source_id)` inside the completion transaction; no other index leads with
+-- those columns, so this keeps the probe bounded.
+CREATE INDEX idx_undelivered_source ON undelivered (source_kind, source_id);
 CREATE INDEX idx_usage_reservation_opened ON usage_reservation (opened_at);
 CREATE INDEX idx_usage_reservation_provider_opened ON usage_reservation (provider, opened_at);
 CREATE INDEX idx_workspace_assoc_task ON workspace_assoc (task_id);
@@ -598,6 +627,20 @@ CREATE TABLE deletion_reconciliation (
  complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
  PRIMARY KEY (operation_id, sweep, identity_table)
 );
+-- Fair scheduling position of each bounded walk over the unfinished deletion
+-- operations (lifecycle §14). One row per walk owner; `after_id` is the last
+-- operation id the previous pass examined, so a pass starts after it instead
+-- of at the smallest id and the tail of a set larger than one pass bound is
+-- reached on later passes (the walk wraps to the head at the end). The row is
+-- a scheduling position only: it is never phase, participant, verification,
+-- condition, or completion truth, and a stale position changes nothing
+-- because each visit re-derives those from `deletion_operation` /
+-- `deletion_participant` / `erasure_condition`. The row holds an identity
+-- only: no target body, matcher material, or count.
+CREATE TABLE deletion_walk_cursor (
+ walk TEXT PRIMARY KEY CHECK (walk IN ('fan_out', 'retryable_hold')),
+ after_id TEXT NOT NULL
+);
 -- A reconciliation page associates already-claimed uses whose Task context
 -- origin names one of the page's covered identities; this index drives that
 -- probe from the (bounded) page instead of scanning every context entry.
@@ -653,7 +696,7 @@ mod tests {
             7
         );
         for version in [
-            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
         ] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());

@@ -1,3 +1,17 @@
+//! Real-compositor overlay probe for `ene-body`.
+//!
+//! Runs the Body runtime in-process with the same projection IPC contract as
+//! the product parent (`--ipc-stdio` framing), prints every Body event as one
+//! JSON line, and accepts projection commands on stdin:
+//!
+//! ```text
+//! show | hide | pose idle|listening|speaking|working|attention
+//! placement X Y W H SCALE | asset PATH | motions DIR | help | quit
+//! ```
+//!
+//! This is a probe tool, not product acceptance: a successful run here does
+//! not stand in for the official `ene` asset or for slice F.
+
 use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
@@ -24,6 +38,8 @@ enum ProbeError {
     Body(#[from] ene_body::BodyError),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("body did not exit within 5s")]
+    Timeout,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -38,13 +54,13 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), ProbeError> {
-    let asset = std::env::args().nth(1).ok_or(ProbeError::Usage)?;
+    let asset = std::env::args_os()
+        .nth(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .ok_or(ProbeError::Usage)?;
     let mut options = RunOptions::default();
     if std::env::var_os("ENE_BODY_SKIP_GPU").is_some() {
         options.try_gpu = false;
-    }
-    if std::env::var_os("ENE_BODY_HEADLESS").is_some() {
-        options.try_native_overlay = false;
     }
     let placement = initial_placement()?;
 
@@ -70,7 +86,6 @@ async fn run() -> Result<(), ProbeError> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut frame = Vec::new();
     let mut chunk = [0_u8; 4096];
-    let mut body_done = false;
     loop {
         tokio::select! {
             line = lines.next_line() => {
@@ -89,37 +104,54 @@ async fn run() -> Result<(), ProbeError> {
                     eprintln!("probe: body closed its event stream");
                     break;
                 }
-                frame.extend_from_slice(&chunk[..read]);
-                while let Ok((event, used)) = decode_body(&frame) {
-                    frame.drain(..used);
-                    emit(&event)?;
-                    if matches!(event, BodyToParent::CleanExit) {
-                        frame.clear();
-                    }
-                }
+                absorb(&mut frame, &chunk[..read])?;
             }
             result = &mut body_future => {
-                body_done = true;
                 if let Err(error) = result {
                     return Err(ProbeError::Body(error));
                 }
                 eprintln!("probe: body exited");
-                break;
+                return Ok(());
             }
         }
-    }
-    if body_done {
-        drop(to_body);
-        return Ok(());
     }
     if let Err(error) = send(&mut to_body, &ParentToBody::Shutdown).await {
         eprintln!("probe: shutdown send failed: {error}");
     }
     drop(to_body);
-    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut body_future).await {
+    // The runtime future ends only after it has written `CleanExit`; drive it
+    // while draining so the body processes `Shutdown` and its final event is
+    // printed too.
+    let drain = async {
+        loop {
+            tokio::select! {
+                read = from_body.read(&mut chunk) => {
+                    let read = read?;
+                    if read == 0 {
+                        break;
+                    }
+                    absorb(&mut frame, &chunk[..read])?;
+                }
+                result = &mut body_future => {
+                    // Drain the events the runtime wrote before it dropped its
+                    // writer (including CleanExit), then propagate its result.
+                    loop {
+                        let read = from_body.read(&mut chunk).await?;
+                        if read == 0 {
+                            break;
+                        }
+                        absorb(&mut frame, &chunk[..read])?;
+                    }
+                    return result.map_err(ProbeError::Body);
+                }
+            }
+        }
+        (&mut body_future).await.map_err(ProbeError::Body)
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(5), drain).await {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => return Err(ProbeError::Body(error)),
-        Err(_) => eprintln!("probe: body did not exit within 5s"),
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return Err(ProbeError::Timeout),
     }
     Ok(())
 }
@@ -135,16 +167,16 @@ fn initial_placement() -> Result<PlacementBox, ProbeError> {
         });
     };
     let raw = raw.to_string_lossy();
-    let parts = raw.split(',').collect::<Vec<_>>();
-    if parts.len() != 5 {
-        return Err(ProbeError::Usage);
-    }
-    let x = parts[0].trim().parse().map_err(|_| ProbeError::Usage)?;
-    let y = parts[1].trim().parse().map_err(|_| ProbeError::Usage)?;
-    let width = parts[2].trim().parse().map_err(|_| ProbeError::Usage)?;
-    let height = parts[3].trim().parse().map_err(|_| ProbeError::Usage)?;
-    let scale = parts[4].trim().parse().map_err(|_| ProbeError::Usage)?;
-    Ok(PlacementBox {
+    parse_placement(raw.split(',')).ok_or(ProbeError::Usage)
+}
+
+fn parse_placement<'a>(mut fields: impl Iterator<Item = &'a str>) -> Option<PlacementBox> {
+    let x = fields.next()?.trim().parse().ok()?;
+    let y = fields.next()?.trim().parse().ok()?;
+    let width = fields.next()?.trim().parse().ok()?;
+    let height = fields.next()?.trim().parse().ok()?;
+    let scale = fields.next()?.trim().parse().ok()?;
+    fields.next().is_none().then_some(PlacementBox {
         x,
         y,
         width,
@@ -183,35 +215,13 @@ async fn command(line: &str, writer: &mut tokio::io::DuplexStream) -> Result<boo
                 None
             }
         },
-        "placement" => {
-            let values = parts.collect::<Vec<_>>();
-            if values.len() == 5 {
-                match (
-                    values[0].parse::<i32>(),
-                    values[1].parse::<i32>(),
-                    values[2].parse::<u32>(),
-                    values[3].parse::<u32>(),
-                    values[4].parse::<f32>(),
-                ) {
-                    (Ok(x), Ok(y), Ok(width), Ok(height), Ok(scale)) => {
-                        Some(ParentToBody::Placement(PlacementBox {
-                            x,
-                            y,
-                            width,
-                            height,
-                            scale,
-                        }))
-                    }
-                    _ => {
-                        eprintln!("probe: placement takes X Y W H SCALE");
-                        None
-                    }
-                }
-            } else {
+        "placement" => match parse_placement(parts) {
+            Some(placement) => Some(ParentToBody::Placement(placement)),
+            None => {
                 eprintln!("probe: placement takes X Y W H SCALE");
                 None
             }
-        }
+        },
         "asset" => Some(ParentToBody::AssetRef(AssetRef::Path {
             path: parts.collect::<Vec<_>>().join(" "),
         })),
@@ -242,6 +252,23 @@ async fn command(line: &str, writer: &mut tokio::io::DuplexStream) -> Result<boo
         send(writer, &message).await?;
     }
     Ok(true)
+}
+
+fn absorb(frame: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ProbeError> {
+    frame.extend_from_slice(bytes);
+    loop {
+        match decode_body(frame) {
+            Ok((event, used)) => {
+                frame.drain(..used);
+                emit(&event)?;
+                if matches!(event, BodyToParent::CleanExit) {
+                    frame.clear();
+                }
+            }
+            Err(ene_body::ipc::IpcError::Truncated { .. }) => return Ok(()),
+            Err(error) => return Err(ProbeError::Ipc(error)),
+        }
+    }
 }
 
 fn emit(event: &BodyToParent) -> Result<(), ProbeError> {

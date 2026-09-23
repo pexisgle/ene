@@ -1,23 +1,79 @@
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+//! Owner-local Targeted Deletion participants over this store's durable rows.
+//!
+//! `ene-preservation` owns the cross-cutting [`ErasureParticipant`] contract
+//! and never depends on a concrete participant crate (lifecycle §9). The
+//! Task, Action, and Inference owners keep their durable master in this
+//! crate's single SQLite writer, so their bounded local-erasure
+//! implementations live beside those tables, and the Host composition
+//! (`apps/ene-core`) registers them with
+//! `HostHandle::register_deletion_participant`.
+//!
+//! Every implementation is a mechanical, LLM-independent sweep over the
+//! owner's body-bearing columns:
+//!
+//! * the exact target text is compared to every stored value (SQLite `instr`,
+//!   no pattern grammar and no semantic matching);
+//! * a match is redacted in place with a fixed marker, never by deleting the
+//!   owner row, so the objective facts of the row (identity, revision,
+//!   progress, adoption, certainty, grounds, ticket, provider, model, usage)
+//!   stay exactly as committed;
+//! * the work is bounded per demand by `ERASURE_SCAN_ROWS`; the fan-out
+//!   re-demands until the participant reports `Verified`, and a crash or a
+//!   restart re-drives the same sweep idempotently because a redaction is a
+//!   no-op on an already-clean value;
+//! * `Verified` is a second, complete pass over the same columns that found
+//!   zero occurrences — never inferred from the erase pass alone.
+//!
+//! The reported `erased_count` / `remainder_count` describe the bounded work
+//! this run observed; they are progress metadata, never the completion
+//! decision (the durable `Verified` state plus the remainder pass is), and a
+//! resumed run counts only what it redacts itself.
+//!
+//! The participant never decides deletion semantics: it receives the
+//! protected exact-text material with the condition identity and reports the
+//! fact. Covered source-correlation identities are not a second deletion
+//! registry here: Task result collection of observation-derived paraphrases
+//! reuses the durable `erasure_use_hold` association already published at
+//! admission. Other owner rows still use the exact text as the mechanical
+//! handle — and the same text is what the bounded remainder pass verifies.
+//! A stale condition can only produce a fact the canonical store refuses
+//! (`StaleSweep`), so an older generation never advances the current sweep;
+//! a demand without protected material or with a target the owner cannot
+//! represent is an explicit hold, never a silent success.
+//!
+//! Owner surfaces:
+//!
+//! * Task: the in-force purpose text, every revision snapshot purpose, the
+//!   recorded result body, the observation occurrence path correlation, and
+//!   the internal workspace / delegation scope path copies. A result body
+//!   that does not contain the exact target is still collected when its
+//!   owning delegation is associated with the demanded operation
+//!   (`erasure_use_hold`): that hold is the observation→delegation
+//!   correspondence published at admission for a discarded body-observed
+//!   source, so a paraphrase of already-started work cannot survive as
+//!   undeleted derived personal data. Correlation columns
+//!   (`task_context_entry`, the observation identities, the delegation
+//!   and association identities) are retained: they are body-free identities,
+//!   not copies.
+//! * Action: the attempt's resolved target path. Certainty and grounds are
+//!   never rewritten; an already-observed external effect stays a fact, and
+//!   only the stored target text is redacted.
+//! * Inference: verification only. The current inference-owned surface
+//!   (attempts, ordered `data_use` correlation, usage facts) stores no copy
+//!   of a logical input or output body, so there is no body column to erase;
+//!   the participant proves the absence over that empty set and never
+//!   rewrites ticket, provider, model, usage, or pricing facts.
 
-use ene_preservation::{
-    DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant, MechanicalDeletionTarget,
-    ParticipantCompletionFact, ParticipantHoldClass, ParticipantOwnerRef,
-};
-use ene_primitive::WallClockWithTz;
-use rusqlite::{Connection, TransactionBehavior, params};
+use ene_preservation::{ErasureConditionRef, ParticipantOwnerRef};
+use rusqlite::{Transaction, params};
 
 use crate::Store;
-use crate::codec::{encode_id, lock_shared};
-use crate::run_blocking;
+use crate::codec::encode_id;
 
-use super::redact_exact;
-
-pub(crate) const ROWS_PER_DEMAND: u32 = 64;
-
-const PAGE_ROWS: u32 = 32;
+use super::{
+    ErasurePageError, LocalErasureParticipant, PageOutcome, PageRequest, SweepCursor, bounded_step,
+    redact_exact,
+};
 
 #[cfg(windows)]
 pub(crate) const ERASED_LOCATOR: &str = r"C:\erased";
@@ -116,322 +172,38 @@ const ACTION_STAGES: &[ErasureStage] = &[ErasureStage {
 
 const INFERENCE_STAGES: &[ErasureStage] = &[];
 
+/// The Task owner's `(table, content column)` surface, in stage order. The
+/// system-wide remainder probe derives its Task surface from these stages, so
+/// a stage column cannot be swept without being probed.
+pub(crate) fn task_content_surface() -> impl Iterator<Item = (&'static str, &'static str)> {
+    TASK_STAGES.iter().flat_map(|stage| {
+        stage
+            .columns
+            .iter()
+            .map(|column| (stage.table, column.name))
+    })
+}
+
+/// The Action owner's `(table, content column)` surface, in stage order. The
+/// system-wide remainder probe derives its Action surface from these stages.
+pub(crate) fn action_content_surface() -> impl Iterator<Item = (&'static str, &'static str)> {
+    ACTION_STAGES.iter().flat_map(|stage| {
+        stage
+            .columns
+            .iter()
+            .map(|column| (stage.table, column.name))
+    })
+}
+
+/// Redacted value planned for one stored column.
 struct ValueRedaction {
     column: &'static str,
     value: String,
     removed: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SweepProgress {
-    phase: SweepPhase,
-    stage: usize,
-    after_rowid: i64,
-    erased: u64,
-    verify_found: u64,
-}
-
-impl Default for SweepProgress {
-    fn default() -> Self {
-        Self {
-            phase: SweepPhase::Erase,
-            stage: 0,
-            after_rowid: 0,
-            erased: 0,
-            verify_found: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SweepPhase {
-    Erase,
-    Verify,
-}
-
-enum Chunk {
-    EraseComplete { erased: u64 },
-    MoreWork { erased: u64, remainder: u64 },
-    Verified { erased: u64 },
-}
-
-struct ErasePage {
-    last_rowid: i64,
-    examined: u32,
-    redacted: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ErasurePageError {
-    Storage,
-    Unrepresentable,
-    NotCurrent,
-}
-
-type DeletionSweepKey = (
-    ene_preservation::DeletionOperationId,
-    ene_preservation::DeletionSweepGeneration,
-);
-
-struct ErasureCore {
-    owner: ParticipantOwnerRef,
-    stages: &'static [ErasureStage],
-    store: Store,
-    sweeps: tokio::sync::Mutex<HashMap<DeletionSweepKey, SweepProgress>>,
-}
-
-impl ErasureCore {
-    fn new(owner: ParticipantOwnerRef, stages: &'static [ErasureStage], store: Store) -> Self {
-        Self {
-            owner,
-            stages,
-            store,
-            sweeps: tokio::sync::Mutex::new(HashMap::new()),
-        }
-    }
-
-    async fn demand(&self, command: DemandLocalErasureCommand) -> ParticipantCompletionFact {
-        #[cfg(any(test, feature = "test-support"))]
-        self.store
-            .test_parks
-            .erasure_mutation
-            .pause_if_armed()
-            .await;
-        let condition = command.condition();
-        let observed_at = WallClockWithTz::now();
-        let Some(target) = exact_target(&command) else {
-            return ParticipantCompletionFact::held(
-                condition,
-                self.owner,
-                ParticipantHoldClass::Failed,
-                observed_at,
-            );
-        };
-        let key = (condition.operation, condition.sweep);
-        let mut sweeps = self.sweeps.lock().await;
-        let progress = sweeps.entry(key).or_default();
-        match self.advance(progress, &target, condition).await {
-            Ok(Chunk::EraseComplete { erased }) => ParticipantCompletionFact::local_complete(
-                condition,
-                self.owner,
-                erased,
-                0,
-                observed_at,
-            ),
-            Ok(Chunk::MoreWork { erased, remainder }) => ParticipantCompletionFact::more_work(
-                condition,
-                self.owner,
-                erased,
-                remainder,
-                observed_at,
-            ),
-            Ok(Chunk::Verified { erased }) => {
-                sweeps.remove(&key);
-                ParticipantCompletionFact::verified(condition, self.owner, erased, observed_at)
-            }
-            Err(ErasurePageError::Storage) => ParticipantCompletionFact::held(
-                condition,
-                self.owner,
-                ParticipantHoldClass::Unavailable,
-                observed_at,
-            ),
-            Err(ErasurePageError::Unrepresentable) => ParticipantCompletionFact::held(
-                condition,
-                self.owner,
-                ParticipantHoldClass::Failed,
-                observed_at,
-            ),
-            Err(ErasurePageError::NotCurrent) => {
-                ParticipantCompletionFact::local_complete(condition, self.owner, 0, 0, observed_at)
-            }
-        }
-    }
-
-    async fn advance(
-        &self,
-        progress: &mut SweepProgress,
-        target: &str,
-        condition: ErasureConditionRef,
-    ) -> Result<Chunk, ErasurePageError> {
-        if self.stages.is_empty() {
-            let conn = Arc::clone(&self.store.conn);
-            let current = run_blocking(move || {
-                let guard = lock_shared(&conn);
-                crate::preservation::condition_is_current(&guard, condition)
-                    .map_err(|_| ErasurePageError::Storage)
-            })
-            .await?;
-            if !current {
-                return Err(ErasurePageError::NotCurrent);
-            }
-        }
-        let mut examined = 0u32;
-        loop {
-            if progress.stage >= self.stages.len() {
-                match progress.phase {
-                    SweepPhase::Erase => {
-                        progress.phase = SweepPhase::Verify;
-                        progress.stage = 0;
-                        progress.after_rowid = 0;
-                        progress.verify_found = 0;
-                        return Ok(Chunk::EraseComplete {
-                            erased: progress.erased,
-                        });
-                    }
-                    SweepPhase::Verify if progress.verify_found == 0 => {
-                        return Ok(Chunk::Verified {
-                            erased: progress.erased,
-                        });
-                    }
-                    SweepPhase::Verify => {
-                        let remainder = progress.verify_found;
-                        progress.stage = 0;
-                        progress.after_rowid = 0;
-                        progress.verify_found = 0;
-                        return Ok(Chunk::MoreWork {
-                            erased: progress.erased,
-                            remainder,
-                        });
-                    }
-                }
-            }
-            if examined >= ROWS_PER_DEMAND {
-                return Ok(Chunk::MoreWork {
-                    erased: progress.erased,
-                    remainder: progress.verify_found,
-                });
-            }
-            let stage = &self.stages[progress.stage];
-            let limit = PAGE_ROWS.min(ROWS_PER_DEMAND - examined);
-            let page = erase_page(
-                &self.store,
-                stage,
-                target,
-                condition,
-                progress.after_rowid,
-                limit,
-            )
-            .await?;
-            if page.examined == 0 {
-                progress.stage += 1;
-                progress.after_rowid = 0;
-                continue;
-            }
-            examined += page.examined;
-            progress.after_rowid = page.last_rowid;
-            progress.erased += page.redacted;
-            if progress.phase == SweepPhase::Verify {
-                progress.verify_found += page.redacted;
-            }
-        }
-    }
-}
-
-fn exact_target(command: &DemandLocalErasureCommand) -> Option<String> {
-    let target = command.scope().target()?;
-    let MechanicalDeletionTarget::ExactText(material) = &target.mechanical;
-    let exact = material.expose_for_erasure();
-    if exact.trim().is_empty() {
-        return None;
-    }
-    Some(exact.to_owned())
-}
-
-async fn erase_page(
-    store: &Store,
-    stage: &'static ErasureStage,
-    target: &str,
-    condition: ErasureConditionRef,
-    after_rowid: i64,
-    limit: u32,
-) -> Result<ErasePage, ErasurePageError> {
-    let conn = Arc::clone(&store.conn);
-    let target = target.to_owned();
-    run_blocking(move || erase_page_sync(&conn, stage, &target, condition, after_rowid, limit))
-        .await
-}
-
-fn erase_page_sync(
-    conn: &Mutex<Connection>,
-    stage: &ErasureStage,
-    target: &str,
-    condition: ErasureConditionRef,
-    after_rowid: i64,
-    limit: u32,
-) -> Result<ErasePage, ErasurePageError> {
-    let mut guard = lock_shared(conn);
-    let tx = guard
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| ErasurePageError::Storage)?;
-    if !crate::preservation::condition_is_current(&tx, condition)
-        .map_err(|_| ErasurePageError::Storage)?
-    {
-        return Err(ErasurePageError::NotCurrent);
-    }
-    let operation = encode_id(condition.operation.as_raw());
-    let rows = {
-        let mut statement = tx
-            .prepare(&page_sql(stage))
-            .map_err(|_| ErasurePageError::Storage)?;
-        statement
-            .query_map(params![after_rowid, limit], |row| {
-                let mut values = Vec::with_capacity(stage.columns.len());
-                for index in 0..stage.columns.len() {
-                    values.push(row.get::<_, Option<String>>(index + 1)?);
-                }
-                Ok(RawErasureRow {
-                    rowid: row.get(0)?,
-                    values,
-                })
-            })
-            .map_err(|_| ErasurePageError::Storage)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| ErasurePageError::Storage)?
-    };
-    let mut examined = 0u32;
-    let mut redacted = 0u64;
-    let mut last_rowid = after_rowid;
-    for row in &rows {
-        examined += 1;
-        last_rowid = row.rowid;
-        let provenance_linked = stage.table == "task_result"
-            && result_delegation_held_for_operation(&tx, row.rowid, &operation)?;
-        for value in plan_redactions(stage, row, target, provenance_linked)? {
-            let sql = format!(
-                "UPDATE {} SET {} = ?1 WHERE rowid = ?2",
-                stage.table, value.column
-            );
-            tx.execute(&sql, params![value.value, row.rowid])
-                .map_err(|_| ErasurePageError::Storage)?;
-            redacted += value.removed;
-        }
-    }
-    tx.commit().map_err(|_| ErasurePageError::Storage)?;
-    Ok(ErasePage {
-        last_rowid,
-        examined,
-        redacted,
-    })
-}
-
-fn result_delegation_held_for_operation(
-    tx: &rusqlite::Transaction<'_>,
-    rowid: i64,
-    operation: &str,
-) -> Result<bool, ErasurePageError> {
-    tx.query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM task_result r
-             JOIN erasure_use_hold h
-               ON h.use_kind = 'task_delegation' AND h.use_id = r.delegation_id
-             WHERE r.rowid = ?1 AND h.operation_id = ?2
-         )",
-        params![rowid, operation],
-        |row| row.get(0),
-    )
-    .map_err(|_| ErasurePageError::Storage)
-}
-
+/// One stored row of one stage: its rowid cursor plus the stage's columns in
+/// order. `None` is a stored NULL.
 struct RawErasureRow {
     rowid: i64,
     values: Vec<Option<String>>,
@@ -450,6 +222,105 @@ fn page_sql(stage: &ErasureStage) -> String {
     )
 }
 
+/// One page of one stage inside the demand's `Immediate` transaction: reads
+/// the stage's rows from the rowid keyset, plans each row's redactions, and
+/// applies them when the walk is erasing. A verification page only counts the
+/// rows that still need redaction: the shared walk restarts the erase pass
+/// from the head of that stage when it sees a match, so a verification page
+/// never rewrites.
+fn stage_page(
+    tx: &Transaction<'_>,
+    stage: &ErasureStage,
+    request: &PageRequest<'_>,
+    condition: ErasureConditionRef,
+) -> Result<PageOutcome, ErasurePageError> {
+    let rows = {
+        let mut statement = tx.prepare(&page_sql(stage))?;
+        statement
+            .query_map(params![request.after_ordinal, request.limit], |row| {
+                let mut values = Vec::with_capacity(stage.columns.len());
+                for index in 0..stage.columns.len() {
+                    values.push(row.get::<_, Option<String>>(index + 1)?);
+                }
+                Ok(RawErasureRow {
+                    rowid: row.get(0)?,
+                    values,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut scanned = 0u32;
+    let mut matched = 0u64;
+    let mut deleted = 0u64;
+    let mut last = None;
+    for row in &rows {
+        scanned += 1;
+        last = Some((String::new(), row.rowid));
+        let provenance_linked = stage.table == "task_result"
+            && result_delegation_held_for_operation(tx, row.rowid, condition)?;
+        let planned = plan_redactions(stage, row, request.target, provenance_linked)?;
+        if planned.is_empty() {
+            continue;
+        }
+        matched += 1;
+        if !request.delete {
+            continue;
+        }
+        for value in planned {
+            let sql = format!(
+                "UPDATE {} SET {} = ?1 WHERE rowid = ?2",
+                stage.table, value.column
+            );
+            tx.execute(&sql, params![value.value, row.rowid])?;
+            deleted += value.removed;
+        }
+    }
+    Ok(PageOutcome {
+        scanned,
+        matched,
+        deleted,
+        last,
+    })
+}
+
+/// Whether one `task_result` row's owning delegation is associated with the
+/// demanded operation (`erasure_use_hold`, `task_delegation`).
+///
+/// That hold is the observation→delegation correspondence published at
+/// admission: a discarded body-observed source cannot be proven unrelated to
+/// the target, so the already-stored result body is collected even when
+/// mechanical search of the paraphrase misses. The execution seal, adoption
+/// pointer, and Action certainty are facts and are not consulted here.
+fn result_delegation_held_for_operation(
+    tx: &Transaction<'_>,
+    rowid: i64,
+    condition: ErasureConditionRef,
+) -> Result<bool, ErasurePageError> {
+    tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM task_result r
+             JOIN erasure_use_hold h
+               ON h.use_kind = 'task_delegation' AND h.use_id = r.delegation_id
+             WHERE r.rowid = ?1 AND h.operation_id = ?2
+         )",
+        params![rowid, encode_id(condition.operation.as_raw())],
+        |row| row.get(0),
+    )
+    .map_err(|_| ErasurePageError::Storage)
+}
+
+/// Plans the redactions of one row. The whole demand is applied inside one
+/// `Immediate` transaction; an unrepresentable value returns before the
+/// commit, so the demand rolls back atomically rather than committing
+/// half-swept.
+///
+/// `provenance_linked` is the observation-hold path for `task_result`: the
+/// whole body is replaced by the body-free marker because a paraphrase of a
+/// discarded observation cannot be proven unrelated to the target by
+/// mechanical search. An already-collected marker is left untouched only when
+/// the marker itself is target-free; a target that overlaps the marker is
+/// redacted out of it so the verify pass stays a clean pass. The execution
+/// seal itself is the row's existence and is never rewritten.
 fn plan_redactions(
     stage: &ErasureStage,
     row: &RawErasureRow,
@@ -462,17 +333,25 @@ fn plan_redactions(
             continue;
         };
         if provenance_linked && column.name == "body" {
-            if text != super::ERASED_MARKER {
+            // The fixed marker is target-free only when the target is not a
+            // substring of it. A target that overlaps the marker must go
+            // through the same mechanical predicate as every other value
+            // instead of being certified clean by identity.
+            let replacement = redact_exact(super::ERASED_MARKER, target).map_or_else(
+                || String::from(super::ERASED_MARKER),
+                |(redacted, _)| redacted,
+            );
+            if replacement.as_str() != text {
                 planned.push(ValueRedaction {
                     column: column.name,
-                    value: String::from(super::ERASED_MARKER),
+                    value: replacement,
                     removed: 1,
                 });
             }
             continue;
         }
         let erased = match column.shape {
-            ErasureShape::Text => erase_exact(text, target),
+            ErasureShape::Text => redact_exact(text, target),
             ErasureShape::AbsolutePath => erase_path(text, target)?,
         };
         if let Some((value, removed)) = erased {
@@ -486,15 +365,16 @@ fn plan_redactions(
     Ok(planned)
 }
 
-fn erase_exact(text: &str, target: &str) -> Option<(String, u64)> {
-    redact_exact(text, target)
-}
-
+/// Redacts one stored filesystem locator, keeping it a readable canonical
+/// absolute path. A redaction that would break that shape (the match consumed
+/// the path root) is replaced by the fixed [`ERASED_LOCATOR`] marker; if even
+/// the marker contains the target, the value is unrepresentable and the sweep
+/// fails closed.
 fn erase_path(text: &str, target: &str) -> Result<Option<(String, u64)>, ErasurePageError> {
-    let Some((redacted, removed)) = erase_exact(text, target) else {
+    let Some((redacted, removed)) = redact_exact(text, target) else {
         return Ok(None);
     };
-    if redacted.is_empty() || !std::path::Path::new(&redacted).is_absolute() {
+    if !std::path::Path::new(&redacted).is_absolute() {
         if ERASED_LOCATOR.contains(target) {
             return Err(ErasurePageError::Unrepresentable);
         }
@@ -503,80 +383,62 @@ fn erase_path(text: &str, target: &str) -> Result<Option<(String, u64)>, Erasure
     Ok(Some((redacted, removed)))
 }
 
-pub struct TaskErasureParticipant {
-    core: ErasureCore,
+fn task_step(
+    tx: &Transaction<'_>,
+    cursor: &mut SweepCursor,
+    target: &str,
+) -> Result<(), ErasurePageError> {
+    let condition = cursor.condition;
+    bounded_step(
+        tx,
+        cursor,
+        target,
+        TASK_STAGES.len(),
+        |tx, stage, request| stage_page(tx, &TASK_STAGES[stage], request, condition),
+    )
 }
 
-impl TaskErasureParticipant {
-    #[must_use]
-    pub fn new(store: Store) -> Self {
-        Self {
-            core: ErasureCore::new(ParticipantOwnerRef::Task, TASK_STAGES, store),
-        }
-    }
+fn action_step(
+    tx: &Transaction<'_>,
+    cursor: &mut SweepCursor,
+    target: &str,
+) -> Result<(), ErasurePageError> {
+    let condition = cursor.condition;
+    bounded_step(
+        tx,
+        cursor,
+        target,
+        ACTION_STAGES.len(),
+        |tx, stage, request| stage_page(tx, &ACTION_STAGES[stage], request, condition),
+    )
 }
 
-impl ErasureParticipant for TaskErasureParticipant {
-    fn owner(&self) -> ParticipantOwnerRef {
-        ParticipantOwnerRef::Task
-    }
-
-    fn demand_local_erasure(
-        &self,
-        command: DemandLocalErasureCommand,
-    ) -> Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>> {
-        Box::pin(self.core.demand(command))
-    }
+/// The Inference owner has no body-bearing column, so the shared walk reaches
+/// `Verified` over the empty stage list after the currentness check.
+fn inference_step(
+    tx: &Transaction<'_>,
+    cursor: &mut SweepCursor,
+    target: &str,
+) -> Result<(), ErasurePageError> {
+    bounded_step(tx, cursor, target, INFERENCE_STAGES.len(), |_, _, _| {
+        Ok(PageOutcome::default())
+    })
 }
 
-pub struct ActionErasureParticipant {
-    core: ErasureCore,
+/// The Task owner's local-erasure registration.
+#[must_use]
+pub fn task_erasure_participant(store: Store) -> LocalErasureParticipant {
+    LocalErasureParticipant::new(ParticipantOwnerRef::Task, task_step, store)
 }
 
-impl ActionErasureParticipant {
-    #[must_use]
-    pub fn new(store: Store) -> Self {
-        Self {
-            core: ErasureCore::new(ParticipantOwnerRef::Action, ACTION_STAGES, store),
-        }
-    }
+/// The Action owner's local-erasure registration.
+#[must_use]
+pub fn action_erasure_participant(store: Store) -> LocalErasureParticipant {
+    LocalErasureParticipant::new(ParticipantOwnerRef::Action, action_step, store)
 }
 
-impl ErasureParticipant for ActionErasureParticipant {
-    fn owner(&self) -> ParticipantOwnerRef {
-        ParticipantOwnerRef::Action
-    }
-
-    fn demand_local_erasure(
-        &self,
-        command: DemandLocalErasureCommand,
-    ) -> Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>> {
-        Box::pin(self.core.demand(command))
-    }
-}
-
-pub struct InferenceErasureParticipant {
-    core: ErasureCore,
-}
-
-impl InferenceErasureParticipant {
-    #[must_use]
-    pub fn new(store: Store) -> Self {
-        Self {
-            core: ErasureCore::new(ParticipantOwnerRef::Inference, INFERENCE_STAGES, store),
-        }
-    }
-}
-
-impl ErasureParticipant for InferenceErasureParticipant {
-    fn owner(&self) -> ParticipantOwnerRef {
-        ParticipantOwnerRef::Inference
-    }
-
-    fn demand_local_erasure(
-        &self,
-        command: DemandLocalErasureCommand,
-    ) -> Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>> {
-        Box::pin(self.core.demand(command))
-    }
+/// The Inference owner's verification registration.
+#[must_use]
+pub fn inference_erasure_participant(store: Store) -> LocalErasureParticipant {
+    LocalErasureParticipant::new(ParticipantOwnerRef::Inference, inference_step, store)
 }

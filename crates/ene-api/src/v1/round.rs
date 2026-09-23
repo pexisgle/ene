@@ -151,12 +151,19 @@ impl core::fmt::Debug for HistoryItem {
     }
 }
 
+/// Largest accepted [`HistoryRequest::limit`]. The bound rides the storage
+/// query; an out-of-range limit is an unusable request, never a full scan.
+pub const HISTORY_LIMIT_MAX: u64 = 200;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HistoryRequest {
     pub companion: CompanionWireRef,
     pub since: Option<String>,
     pub limit: u64,
-    #[serde(default)]
+    /// Restrict to one Host-issued round projection, or [`None`] for the
+    /// whole companion timeline. The projection travels opaquely: the Host
+    /// resolves it against stored history, so a round stays addressable
+    /// across restarts even though the transient wire map is gone.
     pub round: Option<RoundWireId>,
 }
 

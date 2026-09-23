@@ -110,6 +110,9 @@ fn insert_attempt_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(action_unavailable)?;
+    // Attempt identities and evaluations are single-use. The `Immediate`
+    // transaction excludes any concurrent writer between these pre-checks and
+    // the insert, so the pre-checks are the complete duplicate answer.
     let existing: Option<String> = tx
         .query_row(SQL_SELECT_ATTEMPT_EXISTS, params![attempt_text], |row| {
             row.get(0)
@@ -220,7 +223,7 @@ fn insert_attempt_sync(
         tx.commit().map_err(action_unavailable)?;
         return Ok(ActionStartOutcome::HeldForErasure);
     }
-    match tx.execute(
+    tx.execute(
         SQL_INSERT_ATTEMPT,
         params![
             attempt_text,
@@ -235,17 +238,10 @@ fn insert_attempt_sync(
             Option::<String>::None,
             started_at,
         ],
-    ) {
-        Ok(_) => {}
-        Err(error)
-            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) =>
-        {
-            return Err(action_unavailable(
-                "duplicate action attempt id or evaluation",
-            ));
-        }
-        Err(error) => return Err(action_unavailable(error)),
-    }
+    )
+    .map_err(action_unavailable)?;
+    // AU5 registers the started attempt in the same transaction: phase
+    // `unknown` until objective evidence moves the certainty.
     register_action_attempt(
         &tx,
         &task_text,
@@ -296,22 +292,21 @@ fn compare_and_set_sync(
     if current != expected {
         return Ok(CertaintyUpdateOutcome::StaleCurrent { current });
     }
-    let updated = tx
-        .execute(
-            SQL_UPDATE_CERTAINTY,
-            params![
-                attempt_text,
-                new.as_str(),
-                grounds.as_str(),
-                expected.as_str()
-            ],
-        )
-        .map_err(action_unavailable)?;
-    if updated != 1 {
-        return Err(action_unavailable(
-            "attempt certainty update did not apply exactly once",
-        ));
-    }
+    // The `WHERE ... certainty = ?4` guard cannot miss under the `Immediate`
+    // writer that read `current` above, so the update always applies once.
+    tx.execute(
+        SQL_UPDATE_CERTAINTY,
+        params![
+            attempt_text,
+            new.as_str(),
+            grounds.as_str(),
+            expected.as_str()
+        ],
+    )
+    .map_err(action_unavailable)?;
+    // The certainty CAS is a new fact: register the new phase in the same
+    // transaction. A grounded `unknown -> unknown` update reuses the start
+    // phase and the source-key constraint keeps that a no-op.
     register_action_attempt(&tx, &task_text, attempt.as_raw(), certainty_wire(new))?;
     tx.commit().map_err(action_unavailable)?;
     Ok(CertaintyUpdateOutcome::Updated)
@@ -346,22 +341,10 @@ fn raw_attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawAttempt> {
 }
 
 fn grounds_match(certainty: ActionCertainty, grounds: Option<EffectGrounds>) -> bool {
-    matches!(
-        (certainty, grounds),
-        (ActionCertainty::Unknown, None)
-            | (
-                ActionCertainty::Unknown,
-                Some(EffectGrounds::OutcomeUnverified)
-            )
-            | (
-                ActionCertainty::ConfirmedSuccess,
-                Some(EffectGrounds::ObservedAtTarget)
-            )
-            | (
-                ActionCertainty::ConfirmedFailure,
-                Some(EffectGrounds::RefusedBeforeEffect)
-            )
-    )
+    match grounds {
+        None => certainty == ActionCertainty::Unknown,
+        Some(grounds) => ene_action::certainty_grounds_pair_is_valid(certainty, grounds),
+    }
 }
 
 fn decode_attempt_record(

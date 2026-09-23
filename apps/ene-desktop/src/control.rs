@@ -12,21 +12,24 @@ use crate::ui::DesktopError;
 
 const CONFIRMATION_WAIT: Duration = Duration::from_secs(30);
 
+/// How long one requester-listener request round trip may take.
+const REQUESTER_WAIT: Duration = Duration::from_secs(30);
+
+/// Bound on challenges retained for a later Owner gesture. Concurrent
+/// requester traffic can mint challenges faster than the Owner answers them;
+/// the oldest deferred challenge is dropped first so retention stays bounded.
+const DEFERRED_LIMIT: usize = 8;
+
+/// One challenge waiting for the Owner's direct gesture.
 #[derive(Debug, Clone)]
 pub struct PendingChallenge {
     pub session_id: Uuid,
     pub op: ControlOp,
     pub target: String,
-    nonce: String,
+    nonce: ene_local_control::RedactedSecret,
 }
 
-impl PendingChallenge {
-    #[must_use]
-    pub fn display_target(&self) -> &str {
-        &self.target
-    }
-}
-
+/// Requester-side client for the serving Host's local listener.
 #[derive(Debug, Clone)]
 pub struct RequesterClient {
     data_dir: PathBuf,
@@ -40,10 +43,33 @@ impl RequesterClient {
         }
     }
 
+    /// Sends one request and reads its answer.
+    ///
+    /// The refusal answers every requester call shares are classified once
+    /// here: a hold is its own state, and a boundary refusal or an unavailable
+    /// Host is a domain answer, not a control-shape failure.
+    ///
+    /// # Errors
+    ///
+    /// [`DesktopError::Transport`] when the requester listener is unreachable
+    /// or does not answer within `REQUESTER_WAIT`, [`DesktopError::Protocol`]
+    /// when the answer cannot be decoded.
     pub async fn request(&self, message: &ToHost) -> Result<FromHost, DesktopError> {
-        let mut stream = connect_requester(&self.data_dir).await?;
-        write_requester_frame(&mut stream, message).await?;
-        read_requester_frame(&mut stream).await
+        let answer = tokio::time::timeout(REQUESTER_WAIT, async {
+            let mut stream = connect_requester(&self.data_dir).await?;
+            write_requester_frame(&mut stream, message).await?;
+            read_requester_frame(&mut stream).await
+        })
+        .await
+        .map_err(|_| DesktopError::Transport(String::from("requester listener stayed silent")))??;
+        match answer {
+            FromHost::DeniedByBoundary => Err(DesktopError::DeniedByBoundary),
+            FromHost::BackpressureHold => Err(DesktopError::BackpressureHold),
+            FromHost::Unavailable => Err(DesktopError::Unavailable(String::from(
+                "the Host could not answer; retry later",
+            ))),
+            other => Ok(other),
+        }
     }
 
     pub async fn open_desktop(&self) -> Result<bool, DesktopError> {
@@ -61,37 +87,22 @@ impl RequesterClient {
     ) -> Result<Vec<PendingDeletionPreview>, DesktopError> {
         match self.request(&ToHost::PendingDeletions).await? {
             FromHost::PendingDeletions { requests } => Ok(requests),
-            FromHost::DeniedByBoundary => Err(DesktopError::DeniedByBoundary),
             other => Err(DesktopError::Control(format!(
                 "expected pending deletions, got {other:?}"
             ))),
         }
     }
 
-    async fn request_accepted(&self, message: &ToHost) -> Result<String, DesktopError> {
+    /// Requests one high-privilege object under a Host-issued request id.
+    ///
+    /// # Errors
+    ///
+    /// As [`RequesterClient::request`].
+    async fn request_accepted(&self, message: &ToHost) -> Result<(), DesktopError> {
         match self.request(message).await? {
-            FromHost::RequestAccepted { request_id } => Ok(request_id),
-            FromHost::DeniedByBoundary => Err(DesktopError::DeniedByBoundary),
+            FromHost::RequestAccepted { .. } => Ok(()),
             other => Err(DesktopError::Control(format!(
                 "the request was not accepted: {other:?}"
-            ))),
-        }
-    }
-
-    pub async fn request_status(
-        &self,
-        request_id: &str,
-    ) -> Result<ene_local_control::RequestState, DesktopError> {
-        match self
-            .request(&ToHost::RequestStatus {
-                request_id: request_id.to_string(),
-            })
-            .await?
-        {
-            FromHost::RequestStatus { state, .. } => Ok(state),
-            FromHost::DeniedByBoundary => Err(DesktopError::DeniedByBoundary),
-            other => Err(DesktopError::Control(format!(
-                "expected request status, got {other:?}"
             ))),
         }
     }
@@ -103,6 +114,7 @@ pub struct ConfirmationClient {
     incoming: mpsc::Receiver<FromConfirmation>,
     closed: bool,
     challenge: Option<PendingChallenge>,
+    deferred: std::collections::VecDeque<PendingChallenge>,
 }
 
 impl ConfirmationClient {
@@ -132,17 +144,18 @@ impl ConfirmationClient {
             incoming,
             closed: false,
             challenge: None,
+            deferred: std::collections::VecDeque::new(),
         })
     }
 
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.closed
+        self.closed || self.incoming.is_closed()
     }
 
     #[must_use]
     pub fn pending_challenge(&self) -> Option<&PendingChallenge> {
-        self.challenge.as_ref()
+        self.challenge.as_ref().or_else(|| self.deferred.front())
     }
 
     pub async fn list_pending_deletions(
@@ -164,7 +177,7 @@ impl ConfirmationClient {
     }
 
     pub(crate) fn discard_pending(&mut self) {
-        self.challenge = None;
+        let _discarded = self.take_challenge();
     }
 
     pub async fn request_device_approve(&mut self, pending_id: &str) -> Result<(), DesktopError> {
@@ -199,35 +212,90 @@ impl ConfirmationClient {
         self.await_challenge(ControlOp::DeletionConfirm).await
     }
 
+    /// Waits for the Host to push the challenge of the operation just
+    /// requested.
+    ///
+    /// # Errors
+    ///
+    /// [`DesktopError::Control`] when a frame other than a challenge arrives,
+    /// and [`DesktopError::Transport`] when none does.
     async fn await_challenge(&mut self, expected: ControlOp) -> Result<(), DesktopError> {
-        let frame = self.next_frame().await?;
-        match frame {
-            FromConfirmation::ConfirmationChallenge {
-                session_id,
-                op,
-                target,
-                nonce,
-                ..
-            } if op == expected => {
-                self.challenge = Some(PendingChallenge {
+        loop {
+            let frame = self.next_frame().await?;
+            match frame {
+                FromConfirmation::ConfirmationChallenge {
                     session_id,
                     op,
                     target,
                     nonce,
-                });
-                Ok(())
+                    ..
+                } if op == expected => {
+                    self.retain_presented();
+                    self.challenge = Some(PendingChallenge {
+                        session_id,
+                        op,
+                        target,
+                        nonce,
+                    });
+                    return Ok(());
+                }
+                // A different request's challenge may be pushed first when a
+                // concurrent requester races this GUI's own request. Keep it
+                // for its own Owner gesture instead of dropping the only
+                // surface that can complete it.
+                FromConfirmation::ConfirmationChallenge {
+                    session_id,
+                    op,
+                    target,
+                    nonce,
+                    ..
+                } => {
+                    if self.deferred.len() >= DEFERRED_LIMIT {
+                        self.deferred.pop_front();
+                    }
+                    self.deferred.push_back(PendingChallenge {
+                        session_id,
+                        op,
+                        target,
+                        nonce,
+                    });
+                }
+                other => {
+                    return Err(DesktopError::Control(format!(
+                        "expected a challenge, got {other:?}"
+                    )));
+                }
             }
-            FromConfirmation::ConfirmationChallenge { op, .. } => Err(DesktopError::Protocol(
-                format!("expected a {expected:?} challenge, got {op:?}"),
-            )),
-            other => Err(DesktopError::Control(format!(
-                "expected a challenge, got {other:?}"
-            ))),
         }
     }
 
+    /// Takes the challenge currently presented to the Owner, whether it was
+    /// the most recently awaited one or an earlier deferred one.
+    fn take_challenge(&mut self) -> Option<PendingChallenge> {
+        self.challenge.take().or_else(|| self.deferred.pop_front())
+    }
+
+    /// Retains an already-held challenge for its own gesture before a newly
+    /// arriving one takes the single presented slot. Without this the previous
+    /// session is overwritten and can never be answered on the one-shot
+    /// private channel.
+    fn retain_presented(&mut self) {
+        if let Some(previous) = self.challenge.take() {
+            if self.deferred.len() >= DEFERRED_LIMIT {
+                self.deferred.pop_front();
+            }
+            self.deferred.push_back(previous);
+        }
+    }
+
+    /// The Owner's direct confirmation on a non-secret challenge surface.
+    ///
+    /// # Errors
+    ///
+    /// [`DesktopError::Protocol`] when no challenge is live, and
+    /// [`DesktopError::Transport`] when the boundary does not answer.
     pub async fn complete_pending(&mut self) -> Result<FromConfirmation, DesktopError> {
-        let Some(challenge) = self.challenge.take() else {
+        let Some(challenge) = self.take_challenge() else {
             return Err(DesktopError::Protocol(String::from(
                 "no live confirmation session",
             )));
@@ -241,9 +309,9 @@ impl ConfirmationClient {
 
     pub async fn complete_credential(
         &mut self,
-        secret: String,
+        mut secret: zeroize::Zeroizing<String>,
     ) -> Result<FromConfirmation, DesktopError> {
-        let Some(challenge) = self.challenge.take() else {
+        let Some(challenge) = self.take_challenge() else {
             return Err(DesktopError::Protocol(String::from(
                 "no live confirmation session",
             )));
@@ -265,7 +333,7 @@ impl ConfirmationClient {
             nonce: challenge.nonce.clone(),
             provider,
             label,
-            secret: ene_local_control::RedactedSecret::new(secret),
+            secret: ene_local_control::RedactedSecret::new(core::mem::take(&mut *secret)),
         })?;
         match self.await_outcome().await? {
             FromConfirmation::Outcome(ene_local_control::ControlOutcome::CredentialStaged {
@@ -283,7 +351,7 @@ impl ConfirmationClient {
     }
 
     pub async fn reject_pending(&mut self) -> Result<FromConfirmation, DesktopError> {
-        let Some(challenge) = self.challenge.take() else {
+        let Some(challenge) = self.take_challenge() else {
             return Err(DesktopError::Protocol(String::from(
                 "no live confirmation session",
             )));
@@ -295,11 +363,11 @@ impl ConfirmationClient {
         self.await_outcome().await
     }
 
-    pub async fn send_confirmed_true(&mut self) -> Result<FromConfirmation, DesktopError> {
-        self.send(&ToConfirmation::ConfirmedTrue)?;
-        self.await_outcome().await
-    }
-
+    /// Sends one frame on the private channel.
+    ///
+    /// # Errors
+    ///
+    /// [`DesktopError::Transport`] when the channel ended.
     fn send(&mut self, frame: &ToConfirmation) -> Result<(), DesktopError> {
         match self.channel.send(frame) {
             Ok(()) => Ok(()),
@@ -326,6 +394,9 @@ impl ConfirmationClient {
                     nonce,
                     ..
                 } => {
+                    // A second request's challenge may arrive while the first
+                    // is settling; keep it for its own Owner gesture.
+                    self.retain_presented();
                     self.challenge = Some(PendingChallenge {
                         session_id,
                         op,
@@ -365,13 +436,13 @@ async fn connect_requester(data_dir: &Path) -> Result<tokio::net::UnixStream, De
 async fn connect_requester(
     data_dir: &Path,
 ) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, DesktopError> {
-    let pipe = format!("{}-control", crate::session::client_pipe_name(data_dir));
+    // Same derivation as the Host's requester listener: the device pipe name
+    // plus the control suffix, folded from the data directory.
+    let pipe = format!("{}-control", ene_plugin_ipc::pipe_name(data_dir));
     tokio::net::windows::named_pipe::ClientOptions::new()
         .open(&pipe)
         .map_err(|error| DesktopError::Transport(format!("requester listener: {}", error.kind())))
 }
-
-const MAX_REQUESTER_FRAME_BYTES: u32 = 16 * 1024;
 
 async fn write_requester_frame<W>(stream: &mut W, message: &ToHost) -> Result<(), DesktopError>
 where
@@ -379,13 +450,8 @@ where
 {
     use tokio::io::AsyncWriteExt as _;
 
-    let body = serde_json::to_vec(message)
+    let body = ene_local_control::channel::encode_body(message)
         .map_err(|error| DesktopError::Protocol(format!("requester encode: {error}")))?;
-    if body.len() > MAX_REQUESTER_FRAME_BYTES as usize {
-        return Err(DesktopError::Protocol(String::from(
-            "requester frame exceeds the bound",
-        )));
-    }
     stream
         .write_all(&(body.len() as u32).to_be_bytes())
         .await
@@ -412,7 +478,7 @@ where
         .await
         .map_err(|error| DesktopError::Transport(format!("requester read: {error}")))?;
     let length = u32::from_be_bytes(prefix);
-    if length == 0 || length > MAX_REQUESTER_FRAME_BYTES {
+    if length == 0 || length > ene_local_control::channel::MAX_CONTROL_FRAME_BYTES {
         return Err(DesktopError::Protocol(String::from(
             "requester frame length is out of bounds",
         )));
@@ -422,6 +488,103 @@ where
         .read_exact(&mut body)
         .await
         .map_err(|error| DesktopError::Transport(format!("requester read: {error}")))?;
-    serde_json::from_slice(&body)
+    ene_local_control::channel::decode_body(&body)
         .map_err(|error| DesktopError::Protocol(format!("requester decode: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use ene_local_control::{CONFIRMATION_MODE_ENV, CONFIRMATION_MODE_STDIO};
+
+    /// The launcher/GUI switch is an environment marker the Host sets, never a
+    /// command-line flag a user or a requester can aim.
+    #[test]
+    fn the_confirmation_mode_marker_is_the_hosts() {
+        assert_eq!(CONFIRMATION_MODE_ENV, "ENE_CONFIRMATION_CHANNEL");
+        assert_eq!(CONFIRMATION_MODE_STDIO, "stdio");
+    }
+
+    /// A saturated Host answers every requester call with
+    /// `FromHost::BackpressureHold`; the GUI must classify that as the hold,
+    /// never as a control-shape or technical failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_backpressure_hold_is_its_own_error_at_every_requester_call() {
+        use super::RequesterClient;
+        use crate::ui::DesktopError;
+        use ene_local_control::{FromHost, ToHost};
+        use tokio::io::AsyncWriteExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let listener = tokio::net::UnixListener::bind(dir.path().join("host-control.sock"))
+            .expect("bind requester listener");
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let body = serde_json::to_vec(&FromHost::BackpressureHold).expect("encode hold");
+                let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+                frame.extend_from_slice(&body);
+                stream.write_all(&frame).await.expect("write hold");
+                stream.flush().await.expect("flush hold");
+            }
+        });
+        let requester = RequesterClient::new(dir.path());
+        assert!(matches!(
+            requester.open_desktop().await,
+            Err(DesktopError::BackpressureHold)
+        ));
+        assert!(matches!(
+            requester.list_pending_deletions().await,
+            Err(DesktopError::BackpressureHold)
+        ));
+        assert!(matches!(
+            requester
+                .request_accepted(&ToHost::RequestDeviceApprove {
+                    pending_id: String::from("pending-1"),
+                })
+                .await,
+            Err(DesktopError::BackpressureHold)
+        ));
+        server.await.expect("hold server must finish");
+    }
+
+    /// A hold is an admission answer, not a transient transport failure: the
+    /// requester waits for the Owner to act again and never resends on its own.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_held_request_is_not_resent() {
+        use super::RequesterClient;
+        use crate::ui::DesktopError;
+        use ene_local_control::{FromHost, ToHost};
+        use std::time::Duration;
+        use tokio::io::AsyncWriteExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let listener = tokio::net::UnixListener::bind(dir.path().join("host-control.sock"))
+            .expect("bind requester listener");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let body = serde_json::to_vec(&FromHost::BackpressureHold).expect("encode hold");
+            let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&body);
+            stream.write_all(&frame).await.expect("write hold");
+            stream.flush().await.expect("flush hold");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                    .await
+                    .is_err(),
+                "a held request must not be resent"
+            );
+        });
+        let requester = RequesterClient::new(dir.path());
+        assert!(matches!(
+            requester
+                .request_accepted(&ToHost::RequestDeviceApprove {
+                    pending_id: String::from("pending-1"),
+                })
+                .await,
+            Err(DesktopError::BackpressureHold)
+        ));
+        server.await.expect("hold server must finish");
+    }
 }

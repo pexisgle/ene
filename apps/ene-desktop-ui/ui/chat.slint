@@ -1,6 +1,6 @@
 import { ScrollView, LineEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Action, Heading, Caption, BodyText, Field, Notice, EmptyState, RowCard, Item, Message } from "components.slint";
+import { Action, Heading, Caption, BodyText, Field, Notice, EmptyState, RowCard, StaticRowCard, Item, Message } from "components.slint";
 
 export component ChatWindow inherits Window {
     title: "ene";
@@ -23,6 +23,7 @@ export component ChatWindow inherits Window {
     in-out property <string> notice;
     in property <bool> notice-error: true;
     in-out property <string> task-notice;
+    in property <bool> task-notice-error: false;
     in property <bool> busy: false;
     in property <bool> task-busy: false;
     in property <bool> connected: false;
@@ -35,7 +36,6 @@ export component ChatWindow inherits Window {
     callback workspace(string);
     callback resume(string);
     callback cancel-task();
-    callback drafts-changed();
     public function clear-copies() {
         root.draft = ""; root.workspace-draft = ""; root.instruction-draft = "";
         root.messages = []; root.tasks = []; root.details = []; root.selected-task = "";
@@ -64,7 +64,7 @@ export component ChatWindow inherits Window {
         if root.notice != "": Notice { text: root.notice; error: root.notice-error; }
         if root.progress-summary != "" && !root.tasks-open: HorizontalLayout {
           Action {
-            text: root.progress-summary; selected: root.tasks-open;
+            text: root.progress-summary;
             clicked => { root.tasks-open = true; root.refresh-tasks(); }
           }
           Rectangle { horizontal-stretch: 1; }
@@ -72,7 +72,7 @@ export component ChatWindow inherits Window {
         workspace := Rectangle {
             vertical-stretch: 1;
             private property <bool> side: root.width >= 1000px;
-            conversation := Rectangle {
+            Rectangle {
                 x: 0px; y: 0px;
                 width: workspace.side && root.tasks-open ? parent.width - 376px : parent.width;
                 height: !workspace.side && root.tasks-open ? parent.height - 256px : parent.height;
@@ -116,9 +116,6 @@ export component ChatWindow inherits Window {
                                 horizontal-stretch: 1;
                                 text <=> root.draft;
                                 placeholder-text: root.japanese ? "ene にメッセージ…" : "Message ene…";
-                                font-size: 14px;
-                                enabled: true;
-                                edited => { root.drafts-changed(); }
                                 accepted => { if !root.busy && root.connected && root.draft != "" { root.send(root.draft); } }
                             }
                             Action {
@@ -130,7 +127,7 @@ export component ChatWindow inherits Window {
                     }
                 }
             }
-            task-pane := Rectangle {
+            Rectangle {
                 visible: root.tasks-open;
                 x: workspace.side ? parent.width - 360px : 0px;
                 y: workspace.side ? 0px : parent.height - 240px;
@@ -148,16 +145,16 @@ export component ChatWindow inherits Window {
                         content-width: self.width;
                         VerticalLayout {
                             spacing: 12px; alignment: start;
-                            if root.task-notice != "": Notice { text: root.task-notice; error: true; }
+                            if root.task-notice != "": Notice { text: root.task-notice; error: root.task-notice-error; }
                             if root.tasks.length == 0: EmptyState {
                                 title: root.japanese ? "まだ作業はありません" : "No tasks yet";
                                 description: root.japanese ? "会話で依頼した作業の進捗や結果を、ここで確認できます。" : "Tasks delegated in conversation will appear here.";
                             }
                             for task in root.tasks: RowCard { item: task; selected: root.selected-task == task.key; clicked(key) => { if !root.task-busy { root.select-task(key); } } }
-                            for detail in root.details: RowCard { item: detail; }
-                            Field { label: root.japanese ? "作業フォルダ" : "Workspace folder"; hint: root.japanese ? "フォルダのパス" : "Folder path"; value <=> root.workspace-draft; edited => { root.drafts-changed(); } }
+                            for detail in root.details: StaticRowCard { item: detail; }
+                            Field { label: root.japanese ? "作業フォルダ" : "Workspace folder"; hint: root.japanese ? "フォルダのパス" : "Folder path"; value <=> root.workspace-draft; }
                             Action { text: root.japanese ? "フォルダを選択" : "Use folder"; enabled: !root.task-busy && root.connected && root.workspace-draft != ""; clicked => { root.workspace(root.workspace-draft); } }
-                            Field { label: root.japanese ? "再開時の指示" : "Instructions for resuming"; hint: root.japanese ? "続きをどう進めるか" : "How should the task continue?"; value <=> root.instruction-draft; edited => { root.drafts-changed(); } }
+                            Field { label: root.japanese ? "再開時の指示" : "Instructions for resuming"; hint: root.japanese ? "続きをどう進めるか" : "How should the task continue?"; value <=> root.instruction-draft; }
                             HorizontalLayout {
                                 spacing: 8px;
                                 Action { text: root.japanese ? "再開" : "Resume"; primary: true; enabled: root.has-task && !root.task-busy && root.instruction-draft != ""; clicked => { root.resume(root.instruction-draft); } }

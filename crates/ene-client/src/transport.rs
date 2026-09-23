@@ -9,6 +9,8 @@ use ene_api::v1::payload::WirePayload;
 #[cfg(any(unix, windows))]
 use ene_api::v1::refs::WireMessageId;
 #[cfg(any(unix, windows))]
+use ene_api::v1::reject::IncompatibleProtocol;
+#[cfg(any(unix, windows))]
 use ene_plugin_ipc::{CodecError, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 
 #[cfg(any(unix, windows))]
@@ -17,8 +19,8 @@ use crate::error::ClientError;
 
 #[cfg(any(unix, windows))]
 use super::frames::{
-    PreparedRequest, capability_frame, frame_for, missing_secret_guidance, pairing_frame,
-    proof_frame, unreadable_device_file_guidance,
+    PreparedRequest, capability_frame, frame_for, pairing_frame, proof_frame,
+    unreadable_device_file_guidance,
 };
 #[cfg(any(unix, windows))]
 use super::session::{
@@ -27,6 +29,12 @@ use super::session::{
 #[cfg(unix)]
 use super::socket_path;
 
+/// Connected, handshaked Host session: the stream, the sender identity
+/// pairing and authentication fill in, and the observed session state.
+/// Unix dials `ene.sock`; Windows opens the data directory's named pipe
+/// (see `pipe_name`). Everything after the dial — pairing poll, capability,
+/// provision, capability, challenge authentication, and request/response
+/// correlation — is shared.
 #[cfg(any(unix, windows))]
 pub struct Client {
     stream: Stream,
@@ -93,18 +101,6 @@ type Stream = tokio::net::UnixStream;
 #[cfg(windows)]
 type Stream = tokio::net::windows::named_pipe::NamedPipeClient;
 
-#[cfg(any(test, windows))]
-fn pipe_name(data_dir: &Path) -> String {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0100_0000_01b3;
-    let mut tag = FNV_OFFSET;
-    for byte in data_dir.as_os_str().as_encoded_bytes() {
-        tag ^= u64::from(*byte);
-        tag = tag.wrapping_mul(FNV_PRIME);
-    }
-    format!(r"\\.\pipe\ene-{tag:016x}")
-}
-
 #[cfg(any(unix, windows))]
 impl Client {
     pub async fn connect(
@@ -139,7 +135,7 @@ impl Client {
         };
         #[cfg(windows)]
         let mut stream = {
-            let pipe = pipe_name(data_dir);
+            let pipe = ene_plugin_ipc::pipe_name(data_dir);
             tokio::net::windows::named_pipe::ClientOptions::new()
                 .open(&pipe)
                 .map_err(|error| {
@@ -184,6 +180,9 @@ impl Client {
                             "pairing denied: {reason}; start a fresh pairing request"
                         )))
                     }
+                    WirePayload::IncompatibleProtocol(notice) => {
+                        Err(incompatible_protocol_error(&notice))
+                    }
                     unexpected => Err(ClientError::ServerRejected(format!(
                         "unexpected {} during pairing; expected PairingResult",
                         unexpected.message_type()
@@ -207,7 +206,7 @@ impl Client {
     ) -> Result<Self, ClientError> {
         write_frame(
             &mut stream,
-            &capability_frame(platform, incarnation, Some(device_id)),
+            &capability_frame(platform, incarnation, device_id),
         )
         .await?;
         match read_frame(&mut stream).await?.payload {
@@ -219,6 +218,9 @@ impl Client {
                     )));
                 }
             }
+            WirePayload::IncompatibleProtocol(notice) => {
+                return Err(incompatible_protocol_error(&notice));
+            }
             unexpected => {
                 return Err(ClientError::ServerRejected(format!(
                     "unexpected {} during capability negotiation; expected NegotiatedConnection",
@@ -226,8 +228,6 @@ impl Client {
                 )));
             }
         }
-        let mut state = SessionState::default();
-        state.set_pairing_secret(secret);
         let mut session = Self {
             stream,
             sender: WireSender {
@@ -235,7 +235,7 @@ impl Client {
                 incarnation_id: incarnation,
                 connection_id: None,
             },
-            state,
+            state: SessionState::default(),
         };
         let challenge = read_frame(&mut session.stream).await?.payload;
         let WirePayload::AuthChallenge(challenge) = challenge else {
@@ -244,16 +244,13 @@ impl Client {
                 challenge.message_type()
             )));
         };
-        session.authenticate(&challenge).await?;
+        session
+            .authenticate(&challenge, secret.expose_secret(), device_id)
+            .await?;
         if persist_after_acceptance {
-            let Some(secret_value) = session.state.pairing_secret() else {
-                return Err(ClientError::Transport(String::from(
-                    "accepted authentication lost the client device secret",
-                )));
-            };
             device::store_device(
                 data_dir,
-                &device::StoredDevice::new(device_id, secret_value.to_owned()),
+                &device::StoredDevice::new(device_id, secret.expose_secret().to_owned()),
             )?;
         }
         let fact = session.next_frame().await?;
@@ -266,16 +263,26 @@ impl Client {
         Ok(session)
     }
 
-    pub async fn authenticate(&mut self, challenge: &AuthChallenge) -> Result<(), ClientError> {
-        let Some(secret) = self.state.pairing_secret() else {
-            return Err(ClientError::ServerOutcome(missing_secret_guidance()));
-        };
+    /// Answers one authentication challenge using the supplied device secret,
+    /// storing the accepted connection key into the sender (for all later
+    /// frames). [`Client::connect`] calls this for the
+    /// post-negotiation challenge, the only challenge the Host sends on a
+    /// connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
+    /// exchange cannot be moved or framed; [`ClientError::ServerOutcome`] when
+    /// the Host rejects the proof (a fresh pairing is required); and
+    /// [`ClientError::ServerRejected`] when the Host answers with an unexpected
+    /// payload kind.
+    async fn authenticate(
+        &mut self,
+        challenge: &AuthChallenge,
+        secret: &str,
+        device: ene_api::v1::refs::DeviceWireId,
+    ) -> Result<(), ClientError> {
         let proof = pairing_proof_hex(secret, &challenge.nonce);
-        let Some(device) = self.sender.device_id else {
-            return Err(ClientError::ServerRejected(String::from(
-                "cannot prove ownership without a paired device",
-            )));
-        };
         write_frame(
             &mut self.stream,
             &proof_frame(&proof, self.sender.incarnation_id, device),
@@ -285,7 +292,6 @@ impl Client {
         match decide_auth(&answer) {
             AuthDecision::Accepted { connection_id } => {
                 self.sender.connection_id = Some(connection_id);
-                self.state.set_connection(connection_id);
                 Ok(())
             }
             AuthDecision::Guidance { message } => Err(ClientError::ServerOutcome(message)),
@@ -297,11 +303,9 @@ impl Client {
         self.state.companion_ref()
     }
 
-    #[must_use]
-    pub fn presence_state(&self) -> Option<ene_api::v1::presence::PresenceStateWire> {
-        self.state.presence_state()
-    }
-
+    /// Drains deferred auto-presented summaries the Host pushed without
+    /// `reply_to`. The caller paints each and ACKs the receipts it fully
+    /// painted.
     pub fn take_undelivered(&mut self) -> Vec<WireFrame> {
         self.state.take_undelivered()
     }
@@ -311,18 +315,43 @@ impl Client {
         PreparedRequest::new(payload)
     }
 
+    /// Sends one prepared request and returns the answer correlated by
+    /// `reply_to`, absorbing pipelined presence facts and deferring other
+    /// out-of-order frames on the way. The deferred queue only buffers
+    /// auto-presented summaries drained by the session's `take_undelivered`;
+    /// the answer itself
+    /// is read from the socket, so this loops until the correlated answer
+    /// arrives (the streaming form of `session::decide_frame`). A
+    /// [`StaleRound`](ene_api::v1::round::RoundIntakeOutcomeWire::StaleRound)
+    /// answer refreshes the session generation; mismatches are never returned
+    /// as answers and never silently dropped.
+    ///
+    /// Message and request ids go fresh per attempt while the prepared command
+    /// identity travels unchanged, so calling this again on the same retained
+    /// handle replays one logical command rather than minting a second one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
+    /// exchange cannot be moved or framed. Payload semantics are the caller's
+    /// job: this helper never interprets the answer beyond the generation
+    /// bookkeeping.
     pub async fn execute(
         &mut self,
         prepared: &PreparedRequest,
     ) -> Result<WirePayload, ClientError> {
-        self.roundtrip(prepared.frame(self.sender, self.state.generation()))
+        self.pump(prepared.frame(self.sender, self.state.generation()))
             .await
     }
 
-    pub async fn retry(&mut self, prepared: &PreparedRequest) -> Result<WirePayload, ClientError> {
-        self.execute(prepared).await
-    }
-
+    /// One-shot convenience for [`Client::prepare`] plus
+    /// [`Client::execute`]. Prefer that pair when the caller must retain the
+    /// command identity to re-execute a lost reply; this form mints or takes
+    /// the identity but never exposes it.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Client::execute`].
     pub async fn request(&mut self, payload: WirePayload) -> Result<WirePayload, ClientError> {
         let prepared = self.prepare(payload);
         self.execute(&prepared).await
@@ -332,33 +361,19 @@ impl Client {
         &mut self,
         payload: WirePayload,
         round: Option<ene_api::v1::refs::RoundWireId>,
+        generation: Option<u64>,
     ) -> Result<WirePayload, ClientError> {
         use super::frames::observed_frame;
         use ene_api::v1::refs::RequestWireId;
 
-        let mut frame = observed_frame(payload, self.sender, self.state.generation(), round);
-        let own_message_id = frame.envelope.message_id;
+        let mut frame = observed_frame(payload, self.sender, generation, round);
         frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
-        self.pump(frame, own_message_id).await
+        self.pump(frame).await
     }
 
-    async fn roundtrip(&mut self, frame: WireFrame) -> Result<WirePayload, ClientError> {
+    async fn pump(&mut self, frame: WireFrame) -> Result<WirePayload, ClientError> {
         let own_message_id = frame.envelope.message_id;
-        self.pump(frame, own_message_id).await
-    }
-
-    async fn pump(
-        &mut self,
-        frame: WireFrame,
-        own_message_id: WireMessageId,
-    ) -> Result<WirePayload, ClientError> {
         write_frame(&mut self.stream, &frame).await?;
-        if let Some(queued) = self.state.take_deferred_reply(own_message_id) {
-            if let Some(current) = stale_generation_of(&queued) {
-                self.state.note_stale_generation(current);
-            }
-            return Ok(queued);
-        }
         loop {
             let incoming = read_frame(&mut self.stream).await?;
             if self
@@ -369,7 +384,7 @@ impl Client {
             }
             match decide_frame(own_message_id, &incoming) {
                 FrameDecision::AbsorbPresence(fact) => self.state.observe_presence(&fact),
-                FrameDecision::AbsorbBodyHint(_) => {}
+                FrameDecision::AbsorbBodyHint => {}
                 FrameDecision::Answer(payload) => {
                     if let Some(current) = stale_generation_of(&payload) {
                         self.state.note_stale_generation(current);
@@ -381,6 +396,15 @@ impl Client {
         }
     }
 
+    /// Answers one unsolicited Host local-erasure demand inline, returning
+    /// whether the frame was handled: `true` means either an answer was
+    /// written or, in the deferred (GUI participant) mode, the demand was
+    /// stashed for later local wiping — never that a reply reached the Host.
+    ///
+    /// The demand is a control fact, never the reply this session is waiting
+    /// for: it is handled and the read continues. The reply carries only class
+    /// names and correlation — never a target body — and claims nothing beyond
+    /// this process's own local wiping (IPC §17, lifecycle §10).
     async fn answer_deletion_demand_if_any(
         &mut self,
         payload: &WirePayload,
@@ -478,17 +502,35 @@ async fn read_frame(
             "frame body of {claimed} bytes exceeds the 256 KiB cap"
         )));
     }
-    let mut body = zeroize::Zeroizing::new(vec![0_u8; claimed]);
+    let mut bytes = zeroize::Zeroizing::new(vec![0_u8; 4 + claimed]);
+    bytes[..4].copy_from_slice(&prefix);
     stream
-        .read_exact(&mut body)
+        .read_exact(&mut bytes[4..])
         .await
         .map_err(|error| ClientError::Transport(format!("socket read failed: {}", error.kind())))?;
-    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(4 + claimed));
-    bytes.extend_from_slice(&prefix);
-    bytes.extend_from_slice(&body);
     decode_frame(&bytes)
         .map(|(frame, _consumed)| frame)
         .map_err(|error: CodecError| ClientError::Codec(format!("decode failed: {error}")))
+}
+
+/// Terminal connect refusal: no common protocol major (IPC §7.2, V-11). Names
+/// both sides' maxima and the Host's upgrade hint so the operator can move the
+/// older side; operational text only, never a secret or body copy. Retrying
+/// the same build cannot intersect majors, so it is [`ServerRejected`], not a
+/// retryable [`ServerOutcome`].
+///
+/// [`ServerRejected`]: ClientError::ServerRejected
+/// [`ServerOutcome`]: ClientError::ServerOutcome
+#[cfg(any(unix, windows))]
+pub(crate) fn incompatible_protocol_error(notice: &IncompatibleProtocol) -> ClientError {
+    ClientError::ServerRejected(format!(
+        "incompatible protocol: host max {}.{}, client max {}.{}; {}",
+        notice.host_max.major,
+        notice.host_max.minor,
+        notice.client_max.major,
+        notice.client_max.minor,
+        notice.hint
+    ))
 }
 
 #[cfg(any(unix, windows))]
@@ -506,6 +548,11 @@ fn require_reply_to(
     }
 }
 
+/// Unsupported-platform placeholder: connection and I/O methods return
+/// [`ClientError::UnsupportedPlatform`] (transport needs a Unix-domain socket
+/// or a Windows named pipe); state-only accessors report the empty/default
+/// value. The supported-only helpers (`prepare`/`execute`/
+/// `request_observed`/`take_undelivered`) are not available on this platform.
 #[cfg(not(any(unix, windows)))]
 pub struct Client {
     _sealed: (),
@@ -556,10 +603,6 @@ impl Client {
         Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
 
-    pub async fn authenticate(&mut self, _challenge: &AuthChallenge) -> Result<(), ClientError> {
-        Err(ClientError::UnsupportedPlatform("no supported transport"))
-    }
-
     pub async fn next_frame(&mut self) -> Result<WirePayload, ClientError> {
         Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
@@ -583,37 +626,5 @@ impl Client {
 
     pub fn companion_ref(&self) -> String {
         String::from(crate::DEFAULT_COMPANION_REF)
-    }
-
-    #[must_use]
-    pub fn presence_state(&self) -> Option<ene_api::v1::presence::PresenceStateWire> {
-        None
-    }
-}
-
-#[cfg(test)]
-mod pipe_tests {
-    use super::pipe_name;
-
-    #[test]
-    fn pipe_name_is_stable_and_directory_scoped() {
-        assert_eq!(
-            pipe_name(std::path::Path::new("/tmp/ene-data")),
-            String::from(r"\\.\pipe\ene-2c2d8a5218b804b9"),
-            "the pinned vector pins the shared algorithm"
-        );
-        let first = pipe_name(std::path::Path::new("/tmp/ene-data"));
-        assert!(
-            first.starts_with(r"\\.\pipe\ene-"),
-            "the pipe lives in the machine namespace: {first:?}"
-        );
-        assert!(
-            first == pipe_name(std::path::Path::new("/tmp/ene-data")),
-            "the name is stable across processes: {first:?}"
-        );
-        assert!(
-            first != pipe_name(std::path::Path::new("/tmp/other-data")),
-            "distinct directories use distinct pipes"
-        );
     }
 }

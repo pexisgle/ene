@@ -1,3 +1,9 @@
+//! Optional Body child. Chat and settings do not wait for this process.
+//!
+//! Projection IPC matches `apps/ene-body/README.md`: length-prefixed
+//! MessagePack on `--ipc-stdio`. Commands are [`ene_body::ipc::ParentToBody`]
+//! only — secrets, chat text, and Task commands have no variant.
+
 use std::collections::VecDeque;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -6,7 +12,8 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use ene_body::ipc::{
-    BodyToParent, LocalUiFact, ParentToBody, PresentationFeedback, decode_body, encode_parent,
+    BodyToParent, IpcError, LocalUiFact, ParentToBody, PresentationFeedback, decode_body,
+    encode_parent, frame_len,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,8 +29,6 @@ pub struct BodySupervisor {
     stdin: Option<ChildStdin>,
     reader: Option<JoinHandle<()>>,
     events: Option<Receiver<BodyToParent>>,
-    exe: Option<PathBuf>,
-    last_event: Option<String>,
     local_ui: VecDeque<LocalUiFact>,
     presentations: VecDeque<PresentationFeedback>,
     native_ready: bool,
@@ -72,7 +77,6 @@ impl BodySupervisor {
 
     pub fn spawn_if_present(&mut self, exe: &Path) -> BodyStatus {
         if !exe.is_file() {
-            self.exe = Some(exe.to_path_buf());
             return BodyStatus::Absent;
         }
         self.shutdown();
@@ -96,10 +100,28 @@ impl BodySupervisor {
                                 Ok(0) => break,
                                 Ok(n) => {
                                     buf.extend_from_slice(&chunk[..n]);
-                                    while let Ok((message, used)) = decode_body(&buf) {
-                                        buf.drain(..used);
-                                        if tx.send(message).is_err() {
-                                            return;
+                                    loop {
+                                        match decode_body(&buf) {
+                                            Ok((message, used)) => {
+                                                buf.drain(..used);
+                                                if tx.send(message).is_err() {
+                                                    return;
+                                                }
+                                            }
+                                            Err(IpcError::Truncated { .. }) => break,
+                                            Err(_) => match frame_len(&buf) {
+                                                Ok(len) => {
+                                                    buf.drain(..len);
+                                                }
+                                                // The length prefix itself is
+                                                // unreadable or oversize: no
+                                                // valid boundary exists, so
+                                                // dropping only 4 bytes would
+                                                // reread body bytes as the next
+                                                // length and desynchronize the
+                                                // stream. Abort the reader.
+                                                Err(_) => return,
+                                            },
                                         }
                                     }
                                 }
@@ -112,8 +134,6 @@ impl BodySupervisor {
                 self.stdin = stdin;
                 self.reader = reader;
                 self.events = Some(rx);
-                self.exe = Some(exe.to_path_buf());
-                self.last_event = None;
                 self.local_ui.clear();
                 self.presentations.clear();
                 self.native_ready = false;
@@ -154,11 +174,7 @@ impl BodySupervisor {
         }
     }
 
-    #[must_use]
-    pub fn last_event_kind(&self) -> Option<&str> {
-        self.last_event.as_deref()
-    }
-
+    /// Takes an overlay-local settings candidate.
     pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
         self.drain_events();
         self.local_ui.pop_front()
@@ -204,33 +220,34 @@ impl BodySupervisor {
 
     fn drain_events(&mut self) {
         let mut disconnected = false;
-        let mut last = None;
         if let Some(events) = self.events.as_mut() {
             loop {
                 match events.try_recv() {
-                    Ok(message) => {
-                        last = Some(event_kind(&message).to_string());
-                        match message {
-                            BodyToParent::Ready(info) => {
-                                self.native_ready = info.overlay
-                                    != ene_body::ipc::OverlayKind::Headless
-                                    && info.gpu == ene_body::ipc::GpuInitStatus::Ok;
-                            }
-                            BodyToParent::GpuFail(_) | BodyToParent::OverlayUnavailable(_) => {
-                                self.native_ready = false;
-                            }
-                            BodyToParent::AssetReady(_) => self.asset_ready = true,
-                            BodyToParent::HealthTick(tick) => {
-                                self.motion_ready =
-                                    tick.motion == ene_body::ipc::FeatureSupport::Available;
-                            }
-                            BodyToParent::LocalUi(fact) => self.local_ui.push_back(fact),
-                            BodyToParent::Presentation(feedback) => {
-                                self.presentations.push_back(feedback);
-                            }
-                            _ => {}
+                    Ok(message) => match message {
+                        BodyToParent::Ready(info) => {
+                            self.native_ready = info.overlay
+                                != ene_body::ipc::OverlayKind::Headless
+                                && info.gpu == ene_body::ipc::GpuInitStatus::Ok;
                         }
-                    }
+                        BodyToParent::GpuFail(_) | BodyToParent::OverlayUnavailable(_) => {
+                            self.native_ready = false;
+                        }
+                        BodyToParent::AssetReady(_) => self.asset_ready = true,
+                        // A rejected replacement leaves the previous avatar
+                        // live; this supervisor projects one asset per child, so
+                        // an `AssetFail` seen after readiness is about the
+                        // loaded asset.
+                        BodyToParent::AssetFail(_) => self.asset_ready = false,
+                        BodyToParent::HealthTick(tick) => {
+                            self.motion_ready =
+                                tick.motion == ene_body::ipc::FeatureSupport::Available;
+                        }
+                        BodyToParent::LocalUi(fact) => self.local_ui.push_back(fact),
+                        BodyToParent::Presentation(feedback) => {
+                            self.presentations.push_back(feedback);
+                        }
+                        _ => {}
+                    },
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         disconnected = true;
@@ -238,9 +255,6 @@ impl BodySupervisor {
                     }
                 }
             }
-        }
-        if let Some(kind) = last {
-            self.last_event = Some(kind);
         }
         if disconnected {
             self.events = None;
@@ -250,21 +264,9 @@ impl BodySupervisor {
     fn drop_io(&mut self) {
         self.stdin = None;
         self.events = None;
-    }
-}
-
-fn event_kind(message: &BodyToParent) -> &'static str {
-    match message {
-        BodyToParent::Ready(_) => "Ready",
-        BodyToParent::GpuFail(_) => "GpuFail",
-        BodyToParent::OverlayUnavailable(_) => "OverlayUnavailable",
-        BodyToParent::AssetReady(_) => "AssetReady",
-        BodyToParent::AssetFail(_) => "AssetFail",
-        BodyToParent::MotionFail(_) => "MotionFail",
-        BodyToParent::HealthTick(_) => "HealthTick",
-        BodyToParent::LocalUi(_) => "LocalUi",
-        BodyToParent::Presentation(_) => "Presentation",
-        BodyToParent::CleanExit => "CleanExit",
+        self.native_ready = false;
+        self.asset_ready = false;
+        self.motion_ready = false;
     }
 }
 

@@ -9,40 +9,17 @@ pub enum CliError {
     Usage(String),
     #[error(transparent)]
     Config(#[from] ConfigError),
-    #[error("transport: {0}")]
-    Transport(String),
-    #[error("codec: {0}")]
-    Codec(String),
-    #[error("server rejected: {0}")]
-    ServerRejected(String),
-    #[error("server outcome: {0}")]
-    ServerOutcome(String),
-    #[error("unsupported platform: {0}")]
-    UnsupportedPlatform(&'static str),
-}
-
-impl From<ClientError> for CliError {
-    fn from(error: ClientError) -> Self {
-        match error {
-            ClientError::Transport(message) => Self::Transport(message),
-            ClientError::Codec(message) => Self::Codec(message),
-            ClientError::ServerRejected(message) => Self::ServerRejected(message),
-            ClientError::ServerOutcome(message) => Self::ServerOutcome(message),
-            ClientError::UnsupportedPlatform(message) => Self::UnsupportedPlatform(message),
-        }
-    }
+    /// Transport, codec, and Host domain outcomes pass through from
+    /// [`ene_client::ClientError`] unchanged.
+    #[error(transparent)]
+    Client(#[from] ClientError),
 }
 
 impl CliError {
     pub fn exit_code(&self) -> ExitCode {
         match self {
-            Self::ServerOutcome(_) => ExitCode::from(2),
-            Self::Usage(_)
-            | Self::Config(_)
-            | Self::Transport(_)
-            | Self::Codec(_)
-            | Self::ServerRejected(_)
-            | Self::UnsupportedPlatform(_) => ExitCode::FAILURE,
+            Self::Client(ClientError::ServerOutcome(_)) => ExitCode::from(2),
+            Self::Usage(_) | Self::Config(_) | Self::Client(_) => ExitCode::FAILURE,
         }
     }
 }

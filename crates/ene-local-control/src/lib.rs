@@ -1,3 +1,20 @@
+//! Host-local control DTOs. Not on `ene-api`, not remote-capable.
+//!
+//! Two channels with different authority share this crate:
+//!
+//! - [`ToHost`] / [`FromHost`] speak the **requester listener**, a local
+//!   endpoint any same-user process may dial. It carries non-secret requests
+//!   and non-secret outcomes. It never issues a seat, never carries a secret,
+//!   and never completes a [`FromConfirmation::ConfirmationChallenge`] session.
+//! - [`ToConfirmation`] / [`FromConfirmation`] speak the **inherited
+//!   confirmation channel** the Host hands to the GUI it spawned. Only this
+//!   channel carries challenges, secret intake, and session completion.
+//!
+//! The nonce and every secret field use [`RedactedSecret`]: `Debug` never
+//! prints the raw value. A completion is a seat-bound session id plus a
+//! freshness nonce; knowing a nonce, declaring a PID, or opening the requester
+//! listener grants nothing.
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -27,12 +44,6 @@ impl RedactedSecret {
     pub fn expose(&self) -> &str {
         &self.0
     }
-
-    #[must_use]
-    pub fn into_inner(self) -> String {
-        let mut owned = self;
-        core::mem::take(&mut owned.0)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,12 +61,39 @@ pub struct PendingDeletionPreview {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeletionOutcome {
-    Started { operation: String, sweep: u64 },
-    AlreadyCoveredBy { operation: String, sweep: u64 },
-    HeldByOperation { operation: String, sweep: u64 },
+    Started {
+        operation: String,
+        sweep: u64,
+    },
+    AlreadyCoveredBy {
+        operation: String,
+        sweep: u64,
+    },
+    HeldByOperation {
+        operation: String,
+        sweep: u64,
+    },
     NeedsClarification,
     Missing,
-    Resumed { operation: String, sweep: u64 },
+    Resumed {
+        operation: String,
+        sweep: u64,
+    },
+    /// The named sweep is no longer current; a resume cannot apply.
+    StaleSweep {
+        operation: String,
+        sweep: u64,
+    },
+    /// The operation already finished; nothing was resumed.
+    Completed {
+        operation: String,
+        sweep: u64,
+    },
+    /// The operation is sealing its final boundary; a resume cannot apply.
+    Finalizing {
+        operation: String,
+        sweep: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +156,11 @@ pub enum FromHost {
         requests: Vec<PendingDeletionPreview>,
     },
     DeniedByBoundary,
+    /// The requester queue is saturated; the request was not admitted. A hold,
+    /// not a technical failure and not a boundary refusal: the same request may
+    /// be retried once the queue drains.
+    BackpressureHold,
+    /// The Host cannot answer technically. Never a domain outcome.
     Unavailable,
 }
 
@@ -129,19 +172,22 @@ pub enum ToConfirmation {
     },
     CredentialSecret {
         session_id: Uuid,
-        nonce: String,
+        nonce: RedactedSecret,
         provider: String,
         label: String,
         secret: RedactedSecret,
     },
+    /// The Owner's direct confirmation on the challenge surface.
     SessionComplete {
         session_id: Uuid,
-        nonce: String,
+        nonce: RedactedSecret,
     },
+    /// The Owner declined on the challenge surface. Applies nothing.
     SessionReject {
         session_id: Uuid,
-        nonce: String,
+        nonce: RedactedSecret,
     },
+    /// Session-less self-declaration. Always [`FromConfirmation::DeniedByBoundary`].
     ConfirmedTrue,
 }
 
@@ -152,7 +198,7 @@ pub enum FromConfirmation {
         op: ControlOp,
         target: String,
         premise_generation: u64,
-        nonce: String,
+        nonce: RedactedSecret,
     },
     Outcome(ControlOutcome),
     DeniedByBoundary,

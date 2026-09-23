@@ -17,17 +17,58 @@ use crate::serve::HostHandle;
 #[cfg(any(unix, windows))]
 use std::sync::Arc;
 
+/// Bound on each inbound read from a control peer. Every request on a
+/// requester connection is covered, not only the first: a peer that stops
+/// sending is dropped instead of holding a serving task forever.
 #[cfg(any(unix, windows))]
-const MAX_CONTROL_FRAME_BYTES: u32 = 16 * 1024;
+const CONTROL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Upper bound on how long one minted confirmation session stays completable.
+/// The Owner's surface must decide within it; an abandoned challenge must not
+/// stay confirmable for the Host's lifetime.
+const CONTROL_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Upper bound on accepted-but-unsettled requester requests. A same-user peer
+/// may dial the requester listener repeatedly; without a bound the pending map
+/// (and the confirmation sessions minted from it) would grow for the Host's
+/// lifetime. A full queue is answered `FromHost::BackpressureHold`, never
+/// silently admitted or dropped (first-party-desktop §5.1.5).
+const MAX_PENDING_REQUESTS: usize = 64;
+
+/// Upper bound on settled request rows retained so a requester can still read
+/// the outcome by id. The oldest settled rows are retired first; pending rows
+/// are never evicted.
+const MAX_SETTLED_REQUESTS: usize = 256;
+
+/// Environment variables that select injected code or library search paths.
+/// The Host-spawned GUI is pinned to the trusted installation and must not
+/// inherit loader redirection from the launcher's environment; the display and
+/// session variables it needs (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
+/// fonts, `ENE_INTERACTION_TRACE_JSONL`) are inherited unchanged.
 #[cfg(any(unix, windows))]
-const CONTROL_HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const LOADER_ENV_VARS: &[&str] = &[
+    "PATH",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "LD_DEBUG",
+    "LD_PROFILE",
+    "LD_USE_LOAD_BIAS",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FALLBACK_FRAMEWORK_PATH",
+];
 
+/// Unix requester-listener socket name inside the `0700` data directory.
 #[cfg(unix)]
 const CONTROL_SOCKET_NAME: &str = "host-control.sock";
 
 struct AcceptedRequest {
     state: RequestState,
+    /// Insertion order, used to retire the oldest settled rows first.
+    seq: u64,
 }
 
 enum PendingOp {
@@ -37,6 +78,9 @@ enum PendingOp {
     CredentialPut {
         provider: String,
         label: String,
+        /// Per-request mutation identity used by `publish_credential`'s same-id
+        /// dedup/reconciliation. It is minted per accepted request, so a CLI
+        /// retry starts a new mutation rather than observing the first.
         mutation_id: String,
         secret: Option<RedactedSecret>,
     },
@@ -48,39 +92,42 @@ enum PendingOp {
 struct ConfirmationSession {
     nonce: String,
     seat_generation: u64,
+    /// Instant after which the session is no longer completable. Re-checked
+    /// at consumption, not only at the requester's own poll bound.
+    deadline: std::time::Instant,
     request_id: String,
     pending: PendingOp,
 }
 
+/// Identity of the GUI the Host itself started.
+///
+/// Recorded at spawn, not declared by a peer. The seat generation is the
+/// authority key: it moves whenever a new child takes the seat, so a closing
+/// older channel can never clear a newer seat.
 pub(crate) struct SeatedGui {
-    pub(crate) child_id: u32,
     pub(crate) generation: u64,
 }
 
+#[derive(Default)]
 struct SeatInner {
     holder: Option<SeatedGui>,
     next_generation: u64,
     sessions: HashMap<Uuid, ConfirmationSession>,
     requests: HashMap<String, AcceptedRequest>,
+    /// Monotonic insertion sequence for request rows.
+    next_request_seq: u64,
+    /// Outbound side of the live GUI's private channel. Present exactly while
+    /// a Host-spawned GUI holds the seat.
     outbound: Option<std::sync::mpsc::Sender<ene_local_control::channel::ChannelEvent>>,
 }
 
+/// Exclusive first-party control seat owned by one serving Host.
+///
+/// The seat is issued to the Host-spawned GUI alone. Nothing in this type can
+/// be reached from the requester listener.
+#[derive(Default)]
 pub(crate) struct FirstPartyControlSeat {
     inner: StdMutex<SeatInner>,
-}
-
-impl Default for FirstPartyControlSeat {
-    fn default() -> Self {
-        Self {
-            inner: StdMutex::new(SeatInner {
-                holder: None,
-                next_generation: 0,
-                sessions: HashMap::new(),
-                requests: HashMap::new(),
-                outbound: None,
-            }),
-        }
-    }
 }
 
 impl FirstPartyControlSeat {
@@ -99,27 +146,28 @@ impl FirstPartyControlSeat {
 
     pub(crate) fn seat_spawned_gui(
         &self,
-        child_id: u32,
         outbound: std::sync::mpsc::Sender<ene_local_control::channel::ChannelEvent>,
     ) -> u64 {
         let mut inner = lock_unpoison(&self.inner);
         inner.next_generation = inner.next_generation.saturating_add(1);
         let generation = inner.next_generation;
-        inner.holder = Some(SeatedGui {
-            child_id,
-            generation,
-        });
+        inner.holder = Some(SeatedGui { generation });
         Self::invalidate_sessions(&mut inner, RequestState::ConfirmationUnavailable);
         inner.outbound = Some(outbound);
         generation
     }
 
-    pub(crate) fn seat_closed(&self, child_id: u32) {
+    /// Clears the seat when the spawned GUI's private channel ends. Sessions
+    /// die with it: an unconfirmed request never survives its surface.
+    ///
+    /// Keyed by the seat generation, never by the child id: a closing older
+    /// channel must not clear the seat a newer spawn installed.
+    pub(crate) fn seat_closed(&self, generation: u64) {
         let mut inner = lock_unpoison(&self.inner);
         if inner
             .holder
             .as_ref()
-            .is_some_and(|holder| holder.child_id == child_id)
+            .is_some_and(|holder| holder.generation == generation)
         {
             inner.holder = None;
             Self::invalidate_sessions(&mut inner, RequestState::ConfirmationUnavailable);
@@ -127,29 +175,111 @@ impl FirstPartyControlSeat {
         }
     }
 
+    /// The generation of the live seat, when a Host-spawned GUI holds it.
+    pub(crate) fn holder_generation(&self) -> Option<u64> {
+        lock_unpoison(&self.inner)
+            .holder
+            .as_ref()
+            .map(|holder| holder.generation)
+    }
+
+    /// True while a Host-spawned GUI holds the seat.
     pub(crate) fn has_seat(&self) -> bool {
         lock_unpoison(&self.inner).holder.is_some()
     }
 
-    fn accept_request(&self) -> (String, RequestState) {
+    /// Settles every request whose confirmation session passed its deadline:
+    /// the session is dropped and the request reads back `Rejected`, matching
+    /// the single-session poll path. A request with no session is left as-is.
+    fn settle_expired_sessions(inner: &mut SeatInner) {
+        let now = std::time::Instant::now();
+        let expired = inner
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.deadline <= now)
+            .map(|(session_id, _)| *session_id)
+            .collect::<Vec<_>>();
+        for session_id in expired {
+            Self::settle_expired_session(inner, session_id);
+        }
+    }
+
+    /// Retires the oldest settled request rows while too many are retained, so
+    /// a long-lived Host does not accumulate pollable rows forever. Pending
+    /// rows are never evicted: admission is refused instead (see
+    /// [`Self::accept_request`]).
+    fn retire_settled_requests(inner: &mut SeatInner) {
+        loop {
+            let settled = inner
+                .requests
+                .values()
+                .filter(|request| !matches!(request.state, RequestState::AwaitingOwnerConfirmation))
+                .count();
+            if settled < MAX_SETTLED_REQUESTS {
+                break;
+            }
+            let Some(oldest) = inner
+                .requests
+                .iter()
+                .filter(|(_, request)| {
+                    !matches!(request.state, RequestState::AwaitingOwnerConfirmation)
+                })
+                .min_by_key(|(_, request)| request.seq)
+                .map(|(request_id, _)| request_id.clone())
+            else {
+                break;
+            };
+            inner.requests.remove(&oldest);
+        }
+    }
+
+    /// Registers one accepted requester request under a Host-issued id, or
+    /// refuses admission.
+    ///
+    /// Admission is bounded (first-party-desktop §5.1.5): expired sessions are
+    /// settled and the oldest settled rows retired first, and if the pending
+    /// set is still full `None` is returned so the caller can answer
+    /// `FromHost::BackpressureHold`. The request carries no authority of its
+    /// own: it only records what the Owner's surface should show, and its
+    /// state is read back by the same id.
+    fn accept_request(&self) -> Option<(String, RequestState)> {
         let mut inner = lock_unpoison(&self.inner);
+        Self::settle_expired_sessions(&mut inner);
+        let pending = inner
+            .requests
+            .values()
+            .filter(|request| matches!(request.state, RequestState::AwaitingOwnerConfirmation))
+            .count();
+        if pending >= MAX_PENDING_REQUESTS {
+            return None;
+        }
+        Self::retire_settled_requests(&mut inner);
         let request_id = Uuid::new_v4().as_hyphenated().to_string();
         let state = if inner.holder.is_some() {
             RequestState::AwaitingOwnerConfirmation
         } else {
             RequestState::ConfirmationUnavailable
         };
+        let seq = inner.next_request_seq;
+        inner.next_request_seq = inner.next_request_seq.saturating_add(1);
         inner.requests.insert(
             request_id.clone(),
             AcceptedRequest {
                 state: state.clone(),
+                seq,
             },
         );
-        (request_id, state)
+        Some((request_id, state))
     }
 
     fn request_state(&self, request_id: &str) -> Option<RequestState> {
-        lock_unpoison(&self.inner)
+        let mut inner = lock_unpoison(&self.inner);
+        // An expired session is gone: a requester polling the id must observe
+        // `Rejected`, not a challenge that can no longer be completed. A
+        // request with no session at all is left as-is, so the accepted-but-
+        // executing window is not misreported as a refusal.
+        Self::settle_expired_sessions(&mut inner);
+        inner
             .requests
             .get(request_id)
             .map(|request| request.state.clone())
@@ -163,10 +293,16 @@ impl FirstPartyControlSeat {
         pending: PendingOp,
     ) -> FromConfirmation {
         let mut inner = lock_unpoison(&self.inner);
-        let Some(holder) = inner.holder.as_ref() else {
+        let Some(seat_generation) = inner.holder.as_ref().map(|holder| holder.generation) else {
+            // The holder vanished between admission and mint: the request can
+            // never reach a surface, so report it exactly like a delivery
+            // failure instead of leaving it awaiting a decision that cannot
+            // come.
+            if let Some(request) = inner.requests.get_mut(request_id) {
+                request.state = RequestState::ConfirmationUnavailable;
+            }
             return FromConfirmation::DeniedByBoundary;
         };
-        let seat_generation = holder.generation;
         let session_id = Uuid::new_v4();
         let nonce = Uuid::new_v4().as_hyphenated().to_string();
         let premise_generation = seat_generation;
@@ -175,6 +311,7 @@ impl FirstPartyControlSeat {
             ConfirmationSession {
                 nonce: nonce.clone(),
                 seat_generation,
+                deadline: std::time::Instant::now() + CONTROL_SESSION_TTL,
                 request_id: request_id.to_string(),
                 pending,
             },
@@ -184,7 +321,7 @@ impl FirstPartyControlSeat {
             op,
             target,
             premise_generation,
-            nonce,
+            nonce: RedactedSecret::new(nonce),
         };
         let delivered = inner.outbound.as_ref().is_some_and(|outbound| {
             outbound
@@ -203,8 +340,33 @@ impl FirstPartyControlSeat {
         challenge
     }
 
+    /// Drops one session that has passed its deadline, marking its request
+    /// `Rejected` so a requester polling the id observes a settled refusal
+    /// instead of a challenge that can no longer be completed. Returns
+    /// whether the named session had expired.
+    fn settle_expired_session(inner: &mut SeatInner, session_id: Uuid) -> bool {
+        let expired = inner
+            .sessions
+            .get(&session_id)
+            .filter(|session| session.deadline <= std::time::Instant::now())
+            .map(|session| session.request_id.clone());
+        let Some(request_id) = expired else {
+            return false;
+        };
+        inner.sessions.remove(&session_id);
+        if let Some(request) = inner.requests.get_mut(&request_id) {
+            request.state = RequestState::Rejected;
+        }
+        true
+    }
+
+    /// Takes one session for completion, checking the nonce, the seat
+    /// generation it was minted under, and its deadline.
     fn take(&self, session_id: Uuid, nonce: &str) -> Option<(String, PendingOp)> {
         let mut inner = lock_unpoison(&self.inner);
+        if Self::settle_expired_session(&mut inner, session_id) {
+            return None;
+        }
         let live_generation = inner.holder.as_ref().map(|holder| holder.generation);
         let matches = inner.sessions.get(&session_id).is_some_and(|session| {
             session.nonce == nonce && Some(session.seat_generation) == live_generation
@@ -220,6 +382,9 @@ impl FirstPartyControlSeat {
 
     fn reject(&self, session_id: Uuid, nonce: &str) -> Option<String> {
         let mut inner = lock_unpoison(&self.inner);
+        if Self::settle_expired_session(&mut inner, session_id) {
+            return None;
+        }
         let matches = inner
             .sessions
             .get(&session_id)
@@ -241,6 +406,12 @@ impl FirstPartyControlSeat {
         secret: RedactedSecret,
     ) -> bool {
         let mut inner = lock_unpoison(&self.inner);
+        // A session past its deadline must not park a secret candidate: the
+        // same settlement `take`/`reject` run drops the value with the
+        // session, so a late `CredentialSecret` cannot outlive its challenge.
+        if Self::settle_expired_session(&mut inner, session_id) {
+            return false;
+        }
         let live_generation = inner.holder.as_ref().map(|holder| holder.generation);
         let Some(session) = inner.sessions.get_mut(&session_id) else {
             return false;
@@ -293,7 +464,7 @@ pub fn control_socket_path(data_dir: &Path) -> PathBuf {
 #[cfg(windows)]
 #[must_use]
 pub fn control_pipe_name(data_dir: &Path) -> String {
-    format!("{}-control", crate::conn_pipe::pipe_name(data_dir))
+    format!("{}-control", ene_plugin_ipc::pipe_name(data_dir))
 }
 
 #[cfg(unix)]
@@ -308,6 +479,12 @@ pub struct ControlClient {
 
 #[cfg(any(unix, windows))]
 impl ControlClient {
+    /// Dials the serving Host's requester listener.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Control`] when no serving Host answers (the same
+    /// recovery guidance Targeted Deletion already used).
     pub async fn connect(data_dir: &Path) -> Result<Self, CoreError> {
         Ok(Self {
             stream: connect(data_dir).await?,
@@ -322,21 +499,6 @@ impl ControlClient {
             .await
             .map_err(|error| control_failure(&format!("answer failed: {error}")))?
             .ok_or_else(|| control_failure("the serving Host closed without an answer"))
-    }
-
-    #[doc(hidden)]
-    pub async fn exchange_raw(&mut self, raw: &str) -> Result<String, CoreError> {
-        let body = raw.as_bytes();
-        if body.len() > MAX_CONTROL_FRAME_BYTES as usize {
-            return Err(control_failure("frame exceeds the bound"));
-        }
-        write_bytes(&mut self.stream, body)
-            .await
-            .map_err(|error| control_failure(&format!("send failed: {error}")))?;
-        let answer = read_raw_answer(&mut self.stream)
-            .await
-            .map_err(|error| control_failure(&format!("answer failed: {error}")))?;
-        answer.ok_or_else(|| control_failure("the serving Host closed without an answer"))
     }
 }
 
@@ -423,7 +585,7 @@ pub(crate) async fn serve_requester<S>(
             biased;
             () = crate::conn::wait_for_shutdown(&mut shutdown) => break,
             result = tokio::time::timeout(
-                CONTROL_HELLO_TIMEOUT,
+                CONTROL_READ_TIMEOUT,
                 read_message::<_, ToHost>(&mut stream),
             ) => match result {
                 Ok(Ok(Some(request))) => request,
@@ -437,6 +599,26 @@ pub(crate) async fn serve_requester<S>(
     }
 }
 
+/// Admits one high-privilege requester request (first-party-desktop
+/// §5.1.5): start the confirmation surface, admit or hold, mint when a
+/// seat is live, and answer the Host-issued id.
+#[cfg(any(unix, windows))]
+async fn admit_requester(
+    handle: &Arc<HostHandle>,
+    op: ControlOp,
+    target: String,
+    pending: PendingOp,
+) -> FromHost {
+    drop(handle.open_desktop().await);
+    let Some((request_id, state)) = handle.control_seat.accept_request() else {
+        return FromHost::BackpressureHold;
+    };
+    if matches!(state, RequestState::AwaitingOwnerConfirmation) {
+        handle.control_seat.mint(&request_id, op, target, pending);
+    }
+    FromHost::RequestAccepted { request_id }
+}
+
 #[cfg(any(unix, windows))]
 async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHost {
     match request {
@@ -446,48 +628,39 @@ async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHo
             Err(_) => FromHost::Unavailable,
         },
         ToHost::RequestDeviceApprove { pending_id } => {
-            let (request_id, state) = handle.control_seat.accept_request();
-            if matches!(state, RequestState::AwaitingOwnerConfirmation) {
-                handle.control_seat.mint(
-                    &request_id,
-                    ControlOp::DeviceApprove,
-                    pending_id.clone(),
-                    PendingOp::DeviceApprove { pending_id },
-                );
-            }
-            FromHost::RequestAccepted { request_id }
+            admit_requester(
+                handle,
+                ControlOp::DeviceApprove,
+                pending_id.clone(),
+                PendingOp::DeviceApprove { pending_id },
+            )
+            .await
         }
         ToHost::RequestCredentialPut { provider, label } => {
             let target = format!("{provider}:{label}");
-            let (request_id, state) = handle.control_seat.accept_request();
-            if matches!(state, RequestState::AwaitingOwnerConfirmation) {
-                handle.control_seat.mint(
-                    &request_id,
-                    ControlOp::CredentialPut,
-                    target,
-                    PendingOp::CredentialPut {
-                        provider,
-                        label,
-                        mutation_id: Uuid::new_v4().as_hyphenated().to_string(),
-                        secret: None,
-                    },
-                );
-            }
-            FromHost::RequestAccepted { request_id }
+            admit_requester(
+                handle,
+                ControlOp::CredentialPut,
+                target,
+                PendingOp::CredentialPut {
+                    provider,
+                    label,
+                    mutation_id: Uuid::new_v4().as_hyphenated().to_string(),
+                    // The secret arrives on the confirmation channel; the
+                    // requester only names the pair.
+                    secret: None,
+                },
+            )
+            .await
         }
         ToHost::RequestDeletionConfirm { request_id } => {
-            let (accepted_id, state) = handle.control_seat.accept_request();
-            if matches!(state, RequestState::AwaitingOwnerConfirmation) {
-                handle.control_seat.mint(
-                    &accepted_id,
-                    ControlOp::DeletionConfirm,
-                    request_id.clone(),
-                    PendingOp::DeletionConfirm { request_id },
-                );
-            }
-            FromHost::RequestAccepted {
-                request_id: accepted_id,
-            }
+            admit_requester(
+                handle,
+                ControlOp::DeletionConfirm,
+                request_id.clone(),
+                PendingOp::DeletionConfirm { request_id },
+            )
+            .await
         }
         ToHost::PendingDeletions => match handle.pending_targeted_deletions(None, 50).await {
             Ok(list) => FromHost::PendingDeletions {
@@ -520,7 +693,7 @@ async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHo
 async fn dispatch_confirmation(handle: &HostHandle, request: ToConfirmation) -> FromConfirmation {
     match request {
         ToConfirmation::SessionComplete { session_id, nonce } => {
-            match handle.control_seat.take(session_id, &nonce) {
+            match handle.control_seat.take(session_id, nonce.expose()) {
                 Some((request_id, pending)) => {
                     let (reply, outcome) = execute_pending(handle, pending).await;
                     if let Some(outcome) = outcome {
@@ -534,7 +707,7 @@ async fn dispatch_confirmation(handle: &HostHandle, request: ToConfirmation) -> 
             }
         }
         ToConfirmation::SessionReject { session_id, nonce } => {
-            match handle.control_seat.reject(session_id, &nonce) {
+            match handle.control_seat.reject(session_id, nonce.expose()) {
                 Some(request_id) => {
                     handle.control_seat.reject_request(&request_id);
                     FromConfirmation::Outcome(ControlOutcome::Rejected { session_id })
@@ -551,7 +724,7 @@ async fn dispatch_confirmation(handle: &HostHandle, request: ToConfirmation) -> 
         } => {
             if !handle.control_seat.stage_credential_secret(
                 session_id,
-                &nonce,
+                nonce.expose(),
                 &format!("{provider}:{label}"),
                 secret,
             ) {
@@ -572,7 +745,30 @@ async fn dispatch_confirmation(handle: &HostHandle, request: ToConfirmation) -> 
                         sweep: current.sweep.as_u64(),
                     }))
                 }
-                Ok(_) | Err(_) => FromConfirmation::Unavailable,
+                Ok(ene_preservation::DeletionLifecycleOutcome::Held(_)) => {
+                    FromConfirmation::Outcome(ControlOutcome::Deletion(
+                        DeletionOutcome::HeldByOperation { operation, sweep },
+                    ))
+                }
+                Ok(ene_preservation::DeletionLifecycleOutcome::StaleSweep) => {
+                    FromConfirmation::Outcome(ControlOutcome::Deletion(
+                        DeletionOutcome::StaleSweep { operation, sweep },
+                    ))
+                }
+                Ok(ene_preservation::DeletionLifecycleOutcome::Completed) => {
+                    FromConfirmation::Outcome(ControlOutcome::Deletion(
+                        DeletionOutcome::Completed { operation, sweep },
+                    ))
+                }
+                Ok(ene_preservation::DeletionLifecycleOutcome::Finalizing) => {
+                    FromConfirmation::Outcome(ControlOutcome::Deletion(
+                        DeletionOutcome::Finalizing { operation, sweep },
+                    ))
+                }
+                Ok(ene_preservation::DeletionLifecycleOutcome::Missing) => {
+                    FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Missing))
+                }
+                Err(_) => FromConfirmation::Unavailable,
             }
         }
         ToConfirmation::ConfirmedTrue => FromConfirmation::DeniedByBoundary,
@@ -727,7 +923,10 @@ fn deletion_from_control(outcome: &DeletionOutcome) -> Option<ConfirmTargetedDel
         }
         DeletionOutcome::NeedsClarification => ConfirmTargetedDeletionOutcome::NeedsClarification,
         DeletionOutcome::Missing => ConfirmTargetedDeletionOutcome::Missing,
-        DeletionOutcome::Resumed { .. } => return None,
+        DeletionOutcome::Resumed { .. }
+        | DeletionOutcome::StaleSweep { .. }
+        | DeletionOutcome::Completed { .. }
+        | DeletionOutcome::Finalizing { .. } => return None,
     })
 }
 
@@ -745,18 +944,46 @@ impl std::fmt::Debug for GuiProcess {
     }
 }
 
+/// Reaps one GUI child the Host is abandoning.
+///
+/// `std::process::Child` never reaps on drop, and an abandoned GUI may be
+/// exiting on channel EOF, so a detached thread kills and waits for it
+/// without blocking the runtime.
 #[cfg(any(unix, windows))]
-fn locate_gui_binary() -> Option<PathBuf> {
+fn reap_gui_child(process: GuiProcess) {
+    std::thread::spawn(move || {
+        let mut process = process;
+        drop(process.child.kill());
+        drop(process.child.wait());
+    });
+}
+
+/// Resolves the official GUI executable and its installation directory: the
+/// `ene-desktop` binary installed beside this Host binary.
+///
+/// The path is fixed by the installation. No request, environment variable,
+/// `PATH` entry, or current directory selects it, so a requester cannot aim
+/// the Host at a different program.
+#[cfg(any(unix, windows))]
+fn locate_gui_binary() -> Option<(PathBuf, PathBuf)> {
     let exe = std::env::current_exe().ok()?;
-    let sibling = exe.parent()?.join(if cfg!(windows) {
+    let install_dir = exe.parent()?.to_path_buf();
+    let binary = install_dir.join(if cfg!(windows) {
         "ene-desktop.exe"
     } else {
         "ene-desktop"
     });
-    sibling.is_file().then_some(sibling)
+    binary.is_file().then_some((binary, install_dir))
 }
 
 impl HostHandle {
+    /// Waits for every in-flight confirmation dispatch to finish.
+    ///
+    /// The serving composition calls this before releasing its authority: an
+    /// operation the Owner's surface already admitted must not be cut in half,
+    /// and no dispatch may outlive the handle it borrowed. The stop flag is
+    /// set first so a frame arriving during the drain is refused instead of
+    /// being dispatched after the last observation.
     pub(crate) async fn join_confirmation_tasks(&self) {
         loop {
             let next = {
@@ -764,6 +991,11 @@ impl HostHandle {
                     .confirmation_tasks
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Set under the same guard the serve thread holds across its
+                // check-and-push, so a frame is either registered before this
+                // pop or refused after it.
+                self.confirmation_stopping
+                    .store(true, std::sync::atomic::Ordering::Release);
                 tasks.pop()
             };
             let Some(task) = next else {
@@ -782,12 +1014,20 @@ impl HostHandle {
             if self.gui_is_live() {
                 return Ok(true);
             }
-            let Some(binary) = locate_gui_binary() else {
+            let Some((binary, install_dir)) = locate_gui_binary() else {
                 return Ok(false);
             };
             let (host_channel, mut child_handles) = ene_local_control::HostChannel::pair()
                 .map_err(|error| CoreError::Bind(format!("confirmation channel: {error}")))?;
             let mut command = std::process::Command::new(binary);
+            // Fix the child's cwd to the trusted installation and strip any
+            // loader redirection inherited from the Host's launcher
+            // environment, without removing the display/session variables the
+            // GUI needs to open its window.
+            command.current_dir(install_dir);
+            for variable in LOADER_ENV_VARS {
+                command.env_remove(variable);
+            }
             command
                 .env(
                     ene_local_control::CONFIRMATION_MODE_ENV,
@@ -800,8 +1040,21 @@ impl HostHandle {
                 .spawn()
                 .map_err(|error| CoreError::Bind(format!("spawn the official GUI: {error}")))?;
             let child_id = child.id();
-            *lock_unpoison(&self.gui_child) = Some(GuiProcess { child, child_id });
-            self.attach_confirmation_channel(host_channel, child_id);
+            // A slot entry found here is a child `gui_is_live` could not
+            // clear (alive but seatless): overwriting it must reap it too.
+            let replaced = lock_unpoison(&self.gui_child).replace(GuiProcess { child, child_id });
+            if let Some(previous) = replaced {
+                reap_gui_child(previous);
+            }
+            if !self.attach_confirmation_channel(host_channel) {
+                // The private channel is gone, so the GUI may be exiting on
+                // EOF; reaping it keeps a failed attach from leaving a
+                // zombie for the Host's lifetime.
+                if let Some(process) = lock_unpoison(&self.gui_child).take() {
+                    reap_gui_child(process);
+                }
+                return Ok(false);
+            }
             Ok(true)
         }
         #[cfg(not(any(unix, windows)))]
@@ -819,29 +1072,36 @@ impl HostHandle {
         match process.child.try_wait() {
             Ok(None) => self.control_seat.has_seat(),
             Ok(Some(_)) | Err(_) => {
-                let child_id = process.child_id;
                 *guard = None;
-                self.control_seat.seat_closed(child_id);
+                if let Some(generation) = self.control_seat.holder_generation() {
+                    self.control_seat.seat_closed(generation);
+                }
                 false
             }
         }
     }
 
+    /// Registers one spawned GUI's private channel and serves it.
+    ///
+    /// Exactly one thread owns the channel: it writes outbound challenges and
+    /// replies, dispatches inbound frames against this handle, and clears the
+    /// seat when the child's channel ends. Returns `false` when the channel
+    /// cannot be registered or served, so the caller refuses the desktop
+    /// instead of rendering it open with no confirmation surface.
     #[cfg(any(unix, windows))]
     pub(crate) fn attach_confirmation_channel(
         self: &Arc<Self>,
         host_channel: ene_local_control::HostChannel,
-        child_id: u32,
-    ) {
+    ) -> bool {
         use ene_local_control::channel::ChannelEvent;
 
         let (events, events_rx) = std::sync::mpsc::channel::<ChannelEvent>();
-        let seat_generation = self.control_seat.seat_spawned_gui(child_id, events.clone());
+        let seat_generation = self.control_seat.seat_spawned_gui(events.clone());
         let reader_channel = match host_channel.try_clone() {
             Ok(clone) => clone,
             Err(_) => {
-                self.control_seat.seat_closed(child_id);
-                return;
+                self.control_seat.seat_closed(seat_generation);
+                return false;
             }
         };
         let reader_tx = events.clone();
@@ -866,8 +1126,8 @@ impl HostHandle {
                 }
             });
         if reader.is_err() {
-            self.control_seat.seat_closed(child_id);
-            return;
+            self.control_seat.seat_closed(seat_generation);
+            return false;
         }
         let handle = Arc::downgrade(self);
         let replies = events.clone();
@@ -888,6 +1148,22 @@ impl HostHandle {
                             let Some(host) = handle.upgrade() else {
                                 break;
                             };
+                            let mut tasks = host
+                                .confirmation_tasks
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if host
+                                .confirmation_stopping
+                                .load(std::sync::atomic::Ordering::Acquire)
+                            {
+                                drop(tasks);
+                                match replies.send(ChannelEvent::Outbound(
+                                    FromConfirmation::DeniedByBoundary,
+                                )) {
+                                    Ok(()) | Err(_) => {}
+                                }
+                                continue;
+                            }
                             let replies = replies.clone();
                             let dispatched_handle = Arc::clone(&host);
                             let dispatched = runtime.spawn(async move {
@@ -896,24 +1172,26 @@ impl HostHandle {
                                     Ok(()) | Err(_) => {}
                                 }
                             });
-                            host.confirmation_tasks
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .push(dispatched);
+                            // The Host joins these on shutdown: an operation the
+                            // Owner's surface already admitted runs to
+                            // completion before the serving authority goes
+                            // away, and no task outlives the handle it borrows.
+                            tasks.retain(|task| !task.is_finished());
+                            tasks.push(dispatched);
                         }
                         ChannelEvent::Closed => break,
                     }
                 }
                 drop(writer);
                 if let Some(handle) = handle.upgrade() {
-                    handle.control_seat.seat_closed(child_id);
+                    handle.control_seat.seat_closed(seat_generation);
                 }
             });
         if served.is_err() {
-            self.control_seat.seat_closed(child_id);
-            return;
+            self.control_seat.seat_closed(seat_generation);
+            return false;
         }
-        let _ = seat_generation;
+        true
     }
 }
 
@@ -924,10 +1202,17 @@ pub fn seat_test_gui_for_tests(
 ) -> Result<ene_local_control::GuiChannel, CoreError> {
     let (gui, host) = ene_local_control::GuiChannel::pair_for_test()
         .map_err(|error| CoreError::Bind(format!("test confirmation pair: {error}")))?;
-    handle.attach_confirmation_channel(host, 0);
+    let _ = handle.attach_confirmation_channel(host);
     Ok(gui)
 }
 
+/// Owner device approval over the requester listener.
+///
+/// # Errors
+///
+/// [`CoreError::Control`] when the requester listener is unreachable.
+/// A request that no Owner surface could confirm settles as
+/// [`RequestState::ConfirmationUnavailable`].
 pub async fn request_device_approve(
     data_dir: &Path,
     pending_id: &str,
@@ -951,6 +1236,15 @@ pub async fn request_device_approve(
     }
 }
 
+/// Serving-time credential registration request.
+///
+/// The pair is named, never the value: the raw secret is accepted from the
+/// inherited confirmation channel alone, so this call can only ask the Owner's
+/// surface to open the intake. Returns the settled requester state.
+///
+/// # Errors
+///
+/// [`CoreError::Control`] when the requester listener is unreachable.
 pub async fn request_credential_put(
     data_dir: &Path,
     provider: &str,
@@ -980,6 +1274,16 @@ pub async fn request_credential_put(
 async fn requester_complete(data_dir: &Path, request: ToHost) -> Result<RequestState, CoreError> {
     let mut client = ControlClient::connect(data_dir).await?;
     let accepted = client.exchange(&request).await?;
+    // Admission was refused before any request id existed: a hold, not a
+    // transport failure and not a domain refusal. The same request may be
+    // retried once the queue drains (first-party-desktop §5.1.5). The
+    // `show_requester_state` renderer never sees this because no request state
+    // exists; the explicit message is the requester-facing answer.
+    if matches!(accepted, FromHost::BackpressureHold) {
+        return Err(CoreError::Control(String::from(
+            "the host-local requester queue is saturated; retry once it drains",
+        )));
+    }
     let FromHost::RequestAccepted { request_id } = accepted else {
         return Err(control_failure(&format!(
             "the serving Host refused the request as {}",
@@ -1011,6 +1315,15 @@ async fn requester_complete(data_dir: &Path, request: ToHost) -> Result<RequestS
     Ok(RequestState::AwaitingOwnerConfirmation)
 }
 
+/// Dials the serving Host's requester listener and records the Owner's
+/// confirmation inside it.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Control`] with recovery guidance when no serving
+/// Host answers (the offline fallback is deliberately absent), and an
+/// explicit [`CoreError::Control`] refusal for the domain states that are
+/// not `Applied` (no surface, declined, still awaiting, malformed).
 pub async fn confirm_targeted_deletion(
     data_dir: &Path,
     request: &str,
@@ -1027,15 +1340,21 @@ pub async fn confirm_targeted_deletion(
         match state {
             RequestState::Applied {
                 outcome: RequesterOutcome::Deletion(outcome),
-            } => deletion_from_control(&outcome)
-                .ok_or_else(|| control_failure("the serving Host answered a malformed operation")),
-            RequestState::ConfirmationUnavailable | RequestState::Rejected => {
-                Err(control_failure("no confirmation surface was available"))
-            }
-            RequestState::AwaitingOwnerConfirmation => Err(control_failure(
-                "the Owner did not confirm before the request timed out",
-            )),
-            _ => Err(control_failure("the confirmation could not be resolved")),
+            } => deletion_from_control(&outcome).ok_or_else(|| {
+                CoreError::Control(String::from(
+                    "the serving Host answered a malformed operation",
+                ))
+            }),
+            RequestState::ConfirmationUnavailable => Err(CoreError::Control(String::from(
+                "no confirmation surface was available",
+            ))),
+            RequestState::Rejected => Err(CoreError::Control(String::from("the Owner declined"))),
+            RequestState::AwaitingOwnerConfirmation => Err(CoreError::Control(String::from(
+                "the request is still awaiting the Owner",
+            ))),
+            _ => Err(CoreError::Control(String::from(
+                "the confirmation could not be resolved",
+            ))),
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -1055,13 +1374,14 @@ fn from_host_kind(message: &FromHost) -> &'static str {
         FromHost::RequestStatus { .. } => "RequestStatus",
         FromHost::PendingDeletions { .. } => "PendingDeletions",
         FromHost::DeniedByBoundary => "DeniedByBoundary",
+        FromHost::BackpressureHold => "BackpressureHold",
         FromHost::Unavailable => "Unavailable",
     }
 }
 
 #[cfg(any(unix, windows))]
 fn control_failure(detail: &str) -> CoreError {
-    CoreError::Deletion(format!(
+    CoreError::Control(format!(
         "the serving Host is not reachable on the Host-local control inlet \
          ({detail}); start `ene-core serve` and retry — only the serving process \
          can reach every Client that may hold a target-bearing copy"
@@ -1100,53 +1420,14 @@ where
 {
     use tokio::io::AsyncWriteExt as _;
 
-    let body = serde_json::to_vec(message)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    if body.len() > MAX_CONTROL_FRAME_BYTES as usize {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "control frame exceeds the bound",
-        ));
-    }
+    let body = ene_local_control::channel::encode_body(message)?;
     stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
     stream.write_all(&body).await?;
     stream.flush().await
 }
 
-#[cfg(any(unix, windows))]
-async fn write_bytes<W>(stream: &mut W, body: &[u8]) -> std::io::Result<()>
-where
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    use tokio::io::AsyncWriteExt as _;
-
-    stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
-    stream.write_all(body).await?;
-    stream.flush().await
-}
-
-#[cfg(any(unix, windows))]
-async fn read_raw_answer<R>(stream: &mut R) -> std::io::Result<Option<String>>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    use tokio::io::AsyncReadExt as _;
-
-    let mut prefix = [0_u8; 4];
-    match stream.read_exact(&mut prefix).await {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(error) => return Err(error),
-    }
-    let length = u32::from_be_bytes(prefix);
-    if length == 0 || length > MAX_CONTROL_FRAME_BYTES {
-        return Ok(None);
-    }
-    let mut body = vec![0_u8; length as usize];
-    stream.read_exact(&mut body).await?;
-    Ok(Some(String::from_utf8_lossy(&body).into_owned()))
-}
-
+/// Reads one length-prefixed JSON message; [`None`] when the peer closed or
+/// the frame is malformed or oversize.
 #[cfg(any(unix, windows))]
 async fn read_message<R, T>(stream: &mut R) -> std::io::Result<Option<T>>
 where
@@ -1162,12 +1443,297 @@ where
         Err(error) => return Err(error),
     }
     let length = u32::from_be_bytes(prefix);
-    if length == 0 || length > MAX_CONTROL_FRAME_BYTES {
+    if length == 0 || length > ene_local_control::channel::MAX_CONTROL_FRAME_BYTES {
         return Ok(None);
     }
     let mut body = vec![0_u8; length as usize];
     stream.read_exact(&mut body).await?;
-    serde_json::from_slice(&body)
-        .map(Some)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    ene_local_control::channel::decode_body(&body).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deletion_outcomes_round_trip_through_control() {
+        let current = DeletionOperationRef {
+            operation: ene_preservation::DeletionOperationId::from_raw(RawId::new()),
+            sweep: ene_preservation::DeletionSweepGeneration::from_u64(4),
+        };
+        for outcome in [
+            ConfirmTargetedDeletionOutcome::Started(current),
+            ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(current),
+            ConfirmTargetedDeletionOutcome::HeldByOperation(current),
+            ConfirmTargetedDeletionOutcome::NeedsClarification,
+            ConfirmTargetedDeletionOutcome::Missing,
+        ] {
+            let rendered = deletion_outcome(&outcome);
+            assert_eq!(
+                deletion_from_control(&rendered),
+                Some(outcome),
+                "every canonical outcome must round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_operation_identity_is_refused() {
+        let malformed = DeletionOutcome::Started {
+            operation: String::from("not-a-uuid"),
+            sweep: 1,
+        };
+        assert_eq!(deletion_from_control(&malformed), None);
+    }
+
+    /// The offline fallback is deliberately absent: with no serving Host the
+    /// console gets an explicit refusal with recovery guidance, never a
+    /// confirmation admitted from an empty delivery history (lifecycle §8.1).
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn a_stopped_host_refuses_instead_of_admitting_offline() {
+        let dir = tempfile::tempdir().expect("the scratch directory must create");
+        let error = confirm_targeted_deletion(dir.path(), "00000000-0000-0000-0000-000000000000")
+            .await
+            .expect_err("no serving Host must be an explicit refusal");
+        assert!(
+            error.to_string().contains("serving Host"),
+            "the refusal must carry recovery guidance: {error}"
+        );
+    }
+
+    #[test]
+    fn an_unspawned_gui_leaves_no_confirmable_seat() {
+        let seat = FirstPartyControlSeat::default();
+        assert!(
+            !seat.has_seat(),
+            "a Host that never spawned a GUI has no seat to hand out"
+        );
+        let (request_id, state) = seat
+            .accept_request()
+            .expect("an empty queue admits a request");
+        assert!(
+            matches!(state, RequestState::ConfirmationUnavailable),
+            "a request with no confirmation surface must say so, got {state:?}"
+        );
+        let refused = seat.mint(
+            &request_id,
+            ControlOp::DeviceApprove,
+            String::from("p"),
+            PendingOp::DeviceApprove {
+                pending_id: String::from("p"),
+            },
+        );
+        assert!(
+            matches!(refused, FromConfirmation::DeniedByBoundary),
+            "no challenge may be minted without a Host-spawned GUI"
+        );
+    }
+
+    #[test]
+    fn a_new_spawned_gui_invalidates_the_previous_seat_and_its_sessions() {
+        let seat = FirstPartyControlSeat::default();
+        let (first_outbound, _first_inbound) = std::sync::mpsc::channel();
+        let first = seat.seat_spawned_gui(first_outbound);
+        let (request_id, _) = seat
+            .accept_request()
+            .expect("an empty queue admits a request");
+        let FromConfirmation::ConfirmationChallenge {
+            session_id, nonce, ..
+        } = seat.mint(
+            &request_id,
+            ControlOp::DeletionConfirm,
+            String::from("r"),
+            PendingOp::DeletionConfirm {
+                request_id: String::from("r"),
+            },
+        )
+        else {
+            panic!("a live seat must mint a challenge");
+        };
+        let (second_outbound, _second_inbound) = std::sync::mpsc::channel();
+        let second = seat.seat_spawned_gui(second_outbound);
+        assert_ne!(first, second, "a new child is a new seat generation");
+        assert!(
+            seat.take(session_id, nonce.expose()).is_none(),
+            "the previous GUI's session must not complete under the new seat"
+        );
+    }
+
+    #[test]
+    fn the_gui_channel_ending_clears_the_seat() {
+        let seat = FirstPartyControlSeat::default();
+        let generation = seat.seat_spawned_gui(std::sync::mpsc::channel().0);
+        seat.seat_closed(generation);
+        assert!(!seat.has_seat(), "a closed GUI leaves no seat behind");
+        let (request_id, state) = seat
+            .accept_request()
+            .expect("an empty queue admits a request");
+        assert!(matches!(state, RequestState::ConfirmationUnavailable));
+        assert!(matches!(
+            seat.mint(
+                &request_id,
+                ControlOp::CredentialPut,
+                String::from("p"),
+                PendingOp::CredentialPut {
+                    provider: String::from("openai"),
+                    label: String::from("main"),
+                    mutation_id: String::from("m-test"),
+                    secret: None,
+                },
+            ),
+            FromConfirmation::DeniedByBoundary
+        ));
+    }
+
+    #[test]
+    fn a_closing_older_channel_does_not_clear_the_newer_seat() {
+        let seat = FirstPartyControlSeat::default();
+        let (first_outbound, _first_inbound) = std::sync::mpsc::channel();
+        let first = seat.seat_spawned_gui(first_outbound);
+        let (second_outbound, _second_inbound) = std::sync::mpsc::channel();
+        let second = seat.seat_spawned_gui(second_outbound);
+        seat.seat_closed(first);
+        assert!(
+            seat.has_seat(),
+            "an older channel closing must not clear the newer live seat"
+        );
+        assert_eq!(seat.holder_generation(), Some(second));
+    }
+
+    #[test]
+    fn an_expired_session_cannot_complete_and_settles_rejected() {
+        let seat = FirstPartyControlSeat::default();
+        let (outbound, _inbound) = std::sync::mpsc::channel();
+        seat.seat_spawned_gui(outbound);
+        let (request_id, _) = seat
+            .accept_request()
+            .expect("an empty queue admits a request");
+        let FromConfirmation::ConfirmationChallenge {
+            session_id, nonce, ..
+        } = seat.mint(
+            &request_id,
+            ControlOp::DeletionConfirm,
+            String::from("r"),
+            PendingOp::DeletionConfirm {
+                request_id: String::from("r"),
+            },
+        )
+        else {
+            panic!("a live seat must mint a challenge");
+        };
+        {
+            let mut inner = lock_unpoison(&seat.inner);
+            let session = inner
+                .sessions
+                .get_mut(&session_id)
+                .expect("the minted session must exist");
+            session.deadline = std::time::Instant::now() - CONTROL_SESSION_TTL;
+        }
+        assert!(
+            seat.take(session_id, nonce.expose()).is_none(),
+            "an expired session must not complete"
+        );
+        assert_eq!(
+            seat.request_state(&request_id),
+            Some(RequestState::Rejected),
+            "an expired session must settle its request as rejected"
+        );
+    }
+
+    #[test]
+    fn a_foreign_nonce_cannot_complete_a_session() {
+        let seat = FirstPartyControlSeat::default();
+        let (outbound, _inbound) = std::sync::mpsc::channel();
+        seat.seat_spawned_gui(outbound);
+        let (request_id, _) = seat
+            .accept_request()
+            .expect("an empty queue admits a request");
+        let FromConfirmation::ConfirmationChallenge { session_id, .. } = seat.mint(
+            &request_id,
+            ControlOp::DeviceApprove,
+            String::from("p"),
+            PendingOp::DeviceApprove {
+                pending_id: String::from("p"),
+            },
+        ) else {
+            panic!("a live seat must mint a challenge");
+        };
+        assert!(
+            seat.take(session_id, "not-the-minted-nonce").is_none(),
+            "a guessed nonce is not authority"
+        );
+    }
+
+    #[test]
+    fn the_pending_request_cap_holds_admission_instead_of_growing() {
+        let seat = FirstPartyControlSeat::default();
+        let (outbound, _inbound) = std::sync::mpsc::channel();
+        seat.seat_spawned_gui(outbound);
+        let mut admitted = Vec::new();
+        for _ in 0..MAX_PENDING_REQUESTS {
+            let (request_id, _) = seat
+                .accept_request()
+                .expect("admission is available below the cap");
+            admitted.push(request_id);
+        }
+        assert!(
+            seat.accept_request().is_none(),
+            "a full pending set must be held, never admitted"
+        );
+        // A settled request frees exactly one pending slot.
+        let first = admitted.remove(0);
+        seat.reject_request(&first);
+        assert!(
+            seat.accept_request().is_some(),
+            "a settled request must free one pending slot"
+        );
+    }
+
+    #[test]
+    fn expired_sessions_are_retired_before_a_new_admission() {
+        let seat = FirstPartyControlSeat::default();
+        let (outbound, _inbound) = std::sync::mpsc::channel();
+        seat.seat_spawned_gui(outbound);
+        let (request_id, _) = seat
+            .accept_request()
+            .expect("an empty queue admits a request");
+        let FromConfirmation::ConfirmationChallenge { session_id, .. } = seat.mint(
+            &request_id,
+            ControlOp::DeletionConfirm,
+            String::from("r"),
+            PendingOp::DeletionConfirm {
+                request_id: String::from("r"),
+            },
+        ) else {
+            panic!("a live seat must mint a challenge");
+        };
+        {
+            let mut inner = lock_unpoison(&seat.inner);
+            let session = inner
+                .sessions
+                .get_mut(&session_id)
+                .expect("the minted session must exist");
+            session.deadline = std::time::Instant::now() - CONTROL_SESSION_TTL;
+        }
+        // The next admission retires the expired session and settles its
+        // request, so the reclaimed request is no longer pending and the
+        // session map does not accumulate.
+        let admitted = seat.accept_request();
+        assert!(
+            admitted.is_some(),
+            "the reclaimed slot admits a new request"
+        );
+        assert_eq!(
+            seat.request_state(&request_id),
+            Some(RequestState::Rejected),
+            "the retired request reads back rejected"
+        );
+        let inner = lock_unpoison(&seat.inner);
+        assert!(
+            inner.sessions.is_empty(),
+            "the expired session is reclaimed, not retained: {} remain",
+            inner.sessions.len()
+        );
+    }
 }

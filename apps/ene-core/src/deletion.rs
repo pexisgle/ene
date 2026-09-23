@@ -63,7 +63,7 @@ fn parse_status_cursor(raw: &str) -> Option<DeletionOperationId> {
 fn mint_status_cursor(operation: DeletionOperationId) -> DeletionStatusCursorWire {
     DeletionStatusCursorWire(format!(
         "{DELETION_STATUS_CURSOR_PREFIX}{}",
-        operation.as_raw().as_uuid().as_hyphenated()
+        encode_operation(operation)
     ))
 }
 
@@ -109,30 +109,20 @@ fn status_view(
 impl HostHandle {
     const INTENT_KIND_DELETION: &str = "deletion-targeted";
 
-    const DELETION_JOURNAL_FAMILY: &str = "deletion-family";
+    /// Body-free journal target for any Owner-body-carrying intent target.
+    ///
+    /// It names the inlet family only: even a target the grammar refuses may
+    /// carry the Owner's text (an unknown purpose token, an over-long body),
+    /// and the journal must never keep it.
+    pub(crate) const DELETION_JOURNAL_FAMILY: &str = "deletion-family";
 
     pub(crate) fn deletion_intent_fingerprint(
         intent: &ManagementIntent,
         purpose: DeletionPurposeWire,
     ) -> IntentFingerprint {
-        Self::deletion_fingerprint_on(
-            intent,
-            format!("{DELETION_TARGET_PREFIX}{}", purpose.as_str()),
-        )
-    }
-
-    fn inadmissible_deletion_fingerprint(intent: &ManagementIntent) -> IntentFingerprint {
-        Self::deletion_fingerprint_on(intent, String::from(Self::DELETION_JOURNAL_FAMILY))
-    }
-
-    fn deletion_fingerprint_on(intent: &ManagementIntent, target: String) -> IntentFingerprint {
         IntentFingerprint {
-            intent_id: intent.intent_id.0.as_hyphenated().to_string(),
-            kind: Self::INTENT_KIND_DELETION.to_string(),
-            target,
-            base: intent.base_view.0.clone(),
-            rationale_origin: Self::rationale_origin_name(intent.rationale.origin).to_string(),
-            rationale_quote: None,
+            target: format!("{DELETION_TARGET_PREFIX}{}", purpose.as_str()),
+            ..Self::intent_fingerprint(intent, Self::INTENT_KIND_DELETION)
         }
     }
 
@@ -148,7 +138,7 @@ impl HostHandle {
                 live,
                 intent,
                 self.record_decided(
-                    Self::inadmissible_deletion_fingerprint(intent),
+                    Self::intent_fingerprint(intent, Self::INTENT_KIND_DELETION),
                     IntentOutcome::NeedsClarification,
                 )
                 .await,
@@ -290,13 +280,16 @@ impl HostHandle {
         query: &DeletionStatusRequest,
     ) -> Vec<WireFrame> {
         match self
-            .read_deletion_status(query.cursor.as_ref(), query.limit)
+            .read_deletion_status(
+                query.cursor.as_ref().map(|cursor| cursor.0.as_str()),
+                query.limit,
+            )
             .await
         {
-            Ok(response) => vec![outgoing_frame(
+            Ok(page) => vec![outgoing_frame(
                 frame,
                 live,
-                WirePayload::DeletionStatusResponse(response),
+                WirePayload::DeletionStatusResponse(DeletionStatusResponse::Page(page)),
             )],
             Err(DeletionStatusQueryError::InvalidLimit) => {
                 vec![field_reject(frame, live, "query limit must be 1..=50")]
@@ -319,11 +312,27 @@ impl HostHandle {
         &self,
         record: &DeletionOperationRecord,
     ) -> Result<DeletionParticipantReportWire, CoreError> {
-        let participants = self
-            .store
-            .deletion_participants(record.current.operation, None, 100)
-            .await
-            .map_err(|error| CoreError::Deletion(error.to_string()))?;
+        // The durable registry can exceed one page (nine fixed owners plus one
+        // entry per Client incarnation with durable delivery evidence), so walk
+        // it to a short page instead of truncating at 100 and under-reporting.
+        let mut participants = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .store
+                .deletion_participants(record.current.operation, after, 100)
+                .await
+                .map_err(|error| CoreError::Deletion(error.to_string()))?;
+            if page.is_empty() {
+                break;
+            }
+            let short = page.len() < 100;
+            after = page.last().map(|entry| entry.participant.owner);
+            participants.extend(page);
+            if short {
+                break;
+            }
+        }
         Ok(DeletionParticipantReportWire::Reported(
             participants
                 .iter()
@@ -341,15 +350,15 @@ impl HostHandle {
 
     async fn read_deletion_status(
         &self,
-        cursor: Option<&DeletionStatusCursorWire>,
+        cursor: Option<&str>,
         limit: Option<u32>,
-    ) -> Result<DeletionStatusResponse, DeletionStatusQueryError> {
+    ) -> Result<DeletionStatusPage, DeletionStatusQueryError> {
         let limit = checked_limit(limit).ok_or(DeletionStatusQueryError::InvalidLimit)?;
         let after = match cursor {
             None => None,
-            Some(cursor) => Some(
-                parse_status_cursor(&cursor.0).ok_or(DeletionStatusQueryError::InvalidCursor)?,
-            ),
+            Some(cursor) => {
+                Some(parse_status_cursor(cursor).ok_or(DeletionStatusQueryError::InvalidCursor)?)
+            }
         };
         let records = self
             .store
@@ -376,20 +385,19 @@ impl HostHandle {
                 .map_err(|_| DeletionStatusQueryError::Unavailable)?;
             operations.push(status_view(record, participants));
         }
-        Ok(DeletionStatusResponse::Page(DeletionStatusPage {
+        Ok(DeletionStatusPage {
             mark: ViewMarkWire(mark.as_str().to_string()),
             operations,
             next_cursor,
-        }))
+        })
     }
 
     pub async fn deletion_status_page(
         &self,
         cursor: Option<&str>,
         limit: u32,
-    ) -> Result<DeletionStatusResponse, CoreError> {
-        let cursor = cursor.map(|raw| DeletionStatusCursorWire(raw.to_string()));
-        self.read_deletion_status(cursor.as_ref(), Some(limit))
+    ) -> Result<DeletionStatusPage, CoreError> {
+        self.read_deletion_status(cursor, Some(limit))
             .await
             .map_err(|error| match error {
                 DeletionStatusQueryError::InvalidLimit => {
@@ -455,43 +463,5 @@ impl HostHandle {
             self.kick_targeted_deletion().await;
         }
         Ok(outcome)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_deletion_finalizing_park_for_tests(&self) {
-        self.store.arm_deletion_finalizing_park_for_tests();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_deletion_finalizing_park_for_tests(&self) {
-        self.store.wait_deletion_finalizing_park_for_tests().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_deletion_finalizing_park_for_tests(&self) {
-        self.store.release_deletion_finalizing_park_for_tests();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn begin_deletion_finalizing_for_tests(
-        &self,
-        operation: &str,
-        sweep: u64,
-    ) -> Result<ene_preservation::DeletionFinalizationOutcome, CoreError> {
-        let Ok(uuid) = uuid::Uuid::parse_str(operation) else {
-            return Ok(ene_preservation::DeletionFinalizationOutcome::Missing);
-        };
-        let current = DeletionOperationRef {
-            operation: DeletionOperationId::from_raw(RawId::from_uuid(uuid)),
-            sweep: DeletionSweepGeneration::from_u64(sweep),
-        };
-        self.store
-            .begin_deletion_finalizing(current)
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))
     }
 }

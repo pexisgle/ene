@@ -2,18 +2,75 @@ mod dwm;
 mod headless;
 mod wayland;
 
-pub use dwm::windows_dwm_probe;
 pub use headless::HeadlessOverlay;
-pub use wayland::kde_layer_shell_probe;
 
 use crate::ipc::{LocalUiFact, OverlayKind, PlacementBox};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OverlayProbe {
-    Available,
-    Unavailable { reason: String },
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use crate::render::RenderFailure;
+
+/// Scales a logical extent to physical pixels, never below one pixel.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn physical(logical: u32, scale: f32) -> u32 {
+    ((logical as f64 * f64::from(scale)).round() as u64).clamp(1, u64::from(u32::MAX)) as u32
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn gpu_info(failure: RenderFailure) -> crate::ipc::GpuFailInfo {
+    crate::ipc::GpuFailInfo {
+        reason: match failure {
+            RenderFailure::Adapter => crate::ipc::GpuFailReason::NoAdapter,
+            RenderFailure::Device => crate::ipc::GpuFailReason::RequestDevice,
+            RenderFailure::Surface => crate::ipc::GpuFailReason::Surface,
+            RenderFailure::DeviceLost => crate::ipc::GpuFailReason::DeviceLost,
+        },
+    }
+}
+
+/// Reported when `try_gpu` is false: no adapter is ever attempted.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn gpu_disabled() -> crate::ipc::GpuFailInfo {
+    crate::ipc::GpuFailInfo {
+        reason: crate::ipc::GpuFailReason::NoAdapter,
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn gpu_status(
+    renderer: Option<&crate::render::SurfaceRenderer>,
+) -> crate::ipc::GpuInitStatus {
+    if renderer.is_some() {
+        crate::ipc::GpuInitStatus::Ok
+    } else {
+        crate::ipc::GpuInitStatus::Failed
+    }
+}
+
+/// Logical-pixel extent of the resize target, anchored to the rightmost
+/// visible character pixels in the bottom band (mirrors the Windows
+/// `WM_NCHITTEST` grip).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) const RESIZE_GRIP_LOGICAL_PX: u32 = 32;
+
+/// Initial overlay placement shared by the native backends.
+pub const DEFAULT_PLACEMENT: PlacementBox = PlacementBox {
+    x: 24,
+    y: 24,
+    width: 420,
+    height: 640,
+    scale: 1.0,
+};
+
+/// Native backend this build would request; off Linux/Windows there is none.
+#[cfg(target_os = "linux")]
+const REQUESTED_NATIVE: OverlayKind = OverlayKind::KdeLayerShell;
+#[cfg(target_os = "windows")]
+const REQUESTED_NATIVE: OverlayKind = OverlayKind::WindowsDwm;
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+const REQUESTED_NATIVE: OverlayKind = OverlayKind::Headless;
+
+/// Overlay in this process. Production attempts the native backend and reports
+/// an explicit unavailable outcome before using Headless.
 #[derive(Debug)]
 pub enum Overlay {
     Headless(HeadlessOverlay),
@@ -49,10 +106,6 @@ impl Overlay {
         }
     }
 
-    pub(crate) fn unavailable(reason: impl Into<String>) -> Self {
-        Self::Headless(HeadlessOverlay::unavailable(reason.into()))
-    }
-
     #[must_use]
     pub fn kind(&self) -> OverlayKind {
         match self {
@@ -66,7 +119,9 @@ impl Overlay {
 
     pub fn set_visible(&mut self, visible: bool) {
         match self {
-            Self::Headless(inner) => inner.set_visible(visible),
+            Self::Headless(_) => {
+                let _ = visible;
+            }
             #[cfg(target_os = "linux")]
             Self::KdeLayerShell(inner) => inner.set_visible(visible),
             #[cfg(target_os = "windows")]
@@ -74,20 +129,11 @@ impl Overlay {
         }
     }
 
-    #[must_use]
-    pub fn visible(&self) -> bool {
-        match self {
-            Self::Headless(inner) => inner.visible(),
-            #[cfg(target_os = "linux")]
-            Self::KdeLayerShell(inner) => inner.visible(),
-            #[cfg(target_os = "windows")]
-            Self::WindowsDwm(inner) => inner.visible(),
-        }
-    }
-
     pub fn set_placement(&mut self, placement: PlacementBox) {
         match self {
-            Self::Headless(inner) => inner.set_placement(placement),
+            Self::Headless(_) => {
+                let _ = placement;
+            }
             #[cfg(target_os = "linux")]
             Self::KdeLayerShell(inner) => inner.set_placement(placement),
             #[cfg(target_os = "windows")]
@@ -95,21 +141,12 @@ impl Overlay {
         }
     }
 
-    #[must_use]
-    pub fn placement(&self) -> PlacementBox {
-        match self {
-            Self::Headless(inner) => inner.placement(),
-            #[cfg(target_os = "linux")]
-            Self::KdeLayerShell(inner) => inner.placement(),
-            #[cfg(target_os = "windows")]
-            Self::WindowsDwm(inner) => inner.placement(),
-        }
-    }
-
+    /// Native backends report overlay-local drag/resize/hide as `LocalUiFact`;
+    /// Headless never synthesizes them.
     #[must_use]
     pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
         match self {
-            Self::Headless(inner) => inner.take_local_ui(),
+            Self::Headless(_) => None,
             #[cfg(target_os = "linux")]
             Self::KdeLayerShell(inner) => inner.take_local_ui(),
             #[cfg(target_os = "windows")]
@@ -128,12 +165,12 @@ impl Overlay {
         }
     }
 
+    /// Headless attempts no surface creation, so there is no GPU failure to
+    /// report; [`Self::unavailable_info`] carries the overlay's reason.
     #[must_use]
     pub fn gpu_failure(&self) -> Option<crate::ipc::GpuFailInfo> {
         match self {
-            Self::Headless(_) => Some(crate::ipc::GpuFailInfo {
-                reason: crate::ipc::GpuFailReason::Surface,
-            }),
+            Self::Headless(_) => None,
             #[cfg(target_os = "linux")]
             Self::KdeLayerShell(inner) => inner.gpu_failure(),
             #[cfg(target_os = "windows")]
@@ -186,18 +223,10 @@ impl Overlay {
     #[must_use]
     pub fn unavailable_info(&self) -> Option<crate::ipc::OverlayUnavailableInfo> {
         match self {
-            Self::Headless(inner) => {
-                inner
-                    .unavailable_reason()
-                    .map(|reason| crate::ipc::OverlayUnavailableInfo {
-                        requested: if cfg!(target_os = "windows") {
-                            OverlayKind::WindowsDwm
-                        } else {
-                            OverlayKind::KdeLayerShell
-                        },
-                        reason: reason.to_string(),
-                    })
-            }
+            Self::Headless(inner) => Some(crate::ipc::OverlayUnavailableInfo {
+                requested: REQUESTED_NATIVE,
+                reason: inner.reason().to_string(),
+            }),
             #[cfg(target_os = "linux")]
             Self::KdeLayerShell(_) => None,
             #[cfg(target_os = "windows")]

@@ -33,7 +33,7 @@ struct Args {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: ene-measure --host PID --desktop PID --body PID --sha SHA --kernel BUILD [--duration-secs 300] [--interval-ms 1000] [--wayland-feedback-jsonl PATH | --presentmon-csv PATH --swap-chain ID [--presentmon-exe PATH] | --presentation-json PATH] [--fps-warmup-secs 5] [--fps-wall-secs 10] [--interaction-json PATH | --interaction-jsonl PATH] [--click-through-json PATH] [--environment-json PATH] --output-json PATH --output-report PATH"
+        "usage: ene-measure --host PID --desktop PID --body PID [--other NAME:PID]... --sha SHA --kernel BUILD [--duration-secs 300] [--interval-ms 1000] [--wayland-feedback-jsonl PATH | --presentmon-csv PATH --swap-chain ID [--presentmon-exe PATH] | --presentation-json PATH] [--fps-warmup-secs 5] [--fps-wall-secs 10] [--interaction-json PATH | --interaction-jsonl PATH] [--click-through-json PATH] [--environment-json PATH] --output-json PATH --output-report PATH"
     )]
     Usage,
     #[error("invalid {name}: {value}")]
@@ -50,6 +50,12 @@ enum CliError {
     Measurement(#[from] MeasurementError),
     #[error("failed to start PresentMon {path}: {source}")]
     PresentMonStart {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to reap PresentMon {path}: {source}")]
+    PresentMonWait {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -76,6 +82,12 @@ fn main() -> ExitCode {
 
 fn run() -> Result<bool, CliError> {
     let args = parse_args(std::env::args().skip(1))?;
+    let body_pid = args
+        .targets
+        .iter()
+        .find(|target| target.role == ProcessRole::Body)
+        .map(|target| target.pid)
+        .ok_or(CliError::Usage)?;
     let wayland_offset = args
         .wayland_feedback
         .as_deref()
@@ -86,7 +98,7 @@ fn run() -> Result<bool, CliError> {
         .as_deref()
         .map(trace_offset)
         .transpose()?;
-    let mut presentmon = start_presentmon(&args)?;
+    let mut presentmon = start_presentmon(&args, body_pid)?;
     let sampled = sample_idle(
         &args.targets,
         args.duration,
@@ -102,7 +114,7 @@ fn run() -> Result<bool, CliError> {
     }
     let mut record = sampled?;
     if let Some(child) = &mut presentmon {
-        let status = child.wait().map_err(|source| CliError::PresentMonStart {
+        let status = child.wait().map_err(|source| CliError::PresentMonWait {
             path: args
                 .presentmon_exe
                 .clone()
@@ -122,26 +134,17 @@ fn run() -> Result<bool, CliError> {
             supplied.events,
         )?);
     } else if let Some(path) = args.presentmon_csv {
-        let body_pid = args
-            .targets
-            .iter()
-            .find(|target| target.role == ProcessRole::Body)
-            .map(|target| target.pid)
-            .ok_or(CliError::Usage)?;
-        record.fps = Some(import_presentmon_csv(
+        let fps = import_presentmon_csv(
             &path,
             body_pid,
             args.swap_chain.as_deref().ok_or(CliError::Usage)?,
             args.fps_warmup_secs,
             args.fps_wall_secs,
-        )?);
+        )?;
+        if !fps.events.is_empty() {
+            record.fps = Some(fps);
+        }
     } else if let Some(path) = args.wayland_feedback {
-        let body_pid = args
-            .targets
-            .iter()
-            .find(|target| target.role == ProcessRole::Body)
-            .map(|target| target.pid)
-            .ok_or(CliError::Usage)?;
         let feedback = read_wayland_feedback(
             &path,
             wayland_offset.unwrap_or(0),
@@ -149,12 +152,22 @@ fn run() -> Result<bool, CliError> {
             args.fps_warmup_secs,
             args.fps_wall_secs,
         )?;
-        record.fps = Some(wayland_presentation_record(
-            body_pid,
-            args.fps_warmup_secs,
-            args.fps_wall_secs,
-            feedback,
-        )?);
+        if !feedback.is_empty() {
+            // Uncorrelatable runtime evidence is 測定不能 (unmeasured), not a
+            // discarded campaign: keep the completed CPU/RSS/interaction
+            // record and let `evaluate` mark FPS incomplete.
+            match wayland_presentation_record(
+                body_pid,
+                args.fps_warmup_secs,
+                args.fps_wall_secs,
+                feedback,
+            ) {
+                Ok(fps) => record.fps = Some(fps),
+                Err(MeasurementError::PresentationTrace(_))
+                | Err(MeasurementError::DuplicatePresentation(_)) => {}
+                Err(other) => return Err(other.into()),
+            }
+        }
     }
     if let Some(path) = args.interactions {
         record.interactions = read_json(&path)?;
@@ -173,7 +186,7 @@ fn run() -> Result<bool, CliError> {
     Ok(record.claims_pass())
 }
 
-fn start_presentmon(args: &Args) -> Result<Option<std::process::Child>, CliError> {
+fn start_presentmon(args: &Args, body_pid: u32) -> Result<Option<std::process::Child>, CliError> {
     let Some(executable) = &args.presentmon_exe else {
         return Ok(None);
     };
@@ -183,12 +196,6 @@ fn start_presentmon(args: &Args) -> Result<Option<std::process::Child>, CliError
             value: String::from("PresentMon capture is Windows-only"),
         });
     }
-    let body_pid = args
-        .targets
-        .iter()
-        .find(|target| target.role == ProcessRole::Body)
-        .map(|target| target.pid)
-        .ok_or(CliError::Usage)?;
     let output = args.presentmon_csv.as_ref().ok_or(CliError::Usage)?;
     let child = std::process::Command::new(executable)
         .arg("--process_id")
@@ -208,20 +215,38 @@ fn start_presentmon(args: &Args) -> Result<Option<std::process::Child>, CliError
     Ok(Some(child))
 }
 
-fn read_interaction_trace(
+/// Opens one JSONL trace at the campaign's captured offset. A trace that does
+/// not exist is unmeasured evidence, not a failed campaign.
+fn open_trace(
     path: &Path,
     offset: u64,
-) -> Result<Vec<ene_desktop::measure::InteractionSample>, CliError> {
-    let mut file = std::fs::File::open(path).map_err(|source| CliError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+) -> Result<Option<std::io::BufReader<std::fs::File>>, CliError> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(CliError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
     file.seek(std::io::SeekFrom::Start(offset))
         .map_err(|source| CliError::Read {
             path: path.to_path_buf(),
             source,
         })?;
-    std::io::BufReader::new(file)
+    Ok(Some(std::io::BufReader::new(file)))
+}
+
+fn read_interaction_trace(
+    path: &Path,
+    offset: u64,
+) -> Result<Vec<ene_desktop::measure::InteractionSample>, CliError> {
+    let Some(reader) = open_trace(path, offset)? else {
+        return Ok(Vec::new());
+    };
+    reader
         .lines()
         .map(|line| {
             let line = line.map_err(|source| CliError::Read {
@@ -256,22 +281,16 @@ fn read_wayland_feedback(
     warmup_secs: f64,
     wall_secs: f64,
 ) -> Result<Vec<ene_body::ipc::PresentationFeedback>, CliError> {
-    let mut file = std::fs::File::open(path).map_err(|source| CliError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    file.seek(std::io::SeekFrom::Start(offset))
-        .map_err(|source| CliError::Read {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let Some(reader) = open_trace(path, offset)? else {
+        return Ok(Vec::new());
+    };
     let window_start = started_unix_ms
         .saturating_mul(1_000_000)
         .saturating_add((warmup_secs * 1_000_000_000.0).round() as u128);
     let window_end = window_start.saturating_add((wall_secs * 1_000_000_000.0).round() as u128);
     let mut selected = Vec::new();
     let mut submitted = std::collections::BTreeSet::new();
-    for line in std::io::BufReader::new(file).lines() {
+    for line in reader.lines() {
         let line = line.map_err(|source| CliError::Read {
             path: path.to_path_buf(),
             source,
@@ -290,6 +309,13 @@ fn read_wayland_feedback(
                 selected.push(trace.feedback);
             }
             ene_body::ipc::PresentationOutcome::Submitted => {}
+            // The window is approximated by the desktop's observation of the
+            // submission: `Submitted` carries no commit timestamp, so commits
+            // within roughly one 250 ms tick before `window_end` are excluded
+            // and commits just before `window_start` observed after it are
+            // included. Terminal lines are selected by correlation id (not
+            // their own observed time) so late-resolving feedback still counts.
+            // A feedback that never resolves stays Missing.
             _ if submitted.contains(&trace.feedback.correlation_id) => {
                 selected.push(trace.feedback);
             }

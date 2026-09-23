@@ -14,6 +14,7 @@ macro_rules! string_wire_ref {
         pub struct $name(pub String);
     };
 }
+pub(crate) use string_wire_ref;
 
 uuid_wire_id!(WireMessageId);
 uuid_wire_id!(RequestWireId);

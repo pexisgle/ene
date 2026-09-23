@@ -4,6 +4,14 @@ use crate::{
 use ene_primitive::RevisionInner;
 use thiserror::Error;
 
+/// Monotonic identity of the registered credential set.
+///
+/// Bumped atomically with a usable credential ref becoming registered, with a
+/// successful approval/re-approval, and with the Host startup sweep of the
+/// effective values. It is non-secret metadata: it names a state of the set
+/// without naming or deriving any value, and is safe to persist, compare, and
+/// log. Follows the [`RevisionInner`] discipline: the inner count travels
+/// only inside this newtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CredentialSetRevision(RevisionInner);
 
@@ -21,11 +29,6 @@ impl CredentialSetRevision {
     #[must_use]
     pub fn as_u64(&self) -> u64 {
         self.0.as_u64()
-    }
-
-    #[must_use]
-    pub fn checked_next(&self) -> Option<Self> {
-        self.0.checked_next().map(Self)
     }
 }
 
@@ -115,14 +118,46 @@ where
         }
         known.sort_by_key(|(length, _)| std::cmp::Reverse(*length));
         let mut scrubbed = text.to_owned();
-        for (_, credential) in known {
-            let replaced = self.store.with_bearer(&credential, |bearer| {
+        for (_, credential) in &known {
+            let replaced = self.store.with_bearer(credential, |bearer| {
                 scrubbed.replace(bearer, REDACTED_CREDENTIAL)
             });
             let Ok(next) = replaced else {
                 return Err(SecretScrubError::SecretUnavailable);
             };
             scrubbed = next;
+        }
+        // The absence proof is containment-aware: a registered value that is a
+        // substring of the marker (for example "cred") appears inside every
+        // marker, so a naive whole-text `contains` would falsely fail closed on
+        // the public marker's own text. A genuine residual is any occurrence
+        // not wholly contained in one marker — including one that a
+        // replacement creates across a marker boundary, which a per-segment
+        // split cannot see. Any surviving occurrence means the scrubber cannot
+        // claim removal.
+        let marker_len = REDACTED_CREDENTIAL.len();
+        let marker_starts: Vec<usize> = scrubbed
+            .match_indices(REDACTED_CREDENTIAL)
+            .map(|(start, _)| start)
+            .collect();
+        for (_, credential) in &known {
+            let still_present = self
+                .store
+                .with_bearer(credential, |bearer| {
+                    scrubbed.char_indices().any(|(start, _)| {
+                        if !scrubbed[start..].starts_with(bearer) {
+                            return false;
+                        }
+                        let end = start + bearer.len();
+                        !marker_starts
+                            .iter()
+                            .any(|&marker| start >= marker && end <= marker + marker_len)
+                    })
+                })
+                .map_err(|_| SecretScrubError::SecretUnavailable)?;
+            if still_present {
+                return Err(SecretScrubError::SecretUnavailable);
+            }
         }
         Ok(ScrubbedText {
             text: scrubbed,
@@ -232,6 +267,32 @@ mod scrub_tests {
     }
 
     #[tokio::test]
+    async fn a_value_inside_the_marker_is_still_proven_absent() {
+        // "cred" is a substring of the "[credential]" marker: a naive
+        // whole-text `contains` proof would always fail closed here even
+        // though the raw occurrence was replaced.
+        let (refs, store) = registry(&["cred"], CredentialSetRevision::from_u64(2));
+        let proof = CredentialScrubber {
+            refs: &refs,
+            store: &store,
+        }
+        .scrub("token cred tail")
+        .await
+        .expect("a marker-substring value must not defeat the absence proof");
+        assert_eq!(proof.text(), "token [credential] tail");
+    }
+
+    #[tokio::test]
+    async fn a_value_reconstructed_at_a_marker_boundary_fails_closed() {
+        // "]x" is absent from "cx", but replacing the shorter registered "c"
+        // with the marker creates it at the marker's trailing "]".
+        assert_eq!(
+            error_of(&["c", "]x"], "cx").await,
+            SecretScrubError::SecretUnavailable
+        );
+    }
+
+    #[tokio::test]
     async fn an_unreadable_registry_fails_closed() {
         let registry = BrokenRevisionRegistry(Vec::new());
         let scrubber = CredentialScrubber {
@@ -275,23 +336,6 @@ mod scrub_tests {
                 .credential_set(),
             CredentialSetRevision::from_u64(9),
             "a prior premise never raises the revision"
-        );
-    }
-}
-
-#[cfg(test)]
-mod revision_tests {
-    use super::CredentialSetRevision;
-
-    #[test]
-    fn revision_exhaustion_reports_none_instead_of_aliasing() {
-        assert_eq!(
-            CredentialSetRevision::from_u64(0).checked_next(),
-            Some(CredentialSetRevision::from_u64(1))
-        );
-        assert_eq!(
-            CredentialSetRevision::from_u64(u64::MAX).checked_next(),
-            None
         );
     }
 }

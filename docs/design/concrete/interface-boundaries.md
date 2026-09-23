@@ -695,11 +695,12 @@ enum FormationDecision {
     NoChangesApplied,                // コミット前照合の敗北、対象欠落、スコープ不一致、既存と同一、リビジョン枯渇等により何も保存しなかった
     DeferredForContext,              // 文脈情報が不足しているため保留（再提出時に新しい別経験として扱わない）
     DeclinedAsNoEndValue,            // 長期保存する価値がないと判断（すべての経験を保存する義務はない）
+    HeldForErasure,                  // コミットが消去ゲートに拒否された。この由来は消去区間に属するため再試行せず、消去完了後の新しい由来だけを受け入れる
 }
 ```
 
 - クライアント識別子、会話ラウンドID、在席世代番号の細かな対応関係は、現在の開発ステージにおける経験形成では消費しないため、インターフェースには含めません（必要となるステージで再導入します）。
-- 個人データ削除中や保存禁止制約による保留（`HeldByErasureOrConstraint`）は、現在のステージの形成処理では発生させず、削除や制約を本格的に扱うステージで安全に再導入します。
+- 個人データ削除中による保留は `HeldForErasure` として形成処理が返します（削除ステージ A4/R2 の消去条件ゲート）。`MemoryChangeOutcome::HeldForErasure` と同じく、消去対応は操作完了後も残るため、同じ由来を再試行・再クレームせず、消去完了後に新しく提供された由来だけを新しい経験として扱います。保存禁止制約による `HeldByErasureOrConstraint` の制約部分は、制約を本格的に扱うステージで安全に再導入します。
 - **開始責務と判断権限**: 個体調整および作業担当が候補を提出し、認識・学習担当がその保存価値、知識形成、更新、統合、および将来の想起必要性を判断します。タスク固有の一時的な情報を自律学習へ昇格させるかどうかは、学習担当が独立して判断します。
 - **保持すべき情報**: 経験の発生由来の種別、対象パートナー、関連タスク、委任関係、期待される将来の利用用途。
 - 自律学習とタスク管理を混同してはなりません。ユーザーへの応答生成が完了したことと、バックグラウンドでの学習データ更新がすべて完了したことを同一視してはなりません。
@@ -1744,7 +1745,7 @@ fn request_action(cmd: ExecuteActionCommand)
 | タスク中断（Cancel、コマンドレベル・リポジトリレベルで同一） | `TaskCancelOutcome` | 中断受理（CancelAccepted：現在の progress を started / in_progress から cancelled へ不可分に CAS。停止完了や外部作用の確定度は含めない）／再要求（AlreadyCancelled：既に cancelled。書き込みなしの冪等結果）／終端済み（TaskTerminal：Completed / Failed のため中断不可。書き込みなし）／タスク未存在（MissingTask）。受理は durable な progress 遷移のみを意味し、実行中の作用の停止完了は Action 試行の確定度と推論試行の durable facts から別途報告します |
 | タスクコミット（方針指示 AU4、リポジトリレベル） | `TaskCommitOutcome` | コミット成功（CommittedAs）／期待値不一致（StaleExpected：現在値付き）／タスク終端（TaskTerminal：Completed / Failed / Cancelled のため書き込みなし）／タスク未存在（MissingTask）／リビジョン上限超過（RevisionExhausted）／全体保留中（HeldByGlobalHold：hold スライスで追加） |
 | エージェント結果受入 | `TaskResultAcceptance` | 採用と同時に完了（AdoptedAsCompletion：到着 record 済み・現在リビジョンと一致・delegation（execution lifetime）から列挙した authoritative set が claim と完全一致・依拠試行がすべて ConfirmedSuccess・同じ TaskId の全 revision / 全 delegation に Unknown が無い（Task-wide completion barrier））／元の依拠リビジョンへ記録のみ（RecordedToOriginalOnly：revision 前進・progress が terminal（Completed / Failed / Cancelled））／完了を保留（WithheldByEffectFacts：blockers = authoritative set に Unknown / ConfirmedFailure ∪ 同じ TaskId の Task-wide barrier に残る Unknown。重複は 1 回。到着 record と result-local 相関は残り現在 Task は不変。seal 後の証拠更新で再評価可能）／採用対象の result 行が無い（MissingResult）／委任・タスクの durable 状態が無く書き込みなし（MissingDelegation / MissingTask。識別子不在は技術的エラーにしない）。同じ TaskId の別 delegation / 旧 revision の試行は barrier のためにのみ読まれ、`task_result_attempt` には刻印しない。同一 delegation への 2 つ目の final result 到着は AU15a の durable invariant 違反として fail closed（domain outcome ではない） |
-| 経験提出・訂正・スコープ | `FormationDecision`、`CorrectionOutcome`、`ScopeDecision` | 知識形成（Formed）／保留（Deferred）／保存価値なし（Declined）／訂正完了（Corrected）／パートナー専用を維持（KeptAsCompanion）／明示制約により拒絶（DeniedByExplicitConstraint）／対象期限切れ（StaleTarget）／消去中保留（HeldByErasure） |
+| 経験提出・訂正・スコープ | `FormationDecision`、`CorrectionOutcome`、`ScopeDecision` | 知識形成（Formed）／保留（Deferred）／保存価値なし（Declined）／訂正完了（Corrected）／パートナー専用を維持（KeptAsCompanion）／明示制約により拒絶（DeniedByExplicitConstraint）／対象期限切れ（StaleTarget）／消去中保留（HeldForErasure） |
 | 権限リアルタイム照合 | `LiveAuthorizationDecision` | 今回の利用を認可（AllowForThisUse）／拒絶（Deny）／オーナー確認待ち（AskOwner）／条件充足待ち（WaitForCondition）／再照合が必要（NeedsRevalidation） |
 | 認証秘密利用 | `AuthenticatedUseOutcome` | 規定範囲で安全に利用（UsedWithinScope）／再認証が必要（NeedsReauthentication）／制約により拒絶（DeniedByConstraint）／参照期限切れ（StaleReference） |
 | 推論実行・フォールバック | `InferenceDispatchOutcome`、`FallbackDecision` | 完了（Completed）／送信前拒絶（NotSent）／ローカル協調停止（Aborted：claim 前の fast-path で abort を観測した場合は attempt も利用実績も残さず、claim が durable に Started と確定した場合は不確定利用実績（計測不明の usage fact）を記録してから返る。claim 自体の拒否は通常の pre-send refusal であり Aborted へ丸めない。provider 要求・外部作用の停止は意味せず、NotSent へは丸めない）／承認済みフォールバックとして許可（AllowedAsApprovedFallback）／未承認経路のため拒絶（DeniedAsUnapprovedRoute） |

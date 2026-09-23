@@ -17,13 +17,15 @@ impl CompanionId {
     pub fn as_raw(self) -> RawId {
         self.0
     }
-
-    #[must_use]
-    pub fn generate() -> Self {
-        Self(RawId::new())
-    }
 }
 
+/// Command-scoped idempotency identity for history appends.
+///
+/// Carries a public [`RawId`]: the wire `CommandWireId` maps 1:1 at ingress
+/// when the Host parses its UUID text into this domain newtype. The client
+/// mints one per send; a transport retry reuses the same command id with a
+/// fresh message id. Non-secret correspondence, visible in
+/// [`core::fmt::Debug`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommandId(pub RawId);
 
@@ -61,7 +63,6 @@ pub struct HistoryMessage {
     pub round_wire: Option<String>,
     pub round_intent: Option<RoundIntentMark>,
     pub incarnation: Option<(u64, u64)>,
-    pub local_id: Option<String>,
 }
 
 impl core::fmt::Debug for HistoryMessage {
@@ -80,7 +81,6 @@ impl core::fmt::Debug for HistoryMessage {
             .field("round_wire", &self.round_wire)
             .field("round_intent", &self.round_intent)
             .field("incarnation", &self.incarnation)
-            .field("local_id", &self.local_id)
             .finish()
     }
 }
@@ -127,31 +127,55 @@ impl core::fmt::Debug for AppendHistoryCommand {
     }
 }
 
+/// Builds the request semantics fingerprint shared by both constructors.
+///
+/// Returns [`None`] exactly when the request carries no replay key or no
+/// round intent: there is then nothing provable to compare. Keeping the
+/// construction in one place stops the store's in-transaction judge and the
+/// Host's early replay judge from drifting apart when a field is added.
+fn fingerprint_of(
+    command_id: Option<&CommandId>,
+    role: HistoryRole,
+    text: &str,
+    lang: &str,
+    incarnation: Option<(u64, u64)>,
+    round_intent: Option<&RoundIntentMark>,
+) -> Option<RequestFingerprint> {
+    command_id?;
+    Some(RequestFingerprint {
+        role,
+        text: text.to_owned(),
+        lang: lang.to_owned(),
+        incarnation,
+        round_intent: round_intent.cloned()?,
+    })
+}
+
 impl AppendHistoryCommand {
     #[must_use]
     pub fn request_fingerprint(&self) -> Option<RequestFingerprint> {
-        self.command_id.as_ref()?;
-        Some(RequestFingerprint {
-            role: self.role,
-            text: self.text.clone(),
-            lang: self.lang.clone(),
-            incarnation: self.incarnation,
-            round_intent: self.round_intent.clone()?,
-        })
+        fingerprint_of(
+            self.command_id.as_ref(),
+            self.role,
+            &self.text,
+            &self.lang,
+            self.incarnation,
+            self.round_intent.as_ref(),
+        )
     }
 }
 
 impl HistoryMessage {
     #[must_use]
     pub fn request_fingerprint(&self) -> Option<RequestFingerprint> {
-        self.command_id.as_ref()?;
-        Some(RequestFingerprint {
-            role: self.role,
-            text: self.text.clone(),
-            lang: self.lang.clone(),
-            incarnation: self.incarnation,
-            round_intent: self.round_intent.clone()?,
-        })
+        fingerprint_of(
+            self.command_id.as_ref(),
+            self.role,
+            &self.text,
+            &self.lang,
+            self.incarnation,
+            self.round_intent.as_ref(),
+        )
     }
 }
 
@@ -202,11 +226,6 @@ impl UndeliveredId {
     #[must_use]
     pub fn as_raw(self) -> RawId {
         self.0
-    }
-
-    #[must_use]
-    pub fn generate() -> Self {
-        Self(RawId::new())
     }
 }
 
@@ -321,7 +340,6 @@ pub enum ReportStatusTransition {
 pub struct UndeliveredPage {
     pub entries: Vec<UndeliveredRef>,
     pub next: Option<UndeliveredCursor>,
-    pub pass_upper_bound: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -393,10 +411,25 @@ pub trait HistoryRepository {
         cmd: AppendHistoryCommand,
     ) -> Result<HistoryAppendOutcome, CompanionTechnicalError>;
 
+    /// Appends one companion reply and registers an undelivered entry for it
+    /// in the same atomic section.
+    ///
+    /// Conversation-sourced undelivered registration shares the history
+    /// append atom (AU1a); Task- and Action-sourced registration shares the
+    /// parent fact's own commit instead (AU1b). The returned [`Option`]
+    /// carries the registered [`UndeliveredRef`] when registration happened.
+    ///
+    /// `inference_claim` is the durable provider claim this reply was
+    /// produced under, when the caller obtained one. The implementor compares
+    /// it inside the same transaction against the canonical deletion
+    /// correspondence: a claim a deletion admission already associated with
+    /// an interval is refused with [`HistoryAppendOutcome::HeldForErasure`]
+    /// even after the operation completed and no current condition is
+    /// readable (lifecycle §11 R2). [`None`] skips the check (non-provider
+    /// appends and direct test fixtures).
     async fn append_reply_with_undelivered(
         &self,
         cmd: AppendHistoryCommand,
-        register_unpresented: bool,
         inference_claim: Option<RawId>,
     ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError>;
 
@@ -540,4 +573,135 @@ pub trait ActivityRepository {
         &self,
         activity: ActivityId,
     ) -> Result<Option<ManagementActivity>, CompanionTechnicalError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ActionCertaintyWire, AppendHistoryCommand, CommandId, CompanionId, HistoryMessage,
+        HistoryRole, RoundIntentMark, TerminalKindWire,
+    };
+    use ene_presence::PresenceGeneration;
+    use ene_primitive::{RawId, WallClockWithTz};
+
+    fn clock() -> WallClockWithTz {
+        WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00")
+            .expect("fixture timestamp parses")
+    }
+
+    fn command() -> AppendHistoryCommand {
+        AppendHistoryCommand {
+            companion: CompanionId::from_raw(RawId::new()),
+            round: RawId::new(),
+            role: HistoryRole::Owner,
+            text: String::from("private words"),
+            lang: String::from("en"),
+            at: clock(),
+            expected_generation: PresenceGeneration::first(),
+            expected_consent: None,
+            expected_credential_set: None,
+            expected_owner_message: None,
+            command_id: Some(CommandId(RawId::new())),
+            round_wire: Some(String::from("round-wire-1")),
+            round_intent: Some(RoundIntentMark::Auto),
+            incarnation: Some((1, 2)),
+            local_id: Some(String::from("local-1")),
+        }
+    }
+
+    fn message() -> HistoryMessage {
+        HistoryMessage {
+            id: RawId::new(),
+            companion: CompanionId::from_raw(RawId::new()),
+            round: RawId::new(),
+            role: HistoryRole::Companion,
+            text: String::from("private words"),
+            lang: String::from("en"),
+            at: clock(),
+            presence_generation: PresenceGeneration::first(),
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+        }
+    }
+
+    #[test]
+    fn history_debug_redacts_text_and_keeps_refs() {
+        let item = message();
+        let rendered = format!("{item:?}");
+        assert!(
+            !rendered.contains("private words"),
+            "text redacted: {rendered}"
+        );
+        assert!(rendered.contains("en"), "lang stays: {rendered}");
+    }
+
+    #[test]
+    fn command_debug_redacts_text_and_keeps_lang() {
+        let rendered = format!("{:?}", command());
+        assert!(
+            !rendered.contains("private words"),
+            "text redacted: {rendered}"
+        );
+        assert!(rendered.contains("en"), "lang stays: {rendered}");
+    }
+
+    #[test]
+    fn undelivered_wire_names_round_trip_as_a_closed_world() {
+        for certainty in [
+            ActionCertaintyWire::ConfirmedSuccess,
+            ActionCertaintyWire::ConfirmedFailure,
+            ActionCertaintyWire::Unknown,
+        ] {
+            assert_eq!(
+                ActionCertaintyWire::from_name(certainty.as_str()),
+                Some(certainty)
+            );
+        }
+        assert_eq!(ActionCertaintyWire::from_name("confirmed"), None);
+        for kind in [TerminalKindWire::Failed, TerminalKindWire::Cancelled] {
+            assert_eq!(TerminalKindWire::from_name(kind.as_str()), Some(kind));
+        }
+        assert_eq!(TerminalKindWire::from_name("completed"), None);
+    }
+
+    #[test]
+    fn request_fingerprint_covers_request_semantics_only() {
+        let mut keyed = command();
+        keyed.command_id = Some(CommandId(RawId::new()));
+        let fingerprint = keyed
+            .request_fingerprint()
+            .expect("a keyed command carries a request fingerprint");
+        assert_eq!(fingerprint.round_intent, RoundIntentMark::Auto);
+        let rendered = format!("{fingerprint:?}");
+        assert!(
+            !rendered.contains("private words"),
+            "body redacted: {rendered}"
+        );
+        // Same key, same request semantics: equal.
+        let mut same = keyed.clone();
+        same.round = RawId::new();
+        same.round_wire = Some(String::from("rotated"));
+        same.local_id = Some(String::from("other-local"));
+        same.at = clock();
+        same.expected_generation = PresenceGeneration::from_u64(9);
+        assert_eq!(
+            keyed.request_fingerprint(),
+            same.request_fingerprint(),
+            "accepted-result and transport-only drift never decide replay"
+        );
+        // Round intent is request semantics: a flip must not fingerprint
+        // equal, so a retry cannot adopt the changed intent.
+        let mut joined = keyed.clone();
+        joined.round_intent = Some(RoundIntentMark::Existing(String::from("round-wire-1")));
+        assert_ne!(
+            keyed.request_fingerprint(),
+            joined.request_fingerprint(),
+            "a changed round intent must change the fingerprint"
+        );
+        let mut keyless = keyed;
+        keyless.command_id = None;
+        assert_eq!(keyless.request_fingerprint(), None);
+    }
 }

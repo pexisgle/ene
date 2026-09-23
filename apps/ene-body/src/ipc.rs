@@ -1,11 +1,29 @@
+//! Projection IPC owned by `ene-body`.
+//!
+//! This is **not** the Host↔Client protocol (`ene-api` / `ene-plugin-ipc`) and
+//! not plugin IPC. `ene-desktop` links this crate and uses these types and the
+//! codec directly; this module owns the byte layout. See
+//! `apps/ene-body/README.md` for the table of flags and the separation between
+//! automated checks and real probes.
+//!
+//! Frame:
+//!
+//! ```text
+//! u32 BE exclusive body length | MessagePack body (named structs, ≤ 64 KiB)
+//! ```
+//!
+//! Direction is implied by the writer: parent encodes [`ParentToBody`]; body
+//! encodes [`BodyToParent`]. Forbidden content (secrets, conversation text,
+//! pairing material, Task commands, Host PKs) has no variant and is rejected
+//! as an unknown payload, not interpreted.
+
 use serde::{Deserialize, Serialize};
 
 const LEN_PREFIX_LEN: usize = 4;
 
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
-pub const MAX_MOTION_CLIPS: usize = 16;
-
+/// Maximum accepted byte length of one clip path.
 pub const MAX_MOTION_PATH_BYTES: usize = 4096;
 
 pub const HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -116,25 +134,18 @@ pub struct MotionSetInfo {
 }
 
 impl MotionSetInfo {
-    #[must_use]
-    pub fn clip_for(&self, pose: PoseHint) -> Option<&PoseClip> {
-        self.clips.iter().find(|clip| clip.pose == pose)
-    }
-
+    /// Structural checks that run before any clip file is opened, so a
+    /// malformed set cannot partially replace playback state.
+    ///
+    /// # Errors
+    ///
+    /// [`MotionFailReason::EmptySet`], [`MotionFailReason::DuplicatePose`],
+    /// [`MotionFailReason::EmptyPath`], or [`MotionFailReason::PathTooLong`].
     pub fn validate(&self) -> Result<(), MotionFailInfo> {
         if self.clips.is_empty() {
             return Err(MotionFailInfo::new(
                 MotionFailReason::EmptySet,
                 "motion set carries no clips",
-            ));
-        }
-        if self.clips.len() > MAX_MOTION_CLIPS {
-            return Err(MotionFailInfo::new(
-                MotionFailReason::TooManyClips,
-                std::format!(
-                    "motion set carries {} clips; the cap is {MAX_MOTION_CLIPS}",
-                    self.clips.len()
-                ),
             ));
         }
         let mut seen: Vec<PoseHint> = Vec::with_capacity(self.clips.len());
@@ -190,8 +201,6 @@ pub enum FeatureSupport {
 pub struct ReadyInfo {
     pub overlay: OverlayKind,
     pub gpu: GpuInitStatus,
-    pub expressions: FeatureSupport,
-    pub spring_bone: FeatureSupport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -200,7 +209,6 @@ pub enum GpuFailReason {
     RequestDevice,
     Surface,
     DeviceLost,
-    OutOfMemory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,7 +247,6 @@ pub struct AssetFailInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MotionFailReason {
     EmptySet,
-    TooManyClips,
     DuplicatePose,
     EmptyPath,
     PathTooLong,
@@ -276,13 +283,8 @@ pub struct AssetReadyInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthTick {
-    pub seq: u64,
-    pub visible: bool,
-    pub pose: PoseHint,
-    pub gpu_ok: bool,
-    pub overlay: OverlayKind,
-    pub expressions: FeatureSupport,
-    pub spring_bone: FeatureSupport,
+    /// Whether at least one validated clip is loaded. Layout capability and
+    /// per-pose coverage are not claimed here.
     pub motion: FeatureSupport,
 }
 
@@ -316,6 +318,11 @@ pub enum PresentationOutcome {
     },
 }
 
+/// Encode a parent→body command for projection IPC.
+///
+/// # Errors
+///
+/// Returns [`IpcError::EncodeFailed`] or [`IpcError::FrameTooLarge`].
 pub fn encode_parent(message: &ParentToBody) -> Result<Vec<u8>, IpcError> {
     encode_named(message)
 }
@@ -347,7 +354,16 @@ fn encode_named<T: Serialize>(message: &T) -> Result<Vec<u8>, IpcError> {
     Ok(out)
 }
 
-fn decode_named<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<(T, usize), IpcError> {
+/// Total byte length of the frame at the front of `bytes` (prefix + body).
+/// Returns the boundary without decoding so a rejected frame can still be
+/// discarded whole. `Truncated` means more bytes are needed.
+///
+/// # Errors
+///
+/// Truncated input. An oversize claimed length yields no boundary and must be
+/// treated as unrecoverable: the stream cannot be resynchronized from a length
+/// the cap rejects.
+pub fn frame_len(bytes: &[u8]) -> Result<usize, IpcError> {
     if bytes.len() < LEN_PREFIX_LEN {
         return Err(IpcError::Truncated {
             have: bytes.len(),
@@ -365,20 +381,37 @@ fn decode_named<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<(T, usize)
             need,
         });
     }
+    Ok(need)
+}
+
+fn decode_named<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<(T, usize), IpcError> {
+    let need = frame_len(bytes)?;
     let message = rmp_serde::from_slice(&bytes[LEN_PREFIX_LEN..need]).map_err(|error| {
         IpcError::DecodeFailed {
-            reason: std::format!("{error}"),
+            reason: decode_reason(&error),
         }
     })?;
     Ok((message, need))
+}
+
+/// Structural decode text without any frame-derived value. `Syntax` embeds the
+/// unexpected value (serde's `invalid_type`/`unknown variant` text), which a
+/// confused parent could have stuffed with conversation content.
+fn decode_reason(error: &rmp_serde::decode::Error) -> String {
+    match error {
+        rmp_serde::decode::Error::Syntax(_) => {
+            String::from("frame body does not match the expected structure")
+        }
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         AssetFailInfo, AssetFailReason, AssetRef, BodyToParent, FeatureSupport, GpuFailInfo,
-        GpuFailReason, GpuInitStatus, HealthTick, IpcError, LocalUiFact, MAX_FRAME_BYTES,
-        MAX_MOTION_CLIPS, MAX_MOTION_PATH_BYTES, MotionFailInfo, MotionFailReason, MotionSetInfo,
+        GpuFailReason, GpuInitStatus, HEALTH_INTERVAL, HealthTick, IpcError, LocalUiFact,
+        MAX_FRAME_BYTES, MAX_MOTION_PATH_BYTES, MotionFailInfo, MotionFailReason, MotionSetInfo,
         OverlayKind, OverlayUnavailableInfo, ParentToBody, PlacementBox, PoseClip, PoseHint,
         PresentationFeedback, PresentationOutcome, ReadyInfo, decode_body, decode_parent,
         encode_body, encode_parent,
@@ -436,8 +469,6 @@ mod tests {
         roundtrip_body(BodyToParent::Ready(ReadyInfo {
             overlay: OverlayKind::Headless,
             gpu: GpuInitStatus::Failed,
-            expressions: FeatureSupport::Unsupported,
-            spring_bone: FeatureSupport::Unsupported,
         }));
         roundtrip_body(BodyToParent::GpuFail(GpuFailInfo {
             reason: GpuFailReason::NoAdapter,
@@ -455,13 +486,6 @@ mod tests {
             detail: String::from("fixture"),
         }));
         roundtrip_body(BodyToParent::HealthTick(HealthTick {
-            seq: 3,
-            visible: true,
-            pose: PoseHint::Working,
-            gpu_ok: false,
-            overlay: OverlayKind::Headless,
-            expressions: FeatureSupport::Unsupported,
-            spring_bone: FeatureSupport::Unsupported,
             motion: FeatureSupport::Available,
         }));
         roundtrip_body(BodyToParent::LocalUi(LocalUiFact::Hide));
@@ -563,6 +587,11 @@ mod tests {
     }
 
     #[test]
+    fn health_interval_is_a_few_hertz() {
+        assert_eq!(HEALTH_INTERVAL.as_millis(), 250);
+    }
+
+    #[test]
     fn motion_set_shape_is_checked_before_any_file_is_opened() {
         assert!(MotionSetInfo { clips: Vec::new() }.validate().is_err());
         assert_eq!(
@@ -571,18 +600,6 @@ mod tests {
                 .expect_err("empty set")
                 .reason,
             MotionFailReason::EmptySet
-        );
-        let too_many = MotionSetInfo {
-            clips: (0..=MAX_MOTION_CLIPS)
-                .map(|index| PoseClip {
-                    pose: PoseHint::Idle,
-                    path: std::format!("/tmp/{index}.vrma"),
-                })
-                .collect(),
-        };
-        assert_eq!(
-            too_many.validate().expect_err("cap").reason,
-            MotionFailReason::TooManyClips
         );
         let duplicated = MotionSetInfo {
             clips: vec![
@@ -620,23 +637,6 @@ mod tests {
             long_path.validate().expect_err("long path").reason,
             MotionFailReason::PathTooLong
         );
-    }
-
-    #[test]
-    fn motion_set_lookup_is_pose_scoped() {
-        let set = MotionSetInfo {
-            clips: vec![PoseClip {
-                pose: PoseHint::Attention,
-                path: String::from("/tmp/VRMA_03.vrma"),
-            }],
-        };
-        set.validate().expect("valid set");
-        assert_eq!(
-            set.clip_for(PoseHint::Attention)
-                .map(|clip| clip.path.as_str()),
-            Some("/tmp/VRMA_03.vrma")
-        );
-        assert!(set.clip_for(PoseHint::Idle).is_none());
     }
 
     #[test]

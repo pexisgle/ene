@@ -3,12 +3,12 @@ use std::sync::Arc;
 use ene_companion::CompanionLifecycle;
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceAttribution,
-    PresenceCheckRef, PresenceErasureOutcome, PresenceErasureRepository, PresenceGeneration,
-    PresenceRepository, PresenceState, PresenceTechnicalError, RelocationHint,
-    StartupNormalizationFailure, StartupNormalizationFailureReason, StartupNormalizationReport,
-    StopCompanionOutcome, ThinMoveReason,
+    PresenceCheckRef, PresenceErasureRepository, PresenceGeneration, PresenceRepository,
+    PresenceState, PresenceTechnicalError, RelocationHint, StartupNormalizationFailure,
+    StartupNormalizationFailureReason, StartupNormalizationReport, StopCompanionOutcome,
+    ThinMoveReason,
 };
-use ene_preservation::ErasureConditionRef;
+use ene_preservation::{ErasureConditionRef, LocalErasurePass};
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{TransactionBehavior, params};
 
@@ -17,6 +17,7 @@ use crate::codec::{
     decode_id, decode_lifecycle, encode_id, encode_move_reason, encode_presence_state, encode_u64,
     lock_shared, presence_unavailable, select_attribution, select_hint,
 };
+use crate::erasure::{ERASURE_BATCH_ROWS, erasure_count};
 use crate::preservation::condition_is_current;
 use crate::run_blocking;
 
@@ -24,6 +25,53 @@ const SQL_UPDATE_ATTRIBUTION: &str = "UPDATE presence_attribution SET state = ?1
 
 const SQL_INSERT_TRANSITION: &str = "INSERT INTO presence_transition_log (companion_id, old_state, new_state, old_gen, new_gen, reason, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
+/// Writes one attribution change and its transition-log row inside the
+/// caller's transaction. Every presence write is update-plus-log; keeping the
+/// pair in one function keeps the transition history an exact mirror of the
+/// attribution the callers commit.
+fn write_attribution_tx(
+    tx: &rusqlite::Transaction<'_>,
+    old: PresenceAttribution,
+    new: PresenceAttribution,
+    reason: &str,
+    at: &str,
+) -> Result<(), PresenceTechnicalError> {
+    let key = encode_id(new.companion);
+    let old_raw = encode_u64(old.generation.as_u64()).map_err(presence_unavailable)?;
+    let new_raw = encode_u64(new.generation.as_u64()).map_err(presence_unavailable)?;
+    let client = new.active_client.map(|client| encode_id(client.as_raw()));
+    tx.execute(
+        SQL_UPDATE_ATTRIBUTION,
+        params![encode_presence_state(new.state), client, new_raw, key],
+    )
+    .map_err(|error| presence_unavailable(error.to_string()))?;
+    tx.execute(
+        SQL_INSERT_TRANSITION,
+        params![
+            key,
+            encode_presence_state(old.state),
+            encode_presence_state(new.state),
+            old_raw,
+            new_raw,
+            reason,
+            at
+        ],
+    )
+    .map_err(|error| presence_unavailable(error.to_string()))?;
+    Ok(())
+}
+
+/// Synchronous presence primitives for the connection-ownership section.
+///
+/// [`PresenceRepository`] wraps each of these in its own `spawn_blocking`
+/// call, which is the right shape for standalone await callers. The connection
+/// table's admission sections are different: they must decide and commit while
+/// holding the connection-table lock, inside a single `spawn_blocking`
+/// (CCT §10.4), so the same compare/commit is exposed synchronously and never
+/// awaited across the section. The sync bodies carry the full slice B
+/// semantics (stop outranks begin, encode-checked generations, relocation-hint
+/// maintenance), so the close-admission fallback and the async repository
+/// agree by construction.
 impl Store {
     pub fn load_attribution_sync(
         &self,
@@ -42,7 +90,6 @@ impl Store {
         reason: ThinMoveReason,
     ) -> Result<MoveDecision, PresenceTechnicalError> {
         let key = encode_id(companion);
-        let target_text = to_client.map(|client| encode_id(client.as_raw()));
         let reason_text = encode_move_reason(reason);
         let now_text = WallClockWithTz::now().to_rfc3339();
         let mut guard = lock_shared(&self.conn);
@@ -70,34 +117,23 @@ impl Store {
                 reason: String::from("presence generation exhausted"),
             });
         };
-        let next_raw = encode_u64(next_generation.as_u64()).map_err(presence_unavailable)?;
-        let current_raw = encode_u64(current.generation.as_u64()).map_err(presence_unavailable)?;
+        write_attribution_tx(
+            &tx,
+            current,
+            PresenceAttribution {
+                companion,
+                state: PresenceState::InTransition,
+                active_client: to_client,
+                generation: next_generation,
+            },
+            reason_text,
+            &now_text,
+        )?;
+        // Leaving RecoveryWait cancels the recovery intent; the candidate
+        // lives only in the attribution and never becomes `last_client`.
         tx.execute(
-            SQL_UPDATE_ATTRIBUTION,
-            params![
-                encode_presence_state(PresenceState::InTransition),
-                target_text,
-                next_raw,
-                key
-            ],
-        )
-        .map_err(|error| presence_unavailable(error.to_string()))?;
-        tx.execute(
-            SQL_SET_HINT_DESTINATION,
-            params![key, Option::<String>::None],
-        )
-        .map_err(|error| presence_unavailable(error.to_string()))?;
-        tx.execute(
-            SQL_INSERT_TRANSITION,
-            params![
-                key,
-                encode_presence_state(current.state),
-                encode_presence_state(PresenceState::InTransition),
-                current_raw,
-                next_raw,
-                reason_text,
-                now_text
-            ],
+            SQL_UPSERT_HINT,
+            params![key, Option::<String>::None, Option::<String>::None],
         )
         .map_err(|error| presence_unavailable(error.to_string()))?;
         tx.commit()
@@ -129,77 +165,64 @@ impl Store {
                 "missing presence attribution",
             )));
         };
-        if current.generation != transitioning_generation
-            || current.state != PresenceState::InTransition
-        {
-            if current.state == PresenceState::Stopped {
-                return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
-            }
+        // Only the transitioning generation's `InTransition` row may move. A
+        // different generation is a newer begin/normalization that superseded
+        // this transition, and a stopped row outranks the transition, so
+        // neither may be read as this confirmation's own success.
+        if current.generation != transitioning_generation {
+            return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
+        }
+        if current.state == PresenceState::Stopped {
+            return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
+        }
+        if current.state != PresenceState::InTransition {
             return Ok(ConfirmTransitionOutcome::Confirmed(current));
         }
         if live.connection_live && current.active_client != Some(live.client) {
             return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
         }
-        let (target_state, target_text, target_client) = if live.connection_live {
-            (
-                PresenceState::Present,
-                Some(encode_id(live.client.as_raw())),
-                Some(live.client),
-            )
+        let (target_state, target_client) = if live.connection_live {
+            (PresenceState::Present, Some(live.client))
         } else {
-            (PresenceState::NoActive, None, None)
+            (PresenceState::NoActive, None)
         };
-        let current_raw = encode_u64(current.generation.as_u64()).map_err(presence_unavailable)?;
-        tx.execute(
-            SQL_UPDATE_ATTRIBUTION,
-            params![
-                encode_presence_state(target_state),
-                target_text,
-                current_raw,
-                key
-            ],
-        )
-        .map_err(|error| presence_unavailable(error.to_string()))?;
-        if let Some(client) = target_client {
-            tx.execute(
-                SQL_SET_HINT_PRESENT,
-                params![key, encode_id(client.as_raw())],
-            )
-            .map_err(|error| presence_unavailable(error.to_string()))?;
-        } else {
-            tx.execute(
-                SQL_SET_HINT_DESTINATION,
-                params![key, Option::<String>::None],
-            )
-            .map_err(|error| presence_unavailable(error.to_string()))?;
-        }
-        tx.execute(
-            SQL_INSERT_TRANSITION,
-            params![
-                key,
-                encode_presence_state(PresenceState::InTransition),
-                encode_presence_state(target_state),
-                current_raw,
-                current_raw,
-                confirm_reason,
-                now_text
-            ],
-        )
-        .map_err(|error| presence_unavailable(error.to_string()))?;
-        tx.commit()
-            .map_err(|error| presence_unavailable(error.to_string()))?;
-        Ok(ConfirmTransitionOutcome::Confirmed(PresenceAttribution {
+        let confirmed = PresenceAttribution {
             companion,
             state: target_state,
             active_client: target_client,
             generation: transitioning_generation,
-        }))
+        };
+        write_attribution_tx(&tx, current, confirmed, confirm_reason, &now_text)?;
+        // `last_client` moves only when the attribution becomes Present;
+        // a NoActive confirm keeps the last confirmed client as history.
+        if let Some(client) = target_client {
+            tx.execute(
+                SQL_UPSERT_HINT,
+                params![
+                    key,
+                    Some(encode_id(client.as_raw())),
+                    Option::<String>::None
+                ],
+            )
+            .map_err(|error| presence_unavailable(error.to_string()))?;
+        } else {
+            tx.execute(
+                SQL_UPSERT_HINT,
+                params![key, Option::<String>::None, Option::<String>::None],
+            )
+            .map_err(|error| presence_unavailable(error.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|error| presence_unavailable(error.to_string()))?;
+        Ok(ConfirmTransitionOutcome::Confirmed(confirmed))
     }
 }
 
-const SQL_SET_HINT_DESTINATION: &str = "INSERT INTO relocation_hint (companion_id, last_client, recovery_destination) VALUES (?1, NULL, ?2) ON CONFLICT(companion_id) DO UPDATE SET recovery_destination = excluded.recovery_destination";
-
-const SQL_SET_HINT_PRESENT: &str = "INSERT INTO relocation_hint (companion_id, last_client, recovery_destination) VALUES (?1, ?2, NULL) ON CONFLICT(companion_id) DO UPDATE SET last_client = excluded.last_client, recovery_destination = NULL";
+/// The one relocation-hint upsert. A `NULL` `last_client` keeps the stored
+/// one (`COALESCE`), so a destination write (begin, recovery, stop) never
+/// touches `last_client`; a Present confirm supplies the new client and
+/// clears the destination.
+pub(crate) const SQL_UPSERT_HINT: &str = "INSERT INTO relocation_hint (companion_id, last_client, recovery_destination) VALUES (?1, ?2, ?3) ON CONFLICT(companion_id) DO UPDATE SET last_client = COALESCE(excluded.last_client, relocation_hint.last_client), recovery_destination = excluded.recovery_destination";
 
 const SQL_SELECT_COMPANIONS: &str = "SELECT companion_id, lifecycle FROM companion";
 
@@ -370,42 +393,24 @@ impl PresenceRepository for Store {
                 if already_normalized {
                     continue;
                 }
-                let current_raw =
-                    encode_u64(current.generation.as_u64()).map_err(presence_unavailable)?;
-                let next_raw =
-                    encode_u64(target.generation.as_u64()).map_err(presence_unavailable)?;
-                let active_text = target
-                    .active_client
-                    .map(|client| encode_id(client.as_raw()));
                 let destination_text = target
                     .recovery_destination
                     .map(|client| encode_id(client.as_raw()));
+                write_attribution_tx(
+                    &tx,
+                    current,
+                    PresenceAttribution {
+                        companion,
+                        state: target.state,
+                        active_client: target.active_client,
+                        generation: target.generation,
+                    },
+                    encode_move_reason(ThinMoveReason::RestartRecovery),
+                    &WallClockWithTz::now().to_rfc3339(),
+                )?;
                 tx.execute(
-                    SQL_UPDATE_ATTRIBUTION,
-                    params![
-                        encode_presence_state(target.state),
-                        active_text,
-                        next_raw,
-                        companion_text
-                    ],
-                )
-                .map_err(|error| presence_unavailable(error.to_string()))?;
-                tx.execute(
-                    SQL_SET_HINT_DESTINATION,
-                    params![companion_text, destination_text],
-                )
-                .map_err(|error| presence_unavailable(error.to_string()))?;
-                tx.execute(
-                    SQL_INSERT_TRANSITION,
-                    params![
-                        companion_text,
-                        encode_presence_state(current.state),
-                        encode_presence_state(target.state),
-                        current_raw,
-                        next_raw,
-                        encode_move_reason(ThinMoveReason::RestartRecovery),
-                        WallClockWithTz::now().to_rfc3339()
-                    ],
+                    SQL_UPSERT_HINT,
+                    params![companion_text, Option::<String>::None, destination_text],
                 )
                 .map_err(|error| presence_unavailable(error.to_string()))?;
                 tx.commit()
@@ -447,51 +452,40 @@ impl PresenceRepository for Store {
             {
                 return Ok(StopCompanionOutcome::AlreadyStopped(current));
             }
-            let current_raw =
-                encode_u64(current.generation.as_u64()).map_err(presence_unavailable)?;
-            tx.execute(
-                SQL_UPDATE_ATTRIBUTION,
-                params![
-                    encode_presence_state(PresenceState::Stopped),
-                    Option::<String>::None,
-                    current_raw,
-                    key
-                ],
-            )
-            .map_err(|error| presence_unavailable(error.to_string()))?;
-            tx.execute(
-                SQL_SET_HINT_DESTINATION,
-                params![key, Option::<String>::None],
-            )
-            .map_err(|error| presence_unavailable(error.to_string()))?;
-            tx.execute(
-                SQL_INSERT_TRANSITION,
-                params![
-                    key,
-                    encode_presence_state(current.state),
-                    encode_presence_state(PresenceState::Stopped),
-                    current_raw,
-                    current_raw,
-                    encode_move_reason(ThinMoveReason::Stop),
-                    now_text
-                ],
-            )
-            .map_err(|error| presence_unavailable(error.to_string()))?;
-            tx.commit()
-                .map_err(|error| presence_unavailable(error.to_string()))?;
-            Ok(StopCompanionOutcome::Stopped(PresenceAttribution {
+            let stopped = PresenceAttribution {
                 companion,
                 state: PresenceState::Stopped,
                 active_client: None,
                 generation: current.generation,
-            }))
+            };
+            // Stop clears presence without advancing the generation: the
+            // lifecycle change that would make the companion movable again is
+            // a separate owner's decision, and the stopped state itself
+            // rejects every later begin.
+            write_attribution_tx(
+                &tx,
+                current,
+                stopped,
+                encode_move_reason(ThinMoveReason::Stop),
+                &now_text,
+            )?;
+            tx.execute(
+                SQL_UPSERT_HINT,
+                params![key, Option::<String>::None, Option::<String>::None],
+            )
+            .map_err(|error| presence_unavailable(error.to_string()))?;
+            tx.commit()
+                .map_err(|error| presence_unavailable(error.to_string()))?;
+            Ok(StopCompanionOutcome::Stopped(stopped))
         })
         .await
     }
 }
 
-const ERASURE_BATCH_ROWS: i64 = 500;
-
+/// A companion identity that is the target is erased whole: the identity is
+/// the row's primary fact, so a redaction would be a silent rename. The
+/// companion itself belongs to its own owner; presence only removes its
+/// attribution.
 const SQL_ERASE_ATTRIBUTION_IDENTITY: &str = "DELETE FROM presence_attribution
      WHERE companion_id IN (
          SELECT companion_id FROM presence_attribution
@@ -548,16 +542,12 @@ const SQL_COUNT_PRESENCE_TARGET: &str = "SELECT
    + (SELECT COUNT(*) FROM presence_transition_log
       WHERE instr(companion_id, ?1) > 0)";
 
-fn erasure_count(value: i64) -> Result<u64, PresenceTechnicalError> {
-    u64::try_from(value).map_err(|_| presence_unavailable(String::from("count out of range")))
-}
-
 impl PresenceErasureRepository for Store {
     fn erase_target_text(
         &self,
         condition: ErasureConditionRef,
         target: &str,
-    ) -> impl std::future::Future<Output = Result<PresenceErasureOutcome, PresenceTechnicalError>> + Send
+    ) -> impl std::future::Future<Output = Result<LocalErasurePass, PresenceTechnicalError>> + Send
     {
         #[cfg(any(test, feature = "test-support"))]
         let parks = Arc::clone(&self.test_parks);
@@ -574,7 +564,7 @@ impl PresenceErasureRepository for Store {
                 if !condition_is_current(&tx, condition)
                     .map_err(|error| presence_unavailable(error.to_string()))?
                 {
-                    return Ok(PresenceErasureOutcome::NotCurrent);
+                    return Ok(LocalErasurePass::NotCurrent);
                 }
                 let attribution = tx
                     .execute(
@@ -613,15 +603,13 @@ impl PresenceErasureRepository for Store {
                     .query_row(SQL_COUNT_PRESENCE_TARGET, params![target], |row| row.get(0))
                     .map_err(|error| presence_unavailable(error.to_string()))?;
                 let erased = erasure_count(
-                    i64::try_from(
-                        attribution + stopped + hints + last_clients + destinations + transitions,
-                    )
-                    .map_err(|_| presence_unavailable(String::from("count out of range")))?,
-                )?;
-                let remainder = erasure_count(remainder)?;
+                    attribution + stopped + hints + last_clients + destinations + transitions,
+                )
+                .map_err(presence_unavailable)?;
+                let remainder = erasure_count(remainder).map_err(presence_unavailable)?;
                 tx.commit()
                     .map_err(|error| presence_unavailable(error.to_string()))?;
-                Ok(PresenceErasureOutcome::Applied { erased, remainder })
+                Ok(LocalErasurePass::Applied { erased, remainder })
             })
             .await
         }

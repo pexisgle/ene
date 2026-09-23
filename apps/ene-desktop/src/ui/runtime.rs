@@ -2,13 +2,13 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ene_api::v1::deletion::LocalErasureResult;
 use ene_api::v1::management::{ManagementOutcome, ManagementViewRequest};
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::StreamWireId;
 use ene_api::v1::round::{HistoryItem, PresentationStatus};
 use ene_body::ipc::{
-    AssetRef, LocalUiFact, ParentToBody, PlacementBox, PoseHint, PresentationFeedback,
+    AssetRef, LocalUiFact, MotionSetInfo, ParentToBody, PlacementBox, PoseClip, PoseHint,
+    PresentationFeedback,
 };
 use ene_client::{Client, PendingPairingClient};
 use ene_local_control::{ControlOp, ControlOutcome, FromConfirmation};
@@ -16,16 +16,19 @@ use ene_local_control::{ControlOp, ControlOutcome, FromConfirmation};
 use crate::body_supervise::{BodyStatus, BodySupervisor};
 use crate::control::ConfirmationClient;
 use crate::erasure::{self, GuiOwned};
-use crate::host_launch::{self, DetachedHost};
-use crate::i18n::{self, Label, Locale};
+use crate::host_launch;
+use crate::i18n::Locale;
 use crate::measure::WaylandFeedbackTraceLine;
-use crate::motion::{self, MotionEnvironment, MotionPlan};
+use crate::motion::{self, MotionEnvironment};
 use crate::secret::SecretIntake;
 use crate::session::{self, SETUP_PROVIDER_OPENAI, SetupFacts};
 use crate::ui::deletion::DeletionPanel;
 use crate::ui::tasks::TaskPanel;
 use crate::ui::usage::UsagePanel;
-use crate::ui::{Composer, DesktopError, GuiSnapshot, MemoryPage, Page, WizardStep, history_lines};
+use crate::ui::{
+    Composer, DEFAULT_REQUEST_TIMEOUT, DesktopError, GuiSnapshot, MemoryPage, Page, WizardStep,
+    history_lines, request_with_timeout,
+};
 use crate::{BUNDLED_SAMPLE_ASSET, DESKTOP_DESCRIPTOR};
 
 const LOCALE_FILE: &str = "desktop-locale";
@@ -44,27 +47,18 @@ pub struct DesktopRuntime {
     timeline: Vec<super::presentation::Message>,
     surface_erasure: Option<super::presentation::SurfaceErasure>,
     history: Vec<HistoryItem>,
-    connection: &'static str,
-    presence: String,
-    deny_reason: String,
     facts: SetupFacts,
-    setup_completed: bool,
-    ui_ticks: u64,
     body: BodySupervisor,
     body_status: BodyStatus,
     body_placement: PlacementBox,
     body_hidden: bool,
-    body_presentations: Vec<PresentationFeedback>,
     body_pose_deadline: Option<Instant>,
     presentation_trace: Option<std::fs::File>,
     model: String,
-    detached_host: Option<DetachedHost>,
     memory: MemoryPage,
     tasks: TaskPanel,
     usage: UsagePanel,
     deletion: DeletionPanel,
-    search_draft: String,
-    last_erasure: Option<LocalErasureResult>,
     chat_receipt: Option<(String, Option<StreamWireId>)>,
 }
 
@@ -85,17 +79,12 @@ impl DesktopRuntime {
             timeline: Vec::new(),
             surface_erasure: None,
             history: Vec::new(),
-            connection: i18n::label(locale, Label::Disconnected),
-            presence: String::from("unknown"),
-            deny_reason: String::new(),
             facts: SetupFacts {
                 credential_present: false,
                 consent_assigned: false,
                 model: None,
                 mark: String::new(),
             },
-            setup_completed: false,
-            ui_ticks: 0,
             body: BodySupervisor::new(),
             body_status: BodyStatus::Absent,
             body_placement: PlacementBox {
@@ -106,7 +95,6 @@ impl DesktopRuntime {
                 scale: 1.0,
             },
             body_hidden: false,
-            body_presentations: Vec::new(),
             body_pose_deadline: None,
             presentation_trace: std::env::var_os("ENE_PRESENTATION_TRACE_JSONL").and_then(|path| {
                 std::fs::OpenOptions::new()
@@ -116,19 +104,15 @@ impl DesktopRuntime {
                     .ok()
             }),
             model: String::from(DEFAULT_MODEL),
-            detached_host: None,
             memory: MemoryPage::default(),
             tasks: TaskPanel::default(),
             usage: UsagePanel::default(),
             deletion: DeletionPanel::default(),
-            search_draft: String::new(),
-            last_erasure: None,
             chat_receipt: None,
         }
     }
 
     pub fn tick(&mut self) {
-        self.ui_ticks = self.ui_ticks.saturating_add(1);
         self.body_status = self.body.poll();
         while let Some(fact) = self.body.take_local_ui() {
             match fact {
@@ -145,10 +129,6 @@ impl DesktopRuntime {
         }
         while let Some(feedback) = self.body.take_presentation() {
             self.append_presentation_trace(&feedback);
-            if self.body_presentations.len() >= 4096 {
-                self.body_presentations.remove(0);
-            }
-            self.body_presentations.push(feedback);
         }
         if self
             .body_pose_deadline
@@ -160,16 +140,10 @@ impl DesktopRuntime {
     }
 
     #[must_use]
-    pub fn ui_ticks(&self) -> u64 {
-        self.ui_ticks
-    }
-
-    #[must_use]
     pub fn snapshot(&self) -> GuiSnapshot {
         GuiSnapshot {
             locale: self.locale.as_tag().to_string(),
             page: format!("{:?}", self.page),
-            wizard_step: format!("{:?}", self.wizard_step),
             timeline: self
                 .timeline
                 .iter()
@@ -184,56 +158,28 @@ impl DesktopRuntime {
             history: history_lines(&self.history),
             draft: self.composer.draft().to_string(),
             composing: self.composer.composing(),
-            connection: self.connection.to_string(),
-            presence: self
-                .client
-                .as_ref()
-                .and_then(Client::presence_state)
-                .map(session::presence_label)
-                .map(str::to_string)
-                .unwrap_or_else(|| self.presence.clone()),
             tasks: self.tasks.list_lines(),
             task_detail: self.tasks.detail_text(),
-            deny_reason: self.deny_reason.clone(),
-            challenge_target: self
-                .control
-                .as_ref()
-                .and_then(ConfirmationClient::pending_challenge)
-                .map(|challenge| challenge.display_target().to_string()),
-            about_slint: true,
             body_status: format!("{:?}", self.body_status),
-            ui_ticks: self.ui_ticks,
-            setup_ready: self.facts.setup_ready() && self.setup_completed,
+            setup_ready: self.facts.setup_ready(),
             credential_present: self.facts.credential_present,
             consent_assigned: self.facts.consent_assigned,
             secret_visible: matches!(self.wizard_step, WizardStep::Credential),
-            wizard_body: i18n::label(self.locale, wizard_label(self.wizard_step)).to_string(),
             memories: self.memory.rows().to_vec(),
             memory_revisions: self.memory.revisions().to_vec(),
-            memory_next: self.memory.next_after().map(str::to_owned),
-            memory_revisions_of: self.memory.revisions_of().map(str::to_owned),
-            memory_revisions_next: self.memory.next_revision_after(),
             memory_panel: self.memory.panel(),
             usage_body: self.usage.render(),
             deletion_body: self.deletion.render(),
-            search_draft: self.search_draft.clone(),
         }
     }
 
     pub fn set_locale(&mut self, locale: Locale) {
         self.locale = locale;
         persist_locale(&self.data_dir, locale);
-        self.connection = match self.client.is_some() {
-            true => i18n::label(locale, Label::Connected),
-            false => i18n::label(locale, Label::Disconnected),
-        };
     }
 
     pub fn open_page(&mut self, page: Page) {
         self.page = page;
-        if matches!(page, Page::About) {
-            self.tick();
-        }
     }
 
     pub fn wizard_next(&mut self) {
@@ -256,13 +202,19 @@ impl DesktopRuntime {
         self.secret.set(value);
     }
 
-    pub fn cancel_secret(&mut self) {
+    /// Clears temporary secret/confirmation UI state without consuming a
+    /// challenge retained for a later Owner gesture.
+    pub fn cancel_secret_keep_pending(&mut self) {
         self.secret.cancel();
-        if let Some(seat) = &mut self.control {
-            seat.discard_pending();
-        }
         if matches!(self.page, Page::Confirm) {
             self.page = Page::Wizard;
+        }
+    }
+
+    pub fn cancel_secret(&mut self) {
+        self.cancel_secret_keep_pending();
+        if let Some(seat) = &mut self.control {
+            seat.discard_pending();
         }
     }
 
@@ -284,9 +236,11 @@ impl DesktopRuntime {
         let mut commands = vec![ParentToBody::AssetRef(AssetRef::Path {
             path: asset.to_string_lossy().into_owned(),
         })];
-        let motion = self.motion_plan();
-        if let Some(set) = motion.set() {
-            commands.push(ParentToBody::MotionSet(set));
+        // The assignment travels next to the avatar path as asset data. A
+        // missing pack is not an error: the body keeps its staged pose.
+        let clips = self.motion_plan();
+        if !clips.is_empty() {
+            commands.push(ParentToBody::MotionSet(MotionSetInfo { clips }));
         }
         commands.push(ParentToBody::Placement(self.body_placement));
         commands.push(ParentToBody::PoseHint(PoseHint::Idle));
@@ -301,7 +255,7 @@ impl DesktopRuntime {
     }
 
     #[must_use]
-    pub fn motion_plan(&self) -> MotionPlan {
+    pub fn motion_plan(&self) -> Vec<PoseClip> {
         motion::resolve(&MotionEnvironment::from_process(&self.data_dir))
     }
 
@@ -340,10 +294,6 @@ impl DesktopRuntime {
         }
     }
 
-    pub fn take_body_presentations(&mut self) -> Vec<PresentationFeedback> {
-        std::mem::take(&mut self.body_presentations)
-    }
-
     fn append_presentation_trace(&mut self, feedback: &PresentationFeedback) {
         let Some(file) = &mut self.presentation_trace else {
             return;
@@ -359,12 +309,14 @@ impl DesktopRuntime {
             observed_unix_ns,
             feedback: feedback.clone(),
         };
-        let Ok(encoded) = serde_json::to_vec(&line) else {
+        let Ok(mut encoded) = serde_json::to_vec(&line) else {
             return;
         };
-        if file.write_all(&encoded).is_ok() {
-            let _result = file.write_all(b"\n");
-        }
+        // One write: the measurement reader captures its offset from the file
+        // length, so a separate newline write leaves a torn line it cannot
+        // decode.
+        encoded.push(b'\n');
+        let _result = file.write_all(&encoded);
     }
 
     pub fn kill_body(&mut self) {
@@ -384,57 +336,21 @@ impl DesktopRuntime {
         {
             return path;
         }
-        let data_candidate = self.data_dir.join(BUNDLED_SAMPLE_ASSET);
-        if data_candidate.is_file() {
-            return data_candidate;
-        }
-        if let Ok(executable) = std::env::current_exe()
-            && let Some(bin) = executable.parent()
-        {
-            for candidate in [
-                bin.join(BUNDLED_SAMPLE_ASSET),
-                bin.parent()
-                    .map(|prefix| prefix.join("share/ene").join(BUNDLED_SAMPLE_ASSET))
-                    .unwrap_or_default(),
-            ] {
-                if candidate.is_file() {
-                    return candidate;
-                }
+        let env = MotionEnvironment::from_process(&self.data_dir);
+        let data_candidate = env.data_dir.join(BUNDLED_SAMPLE_ASSET);
+        for root in motion::install_roots(&env) {
+            let candidate = root.join(BUNDLED_SAMPLE_ASSET);
+            if candidate.is_file() {
+                return candidate;
             }
-        }
-        let workspace_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(BUNDLED_SAMPLE_ASSET);
-        if workspace_candidate.is_file() {
-            return workspace_candidate;
         }
         data_candidate
     }
 
-    pub fn ensure_host(&mut self, host_bin: Option<&Path>) -> Result<(), DesktopError> {
-        if host_launch::host_is_serving(&self.data_dir) {
-            return Ok(());
-        }
-        let binary = match host_bin
-            .map(Path::to_path_buf)
-            .or_else(host_launch::locate_host_binary)
-        {
-            Some(path) => path,
-            None => {
-                return Err(DesktopError::HostLaunch(String::from(
-                    "ene-core binary was not found",
-                )));
-            }
-        };
-        let detached = host_launch::detach_serve(&self.data_dir, &binary)
-            .map_err(|error| DesktopError::HostLaunch(error.to_string()))?;
-        if detached.pid == 0 {
-            return Err(DesktopError::HostLaunch(String::from(
-                "detached host reported pid 0",
-            )));
-        }
-        self.detached_host = Some(detached);
-        Ok(())
+    /// Detach `ene-core serve` when the Client listener is down.
+    pub fn ensure_host(&mut self) -> Result<(), DesktopError> {
+        host_launch::ensure_serving(&self.data_dir)
+            .map_err(|error| DesktopError::HostLaunch(error.to_string()))
     }
 
     pub fn attach_confirmation(
@@ -447,11 +363,9 @@ impl DesktopRuntime {
 
     pub async fn connect_or_begin_pairing(&mut self) -> Result<(), DesktopError> {
         self.require_confirmation()?;
-        self.connection = i18n::label(self.locale, Label::Connecting);
         match session::connect_or_pending(&self.data_dir, DESKTOP_DESCRIPTOR).await? {
             session::DesktopConnect::Paired(client) => {
                 self.adopt_client(*client);
-                self.deny_reason = String::new();
                 self.refresh_after_connect().await;
                 Ok(())
             }
@@ -483,9 +397,52 @@ impl DesktopRuntime {
         })
     }
 
+    /// True once the Host's private channel ended. The GUI must then discard
+    /// its sessions and temporary secrets, stop Body, and close.
+    #[must_use]
+    pub fn confirmation_lost(&self) -> bool {
+        self.control
+            .as_ref()
+            .is_some_and(ConfirmationClient::is_closed)
+    }
+
+    /// Discards session and temporary-secret state after the private channel
+    /// ended, then stops the Body child. The GUI is no longer the Host's
+    /// confirmation surface.
+    pub fn close_after_confirmation_loss(&mut self) {
+        self.cancel_secret();
+        self.client = None;
+        self.pending_pairing = None;
+        self.body.shutdown();
+        self.body_status = self.body.poll();
+    }
+
+    /// The Owner's refusal of the currently displayed challenge. Applies
+    /// nothing; a no-op when no challenge is live.
+    pub async fn reject_pending_challenge(&mut self) {
+        let Some(seat) = self.control.as_mut() else {
+            return;
+        };
+        if seat.pending_challenge().is_none() {
+            return;
+        }
+        match seat.reject_pending().await {
+            Ok(_) | Err(_) => {}
+        }
+    }
+
     pub async fn begin_credential_put(&mut self) -> Result<(), DesktopError> {
         self.require_confirmation()?;
+        // Ordered before the empty check so a disconnected intake reports the
+        // transport state, not an empty-secret protocol error.
         self.ensure_client()?;
+        if self.secret.is_empty() {
+            return Err(DesktopError::Protocol(String::from(
+                "secret intake is empty",
+            )));
+        }
+        // Wire intent stages the pending pair. Control put+approve then
+        // makes it usable. Approve without a pending does not create the ref.
         let staged = self.register_credential_intent().await?;
         match staged {
             ManagementOutcome::HeldByOperation | ManagementOutcome::AppliedAsOneTime => {}
@@ -494,11 +451,6 @@ impl DesktopRuntime {
                     "credential intent must stage or apply, got {other:?}"
                 )));
             }
-        }
-        if self.secret.is_empty() {
-            return Err(DesktopError::Protocol(String::from(
-                "secret intake is empty",
-            )));
         }
         let seat = self.require_confirmation_mut()?;
         let result = seat
@@ -521,10 +473,6 @@ impl DesktopRuntime {
         let deletion_confirm = challenge
             .as_ref()
             .is_some_and(|challenge| matches!(challenge.op, ControlOp::DeletionConfirm));
-        let credential_intake = challenge.as_ref().and_then(|challenge| {
-            matches!(challenge.op, ControlOp::CredentialPut).then(|| challenge.session_id)
-        });
-        let _ = credential_intake;
         let credential_secret = if challenge
             .as_ref()
             .is_some_and(|challenge| matches!(challenge.op, ControlOp::CredentialPut))
@@ -541,12 +489,10 @@ impl DesktopRuntime {
                 timeline,
                 history,
                 composer,
-                search_draft,
                 memory,
                 tasks,
                 usage,
                 chat_receipt,
-                last_erasure,
                 surface_erasure,
                 ..
             } = self;
@@ -560,7 +506,6 @@ impl DesktopRuntime {
                     timeline,
                     history,
                     composer,
-                    search_draft,
                     memory,
                     tasks,
                     usage,
@@ -571,7 +516,6 @@ impl DesktopRuntime {
                     seat,
                     client.as_mut(),
                     &mut copies,
-                    last_erasure,
                     surface_erasure.as_ref(),
                 )
                 .await?
@@ -609,7 +553,6 @@ impl DesktopRuntime {
             }
             FromConfirmation::DeniedByBoundary => {
                 self.pending_pairing = None;
-                self.deny_reason = i18n::control_deny(self.locale, &reply);
                 self.page = Page::Wizard;
             }
             FromConfirmation::Outcome(
@@ -620,44 +563,32 @@ impl DesktopRuntime {
             )
             | FromConfirmation::Unavailable => {
                 self.pending_pairing = None;
-                self.deny_reason = i18n::control_deny(self.locale, &reply);
                 self.page = Page::Wizard;
             }
-            other => {
-                self.deny_reason = i18n::control_deny(self.locale, other);
-            }
+            _ => {}
         }
         self.flush_pending_erasure().await;
         Ok(reply)
     }
 
-    pub async fn send_confirmed_true_on_control(
-        &mut self,
-    ) -> Result<FromConfirmation, DesktopError> {
-        let seat = self.require_confirmation_mut()?;
-        let reply = seat.send_confirmed_true().await?;
-        if matches!(reply, FromConfirmation::DeniedByBoundary) {
-            self.deny_reason = i18n::control_deny(self.locale, &reply);
-        }
-        Ok(reply)
-    }
-
     pub async fn register_credential_intent(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
         let answer = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-            request(
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
+            request_with_timeout(
                 client,
                 session::credential_intent(&mark, SETUP_PROVIDER_OPENAI),
+                DEFAULT_REQUEST_TIMEOUT,
             )
             .await?
         };
         self.flush_pending_erasure().await;
         match answer {
             WirePayload::ManagementOutcome(outcome) => {
-                self.deny_reason = i18n::management_deny(self.locale, &outcome);
                 self.refresh_setup().await?;
                 Ok(outcome)
             }
@@ -669,15 +600,18 @@ impl DesktopRuntime {
     }
 
     pub async fn assign_model(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
         let model = self.model.clone();
         let assign = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-            request(
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
+            request_with_timeout(
                 client,
                 session::assignment_intent(&mark, SETUP_PROVIDER_OPENAI, &model),
+                DEFAULT_REQUEST_TIMEOUT,
             )
             .await?
         };
@@ -687,24 +621,28 @@ impl DesktopRuntime {
                 "assignment did not return an outcome",
             )));
         };
-        self.deny_reason = i18n::management_deny(self.locale, &outcome);
         self.refresh_setup().await?;
         if matches!(outcome, ManagementOutcome::StoredAsRuleView { .. }) {
             let mark = self.facts.mark.clone();
             let complete_answer = {
-                let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-                request(client, session::setup_complete_intent(&mark)).await?
+                let client = self.client.as_mut().ok_or_else(|| {
+                    DesktopError::Transport(String::from("client is not connected"))
+                })?;
+                request_with_timeout(
+                    client,
+                    session::setup_complete_intent(&mark),
+                    DEFAULT_REQUEST_TIMEOUT,
+                )
+                .await?
             };
             self.flush_pending_erasure().await;
             match complete_answer {
                 WirePayload::ManagementOutcome(complete) => {
-                    self.deny_reason = i18n::management_deny(self.locale, &complete);
-                    self.setup_completed = matches!(
+                    if !matches!(
                         complete,
                         ManagementOutcome::AppliedAsOneTime
                             | ManagementOutcome::StoredAsRuleView { .. }
-                    );
-                    if !self.setup_completed {
+                    ) {
                         return Ok(complete);
                     }
                 }
@@ -723,30 +661,7 @@ impl DesktopRuntime {
         Ok(outcome)
     }
 
-    pub async fn client_confirmed_true(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
-        self.refresh_setup().await?;
-        let mark = self.facts.mark.clone();
-        let answer = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-            request(client, session::confirmed_true_intent(&mark)).await?
-        };
-        self.flush_pending_erasure().await;
-        match answer {
-            WirePayload::ManagementOutcome(outcome) => {
-                self.deny_reason = i18n::management_deny(self.locale, &outcome);
-                Ok(outcome)
-            }
-            other => Err(DesktopError::Protocol(format!(
-                "expected ManagementOutcome, got {}",
-                other.message_type()
-            ))),
-        }
-    }
-
     pub fn take_client(&mut self) -> Option<Client> {
-        self.connection = i18n::label(self.locale, Label::Disconnected);
-        self.presence = String::from("unknown");
         self.tasks.reset_connection_state();
         self.client.take()
     }
@@ -755,42 +670,19 @@ impl DesktopRuntime {
         self.adopt_client(client);
     }
 
-    pub async fn reconnect(&mut self) -> Result<(), DesktopError> {
-        self.client = None;
-        self.tasks.reset_connection_state();
-        let mut attempts = 0_u8;
-        let client = loop {
-            match session::connect(&self.data_dir, DESKTOP_DESCRIPTOR).await {
-                Ok(client) => break client,
-                Err(ene_client::error::ClientError::Transport(error)) => {
-                    attempts = attempts.saturating_add(1);
-                    if attempts >= 80 {
-                        return Err(DesktopError::Client(
-                            ene_client::error::ClientError::Transport(error),
-                        ));
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                Err(error) => return Err(DesktopError::Client(error)),
-            }
-        };
-        self.adopt_client(client);
-        self.refresh_setup().await?;
-        self.refresh_history().await?;
-        self.refresh_tasks().await?;
-        Ok(())
-    }
-
     pub async fn send_text(&mut self) -> Result<(), DesktopError> {
         let Some(text) = self.composer.take_sendable() else {
             return Ok(());
         };
-        self.ensure_client()?;
         self.project_body_pose(PoseHint::Listening);
         let lang = self.locale.as_tag().to_string();
-        let collected = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-            session::submit_and_collect(client, &text, &lang).await
+        // A disconnected send takes the same failure path as a transport
+        // failure, so the typed text stays in the Owner-visible timeline.
+        let collected = match self.client.as_mut() {
+            Some(client) => session::submit_and_collect(client, &text, &lang).await,
+            None => Err(DesktopError::Transport(String::from(
+                "client is not connected",
+            ))),
         };
         match collected {
             Ok(turn) => {
@@ -808,9 +700,10 @@ impl DesktopRuntime {
                     caption: String::new(),
                 });
                 self.chat_receipt = Some((turn.round.clone(), turn.stream));
-                self.pull_presence();
                 {
-                    let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+                    let client = self.client.as_mut().ok_or_else(|| {
+                        DesktopError::Transport(String::from("client is not connected"))
+                    })?;
                     match session::confirm_chat_presentation(
                         client,
                         &turn,
@@ -822,12 +715,13 @@ impl DesktopRuntime {
                     }
                 }
                 self.flush_pending_erasure().await;
-                self.refresh_history().await?;
+                // The round is committed and painted; a failed follow-up read
+                // must not report the accepted send as a failure.
+                let _result = self.refresh_history().await;
                 Ok(())
             }
             Err(error) => {
                 self.project_body_pose(PoseHint::Attention);
-                self.deny_reason = error.to_string();
                 self.timeline.push(super::presentation::Message {
                     owner: true,
                     text,
@@ -840,9 +734,11 @@ impl DesktopRuntime {
     }
 
     pub async fn refresh_history(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let history = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             session::fetch_history(client, session::DEFAULT_HISTORY_LIMIT).await?
         };
         self.history = history;
@@ -851,20 +747,16 @@ impl DesktopRuntime {
     }
 
     pub async fn refresh_setup(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let view = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             session::fetch_setup_view(client).await?
         };
         self.facts = SetupFacts::from_view(&view);
-        self.pull_presence();
         self.flush_pending_erasure().await;
         Ok(())
-    }
-
-    pub async fn refresh_management_without_body(&mut self) -> Result<(), DesktopError> {
-        self.body_status = BodyStatus::Absent;
-        self.refresh_setup().await
     }
 
     #[must_use]
@@ -906,12 +798,15 @@ impl DesktopRuntime {
         view_request: ManagementViewRequest,
         append: bool,
     ) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let view = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-            match request(
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
+            match request_with_timeout(
                 client,
                 WirePayload::ManagementViewRequest(view_request.clone()),
+                DEFAULT_REQUEST_TIMEOUT,
             )
             .await?
             {
@@ -935,9 +830,11 @@ impl DesktopRuntime {
     }
 
     pub async fn refresh_tasks(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let result = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.tasks.refresh_list(client).await
         };
         self.flush_pending_erasure().await;
@@ -945,9 +842,11 @@ impl DesktopRuntime {
     }
 
     pub async fn select_listed_task(&mut self, index: usize) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let result = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.tasks.select(client, index).await
         };
         self.flush_pending_erasure().await;
@@ -958,11 +857,13 @@ impl DesktopRuntime {
         &mut self,
         path: &Path,
     ) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
         let result = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.tasks.select_workspace(client, &mark, path).await
         };
         self.flush_pending_erasure().await;
@@ -970,13 +871,17 @@ impl DesktopRuntime {
     }
 
     pub async fn cancel_displayed_task(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
         let result = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             let outcome = self.tasks.cancel_displayed(client, &mark).await?;
-            self.tasks.refresh_list(client).await?;
+            // The cancel already reached the Host; a failed follow-up list
+            // must not report the accepted cancel as a failure.
+            let _result = self.tasks.refresh_list(client).await;
             Ok(outcome)
         };
         self.flush_pending_erasure().await;
@@ -987,9 +892,11 @@ impl DesktopRuntime {
         &mut self,
         instruction: String,
     ) -> Result<ene_api::v1::undelivered::ResumeTaskOutcomeWire, DesktopError> {
-        self.ensure_client()?;
         let result = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.tasks.resume_displayed(client, instruction).await
         };
         self.flush_pending_erasure().await;
@@ -997,9 +904,11 @@ impl DesktopRuntime {
     }
 
     pub async fn present_task_undelivered(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let result = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.tasks.present_undelivered(client).await
         };
         self.flush_pending_erasure().await;
@@ -1009,9 +918,11 @@ impl DesktopRuntime {
     pub async fn ack_presented_tasks(
         &mut self,
     ) -> Result<ene_api::v1::undelivered::UndeliveredAckOutcome, DesktopError> {
-        self.ensure_client()?;
         let result = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.tasks.ack_presented(client).await
         };
         self.flush_pending_erasure().await;
@@ -1023,20 +934,12 @@ impl DesktopRuntime {
         self.tasks.has_presented_receipt()
     }
 
-    #[must_use]
-    pub fn displayed_task_revision(&self) -> Option<u64> {
-        self.tasks.displayed().map(|shown| shown.revision)
-    }
-
-    #[must_use]
-    pub fn displayed_task_purpose(&self) -> Option<String> {
-        self.tasks.displayed().map(|shown| shown.purpose.clone())
-    }
-
     pub async fn refresh_usage(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.usage.refresh(client).await?;
         }
         self.flush_pending_erasure().await;
@@ -1044,9 +947,11 @@ impl DesktopRuntime {
     }
 
     pub async fn next_usage_page(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.usage.next_page(client).await?;
         }
         self.flush_pending_erasure().await;
@@ -1057,53 +962,18 @@ impl DesktopRuntime {
         self.usage.set_cap_limit_micros(micros);
     }
 
-    pub fn set_usage_status_filter(&mut self, status: Option<String>) {
-        self.usage.set_status_filter(status);
-    }
-
-    pub fn set_usage_period(&mut self, from: Option<String>, to: Option<String>) {
-        self.usage.set_period(from, to);
-    }
-
-    pub fn set_usage_attribution(
-        &mut self,
-        provider: Option<String>,
-        model: Option<String>,
-        consumer: Option<String>,
-        purpose: Option<String>,
-    ) {
-        self.usage
-            .set_attribution_filters(provider, model, consumer, purpose);
-    }
-
-    pub fn set_usage_cap_slot(
-        &mut self,
-        scope: String,
-        provider: Option<String>,
-        window: String,
-        currency: String,
-    ) {
-        self.usage.set_cap_slot(scope, provider, window, currency);
-    }
-
-    pub fn set_deletion_purpose(&mut self, purpose: ene_api::v1::deletion::DeletionPurposeWire) {
-        self.deletion.set_purpose(purpose);
-    }
-
+    /// Cap mutation uses the last-read mark. Remaining on the panel is
+    /// display-only and is not consulted.
     pub async fn apply_usage_cap(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         let outcome = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.usage.apply_cap(client).await?
         };
-        self.deny_reason = i18n::management_deny(self.locale, &outcome);
         self.flush_pending_erasure().await;
         Ok(outcome)
-    }
-
-    #[must_use]
-    pub fn usage_has_unknown_cost(&self) -> bool {
-        self.usage.has_unknown_cost()
     }
 
     pub fn set_deletion_exact_text(&mut self, text: String) {
@@ -1111,32 +981,24 @@ impl DesktopRuntime {
     }
 
     pub async fn request_deletion(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         let outcome = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.deletion.request(client).await?
         };
-        self.deny_reason = i18n::management_deny(self.locale, &outcome);
         self.page = Page::Deletion;
         self.flush_pending_erasure().await;
         Ok(outcome)
     }
 
-    pub async fn deletion_confirmed_true(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
-        let outcome = {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
-            self.deletion.request_confirmed_true(client).await?
-        };
-        self.deny_reason = i18n::management_deny(self.locale, &outcome);
-        self.flush_pending_erasure().await;
-        Ok(outcome)
-    }
-
     pub async fn refresh_deletion(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         {
-            let client = self.client.as_mut().ok_or(DesktopError::DeniedByBoundary)?;
+            let client = self
+                .client
+                .as_mut()
+                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.deletion.refresh(client).await?;
         }
         self.flush_pending_erasure().await;
@@ -1165,12 +1027,10 @@ impl DesktopRuntime {
             timeline,
             history,
             composer,
-            search_draft,
             memory,
             tasks,
             usage,
             chat_receipt,
-            last_erasure,
             surface_erasure,
             ..
         } = self;
@@ -1182,37 +1042,21 @@ impl DesktopRuntime {
             })?;
             let (operation, sweep) = deletion.resume_target()?;
             let resume = seat.request_deletion_resume(&operation, sweep);
-            tokio::pin!(resume);
             match client.as_mut() {
                 Some(client) => {
                     let mut copies = GuiOwned {
                         timeline,
                         history,
                         composer,
-                        search_draft,
                         memory,
                         tasks,
                         usage,
                         deletion,
                         chat_receipt,
                     };
-                    let reply = loop {
-                        tokio::select! {
-                            outcome = &mut resume => break outcome?,
-                            () = tokio::time::sleep(Duration::from_millis(20)) => {
-                                match copies.deletion.refresh(client).await {
-                                    Ok(()) | Err(_) => {}
-                                }
-                                apply_pending_erasure(
-                                    client,
-                                    &mut copies,
-                                    last_erasure,
-                                    surface_erasure.as_ref(),
-                                )
-                                .await;
-                            }
-                        }
-                    };
+                    let reply =
+                        pump_while_pending(resume, client, &mut copies, surface_erasure.as_ref())
+                            .await?;
                     copies.deletion.note_resume(&reply);
                     reply
                 }
@@ -1230,27 +1074,6 @@ impl DesktopRuntime {
     }
 
     #[must_use]
-    pub fn deletion_phase_token(&self) -> Option<&'static str> {
-        self.deletion
-            .phase_of_first()
-            .map(ene_api::v1::deletion::DeletionPhaseWire::as_str)
-    }
-
-    #[must_use]
-    pub fn deletion_has_operations(&self) -> bool {
-        self.deletion.has_operations()
-    }
-
-    #[must_use]
-    pub fn last_erasure(&self) -> Option<&LocalErasureResult> {
-        self.last_erasure.as_ref()
-    }
-
-    pub fn set_search_draft(&mut self, text: String) {
-        self.search_draft = text;
-    }
-
-    #[must_use]
     pub fn has_chat_receipt(&self) -> bool {
         self.chat_receipt.is_some()
     }
@@ -1258,13 +1081,10 @@ impl DesktopRuntime {
     fn adopt_client(&mut self, mut client: Client) {
         client.defer_erasure();
         self.client = Some(client);
-        self.connection = i18n::label(self.locale, Label::Connected);
-        self.pull_presence();
     }
 
     async fn refresh_after_connect(&mut self) {
         if self.refresh_setup().await.is_ok() && self.facts.setup_ready() {
-            self.setup_completed = true;
             self.page = Page::Chat;
         }
         match self.refresh_history().await {
@@ -1283,20 +1103,13 @@ impl DesktopRuntime {
             timeline: &mut self.timeline,
             history: &mut self.history,
             composer: &mut self.composer,
-            search_draft: &mut self.search_draft,
             memory: &mut self.memory,
             tasks: &mut self.tasks,
             usage: &mut self.usage,
             deletion: &mut self.deletion,
             chat_receipt: &mut self.chat_receipt,
         };
-        apply_pending_erasure(
-            client,
-            &mut copies,
-            &mut self.last_erasure,
-            self.surface_erasure.as_ref(),
-        )
-        .await;
+        apply_pending_erasure(client, &mut copies, self.surface_erasure.as_ref()).await;
     }
 
     fn ensure_client(&self) -> Result<(), DesktopError> {
@@ -1308,39 +1121,11 @@ impl DesktopRuntime {
             )))
         }
     }
-
-    fn pull_presence(&mut self) {
-        self.presence = self
-            .client
-            .as_ref()
-            .and_then(Client::presence_state)
-            .map(session::presence_label)
-            .unwrap_or("unknown")
-            .to_string();
-    }
-}
-
-fn wizard_label(step: WizardStep) -> Label {
-    match step {
-        WizardStep::Language => Label::WizardLanguage,
-        WizardStep::BundledEne => Label::WizardBundledEne,
-        WizardStep::CloudCost => Label::WizardCloudCost,
-        WizardStep::Credential => Label::WizardCredential,
-        WizardStep::Assignment => Label::WizardAssignment,
-    }
-}
-
-async fn request(client: &mut Client, payload: WirePayload) -> Result<WirePayload, DesktopError> {
-    tokio::time::timeout(Duration::from_secs(15), client.request(payload))
-        .await
-        .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
-        .map_err(DesktopError::Client)
 }
 
 async fn apply_pending_erasure(
     client: &mut Client,
     copies: &mut GuiOwned<'_>,
-    last_erasure: &mut Option<LocalErasureResult>,
     surface: Option<&super::presentation::SurfaceErasure>,
 ) {
     loop {
@@ -1353,7 +1138,6 @@ async fn apply_pending_erasure(
         {
             result.unverified.append(&mut result.wiped);
         }
-        *last_erasure = Some(result.clone());
         match client.report_local_erasure(result).await {
             Ok(()) | Err(_) => {}
         }
@@ -1364,22 +1148,36 @@ async fn complete_pending_pumping(
     seat: &mut ConfirmationClient,
     client: Option<&mut Client>,
     copies: &mut GuiOwned<'_>,
-    last_erasure: &mut Option<LocalErasureResult>,
     surface: Option<&super::presentation::SurfaceErasure>,
 ) -> Result<FromConfirmation, DesktopError> {
     let Some(client) = client else {
         return seat.complete_pending().await;
     };
     let complete = seat.complete_pending();
-    tokio::pin!(complete);
+    pump_while_pending(complete, client, copies, surface).await
+}
+
+/// Drives one Client's frame pump while a seat-confirmation future is
+/// pending, so a bounded local-erasure demand raised during the wait is
+/// answered inline.
+async fn pump_while_pending<F>(
+    pump: F,
+    client: &mut Client,
+    copies: &mut GuiOwned<'_>,
+    surface: Option<&super::presentation::SurfaceErasure>,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    tokio::pin!(pump);
     loop {
         tokio::select! {
-            result = &mut complete => return result,
+            outcome = &mut pump => return outcome,
             () = tokio::time::sleep(Duration::from_millis(20)) => {
                 match copies.deletion.refresh(client).await {
                     Ok(()) | Err(_) => {}
                 }
-                apply_pending_erasure(client, copies, last_erasure, surface).await;
+                apply_pending_erasure(client, copies, surface).await;
             }
         }
     }
@@ -1431,9 +1229,9 @@ impl DesktopRuntime {
                 .cloned(),
         );
         SurfaceSnapshot {
-            japanese: locale == Locale::Ja, connected: self.client.is_some(), ready: self.facts.setup_ready() && self.setup_completed,
+            japanese: locale == Locale::Ja, connected: self.client.is_some(), ready: self.facts.setup_ready(),
             credential: self.facts.credential_present, consent: self.facts.consent_assigned,
-            model: self.facts.model.clone().unwrap_or_else(|| self.model.clone()),
+            assigned_model: self.facts.model.clone().unwrap_or_else(|| String::from(DEFAULT_MODEL)),
             step: match self.wizard_step { WizardStep::Language => 0, WizardStep::BundledEne => 1, WizardStep::CloudCost => 2, WizardStep::Credential => 3, WizardStep::Assignment => 4 },
             status: if self.client.is_some() { tr(locale, "接続済み", "Connected") } else { tr(locale, "未接続 · セットアップを確認してください", "Disconnected · review setup") },
             body_available: self.body_status == BodyStatus::Spawned && self.body.available(),
@@ -1503,5 +1301,28 @@ impl DesktopRuntime {
             return Err(DesktopError::Protocol(String::from("stale confirmation")));
         }
         self.confirm_owner().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DesktopRuntime;
+
+    #[tokio::test]
+    async fn disconnected_send_keeps_the_typed_text_in_the_timeline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut runtime = DesktopRuntime::new(dir.path().to_path_buf());
+        runtime.composer_mut().set_draft(String::from("keep me"));
+        let result = runtime.send_text().await;
+        assert!(result.is_err(), "a disconnected send must not fake success");
+        let snapshot = runtime.snapshot();
+        assert!(
+            snapshot
+                .timeline
+                .iter()
+                .any(|line| line == "[owner] keep me"),
+            "the Owner's text must stay in the timeline: {:?}",
+            snapshot.timeline
+        );
     }
 }

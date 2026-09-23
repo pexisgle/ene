@@ -12,6 +12,12 @@ const FPS_MINIMUM: f64 = 30.0;
 const INTAKE_LIMIT_SECS: f64 = 1.0;
 const IDLE_GATE_SECS: f64 = 300.0;
 
+/// The measured GUI operation whose intake and paint the campaign gate
+/// requires. Shared with the producer so a renamed label cannot silently turn
+/// every campaign Incomplete.
+pub const CANCEL_TASK_OPERATION: &str = "cancel_task";
+
+/// Role of a process included in the idle campaign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessRole {
@@ -169,55 +175,47 @@ impl PresentationRecord {
         })
     }
 
-    fn passes(&self) -> bool {
-        let mut presented = 0_u64;
-        let mut discarded = 0_u64;
-        let mut missing = 0_u64;
-        let mut ids = std::collections::BTreeSet::new();
+    /// The first presentation rejection, so the operator failure line names the
+    /// real cause instead of printing numbers that all look passing. `None`
+    /// when the presented events are accepted.
+    ///
+    /// A discarded frame is not its own rejection: it is absent from
+    /// `presented`, so it already lowers the FPS checked below. Only a
+    /// missing frame is a rejection independent of the presented count.
+    fn rejection(&self) -> Option<&'static str> {
         let mut last_timestamp = None;
         let mut timing_domain = None;
         for event in &self.events {
-            let id = match event {
-                PresentationEvent::Presented { correlation_id, .. }
-                | PresentationEvent::Discarded { correlation_id }
-                | PresentationEvent::Missing { correlation_id, .. } => *correlation_id,
-            };
-            if !ids.insert(id) {
-                return false;
-            }
-            match event {
-                PresentationEvent::Presented {
-                    timestamp_ns,
-                    clock_id,
-                    output,
-                    ..
-                } => {
-                    if output.is_empty()
-                        || last_timestamp.is_some_and(|last| *timestamp_ns <= last)
-                        || timing_domain
-                            .as_ref()
-                            .is_some_and(|domain| domain != &(*clock_id, output.as_str()))
-                    {
-                        return false;
-                    }
-                    last_timestamp = Some(*timestamp_ns);
-                    timing_domain = Some((*clock_id, output.as_str()));
-                    presented = presented.saturating_add(1);
+            if let PresentationEvent::Presented {
+                timestamp_ns,
+                clock_id,
+                output,
+                ..
+            } = event
+            {
+                if output.is_empty() {
+                    return Some("presented output is empty");
                 }
-                PresentationEvent::Discarded { .. } => discarded = discarded.saturating_add(1),
-                PresentationEvent::Missing { .. } => missing = missing.saturating_add(1),
+                if last_timestamp.is_some_and(|last| *timestamp_ns <= last) {
+                    return Some("presented timestamps are not strictly increasing");
+                }
+                if timing_domain
+                    .as_ref()
+                    .is_some_and(|domain| domain != &(*clock_id, output.as_str()))
+                {
+                    return Some("presented timing domain changed");
+                }
+                last_timestamp = Some(*timestamp_ns);
+                timing_domain = Some((*clock_id, output.as_str()));
             }
         }
-        let calculated_fps = presented as f64 / self.wall_secs;
-        self.wall_secs.is_finite()
-            && self.wall_secs > 0.0
-            && presented == self.presented
-            && discarded == self.discarded
-            && missing == self.missing
-            && (calculated_fps - self.actual_fps).abs() < f64::EPSILON
-            && discarded == 0
-            && missing == 0
-            && calculated_fps >= FPS_MINIMUM
+        if self.presented == 0 || self.actual_fps < FPS_MINIMUM {
+            return Some("presented FPS is below the minimum");
+        }
+        if self.missing != 0 {
+            return Some("frames are missing");
+        }
+        None
     }
 }
 
@@ -227,72 +225,64 @@ pub fn wayland_presentation_record(
     wall_secs: f64,
     feedback: Vec<ene_body::ipc::PresentationFeedback>,
 ) -> Result<PresentationRecord, MeasurementError> {
-    let surfaces = feedback
-        .iter()
+    let Some(surface_id) = feedback
+        .first()
         .map(|feedback| feedback.surface_id.as_str())
-        .collect::<BTreeSet<_>>();
-    if surfaces.len() != 1 {
+    else {
+        return Err(MeasurementError::PresentationTrace(String::from(
+            "Wayland feedback is empty",
+        )));
+    };
+    if feedback
+        .iter()
+        .any(|feedback| feedback.surface_id.as_str() != surface_id)
+    {
         return Err(MeasurementError::PresentationTrace(String::from(
             "Wayland feedback must correlate to exactly one surface",
         )));
     }
-    let surface_id = surfaces
-        .first()
-        .map(|surface| (*surface).to_string())
-        .ok_or_else(|| {
-            MeasurementError::PresentationTrace(String::from("Wayland feedback is empty"))
-        })?;
+    let surface_id = surface_id.to_string();
     let mut correlated = BTreeMap::<u64, Option<PresentationEvent>>::new();
     for feedback in feedback {
-        match feedback.outcome {
+        let terminal = match feedback.outcome {
             ene_body::ipc::PresentationOutcome::Submitted => {
                 if correlated.insert(feedback.correlation_id, None).is_some() {
                     return Err(MeasurementError::DuplicatePresentation(
                         feedback.correlation_id,
                     ));
                 }
+                continue;
             }
-            outcome => {
-                let terminal = match outcome {
-                    ene_body::ipc::PresentationOutcome::Presented {
-                        timestamp_ns,
-                        clock_id,
-                        output,
-                    } => PresentationEvent::Presented {
-                        correlation_id: feedback.correlation_id,
-                        timestamp_ns,
-                        clock_id,
-                        output,
-                    },
-                    ene_body::ipc::PresentationOutcome::Discarded => PresentationEvent::Discarded {
-                        correlation_id: feedback.correlation_id,
-                    },
-                    ene_body::ipc::PresentationOutcome::Missing { reason } => {
-                        PresentationEvent::Missing {
-                            correlation_id: feedback.correlation_id,
-                            reason,
-                        }
-                    }
-                    ene_body::ipc::PresentationOutcome::Submitted => {
-                        return Err(MeasurementError::DuplicatePresentation(
-                            feedback.correlation_id,
-                        ));
-                    }
-                };
-                let slot = correlated
-                    .get_mut(&feedback.correlation_id)
-                    .ok_or_else(|| {
-                        MeasurementError::PresentationTrace(format!(
-                            "terminal feedback {} has no correlated submission",
-                            feedback.correlation_id
-                        ))
-                    })?;
-                if slot.replace(terminal).is_some() {
-                    return Err(MeasurementError::DuplicatePresentation(
-                        feedback.correlation_id,
-                    ));
-                }
-            }
+            ene_body::ipc::PresentationOutcome::Presented {
+                timestamp_ns,
+                clock_id,
+                output,
+            } => PresentationEvent::Presented {
+                correlation_id: feedback.correlation_id,
+                timestamp_ns,
+                clock_id,
+                output,
+            },
+            ene_body::ipc::PresentationOutcome::Discarded => PresentationEvent::Discarded {
+                correlation_id: feedback.correlation_id,
+            },
+            ene_body::ipc::PresentationOutcome::Missing { reason } => PresentationEvent::Missing {
+                correlation_id: feedback.correlation_id,
+                reason,
+            },
+        };
+        let slot = correlated
+            .get_mut(&feedback.correlation_id)
+            .ok_or_else(|| {
+                MeasurementError::PresentationTrace(format!(
+                    "terminal feedback {} has no correlated submission",
+                    feedback.correlation_id
+                ))
+            })?;
+        if slot.replace(terminal).is_some() {
+            return Err(MeasurementError::DuplicatePresentation(
+                feedback.correlation_id,
+            ));
         }
     }
     let events = correlated
@@ -315,6 +305,16 @@ pub fn wayland_presentation_record(
     )
 }
 
+/// Imports a PresentMon CSV while retaining the raw trace path and requiring
+/// every row to correlate to the selected Body PID and swap chain.
+/// `DisplayedTime` must show a positive display duration; the display timestamp
+/// is reconstructed from `CPUStartTime + DisplayLatency`. A row whose
+/// `DisplayedTime` is `NA` is discarded, while a row without complete display
+/// timing is missing.
+///
+/// # Errors
+///
+/// Missing required columns, malformed values, or I/O.
 pub fn import_presentmon_csv(
     path: &Path,
     body_pid: u32,
@@ -340,23 +340,17 @@ pub fn import_presentmon_csv(
     let pid_column = column("ProcessID")?;
     let chain_column = column("SwapChainAddress")?;
     let displayed_column = column("DisplayedTime")?;
-    let timing_columns = match (
-        headers.iter().position(|header| header == "TimeInSeconds"),
-        headers
-            .iter()
-            .position(|header| header == "MsUntilDisplayed"),
+    let (start_column, latency_column) = match (
         headers.iter().position(|header| header == "CPUStartTime"),
         headers.iter().position(|header| header == "DisplayLatency"),
     ) {
-        (Some(start), Some(latency), _, _) => (start, latency, false),
-        (_, _, Some(start), Some(latency)) => (start, latency, true),
+        (Some(start), Some(latency)) => (start, latency),
         _ => {
             return Err(MeasurementError::PresentationTrace(String::from(
                 "missing a complete PresentMon display timing column pair",
             )));
         }
     };
-    let dropped_column = headers.iter().position(|header| header == "Dropped");
     let mut events = Vec::new();
     for row in reader.records() {
         let row = row.map_err(|error| MeasurementError::PresentationTrace(error.to_string()))?;
@@ -367,30 +361,21 @@ pub fn import_presentmon_csv(
             continue;
         }
         let start_value = row
-            .get(timing_columns.0)
+            .get(start_column)
             .and_then(|value| value.parse::<f64>().ok())
             .filter(|value| value.is_finite() && *value >= 0.0);
         let Some(start_value) = start_value else {
             continue;
         };
-        let start_secs = if timing_columns.2 {
-            start_value / 1_000.0
-        } else {
-            start_value
-        };
+        let start_secs = start_value / 1_000.0;
         if start_secs < warmup_secs || start_secs >= warmup_secs + wall_secs {
             continue;
         }
         let correlation_id = u64::try_from(events.len())
             .map_err(|_| MeasurementError::NumericOverflow)?
             .saturating_add(1);
-        let dropped = dropped_column
-            .and_then(|index| row.get(index))
-            .is_some_and(|value| {
-                value.eq_ignore_ascii_case("true") || value == "1" || value == "dropped"
-            });
         let displayed_text = row.get(displayed_column).unwrap_or_default().trim();
-        if dropped || displayed_text.eq_ignore_ascii_case("NA") {
+        if displayed_text.eq_ignore_ascii_case("NA") {
             events.push(PresentationEvent::Discarded { correlation_id });
             continue;
         }
@@ -399,7 +384,7 @@ pub fn import_presentmon_csv(
             .ok()
             .filter(|value| value.is_finite() && *value > 0.0);
         let display_latency_ms = row
-            .get(timing_columns.1)
+            .get(latency_column)
             .and_then(|value| value.parse::<f64>().ok())
             .filter(|value| value.is_finite() && *value >= 0.0);
         if let (Some(_duration), Some(display_latency_ms)) =
@@ -427,11 +412,6 @@ pub fn import_presentmon_csv(
             });
         }
     }
-    if events.is_empty() {
-        return Err(MeasurementError::PresentationTrace(format!(
-            "no rows correlate to Body PID {body_pid} swap chain {swap_chain}"
-        )));
-    }
     PresentationRecord::from_events(
         PresentationSource::WindowsDisplayTiming {
             body_pid,
@@ -444,11 +424,16 @@ pub fn import_presentmon_csv(
     )
 }
 
+/// Input-to-Host-outcome-to-painted timestamps for a first-party GUI
+/// operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InteractionSample {
     pub operation: String,
     pub input_monotonic_ns: u64,
-    pub host_intake_monotonic_ns: u64,
+    /// When this GUI received the Host outcome, including any follow-up
+    /// refresh work. An upper bound on the Host's intake instant, not an
+    /// instrumented intake timestamp.
+    pub host_outcome_monotonic_ns: u64,
     pub gui_painted_monotonic_ns: u64,
 }
 
@@ -466,8 +451,8 @@ pub fn monotonic_ns() -> u64 {
 
 impl InteractionSample {
     #[must_use]
-    pub fn intake_latency_secs(&self) -> Option<f64> {
-        self.host_intake_monotonic_ns
+    pub fn outcome_latency_secs(&self) -> Option<f64> {
+        self.host_outcome_monotonic_ns
             .checked_sub(self.input_monotonic_ns)
             .map(|ns| ns as f64 / 1_000_000_000.0)
     }
@@ -481,9 +466,9 @@ impl InteractionSample {
 
     fn passes(&self) -> bool {
         !self.operation.trim().is_empty()
-            && self.gui_painted_monotonic_ns >= self.host_intake_monotonic_ns
+            && self.gui_painted_monotonic_ns >= self.host_outcome_monotonic_ns
             && self
-                .intake_latency_secs()
+                .outcome_latency_secs()
                 .is_some_and(|latency| latency <= INTAKE_LIMIT_SECS)
             && self
                 .painted_latency_secs()
@@ -557,11 +542,6 @@ enum VerdictKind {
 
 impl MeasurementVerdict {
     pub const UNMEASURED: Self = Self(VerdictKind::Unmeasured);
-
-    #[must_use]
-    pub fn is_pass(self) -> bool {
-        self.0 == VerdictKind::Pass
-    }
 
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -643,14 +623,20 @@ impl MeasurementRecord {
                 "reproducible environment facts are incomplete",
             ));
         }
-        if !self.elapsed_wall_secs.is_finite()
-            || self.elapsed_wall_secs < IDLE_GATE_SECS
-            || self.logical_cpus == 0
-        {
+        if !self.elapsed_wall_secs.is_finite() {
+            self.failures.push(format!(
+                "idle wall {}s is not a finite duration",
+                self.elapsed_wall_secs
+            ));
+        } else if self.elapsed_wall_secs < IDLE_GATE_SECS {
             self.failures.push(format!(
                 "idle wall {:.3}s is shorter than {IDLE_GATE_SECS:.0}s",
                 self.elapsed_wall_secs
             ));
+        }
+        if self.logical_cpus == 0 {
+            self.failures
+                .push(String::from("online logical CPU count is zero"));
         }
         let mut incomplete = false;
         if let Some(cpu) = &self.cpu {
@@ -703,9 +689,9 @@ impl MeasurementRecord {
                     "presentation evidence does not correlate to the measured Body PID",
                 ));
             }
-            if !fps.passes() {
+            if let Some(reason) = fps.rejection() {
                 self.failures.push(format!(
-                    "presented FPS {:.3}, missing {}",
+                    "presented FPS {:.3}, missing {}: {reason}",
                     fps.actual_fps, fps.missing
                 ));
             }
@@ -732,7 +718,7 @@ impl MeasurementRecord {
         } else if !self
             .interactions
             .iter()
-            .any(|sample| sample.operation == "cancel_task")
+            .any(|sample| sample.operation == CANCEL_TASK_OPERATION)
         {
             self.failures
                 .push(String::from("cancel_task intake/paint is unmeasured"));
@@ -757,7 +743,7 @@ impl MeasurementRecord {
 
     #[must_use]
     pub fn claims_pass(&self) -> bool {
-        self.verdict.is_pass()
+        self.verdict.0 == VerdictKind::Pass
     }
 
     #[must_use]
@@ -832,9 +818,9 @@ impl MeasurementRecord {
         }
         for interaction in &self.interactions {
             out.push_str(&format!(
-                "Interaction {}: intake {:.6}s; painted {:.6}s\n",
+                "Interaction {}: host outcome (upper bound) {:.6}s; painted {:.6}s\n",
                 interaction.operation,
-                interaction.intake_latency_secs().unwrap_or(f64::NAN),
+                interaction.outcome_latency_secs().unwrap_or(f64::NAN),
                 interaction.painted_latency_secs().unwrap_or(f64::NAN)
             ));
         }
@@ -882,6 +868,9 @@ pub fn sample_idle(
     {
         return Err(MeasurementError::InvalidCampaign);
     }
+    #[cfg(target_os = "linux")]
+    let logical_cpus = os::logical_cpus()?;
+    #[cfg(not(target_os = "linux"))]
     let logical_cpus = u32::try_from(
         std::thread::available_parallelism()
             .map_err(MeasurementError::Io)?
@@ -893,18 +882,11 @@ pub fn sample_idle(
         .map_err(|_| MeasurementError::Clock)?
         .as_millis();
     let start = Instant::now();
-    let mut points: BTreeMap<u32, Vec<ProcessPoint>> = targets
-        .iter()
-        .map(|target| (target.pid, Vec::new()))
-        .collect();
+    let mut points: Vec<Vec<ProcessPoint>> = targets.iter().map(|_| Vec::new()).collect();
     loop {
         let offset = start.elapsed().as_secs_f64();
-        for target in targets {
-            let point = os::read_process(target.pid, offset)?;
-            let process_points = points
-                .get_mut(&target.pid)
-                .ok_or(MeasurementError::InvalidCampaign)?;
-            process_points.push(point);
+        for (target, process_points) in targets.iter().zip(&mut points) {
+            process_points.push(os::read_process(target.pid, offset)?);
         }
         if start.elapsed() >= duration {
             break;
@@ -914,10 +896,7 @@ pub fn sample_idle(
     }
     let elapsed_wall_secs = start.elapsed().as_secs_f64();
     let mut processes = Vec::with_capacity(targets.len());
-    for target in targets {
-        let process_points = points
-            .remove(&target.pid)
-            .ok_or(MeasurementError::InvalidCampaign)?;
+    for (target, process_points) in targets.iter().zip(points) {
         let first = process_points
             .first()
             .ok_or(MeasurementError::InvalidCampaign)?;
@@ -964,9 +943,6 @@ pub fn sample_idle(
         .unwrap_or(0);
     let mut rss_totals = vec![0_u64; rounds];
     for process in &processes {
-        if process.points.len() != rounds {
-            return Err(MeasurementError::UnalignedSamples);
-        }
         for (total, point) in rss_totals.iter_mut().zip(&process.points) {
             *total = total
                 .checked_add(point.rss_bytes)
@@ -1015,8 +991,6 @@ pub enum MeasurementError {
     InvalidWindow,
     #[error("duplicate presentation correlation id {0}")]
     DuplicatePresentation(u64),
-    #[error("process samples were not aligned")]
-    UnalignedSamples,
     #[error("numeric overflow")]
     NumericOverflow,
     #[error("system clock is before the Unix epoch")]
@@ -1102,6 +1076,21 @@ mod os {
                 .ok_or(MeasurementError::NumericOverflow)?,
         })
     }
+
+    /// The online logical CPU count, not the usable-parallelism estimate:
+    /// `machine_percent` is defined against all online CPUs, so process
+    /// affinity or a cgroup quota must not shrink the denominator.
+    pub(super) fn logical_cpus() -> Result<u32, MeasurementError> {
+        // SAFETY: sysconf is side-effect free for this constant and has no
+        // pointer arguments. A non-positive result is rejected below.
+        let count = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        match u32::try_from(count) {
+            Ok(count) if count > 0 => Ok(count),
+            _ => Err(MeasurementError::Io(std::io::Error::other(
+                "online logical CPU count unavailable",
+            ))),
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1183,6 +1172,18 @@ mod os {
 mod tests {
     use super::*;
 
+    /// Presented events at 30 FPS over the 10 s fixture window.
+    fn presented_events(count: u64) -> Vec<PresentationEvent> {
+        (0..count)
+            .map(|id| PresentationEvent::Presented {
+                correlation_id: id,
+                timestamp_ns: id * 33_000_000,
+                clock_id: 1,
+                output: String::from("fixture-output"),
+            })
+            .collect()
+    }
+
     fn passing_record() -> MeasurementRecord {
         let process = |role, pid| ProcessRecord {
             role,
@@ -1194,14 +1195,7 @@ mod tests {
             rss_mean_bytes: 1024,
             rss_peak_bytes: 2048,
         };
-        let events = (0..300)
-            .map(|id| PresentationEvent::Presented {
-                correlation_id: id,
-                timestamp_ns: id * 33_000_000,
-                clock_id: 1,
-                output: String::from("fixture-output"),
-            })
-            .collect();
+        let events = presented_events(300);
         MeasurementRecord {
             exact_sha: String::from("0123456789abcdef0123456789abcdef01234567"),
             build_profile: String::from("release"),
@@ -1252,7 +1246,7 @@ mod tests {
             interactions: vec![InteractionSample {
                 operation: String::from("cancel_task"),
                 input_monotonic_ns: 1_000,
-                host_intake_monotonic_ns: 100_000_000,
+                host_outcome_monotonic_ns: 100_000_000,
                 gui_painted_monotonic_ns: 200_000_000,
             }],
             click_through: Some(ClickThroughRecord {
@@ -1272,6 +1266,44 @@ mod tests {
         assert!(!record.claims_pass());
         record.evaluate();
         assert!(record.claims_pass(), "{:?}", record.failures);
+    }
+
+    #[test]
+    fn discarded_frames_do_not_fail_a_passing_presented_fps() {
+        let mut record = passing_record();
+        let source = record.fps.as_ref().expect("fps").source.clone();
+        let mut events = presented_events(300);
+        events.push(PresentationEvent::Discarded {
+            correlation_id: 300,
+        });
+        record.fps =
+            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.evaluate();
+        assert!(record.claims_pass(), "{:?}", record.failures);
+    }
+
+    #[test]
+    fn missing_frames_still_fail_a_passing_presented_fps() {
+        let mut record = passing_record();
+        let source = record.fps.as_ref().expect("fps").source.clone();
+        let mut events = presented_events(300);
+        events.push(PresentationEvent::Missing {
+            correlation_id: 300,
+            reason: String::from("feedback never resolved"),
+        });
+        record.fps =
+            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.evaluate();
+        assert_eq!(record.verdict.label(), "Fail");
+        assert!(
+            record
+                .failures
+                .iter()
+                .any(|failure| failure.starts_with("presented FPS 30.000")
+                    && failure.ends_with("frames are missing")),
+            "{:?}",
+            record.failures
+        );
     }
 
     #[test]
@@ -1311,6 +1343,34 @@ mod tests {
                 .failures
                 .iter()
                 .any(|failure| failure.starts_with("presented FPS 29.000"))
+        );
+    }
+
+    #[test]
+    fn rejected_presentation_names_the_reason_on_the_failure_line() {
+        let mut record = passing_record();
+        let source = record.fps.as_ref().expect("fps").source.clone();
+        // Every presented timestamp is valid and no frame is discarded or
+        // missing, so the empty output is the only rejection.
+        let events = (0..300)
+            .map(|id| PresentationEvent::Presented {
+                correlation_id: id,
+                timestamp_ns: id * 33_000_000,
+                clock_id: 1,
+                output: String::new(),
+            })
+            .collect();
+        record.fps =
+            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.evaluate();
+        let failure = record
+            .failures
+            .iter()
+            .find(|failure| failure.starts_with("presented FPS"))
+            .expect("the rejected presentation is reported");
+        assert!(
+            failure.contains("presented output is empty"),
+            "the operator line must name the rejection reason: {failure}"
         );
     }
 
@@ -1371,7 +1431,7 @@ mod tests {
             wayland_presentation_record(42, 1.0, 1.0, feedback).expect("correlated feedback");
         assert_eq!(record.presented, 1);
         assert_eq!(record.missing, 1);
-        assert!(!record.passes());
+        assert!(record.rejection().is_some());
     }
 
     #[test]
@@ -1403,11 +1463,11 @@ mod tests {
         assert_eq!(fps.presented, 20);
         assert_eq!(fps.discarded, 40);
         assert_eq!(fps.actual_fps, 20.0);
-        assert!(!fps.passes());
+        assert_eq!(fps.rejection(), Some("presented FPS is below the minimum"));
     }
 
     #[test]
-    fn any_discarded_feedback_prevents_pass_even_above_thirty_fps() {
+    fn discarded_feedback_does_not_reject_a_passing_presented_fps() {
         let mut events = (0..31)
             .map(|id| PresentationEvent::Presented {
                 correlation_id: id,
@@ -1427,24 +1487,9 @@ mod tests {
             events,
         )
         .expect("fps");
+        assert_eq!(fps.discarded, 1);
         assert!(fps.actual_fps >= 30.0);
-        assert!(!fps.passes());
-    }
-
-    #[test]
-    fn presentmon_missing_display_timing_is_not_presented() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("presentmon.csv");
-        std::fs::write(
-            &path,
-            "ProcessID,SwapChainAddress,TimeInSeconds,MsUntilDisplayed,DisplayedTime,Dropped\n42,0xabc,1.0,5.0,16.6,false\n42,0xabc,1.1,,,false\n42,0xabc,1.2,,,true\n",
-        )
-        .expect("trace");
-        let record = import_presentmon_csv(&path, 42, "0xabc", 0.0, 2.0).expect("import");
-        assert_eq!(record.presented, 1);
-        assert_eq!(record.missing, 1);
-        assert_eq!(record.discarded, 1);
-        assert!(!record.passes());
+        assert!(fps.rejection().is_none());
     }
 
     #[test]

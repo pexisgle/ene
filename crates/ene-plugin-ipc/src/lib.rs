@@ -1,8 +1,51 @@
+//! Length-prefixed `MessagePack` transport frames (IPC §10.1), shared by the
+//! Host listener and the Client dialer.
+//!
+//! This is a pure byte codec: it frames one domain message ([`WireFrame`]) as
+//! a 4-byte big-endian exclusive length prefix followed by the canonical
+//! `MessagePack` body (IPC §7), and parses such bytes back. It performs no
+//! I/O, owns no sockets, and runs no async tasks; socket read/write loops
+//! live in the applications that embed it.
+//!
+//! One frame carries exactly one domain message. Text streaming chunking
+//! happens at the DTO level ([`ene_api::v1::round::TextStreamFrameWire`]),
+//! never here: this layer never splits, merges, or otherwise interprets
+//! payloads. It never inspects envelope or payload semantics either; domain
+//! meaning (routing, validation, authority) stays in `ene-api` and the
+//! Host. Unknown-field tolerance comes from the named `MessagePack`
+//! encoding (structs as maps) together with the `ene-api` DTOs, not from
+//! any logic here.
+
+use std::path::Path;
+
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::payload::WirePayload;
 use serde::{Deserialize, Serialize};
 
 const LEN_PREFIX_LEN: usize = 4;
+
+/// Pipe name for one Host data directory.
+///
+/// Named pipes live in a flat per-machine namespace, so the data directory
+/// is folded into the name: FNV-1a (64-bit, fixed offsets, so the name is
+/// stable across processes) over its string form, rendered as hex. Backslash
+/// can never appear in the hex tag. One definition: the Host listener, the
+/// Client dialer, and the first-party control inlet derive the same name.
+#[must_use]
+pub fn pipe_name(data_dir: &Path) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut tag = FNV_OFFSET;
+    for byte in data_dir.as_os_str().as_encoded_bytes() {
+        tag ^= u64::from(*byte);
+        tag = tag.wrapping_mul(FNV_PRIME);
+    }
+    format!(r"\\.\pipe\ene-{tag:016x}")
+}
+
+/// Maximum `MessagePack` body length in bytes, exclusive of the prefix. The
+/// bound keeps a single hostile or corrupt length prefix from driving
+/// unbounded allocation while comfortably fitting text round-trip traffic.
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19,11 +62,14 @@ pub enum CodecError {
     Truncated { have: usize, need: usize },
     #[error("frame body failed to decode: {reason}")]
     DecodeFailed { reason: String },
+    /// The body could not be serialized as a [`WireFrame`].
+    #[error("frame body failed to encode: {reason}")]
+    EncodeFailed { reason: String },
 }
 
 pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, CodecError> {
-    let body = rmp_serde::to_vec(frame).map_err(|error| CodecError::DecodeFailed {
-        reason: std::format!("encode: {error}"),
+    let body = rmp_serde::to_vec_named(frame).map_err(|error| CodecError::EncodeFailed {
+        reason: std::format!("{error}"),
     })?;
     if body.len() > MAX_FRAME_BYTES {
         return Err(CodecError::FrameTooLarge { len: body.len() });
@@ -55,10 +101,22 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(WireFrame, usize), CodecError> {
     }
     let frame = rmp_serde::from_slice(&bytes[LEN_PREFIX_LEN..need]).map_err(|error| {
         CodecError::DecodeFailed {
-            reason: std::format!("{error}"),
+            reason: decode_reason(&error),
         }
     })?;
     Ok((frame, need))
+}
+
+/// Structural decode text without any frame-derived value. `Syntax` embeds the
+/// unexpected value (serde's `invalid_type`/`unknown variant` text), which a
+/// corrupt or cross-version body could have stuffed with conversation content.
+fn decode_reason(error: &rmp_serde::decode::Error) -> String {
+    match error {
+        rmp_serde::decode::Error::Syntax(_) => {
+            String::from("frame body does not match the expected structure")
+        }
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -99,6 +157,14 @@ mod tests {
     }
 
     #[test]
+    fn pipe_name_is_the_stable_data_directory_vector() {
+        assert_eq!(
+            super::pipe_name(std::path::Path::new("/tmp/ene-data")),
+            String::from(r"\\.\pipe\ene-2c2d8a5218b804b9"),
+        );
+    }
+
+    #[test]
     fn roundtrip_preserves_envelope_and_payload() {
         let frame = sample_frame();
         let encoded = encode_frame(&frame).expect("encode frame");
@@ -110,7 +176,7 @@ mod tests {
     #[test]
     fn prefix_is_big_endian_body_length() {
         let frame = sample_frame();
-        let body = rmp_serde::to_vec(&frame).expect("encode body");
+        let body = rmp_serde::to_vec_named(&frame).expect("encode body");
         let encoded = encode_frame(&frame).expect("encode frame");
         let body_len = u32::try_from(body.len()).expect("sample body fits in u32");
         let mut expected = body_len.to_be_bytes().to_vec();

@@ -17,6 +17,7 @@ use ene_api::v1::undelivered::{
 use ene_client::Client;
 
 use crate::ui::DesktopError;
+use crate::ui::{request_observed_with_timeout, request_with_timeout};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -29,12 +30,12 @@ pub(crate) struct TaskPanel {
     result_adopted: Option<u64>,
     action_lines: Vec<String>,
     report_rows: Vec<super::presentation::Row>,
+    /// Certainty per presented action-attempt subject, from the undelivered
+    /// receipt. Kept across report reloads so display order cannot settle it.
+    certainty: std::collections::BTreeMap<String, String>,
     workspace_path: Option<String>,
     undelivered_lines: Vec<String>,
     presented: Option<PresentedReceipt>,
-    last_resume: Option<String>,
-    last_cancel: Option<String>,
-    last_ack: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,7 @@ pub(crate) struct DisplayedTask {
 struct PresentedReceipt {
     receipt: String,
     round: RoundWireId,
+    generation: u64,
 }
 
 impl TaskPanel {
@@ -164,21 +166,7 @@ impl TaskPanel {
         } else {
             lines.push(String::from("presentation not-presented"));
         }
-        if let Some(cancel) = &self.last_cancel {
-            lines.push(format!("cancel {cancel}"));
-        }
-        if let Some(resume) = &self.last_resume {
-            lines.push(format!("resume {resume}"));
-        }
-        if let Some(ack) = &self.last_ack {
-            lines.push(format!("ack {ack}"));
-        }
         lines.join("\n")
-    }
-
-    #[must_use]
-    pub(crate) fn displayed(&self) -> Option<&DisplayedTask> {
-        self.displayed.as_ref()
     }
 
     #[must_use]
@@ -194,10 +182,6 @@ impl TaskPanel {
         };
     }
 
-    pub(crate) fn wipe_owned_copies(&mut self) {
-        self.reset_connection_state();
-    }
-
     #[must_use]
     pub(crate) fn presentation_cleared(&self) -> bool {
         self.items.is_empty()
@@ -211,21 +195,47 @@ impl TaskPanel {
     }
 
     pub(crate) async fn refresh_list(&mut self, client: &mut Client) -> Result<(), DesktopError> {
-        let answer = request(
-            client,
-            WirePayload::ListTasks(ListTasks {
-                cursor: None,
-                limit: None,
-            }),
-        )
-        .await?;
-        let WirePayload::TaskListResponse(TaskListResponse::Page(page)) = answer else {
-            return Err(DesktopError::Protocol(format!(
-                "list tasks answered {}",
-                answer.message_type()
-            )));
-        };
-        self.items = page.tasks;
+        // A Host page sized at its own bound leaves a continuation cursor;
+        // dropping it would silently truncate the list.
+        let mut cursor = None;
+        let mut items = Vec::new();
+        loop {
+            let answer = request_with_timeout(
+                client,
+                WirePayload::ListTasks(ListTasks {
+                    cursor,
+                    limit: None,
+                }),
+                REQUEST_TIMEOUT,
+            )
+            .await?;
+            let page = match answer {
+                WirePayload::TaskListResponse(TaskListResponse::Page(page)) => page,
+                WirePayload::TaskListResponse(TaskListResponse::StaleBaseView { .. }) => {
+                    return Err(DesktopError::Stale(String::from(
+                        "task list cursor is stale",
+                    )));
+                }
+                WirePayload::TaskListResponse(TaskListResponse::Unavailable) => {
+                    return Err(DesktopError::Unavailable(String::from(
+                        "task list is unavailable; retry later",
+                    )));
+                }
+                other => {
+                    return Err(DesktopError::Protocol(format!(
+                        "list tasks answered {}",
+                        other.message_type()
+                    )));
+                }
+            };
+            let next = page.next_cursor;
+            items.extend(page.tasks);
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        self.items = items;
         if let Some(shown) = &self.displayed {
             let still = self.items.iter().any(|item| same_listed_task(item, shown));
             if !still {
@@ -246,11 +256,12 @@ impl TaskPanel {
             self.items.get(index).cloned().ok_or_else(|| {
                 DesktopError::Protocol(String::from("no listed task at that index"))
             })?;
-        let answer = request(
+        let answer = request_with_timeout(
             client,
             WirePayload::SelectTask(SelectTask {
                 task: item.task.clone(),
             }),
+            REQUEST_TIMEOUT,
         )
         .await?;
         match answer {
@@ -271,6 +282,11 @@ impl TaskPanel {
                     "task ref is unknown on this connection",
                 )));
             }
+            WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable) => {
+                return Err(DesktopError::Unavailable(String::from(
+                    "task selection is unavailable; retry later",
+                )));
+            }
             other => {
                 return Err(DesktopError::Protocol(format!(
                     "select task answered {}",
@@ -278,7 +294,15 @@ impl TaskPanel {
                 )));
             }
         }
-        self.load_report(client).await
+        match self.load_report(client).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // The new identity is committed; a failed report read must not
+                // leave the previous Task's body under it.
+                self.clear_selection_body();
+                Err(error)
+            }
+        }
     }
 
     pub(crate) async fn select_workspace(
@@ -288,7 +312,7 @@ impl TaskPanel {
         path: &Path,
     ) -> Result<ManagementOutcome, DesktopError> {
         let path_text = path.to_string_lossy().into_owned();
-        let answer = request(
+        let answer = request_with_timeout(
             client,
             WirePayload::ManagementIntent(ManagementIntent {
                 intent_id: CommandWireId(uuid::Uuid::new_v4()),
@@ -301,6 +325,7 @@ impl TaskPanel {
                 },
                 confirmed: false,
             }),
+            REQUEST_TIMEOUT,
         )
         .await?;
         let WirePayload::ManagementOutcome(outcome) = answer else {
@@ -325,7 +350,7 @@ impl TaskPanel {
             .clone()
             .ok_or_else(|| DesktopError::Protocol(String::from("cancel needs a displayed task")))?;
         let task = task_id_from_purpose(&shown.purpose)?;
-        let answer = request(
+        let answer = request_with_timeout(
             client,
             WirePayload::ManagementIntent(ManagementIntent {
                 intent_id: CommandWireId(uuid::Uuid::new_v4()),
@@ -338,6 +363,7 @@ impl TaskPanel {
                 },
                 confirmed: false,
             }),
+            REQUEST_TIMEOUT,
         )
         .await?;
         let WirePayload::ManagementOutcome(outcome) = answer else {
@@ -346,7 +372,6 @@ impl TaskPanel {
                 answer.message_type()
             )));
         };
-        self.last_cancel = Some(cancel_label(&outcome, shown.running));
         Ok(outcome)
     }
 
@@ -365,18 +390,14 @@ impl TaskPanel {
             )));
         }
         let command = resume_from_displayed(&shown, instruction);
-        let prepared = client.prepare(WirePayload::ResumeTask(command));
-        let answer = tokio::time::timeout(REQUEST_TIMEOUT, client.execute(&prepared))
-            .await
-            .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
-            .map_err(DesktopError::Client)?;
+        let answer =
+            request_with_timeout(client, WirePayload::ResumeTask(command), REQUEST_TIMEOUT).await?;
         let WirePayload::ResumeTaskOutcome(outcome) = answer else {
             return Err(DesktopError::Protocol(format!(
                 "resume answered {}",
                 answer.message_type()
             )));
         };
-        self.last_resume = Some(resume_label(&outcome, shown.revision, &shown.purpose));
         Ok(outcome)
     }
 
@@ -384,9 +405,10 @@ impl TaskPanel {
         &mut self,
         client: &mut Client,
     ) -> Result<(), DesktopError> {
-        let mut summary = take_pushed_summary(client);
-        if summary.is_none() {
-            let answer = request(
+        let summary = if let Some(summary) = take_pushed_summary(client) {
+            summary
+        } else {
+            let answer = request_with_timeout(
                 client,
                 WirePayload::UndeliveredRequest(UndeliveredRequest {
                     companion: None,
@@ -394,11 +416,15 @@ impl TaskPanel {
                     limit: None,
                     redisplay: false,
                 }),
+                REQUEST_TIMEOUT,
             )
             .await?;
             match answer {
-                WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(page)) => {
-                    summary = Some(page);
+                WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(page)) => page,
+                WirePayload::UndeliveredResponse(UndeliveredResponse::Unavailable) => {
+                    return Err(DesktopError::Unavailable(String::from(
+                        "the undelivered pass could not be read; retry later",
+                    )));
                 }
                 WirePayload::UndeliveredResponse(other) => {
                     return Err(DesktopError::Protocol(format!(
@@ -412,11 +438,6 @@ impl TaskPanel {
                     )));
                 }
             }
-        }
-        let Some(summary) = summary else {
-            self.undelivered_lines.clear();
-            self.presented = None;
-            return Ok(());
         };
         self.undelivered_lines = summary
             .items
@@ -435,10 +456,20 @@ impl TaskPanel {
                 report.task.0, report.revision, report.progress
             ));
         }
-        merge_action_certainty(&mut self.action_lines, &summary);
+        self.certainty = summary
+            .items
+            .iter()
+            .filter_map(|item| {
+                item.source
+                    .certainty
+                    .as_ref()
+                    .map(|certainty| (item.source.subject.clone(), certainty.clone()))
+            })
+            .collect();
         self.presented = Some(PresentedReceipt {
             receipt: summary.receipt.0,
             round: summary.round,
+            generation: summary.presence_generation,
         });
         Ok(())
     }
@@ -452,29 +483,28 @@ impl TaskPanel {
                 "ack requires a presented receipt",
             )));
         };
-        let answer = tokio::time::timeout(
+        let answer = request_observed_with_timeout(
+            client,
+            WirePayload::UndeliveredAck(UndeliveredAck {
+                receipt: ene_api::v1::undelivered::PresentationReceiptWireRef(presented.receipt),
+                status: PresentationStatus::Presented,
+            }),
+            Some(presented.round),
+            Some(presented.generation),
             REQUEST_TIMEOUT,
-            client.request_observed(
-                WirePayload::UndeliveredAck(UndeliveredAck {
-                    receipt: ene_api::v1::undelivered::PresentationReceiptWireRef(
-                        presented.receipt,
-                    ),
-                    status: PresentationStatus::Presented,
-                }),
-                Some(presented.round),
-            ),
         )
-        .await
-        .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
-        .map_err(DesktopError::Client)?;
+        .await?;
         let WirePayload::UndeliveredAckOutcome(outcome) = answer else {
             return Err(DesktopError::Protocol(format!(
                 "ack answered {}",
                 answer.message_type()
             )));
         };
-        self.last_ack = Some(ack_label(&outcome));
-        self.presented = None;
+        // `Unavailable` means the Host wrote no status; the receipt is still
+        // valid and retryable, so keep it for a later ACK.
+        if !matches!(outcome, UndeliveredAckOutcome::Unavailable) {
+            self.presented = None;
+        }
         Ok(outcome)
     }
 
@@ -483,34 +513,58 @@ impl TaskPanel {
             .displayed
             .clone()
             .ok_or_else(|| DesktopError::Protocol(String::from("report needs a displayed task")))?;
-        let answer = request(
-            client,
-            WirePayload::GetTaskReport(GetTaskReport {
-                task: TaskWireRef(shown.task.clone()),
-                cursor: None,
-                limit: None,
-            }),
-        )
-        .await?;
-        let page = match answer {
-            WirePayload::TaskReportResponse(TaskReportResponse::Page(page)) => page,
-            WirePayload::TaskReportResponse(TaskReportResponse::UnknownRef) => {
-                return Err(DesktopError::Protocol(String::from(
-                    "task report ref is unknown",
-                )));
+        // A report larger than one Host page reports a continuation cursor;
+        // merge every page before applying so no attempt or result is lost.
+        let mut cursor = None;
+        let mut merged: Option<TaskReportPage> = None;
+        loop {
+            let answer = request_with_timeout(
+                client,
+                WirePayload::GetTaskReport(GetTaskReport {
+                    task: TaskWireRef(shown.task.clone()),
+                    cursor,
+                    limit: None,
+                }),
+                REQUEST_TIMEOUT,
+            )
+            .await?;
+            let page = match answer {
+                WirePayload::TaskReportResponse(TaskReportResponse::Page(page)) => page,
+                WirePayload::TaskReportResponse(TaskReportResponse::UnknownRef) => {
+                    return Err(DesktopError::Protocol(String::from(
+                        "task report ref is unknown",
+                    )));
+                }
+                WirePayload::TaskReportResponse(TaskReportResponse::StaleBaseView { .. }) => {
+                    return Err(DesktopError::Stale(String::from(
+                        "task report cursor is stale",
+                    )));
+                }
+                WirePayload::TaskReportResponse(TaskReportResponse::Unavailable) => {
+                    return Err(DesktopError::Unavailable(String::from(
+                        "task report is unavailable; retry later",
+                    )));
+                }
+                other => {
+                    return Err(DesktopError::Protocol(format!(
+                        "task report answered {}",
+                        other.message_type()
+                    )));
+                }
+            };
+            let next = page.next_cursor.clone();
+            if let Some(existing) = merged.as_mut() {
+                existing.rows.extend(page.rows);
+            } else {
+                merged = Some(page);
             }
-            WirePayload::TaskReportResponse(TaskReportResponse::StaleBaseView { .. }) => {
-                return Err(DesktopError::Protocol(String::from(
-                    "task report cursor is stale",
-                )));
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
             }
-            other => {
-                return Err(DesktopError::Protocol(format!(
-                    "task report answered {}",
-                    other.message_type()
-                )));
-            }
-        };
+        }
+        let page = merged
+            .ok_or_else(|| DesktopError::Protocol(String::from("task report returned no page")))?;
         self.apply_report(client, page).await
     }
 
@@ -525,9 +579,7 @@ impl TaskPanel {
                     "task report premise changed",
                 )));
             }
-            shown.revision = page.revision;
             shown.progress = page.progress.clone();
-            shown.purpose = page.purpose.clone();
         }
         self.purpose_text = load_source(client, &page.purpose_source).await?;
         self.result_text.clear();
@@ -541,8 +593,17 @@ impl TaskPanel {
                 } else {
                     String::new()
                 };
+                // The attempt's certainty is receipt state, not report state;
+                // carrying it onto the row is what the card can show.
+                let meta = if row.kind == "action_attempt" {
+                    let certainty = self.certainty.get(&row.id).map_or("unset", String::as_str);
+                    format!("{} certainty={certainty}", row.id)
+                } else {
+                    String::new()
+                };
                 self.report_rows.push(super::presentation::Row {
                     body,
+                    meta,
                     ..Default::default()
                 });
             }
@@ -560,8 +621,9 @@ impl TaskPanel {
                         .push(format!("task_result {} {adopted}", row.id));
                 }
                 "action_attempt" => {
+                    let certainty = self.certainty.get(&row.id).map_or("unset", String::as_str);
                     self.action_lines
-                        .push(format!("action_attempt {} certainty=unset", row.id));
+                        .push(format!("action_attempt {} certainty={certainty}", row.id));
                 }
                 other => {
                     self.action_lines.push(format!("{other} {}", row.id));
@@ -571,6 +633,9 @@ impl TaskPanel {
         Ok(())
     }
 
+    /// Drops the selected Task's report body only. The undelivered receipt
+    /// and certainty are Host presentation facts; only
+    /// `reset_connection_state` or an explicit ACK may drop them.
     fn clear_selection_body(&mut self) {
         self.displayed = None;
         self.purpose_text.clear();
@@ -578,8 +643,6 @@ impl TaskPanel {
         self.result_adopted = None;
         self.action_lines.clear();
         self.report_rows.clear();
-        self.undelivered_lines.clear();
-        self.presented = None;
     }
 
     fn sync_lifecycle_from_list(&mut self) {
@@ -630,39 +693,6 @@ fn task_id_from_purpose(purpose: &str) -> Result<uuid::Uuid, DesktopError> {
         .map_err(|_| DesktopError::Protocol(String::from("purpose identity is not a task id")))
 }
 
-fn cancel_label(outcome: &ManagementOutcome, was_running: bool) -> String {
-    match outcome {
-        ManagementOutcome::AppliedAsOneTime if was_running => {
-            String::from("accepted (stop not yet complete)")
-        }
-        ManagementOutcome::AppliedAsOneTime => String::from("accepted"),
-        other => format!("{other:?}"),
-    }
-}
-
-fn resume_label(outcome: &ResumeTaskOutcomeWire, expected: u64, purpose: &str) -> String {
-    match outcome {
-        ResumeTaskOutcomeWire::Resumed { revision, .. } => {
-            format!("resumed revision {revision}")
-        }
-        ResumeTaskOutcomeWire::StalePremise { current_revision } => {
-            format!("stale displayed-rev {expected} purpose {purpose} current {current_revision}")
-        }
-        ResumeTaskOutcomeWire::TaskTerminal { progress } => {
-            format!("terminal {progress}")
-        }
-        other => format!("{other:?}"),
-    }
-}
-
-fn ack_label(outcome: &UndeliveredAckOutcome) -> String {
-    match outcome {
-        UndeliveredAckOutcome::Presented { presented } => format!("presented {presented}"),
-        UndeliveredAckOutcome::AlreadyPresented => String::from("already-presented"),
-        other => format!("{other:?}"),
-    }
-}
-
 fn take_pushed_summary(client: &mut Client) -> Option<UndeliveredSummary> {
     let mut found = None;
     for frame in client.take_undelivered() {
@@ -676,22 +706,6 @@ fn take_pushed_summary(client: &mut Client) -> Option<UndeliveredSummary> {
     found
 }
 
-fn merge_action_certainty(action_lines: &mut [String], summary: &UndeliveredSummary) {
-    for item in &summary.items {
-        if item.source.kind != "action_attempt" {
-            continue;
-        }
-        let Some(certainty) = &item.source.certainty else {
-            continue;
-        };
-        for line in action_lines.iter_mut() {
-            if line.contains(&item.source.subject) && line.contains("certainty=unset") {
-                *line = line.replace("certainty=unset", &format!("certainty={certainty}"));
-            }
-        }
-    }
-}
-
 async fn load_source(
     client: &mut Client,
     source: &ReportSourceWireRef,
@@ -699,13 +713,14 @@ async fn load_source(
     let mut cursor = None;
     let mut text = String::new();
     loop {
-        let answer = request(
+        let answer = request_with_timeout(
             client,
             WirePayload::GetReportSource(GetReportSource {
                 source: source.clone(),
                 cursor,
                 limit_bytes: None,
             }),
+            REQUEST_TIMEOUT,
         )
         .await?;
         match answer {
@@ -733,9 +748,103 @@ async fn load_source(
     Ok(text)
 }
 
-async fn request(client: &mut Client, payload: WirePayload) -> Result<WirePayload, DesktopError> {
-    tokio::time::timeout(REQUEST_TIMEOUT, client.request(payload))
-        .await
-        .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
-        .map_err(DesktopError::Client)
+#[cfg(test)]
+mod tests {
+    use super::{
+        DisplayedTask, PresentedReceipt, TaskPanel, is_interrupted, resume_from_displayed,
+        same_listed_task, task_id_from_purpose,
+    };
+    use ene_api::v1::undelivered::{TaskListItem, TaskWireRef};
+
+    fn shown(revision: u64) -> DisplayedTask {
+        DisplayedTask {
+            task: String::from("wire-1"),
+            revision,
+            purpose: String::from("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1"),
+            progress: String::from("in_progress"),
+            running: false,
+        }
+    }
+
+    #[test]
+    fn interrupted_is_in_progress_without_execution_registration() {
+        let mut item = shown(1);
+        assert!(is_interrupted(&item));
+        item.running = true;
+        assert!(!is_interrupted(&item));
+        item.running = false;
+        item.progress = String::from("cancelled");
+        assert!(!is_interrupted(&item));
+        item.progress = String::from("failed");
+        assert!(!is_interrupted(&item));
+        item.progress = String::from("completed");
+        assert!(!is_interrupted(&item));
+    }
+
+    #[test]
+    fn resume_command_echoes_the_displayed_premise_not_a_later_list() {
+        let displayed = shown(1);
+        let mut latest = displayed.clone();
+        latest.revision = 4;
+        latest.purpose = String::from("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:4");
+        let command = resume_from_displayed(&displayed, String::from("continue remaining work"));
+        assert_eq!(command.task, TaskWireRef(String::from("wire-1")));
+        assert_eq!(command.expected_revision, 1);
+        assert_eq!(
+            command.expected_purpose,
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1"
+        );
+        assert_ne!(command.expected_revision, latest.revision);
+    }
+
+    #[test]
+    fn purpose_identity_yields_the_management_task_target() {
+        let id = task_id_from_purpose("01234567-89ab-cdef-0123-456789abcdef:3")
+            .expect("purpose identity parses");
+        assert_eq!(id.to_string(), "01234567-89ab-cdef-0123-456789abcdef");
+    }
+
+    #[test]
+    fn clearing_the_selection_body_keeps_the_presentation_receipt() {
+        let mut panel = TaskPanel {
+            presented: Some(PresentedReceipt {
+                receipt: String::from("receipt-1"),
+                round: ene_api::v1::refs::RoundWireId(String::from("round-1")),
+                generation: 3,
+            }),
+            undelivered_lines: vec![String::from("undelivered 1")],
+            ..TaskPanel::default()
+        };
+        panel.clear_selection_body();
+        assert!(
+            panel.has_presented_receipt(),
+            "a receipt is a Host presentation fact, not part of the selection body"
+        );
+        assert_eq!(panel.undelivered_lines.len(), 1);
+    }
+
+    #[test]
+    fn list_refresh_keeps_the_displayed_premise_when_wire_refs_rotate() {
+        let shown = shown(1);
+        let mut rotated = TaskListItem {
+            task: TaskWireRef(String::from("wire-2")),
+            revision: 2,
+            progress: String::from("in_progress"),
+            running: true,
+            purpose: shown.purpose.clone(),
+        };
+        assert!(same_listed_task(&rotated, &shown));
+        rotated.purpose = String::from("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:4");
+        assert!(!same_listed_task(&rotated, &shown));
+    }
+
+    #[test]
+    fn resume_debug_does_not_carry_the_instruction() {
+        let command = resume_from_displayed(&shown(1), String::from("sk-should-not-leak"));
+        let rendered = format!("{command:?}");
+        assert!(
+            !rendered.contains("sk-should-not-leak"),
+            "instruction redacted: {rendered}"
+        );
+    }
 }

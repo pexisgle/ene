@@ -195,6 +195,27 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<CliCommand, CliError> {
     }
 }
 
+/// `Stage 2` Host entrypoint: parse arguments, load configuration, then stop,
+/// serve, or approve.
+///
+/// Without a subcommand this keeps the `Stage 1` behavior: [`Config::load`]
+/// (which validates), and [`ene_config::resolve_data_dir`] proof with no
+/// effects. With `serve` it resolves the data directory (which must exist
+/// as a value: an unresolvable directory is a [`CoreError::Store`] failure,
+/// since serving without durable state is meaningless) and blocks on
+/// [`serve::serve`] under a multi-threaded `Tokio` runtime. With
+/// `approve-device` it resolves the data directory the same way and approves
+/// one pending pairing by its exact `--pending` id (surrounding whitespace
+/// trimmed), or lists `pending-id descriptor` lines when `--pending` is
+/// omitted.
+///
+/// `--help` and `--version` are standard successful exits handled by `clap`
+/// before configuration is loaded, so they have no side effects.
+///
+/// # Errors
+///
+/// Returns [`CliError::Usage`] for argument misuse, [`CliError::Config`] when
+/// [`Config::load`] fails, and [`CliError::Serve`] when `serve` mode fails.
 fn main() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let matches = match ene_core_command()
@@ -220,18 +241,12 @@ fn main() -> Result<(), CliError> {
             provider,
             label,
         } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             run_approve_credential(&data_dir, provider.trim(), label.trim())?;
             Ok(())
         }
         CliCommand::ApproveDevice { config, pending } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             let Some(pending) = pending else {
                 list_pending_devices(&data_dir)?;
                 return Ok(());
@@ -245,10 +260,7 @@ fn main() -> Result<(), CliError> {
             Ok(())
         }
         CliCommand::Serve { config } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             run_serve(&data_dir)?;
             Ok(())
         }
@@ -257,18 +269,12 @@ fn main() -> Result<(), CliError> {
             after,
             limit,
         } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             run_pending_deletions(&data_dir, after.as_deref(), limit)?;
             Ok(())
         }
         CliCommand::ConfirmDeletion { config, request } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             let request = request.trim();
             if request.is_empty() {
                 return Err(CliError::Usage(
@@ -283,10 +289,7 @@ fn main() -> Result<(), CliError> {
             cursor,
             limit,
         } => {
-            let cfg = Config::load(config.as_deref())?;
-            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-                return Err(CoreError::Store("no data directory resolved".to_string()).into());
-            };
+            let data_dir = load_data_dir(config.as_deref())?;
             run_deletion_status(&data_dir, cursor.as_deref(), limit)?;
             Ok(())
         }
@@ -298,6 +301,20 @@ fn main() -> Result<(), CliError> {
     }
 }
 
+/// Loads the configuration and requires a resolvable data directory.
+fn load_data_dir(config: Option<&Path>) -> Result<PathBuf, CliError> {
+    let cfg = Config::load(config)?;
+    ene_config::resolve_data_dir(&cfg).ok_or_else(|| {
+        CliError::Serve(CoreError::Store(String::from("no data directory resolved")))
+    })
+}
+
+/// Builds the multi-threaded `Tokio` runtime the store-backed tasks run on
+/// and blocks on `task`.
+///
+/// A runtime that cannot be built is a [`CoreError::Store`] failure: the
+/// runtime is the async substrate of the store-backed Host, and no narrower
+/// variant names it.
 fn block_on<F>(task: F) -> Result<(), CoreError>
 where
     F: std::future::Future<Output = Result<(), CoreError>>,
@@ -332,29 +349,57 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
     block_on(serve::serve(data_dir))
 }
 
+/// An unknown pending id fails with the pending id set so the Owner
+/// can retry with the exact value; descriptors are display strings only.
+///
+/// No serving Host means refusal: this command never mutates the store
+/// offline (first-party-desktop §5.1.5). While a Host is serving, the
+/// approval is recorded in the serving process through the Host-local
+/// control inlet. The one-time pairing provision travels only on the
+/// authentication frame to the originating pairing connection, never to
+/// this command's stdout, and an occupied seat never falls through to the
+/// Client channel.
+///
+/// # Errors
+///
+/// [`CoreError::HostUnavailable`] when no Host is serving,
+/// [`CoreError::Control`] when the requester inlet is unreachable,
+/// [`CoreError::Store`] when the single-writer lock cannot be inspected,
+/// [`CoreError::Approve`] when the settled outcome cannot be shown, and
+/// [`CoreError::UnsupportedPlatform`] without a Host-local control transport.
 fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
+    run_requester(
+        data_dir,
+        "device approval",
+        ene_core::host_control::request_device_approve(data_dir, pending_id),
+    )
+}
+
+/// Runs one requester exchange under the serving-Host premise: an acquirable
+/// writer lock means no Host is serving, so the command refuses with
+/// `HostUnavailable` instead of opening the state offline
+/// (first-party-desktop §5.1.5).
+fn run_requester(
+    data_dir: &Path,
+    what: &str,
+    request: impl std::future::Future<Output = Result<ene_local_control::RequestState, CoreError>>,
+) -> Result<(), CoreError> {
     use ene_core::host_lock::HostLock;
 
-    block_on(async {
+    block_on(async move {
         match HostLock::acquire(data_dir) {
-            Ok(_lock) => Err(host_not_serving()),
+            Ok(_lock) => Err(CoreError::HostUnavailable),
             Err(CoreError::AlreadyRunning) => {
-                let state =
-                    ene_core::host_control::request_device_approve(data_dir, pending_id).await?;
-                show_requester_state("device approval", &state)
+                let state = request.await?;
+                show_requester_state(what, &state)
             }
             Err(error) => Err(error),
         }
     })
 }
 
-fn host_not_serving() -> CoreError {
-    CoreError::Approve(String::from(
-        "the Host is not serving; start `ene-core serve` and retry — the Owner's \
-         confirmation surface runs there, and an offline command cannot record one",
-    ))
-}
-
+/// Shows one requester request's settled state. Secrets never appear here: the
+/// pairing provision and the credential value belong to their own channels.
 fn show_requester_state(
     what: &str,
     state: &ene_local_control::RequestState,
@@ -410,23 +455,40 @@ fn show_requester_state(
         .map_err(|error| CoreError::Approve(format!("the outcome could not be shown: {error}")))
 }
 
+/// The pair is named, never the value: the Owner's confirmation surface opens
+/// the intake, and an unknown or refused pair is reported from the settled
+/// `RequesterOutcome`. The raw value is entered on that surface and never on
+/// this command line. No serving Host means refusal, never an offline store
+/// open (`host_control::request_credential_put`).
+///
+/// # Errors
+///
+/// [`CoreError::HostUnavailable`] when no Host is serving,
+/// [`CoreError::Control`] when the requester inlet is unreachable,
+/// [`CoreError::Store`] when the single-writer lock cannot be inspected,
+/// [`CoreError::Approve`] when the settled outcome cannot be shown, and
+/// [`CoreError::UnsupportedPlatform`] without a Host-local control transport.
 fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
-    use ene_core::host_lock::HostLock;
-
-    block_on(async {
-        match HostLock::acquire(data_dir) {
-            Ok(_lock) => Err(host_not_serving()),
-            Err(CoreError::AlreadyRunning) => {
-                let state =
-                    ene_core::host_control::request_credential_put(data_dir, provider, label)
-                        .await?;
-                show_requester_state("credential registration", &state)
-            }
-            Err(error) => Err(error),
-        }
-    })
+    run_requester(
+        data_dir,
+        "credential registration",
+        ene_core::host_control::request_credential_put(data_dir, provider, label),
+    )
 }
 
+/// Prints the Targeted Deletion requests awaiting the Owner's confirmation,
+/// one `<request-id> <purpose> <exact-text>` line each.
+///
+/// This is the Host-local trusted preview (IPC §18.1): the exact target text is
+/// shown here, on the Owner's own console, and nowhere else. The request
+/// identity is Host-minted and never travels the wire, so no Client can name —
+/// let alone confirm — one.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
+/// cannot be opened, and [`CoreError::Deletion`] for a malformed `--after`
+/// identity or a `--limit` outside `1..=100`.
 fn run_pending_deletions(
     data_dir: &Path,
     after: Option<&str>,
@@ -434,6 +496,11 @@ fn run_pending_deletions(
 ) -> Result<(), CoreError> {
     use std::io::Write as _;
 
+    if !(1..=100).contains(&limit) {
+        return Err(CoreError::Deletion(String::from(
+            "pending-deletions limit must be 1..=100",
+        )));
+    }
     let after = match after {
         None => None,
         Some(raw) => Some(parse_deletion_request_id(raw)?),
@@ -446,7 +513,7 @@ fn run_pending_deletions(
             writeln!(
                 stdout,
                 "{} {} {}",
-                deletion_request_id_text(request),
+                raw_id_text(request.request().as_raw()),
                 request.purpose().as_str(),
                 request.owner_review_text()
             )
@@ -461,6 +528,30 @@ fn run_pending_deletions(
     })
 }
 
+/// Records one Owner confirmation and starts the canonical Targeted Deletion
+/// operation (IPC §18.1) through the serving Host's Host-local first-party
+/// control inlet, then prints the operation identity the status view reports.
+///
+/// The confirmation must run in the serving process. The required
+/// participant snapshot includes every Client incarnation with durable
+/// body-delivery evidence, and only the serving process can reach those
+/// incarnations through its live connection table (lifecycle §8.1); an
+/// offline state open could name them but could never complete their local
+/// erasure, so this command never admits from an offline handle. It dials
+/// [`ene_core::host_control`] and reports the serving Host's typed outcome;
+/// when no Host is serving it fails with recovery guidance instead of
+/// confirming.
+///
+/// An unknown request id fails with the pending id set (never their target
+/// text, which stays on the `pending-deletions` preview).
+///
+/// # Errors
+///
+/// Returns [`CoreError::Control`] when the serving Host is not reachable on
+/// the control inlet or the confirmation is refused (no surface, declined,
+/// still awaiting) or malformed, [`CoreError::Deletion`] for an unknown or
+/// inadmissible request, and [`CoreError::Store`] when the pending-id
+/// fallback cannot be read.
 fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError> {
     use std::io::Write as _;
 
@@ -470,24 +561,24 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
     block_on(async move {
         let outcome = ene_core::host_control::confirm_targeted_deletion(
             data_dir,
-            &deletion_request_id_text_of(request_id),
+            &raw_id_text(request_id.as_raw()),
         )
         .await?;
         let mut stdout = std::io::stdout().lock();
         let line = match outcome {
             ConfirmTargetedDeletionOutcome::Started(operation) => format!(
                 "started {} sweep {}",
-                deletion_operation_text(operation),
+                raw_id_text(operation.operation.as_raw()),
                 operation.sweep.as_u64()
             ),
             ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(operation) => format!(
                 "already covered by {} sweep {}",
-                deletion_operation_text(operation),
+                raw_id_text(operation.operation.as_raw()),
                 operation.sweep.as_u64()
             ),
             ConfirmTargetedDeletionOutcome::HeldByOperation(operation) => format!(
                 "held by {} sweep {}",
-                deletion_operation_text(operation),
+                raw_id_text(operation.operation.as_raw()),
                 operation.sweep.as_u64()
             ),
             ConfirmTargetedDeletionOutcome::NeedsClarification => {
@@ -502,7 +593,7 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
                     "unknown deletion request {request:?}; pending: [{}]",
                     pending
                         .iter()
-                        .map(deletion_request_id_text)
+                        .map(|request| raw_id_text(request.request().as_raw()))
                         .collect::<Vec<String>>()
                         .join(", ")
                 )));
@@ -518,19 +609,24 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
     })
 }
 
+/// Prints the same bounded deletion status page the wire view renders: the
+/// surface mark, then one line per operation, then the next cursor while a
+/// later page exists. No target body, search material, or credential appears
+/// here.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
+/// cannot be opened, and [`CoreError::Deletion`] for a malformed cursor, a
+/// `--limit` outside `1..=50`, or an unreadable surface.
 fn run_deletion_status(data_dir: &Path, cursor: Option<&str>, limit: u32) -> Result<(), CoreError> {
     use std::io::Write as _;
 
-    use ene_api::v1::deletion::{DeletionParticipantReportWire, DeletionStatusResponse};
+    use ene_api::v1::deletion::DeletionParticipantReportWire;
 
     block_on(async move {
         let handle = HostHandle::open(data_dir).await?;
-        let response = handle.deletion_status_page(cursor, limit).await?;
-        let DeletionStatusResponse::Page(page) = response else {
-            return Err(CoreError::Deletion(String::from(
-                "deletion status is unavailable",
-            )));
-        };
+        let page = handle.deletion_status_page(cursor, limit).await?;
         let mut stdout = std::io::stdout().lock();
         writeln!(stdout, "mark {}", page.mark.0).map_err(|error| {
             CoreError::Store(format!("deletion status could not be shown: {error}"))
@@ -578,19 +674,6 @@ fn parse_deletion_request_id(raw: &str) -> Result<ene_preservation::DeletionRequ
         .map_err(|_| CoreError::Deletion(String::from("request ID is not a canonical UUID")))
 }
 
-fn deletion_request_id_text(request: &ene_preservation::TargetedDeletionRequest) -> String {
-    deletion_request_id_text_of(request.request())
-}
-
-fn deletion_request_id_text_of(request: ene_preservation::DeletionRequestId) -> String {
-    request.as_raw().as_uuid().as_hyphenated().to_string()
-}
-
-fn deletion_operation_text(operation: ene_preservation::DeletionOperationRef) -> String {
-    operation
-        .operation
-        .as_raw()
-        .as_uuid()
-        .as_hyphenated()
-        .to_string()
+fn raw_id_text(raw: ene_primitive::RawId) -> String {
+    raw.as_uuid().as_hyphenated().to_string()
 }

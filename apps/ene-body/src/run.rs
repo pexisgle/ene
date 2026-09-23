@@ -7,8 +7,8 @@ use tokio::sync::Mutex;
 
 use crate::error::BodyError;
 use crate::ipc::{
-    AssetReadyInfo, AssetRef, BodyToParent, HEALTH_INTERVAL, MotionSetInfo, ParentToBody,
-    ReadyInfo, decode_parent, encode_body,
+    AssetRef, BodyToParent, HEALTH_INTERVAL, LocalUiFact, MotionSetInfo, ParentToBody, ReadyInfo,
+    decode_parent, encode_body,
 };
 use crate::vrm::VrmSession;
 use crate::window::Overlay;
@@ -25,15 +25,11 @@ pub enum IpcEndpoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunOptions {
     pub try_gpu: bool,
-    pub try_native_overlay: bool,
 }
 
 impl Default for RunOptions {
     fn default() -> Self {
-        Self {
-            try_gpu: true,
-            try_native_overlay: true,
-        }
+        Self { try_gpu: true }
     }
 }
 
@@ -163,11 +159,7 @@ where
     W: AsyncWrite + Unpin + Send,
 {
     let writer = Mutex::new(writer);
-    let mut overlay = if options.try_native_overlay {
-        Overlay::open(options.try_gpu)
-    } else {
-        Overlay::unavailable("native overlay disabled by test options")
-    };
+    let mut overlay = Overlay::open(options.try_gpu);
     let mut vrm = VrmSession::new();
 
     send(
@@ -175,12 +167,11 @@ where
         &BodyToParent::Ready(ReadyInfo {
             overlay: overlay.kind(),
             gpu: overlay.gpu_status(),
-            expressions: vrm.expressions(),
-            spring_bone: vrm.spring_bone(),
         }),
     )
     .await?;
     let mut reported_gpu_failure = overlay.gpu_failure();
+    let mut reported_asset_failure: Option<crate::ipc::AssetFailInfo> = None;
     if let Some(info) = reported_gpu_failure {
         send(&writer, &BodyToParent::GpuFail(info)).await?;
     }
@@ -192,11 +183,14 @@ where
     let mut tmp = [0u8; 4096];
     let mut health = tokio::time::interval(HEALTH_INTERVAL);
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    const RUNTIME_HZ: f32 = 60.0;
-    let mut runtime_tick = tokio::time::interval(std::time::Duration::from_nanos(16_666_667));
+    // Single cadence source: tick interval and animation dt must stay in
+    // lockstep. 60 Hz is the measured presentation margin for the fixed-window
+    // >= 30 FPS gate (a fixed 30 Hz tick could not absorb a Present stall);
+    // lowering it requires a fresh measurement per first-party-desktop §8.4.
+    const RUNTIME_TICK: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
+    let mut runtime_tick = tokio::time::interval(RUNTIME_TICK);
     runtime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut render_paused_until = None;
-    let mut seq: u64 = 0;
 
     loop {
         tokio::select! {
@@ -226,8 +220,13 @@ where
                 }
             }
             _ = health.tick() => {
-                seq = seq.saturating_add(1);
-                if let Some(fact) = overlay.take_local_ui() {
+                while let Some(fact) = overlay.take_local_ui() {
+                    if matches!(fact, LocalUiFact::Hide) {
+                        // The gesture hides the overlay locally on every
+                        // backend; Windows already hid its HWND in WM_CLOSE,
+                        // so this is idempotent.
+                        overlay.set_visible(false);
+                    }
                     send(&writer, &BodyToParent::LocalUi(fact)).await?;
                 }
                 while let Some(feedback) = overlay.take_presentation() {
@@ -243,13 +242,6 @@ where
                 send(
                     &writer,
                     &BodyToParent::HealthTick(crate::ipc::HealthTick {
-                        seq,
-                        visible: overlay.visible(),
-                        pose: vrm.pose(),
-                        gpu_ok: overlay.gpu_status() == crate::ipc::GpuInitStatus::Ok,
-                        overlay: overlay.kind(),
-                        expressions: vrm.expressions(),
-                        spring_bone: vrm.spring_bone(),
                         motion: vrm.motion(),
                     }),
                 )
@@ -261,9 +253,21 @@ where
                 overlay.pump();
                 if overlay.ready_to_render() && !high_load_paused {
                     let started = std::time::Instant::now();
-                    match vrm.update(1.0 / RUNTIME_HZ) {
-                        Ok(meshes) => overlay.render(&meshes),
-                        Err(info) => send(&writer, &BodyToParent::AssetFail(info)).await?,
+                    match vrm.update(RUNTIME_TICK.as_secs_f32()) {
+                        Ok(meshes) => {
+                            reported_asset_failure = None;
+                            overlay.render(&meshes);
+                        }
+                        Err(info) => {
+                            if reported_asset_failure.as_ref() != Some(&info) {
+                                send(
+                                    &writer,
+                                    &BodyToParent::AssetFail(info.clone()),
+                                )
+                                .await?;
+                                reported_asset_failure = Some(info);
+                            }
+                        }
                     }
                     if started.elapsed() >= std::time::Duration::from_millis(100) {
                         render_paused_until = Some(now + std::time::Duration::from_secs(1));
@@ -298,18 +302,17 @@ where
             }
             Err(crate::ipc::IpcError::Truncated { .. }) => return Ok(false),
             Err(_) => {
-                if buf.len() >= 4 {
-                    let claimed = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-                    let need = 4usize.saturating_add(claimed);
-                    if claimed > crate::ipc::MAX_FRAME_BYTES {
-                        buf.drain(..4);
-                    } else if buf.len() >= need {
+                // Unknown / corrupt body: drop the framed bytes whole if the
+                // length is readable. An oversize claim leaves no boundary and
+                // is unrecoverable: aborting beats desynchronizing the stream
+                // or buffering up to 4 GiB. Never decode leftover bytes as
+                // conversation text.
+                match crate::ipc::frame_len(buf) {
+                    Ok(need) => {
                         buf.drain(..need);
-                    } else {
-                        return Ok(false);
                     }
-                } else {
-                    return Ok(false);
+                    Err(crate::ipc::IpcError::Truncated { .. }) => return Ok(false),
+                    Err(error) => return Err(BodyError::Ipc(error)),
                 }
             }
         }
@@ -357,15 +360,7 @@ where
             let stats = vrm.stats().ok_or_else(|| {
                 BodyError::Runtime(String::from("loaded VRM has no retained statistics"))
             })?;
-            send(
-                writer,
-                &BodyToParent::AssetReady(AssetReadyInfo {
-                    primitives: stats.primitives,
-                    expressions: stats.expressions,
-                    spring_chains: stats.spring_chains,
-                }),
-            )
-            .await
+            send(writer, &BodyToParent::AssetReady(stats)).await
         }
         Err(info) => send(writer, &BodyToParent::AssetFail(info)).await,
     }
@@ -415,4 +410,38 @@ fn peer_gone(error: &std::io::Error) -> bool {
         error.kind(),
         ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IpcEndpoint, parse_endpoint};
+
+    #[test]
+    fn default_endpoint_is_stdio() {
+        let endpoint = parse_endpoint(["ene-body"]).expect("parse");
+        assert_eq!(endpoint, IpcEndpoint::Stdio);
+    }
+
+    #[test]
+    fn stdio_flag_is_accepted() {
+        let endpoint = parse_endpoint(["ene-body", "--ipc-stdio"]).expect("parse");
+        assert_eq!(endpoint, IpcEndpoint::Stdio);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_stdio_fds_are_rejected() {
+        let err = parse_endpoint(["ene-body", "--ipc-fd", "1"]).expect_err("fd 1");
+        let text = err.to_string();
+        assert!(text.contains("ipc-fd"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn combined_endpoints_are_rejected() {
+        let err = parse_endpoint(["ene-body", "--ipc-stdio", "--ipc-unix", "/tmp/x"])
+            .expect_err("combined");
+        let text = err.to_string();
+        assert!(text.contains("only one"), "{text}");
+    }
 }

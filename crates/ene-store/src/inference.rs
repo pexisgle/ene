@@ -1,26 +1,25 @@
 use std::sync::Arc;
 
-use ene_inference::cost::{Money, TokenRate, UsageCostFact, project_cost};
-use ene_inference::pricing::{PricingCatalogRevision, PricingSnapshot};
+use ene_inference::cost::{CostProjectionError, Money, TokenRate, UsageCostFact, project_cost};
+use ene_inference::pricing::{PricingCatalogRevision, PricingSnapshot, PricingSnapshotRef};
 use ene_inference::{
     AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRecord, InferenceAttemptRepository,
     InferenceTechnicalError, InferenceTicketId, ReportedTokenUsage, TaskAgentAttemptPremise,
-    UsageCostRecord, UsageFact, UsageRepository, UsageSource, UsageSummaryQuery,
-    UsageSummaryRepository, UsageSummaryRow, UsageSummaryStatus,
+    UsageFact, UsageRepository, UsageSource, UsageSummaryQuery, UsageSummaryRepository,
+    UsageSummaryRow, UsageSummaryStatus,
 };
 use ene_permission::{CapabilityKind, ConsumerKind, PurposeKind, UsageReservationState};
-use ene_preservation::ErasureConditionRef;
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{
     decode_consumer, decode_currency, decode_id, decode_pricing_reference, decode_purpose,
-    decode_u64, decode_wall_clock, encode_consumer, encode_currency, encode_id,
-    encode_optional_count, encode_pricing_reference, encode_purpose, encode_u64,
-    encode_usage_source, encode_wall_clock, inference_unavailable, lock_shared, select_consent,
+    decode_u64, decode_usage_source, decode_wall_clock, encode_id, encode_optional_count,
+    encode_u64, encode_usage_source, encode_wall_clock, inference_unavailable, lock_shared,
+    select_consent,
 };
-use crate::credential::SQL_SELECT_SET_REV;
+use crate::credential::current_set_revision;
 use crate::run_blocking;
 
 const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, capability, consumer, purpose, consent_id, consent_rev, credential_set_rev, provider, model, started_at, delegation_id, task_id, task_revision, data_use_count, pricing_snapshot) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
@@ -48,8 +47,29 @@ const SQL_INSERT_USAGE: &str = "INSERT INTO usage_fact (ticket, provider, model,
 const SQL_SELECT_ATTEMPT_ROUTE: &str =
     "SELECT provider, model, pricing_snapshot FROM inference_attempt WHERE ticket = ?1";
 
-const SQL_SELECT_USAGE_COST: &str = "SELECT provider, model, input_tokens, cached_input_tokens, output_tokens, source, pricing_snapshot FROM usage_fact WHERE ticket = ?1";
+/// Reads the claimed attempt's route and admission pricing binding, if the
+/// attempt exists. Every caller keeps its own missing/route checks.
+fn select_attempt_route(
+    conn: &Connection,
+    ticket_text: &str,
+) -> Result<Option<(String, String, Option<String>)>, InferenceTechnicalError> {
+    conn.query_row(SQL_SELECT_ATTEMPT_ROUTE, params![ticket_text], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })
+    .optional()
+    .map_err(|error| inference_unavailable(error.to_string()))
+}
 
+/// One bounded page of the first-party usage summary (`usage-cost-cap` §16).
+///
+/// The status expression repeats the decode rule so the SQL `LIMIT` counts
+/// matching rows instead of being applied after an in-memory filter: a
+/// reported/unknown usage fact decides the settled status, an attempt without
+/// a fact is the still-reserved row, and a released reservation is excluded
+/// (no provider I/O ran, so it is no usage at all). The keyset comparison
+/// uses the canonical UTC `started_at` text, so lexical order is instant
+/// order; the index on `(started_at, ticket)` serves both the range and the
+/// order.
 pub(crate) const SQL_SELECT_USAGE_SUMMARY: &str = "SELECT a.ticket, a.provider, a.model, a.consumer, a.purpose, a.started_at, f.source, f.input_tokens, f.cached_input_tokens, f.output_tokens, f.pricing_snapshot, r.state, r.currency, r.upper_bound_micros, p.id, p.provider, p.model, p.currency, p.input_rate, p.cached_input_rate, p.output_rate, p.effective_at, p.source_revision, a.pricing_snapshot, r.committed_currency, r.committed_micros FROM inference_attempt a LEFT JOIN usage_fact f ON f.ticket = a.ticket LEFT JOIN usage_reservation r ON r.ticket = a.ticket LEFT JOIN pricing_snapshot p ON p.id = f.pricing_snapshot WHERE a.started_at >= ?1 AND a.started_at < ?2 AND (?3 IS NULL OR a.provider = ?3) AND (?4 IS NULL OR a.model = ?4) AND (?5 IS NULL OR a.consumer = ?5) AND (?6 IS NULL OR a.purpose = ?6) AND (r.state IS NULL OR r.state != 'released') AND (?7 IS NULL OR (CASE WHEN f.source = 'reported' THEN 'reported' WHEN f.source = 'unknown' THEN 'unknown' ELSE 'reserved' END) = ?7) AND (?8 IS NULL OR a.started_at < ?8 OR (a.started_at = ?8 AND a.ticket < ?9)) ORDER BY a.started_at DESC, a.ticket DESC LIMIT ?10";
 
 const SQL_SELECT_PRICING_BY_ROUTE: &str = "SELECT id, provider, model, currency, input_rate, cached_input_rate, output_rate, effective_at, source_revision FROM pricing_snapshot WHERE provider = ?1 AND model = ?2 AND source_revision = ?3";
@@ -65,11 +85,6 @@ impl InferenceAttemptRepository for Store {
     ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
-            if (attempt.consumer == ConsumerKind::TaskAgent) != attempt.task_agent.is_some() {
-                return Err(inference_unavailable(String::from(
-                    "task agent consumer and correlation disagree",
-                )));
-            }
             let rev_raw =
                 encode_u64(attempt.expected_consent.1.as_u64()).map_err(inference_unavailable)?;
             let credential_set_raw = encode_u64(attempt.expected_credential_set.as_u64())
@@ -97,11 +112,12 @@ impl InferenceAttemptRepository for Store {
             if !current_matches {
                 return Ok(AttemptBeginOutcome::Stale);
             }
-            let stored_set: i64 = tx
-                .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
+            // The credential-set premise rides the same claim transaction:
+            // a prompt scrubbed before a credential became registered must
+            // not reach the provider, even though the consent still holds.
+            let current_set = current_set_revision(&tx)
                 .map_err(|error| inference_unavailable(error.to_string()))?;
-            let current_set = decode_u64(stored_set).map_err(inference_unavailable)?;
-            if current_set != attempt.expected_credential_set.as_u64() {
+            if current_set != attempt.expected_credential_set {
                 return Ok(AttemptBeginOutcome::Stale);
             }
             match check_task_agent_premise(&tx, attempt.task_agent.as_ref())? {
@@ -112,7 +128,7 @@ impl InferenceAttemptRepository for Store {
             }
             match check_data_use_currentness(&tx, &correlation.data_use)? {
                 DataUseCheck::Clear => {}
-                DataUseCheck::Covered(_condition) => {
+                DataUseCheck::Covered => {
                     return Ok(AttemptBeginOutcome::DataUseHeld);
                 }
             }
@@ -151,8 +167,8 @@ impl InferenceAttemptRepository for Store {
             {
                 crate::usage_cap::ReservationAdmission::NoCap
                 | crate::usage_cap::ReservationAdmission::Reserved => {}
-                crate::usage_cap::ReservationAdmission::Held(cap) => {
-                    return Ok(AttemptBeginOutcome::HeldByCap(cap));
+                crate::usage_cap::ReservationAdmission::Held => {
+                    return Ok(AttemptBeginOutcome::HeldByCap);
                 }
                 crate::usage_cap::ReservationAdmission::Indeterminate => {
                     return Ok(AttemptBeginOutcome::CapIndeterminate);
@@ -164,8 +180,8 @@ impl InferenceAttemptRepository for Store {
                 params![
                     ticket_text,
                     attempt.capability.as_str(),
-                    encode_consumer(attempt.consumer),
-                    encode_purpose(attempt.purpose),
+                    attempt.consumer.as_str(),
+                    attempt.purpose.as_str(),
                     attempt.expected_consent.0,
                     rev_raw,
                     credential_set_raw,
@@ -180,12 +196,6 @@ impl InferenceAttemptRepository for Store {
                 ],
             ) {
                 Ok(_) => {}
-                Err(error)
-                    if error.sqlite_error_code()
-                        == Some(rusqlite::ErrorCode::ConstraintViolation) =>
-                {
-                    return Ok(AttemptBeginOutcome::Stale);
-                }
                 Err(error) => return Err(inference_unavailable(error.to_string())),
             }
             for (ordinal, source) in correlation.data_use.iter().enumerate() {
@@ -234,6 +244,12 @@ fn encode_data_use(data_use: &[RawId]) -> Vec<String> {
     data_use.iter().map(|source| encode_id(*source)).collect()
 }
 
+/// The consumer and its correlation are one premise: a Task Agent attempt
+/// without one would skip the delegation/revision compare, and a
+/// non-Task-Agent attempt with one would persist a correlation it has no
+/// right to. The public trait is callable directly, so the pairing is
+/// enforced here instead of trusting `AuthorizedInference`'s construction
+/// path.
 fn encode_correlation(
     attempt: &InferenceAttempt,
 ) -> Result<EncodedCorrelation, InferenceTechnicalError> {
@@ -299,7 +315,7 @@ fn encode_correlation(
 
 enum DataUseCheck {
     Clear,
-    Covered(ErasureConditionRef),
+    Covered,
 }
 
 fn check_data_use_currentness(
@@ -307,10 +323,11 @@ fn check_data_use_currentness(
     data_use: &[String],
 ) -> Result<DataUseCheck, InferenceTechnicalError> {
     for source in data_use {
-        if let Some(condition) = crate::preservation::covering_condition(tx, source)
+        if crate::preservation::covering_condition(tx, source)
             .map_err(|error| inference_unavailable(error.to_string()))?
+            .is_some()
         {
-            return Ok(DataUseCheck::Covered(condition));
+            return Ok(DataUseCheck::Covered);
         }
     }
     Ok(DataUseCheck::Clear)
@@ -434,12 +451,43 @@ fn decode_pricing(raw: RawPricing) -> Result<PricingSnapshot, InferenceTechnical
     })
 }
 
+/// Requires the stored row a usage fact's reference names to exist, decode,
+/// and derive exactly that reference.
+///
+/// A dangling reference or a row edited after publication is a technical
+/// error: the cost fact must never be projected from a rate that does not
+/// belong to the ticket.
+fn decode_referenced_pricing(
+    reference: PricingSnapshotRef,
+    stored: Option<RawPricing>,
+) -> Result<PricingSnapshot, InferenceTechnicalError> {
+    let Some(raw) = stored else {
+        return Err(inference_unavailable(String::from(
+            "usage fact references a missing pricing snapshot",
+        )));
+    };
+    let snapshot = decode_pricing(raw)?;
+    if snapshot.reference() != reference {
+        return Err(inference_unavailable(String::from(
+            "stored pricing snapshot does not match its reference",
+        )));
+    }
+    Ok(snapshot)
+}
+
+/// Publishes the resolved snapshot under its content-derived reference and
+/// returns the reference text the attempt binds.
+///
+/// Publication is idempotent for one `(provider, model, revision)`: an
+/// existing row must have exactly the resolved content and reference.
+/// Anything else means the stored revision is not the reviewed one, so the
+/// claim fails closed instead of binding a rate the catalog never published.
 fn publish_pricing_snapshot(
     tx: &rusqlite::Transaction<'_>,
     snapshot: &PricingSnapshot,
 ) -> Result<String, InferenceTechnicalError> {
     let revision = encode_u64(snapshot.source_revision.as_u64()).map_err(inference_unavailable)?;
-    let reference = encode_pricing_reference(snapshot.reference());
+    let reference = snapshot.reference().to_text();
     let stored: Option<RawPricing> = tx
         .query_row(
             SQL_SELECT_PRICING_BY_ROUTE,
@@ -455,7 +503,7 @@ fn publish_pricing_snapshot(
                 reference,
                 snapshot.provider,
                 snapshot.model,
-                encode_currency(snapshot.currency),
+                snapshot.currency.as_str(),
                 encode_u64(snapshot.input_rate.micros_per_million())
                     .map_err(inference_unavailable)?,
                 encode_u64(snapshot.cached_input_rate.micros_per_million())
@@ -479,82 +527,12 @@ fn publish_pricing_snapshot(
     Ok(reference)
 }
 
-struct RawUsageRow {
-    provider: String,
-    model: String,
-    input_tokens: Option<i64>,
-    cached_input_tokens: Option<i64>,
-    output_tokens: Option<i64>,
-    source: String,
-    pricing_snapshot: Option<String>,
-}
-
-fn raw_usage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawUsageRow> {
-    Ok(RawUsageRow {
-        provider: row.get(0)?,
-        model: row.get(1)?,
-        input_tokens: row.get(2)?,
-        cached_input_tokens: row.get(3)?,
-        output_tokens: row.get(4)?,
-        source: row.get(5)?,
-        pricing_snapshot: row.get(6)?,
-    })
-}
-
-fn decode_usage_fact(
-    ticket: ene_inference::InferenceTicketId,
-    raw: &RawUsageRow,
-) -> Result<UsageFact, InferenceTechnicalError> {
-    let input_tokens = raw
-        .input_tokens
-        .map(decode_u64)
-        .transpose()
-        .map_err(inference_unavailable)?;
-    let cached_input_tokens = raw
-        .cached_input_tokens
-        .map(decode_u64)
-        .transpose()
-        .map_err(inference_unavailable)?;
-    let output_tokens = raw
-        .output_tokens
-        .map(decode_u64)
-        .transpose()
-        .map_err(inference_unavailable)?;
-    let source = match raw.source.as_str() {
-        "reported" => UsageSource::Reported,
-        "unknown" => UsageSource::Unknown,
-        _ => {
-            return Err(inference_unavailable(String::from(
-                "unknown usage source in usage fact",
-            )));
-        }
-    };
-    let fact = UsageFact {
-        ticket,
-        provider: raw.provider.clone(),
-        model: raw.model.clone(),
-        input_tokens,
-        cached_input_tokens,
-        output_tokens,
-        source,
-    };
-    match (
-        fact.source,
-        input_tokens,
-        cached_input_tokens,
-        output_tokens,
-    ) {
-        (UsageSource::Unknown, None, None, None) => {}
-        (UsageSource::Reported, Some(input), Some(cached), Some(_)) if cached <= input => {}
-        _ => {
-            return Err(inference_unavailable(String::from(
-                "stored usage fact shape is inconsistent",
-            )));
-        }
-    }
-    Ok(fact)
-}
-
+/// Reads the pricing snapshot a usage fact is bound to.
+///
+/// A dangling reference, a row whose content no longer derives its own
+/// reference, or a route that disagrees with the usage attribution is a
+/// technical error: the cost fact must never be projected from a rate that
+/// does not belong to the ticket.
 fn load_pricing_snapshot(
     conn: &Connection,
     reference_text: &str,
@@ -565,24 +543,12 @@ fn load_pricing_snapshot(
     let stored: Option<RawPricing> = conn
         .query_row(
             SQL_SELECT_PRICING_BY_ID,
-            params![encode_pricing_reference(reference)],
+            params![reference.to_text()],
             raw_pricing_row,
         )
         .optional()
         .map_err(|error| inference_unavailable(error.to_string()))?;
-    let Some(raw) = stored else {
-        return Err(inference_unavailable(String::from(
-            "usage fact references a missing pricing snapshot",
-        )));
-    };
-    let stored_reference = raw.id.clone();
-    let snapshot = decode_pricing(raw)?;
-    if stored_reference != encode_pricing_reference(reference) || snapshot.reference() != reference
-    {
-        return Err(inference_unavailable(String::from(
-            "stored pricing snapshot does not match its reference",
-        )));
-    }
+    let snapshot = decode_referenced_pricing(reference, stored)?;
     if snapshot.provider != provider || snapshot.model != model {
         return Err(inference_unavailable(String::from(
             "pricing snapshot route disagrees with the usage attribution",
@@ -785,13 +751,39 @@ fn settle_reservation(
     Ok(())
 }
 
+/// The one usage-shape predicate the writer and the summary reader share:
+/// Reported carries all three counts with cached input a subset of input;
+/// Unknown carries none. Anything else is unreadable, never zero-filled.
+fn usage_counts_agree(
+    source: UsageSource,
+    input: Option<u64>,
+    cached: Option<u64>,
+    output: Option<u64>,
+) -> bool {
+    match source {
+        UsageSource::Reported => matches!(
+            (input, cached, output),
+            (Some(input), Some(cached), Some(_)) if cached <= input
+        ),
+        UsageSource::Unknown => input.is_none() && cached.is_none() && output.is_none(),
+    }
+}
+
 impl UsageRepository for Store {
     async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let ticket_text = encode_id(fact.ticket.0);
-            let reported = fact.source == UsageSource::Reported;
-            if reported != (fact.input_tokens.is_some() && fact.output_tokens.is_some()) {
+            // The fact must be internally consistent before it touches the
+            // database: Reported carries all three counts with cached input a
+            // subset of input, Unknown carries none. Zero-as-unknown cannot
+            // survive this boundary.
+            if !usage_counts_agree(
+                fact.source,
+                fact.input_tokens,
+                fact.cached_input_tokens,
+                fact.output_tokens,
+            ) {
                 return Err(inference_unavailable(String::from(
                     "usage source and counts disagree",
                 )));
@@ -800,29 +792,17 @@ impl UsageRepository for Store {
                 encode_optional_count(fact.input_tokens).map_err(inference_unavailable)?;
             let output_column =
                 encode_optional_count(fact.output_tokens).map_err(inference_unavailable)?;
-            let cached_column = match (fact.cached_input_tokens, fact.input_tokens) {
-                (Some(cached), Some(input)) if cached <= input => {
-                    encode_optional_count(Some(cached)).map_err(inference_unavailable)?
-                }
-                (None, _) if !reported => {
-                    encode_optional_count(None).map_err(inference_unavailable)?
-                }
-                _ => {
-                    return Err(inference_unavailable(String::from(
-                        "cached tokens are not an input subset",
-                    )));
-                }
-            };
+            let cached_column =
+                encode_optional_count(fact.cached_input_tokens).map_err(inference_unavailable)?;
             let mut guard = lock_shared(&conn);
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| inference_unavailable(error.to_string()))?;
-            let route: Option<(String, String, Option<String>)> = tx
-                .query_row(SQL_SELECT_ATTEMPT_ROUTE, [&ticket_text], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })
-                .optional()
-                .map_err(|error| inference_unavailable(error.to_string()))?;
+            // Attribution belongs to the claimed attempt, and the rate the
+            // attempt was admitted under is the only one this fact may bind.
+            // Refuse orphan facts and route substitutions rather than
+            // manufacturing correspondence.
+            let route = select_attempt_route(&tx, &ticket_text)?;
             let Some((attempt_provider, attempt_model, pricing_reference)) = route else {
                 return Err(inference_unavailable(String::from(
                     "usage attempt route mismatch",
@@ -855,91 +835,19 @@ impl UsageRepository for Store {
         .await
     }
 
-    async fn load_usage_cost(
-        &self,
-        ticket: ene_inference::InferenceTicketId,
-    ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let ticket_text = encode_id(ticket.0);
-            let guard = lock_shared(&conn);
-            let found: Option<RawUsageRow> = guard
-                .query_row(SQL_SELECT_USAGE_COST, params![ticket_text], raw_usage_row)
-                .optional()
-                .map_err(|error| inference_unavailable(error.to_string()))?;
-            let Some(raw) = found else {
-                return Ok(None);
-            };
-            let usage = decode_usage_fact(ticket, &raw)?;
-            let attempt_route: Option<(String, String, Option<String>)> = guard
-                .query_row(SQL_SELECT_ATTEMPT_ROUTE, params![ticket_text], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })
-                .optional()
-                .map_err(|error| inference_unavailable(error.to_string()))?;
-            let Some((attempt_provider, attempt_model, attempt_pricing)) = attempt_route else {
-                return Err(inference_unavailable(String::from(
-                    "usage fact has no claimed attempt",
-                )));
-            };
-            if attempt_provider != usage.provider
-                || attempt_model != usage.model
-                || attempt_pricing != raw.pricing_snapshot
-            {
-                return Err(inference_unavailable(String::from(
-                    "usage fact pricing binding disagrees with its attempt",
-                )));
-            }
-            let pricing = match raw.pricing_snapshot.as_deref() {
-                None => None,
-                Some(reference) => Some(load_pricing_snapshot(
-                    &guard,
-                    reference,
-                    &usage.provider,
-                    &usage.model,
-                )?),
-            };
-            let cost = project_cost(&usage, pricing.as_ref()).map_err(|error| {
-                InferenceTechnicalError::CostProjectionFailed {
-                    reason: error.to_string(),
-                }
-            })?;
-            Ok(Some(UsageCostRecord { usage, cost }))
-        })
-        .await
-    }
-
-    async fn load_usage_reservation(
-        &self,
-        ticket: ene_inference::InferenceTicketId,
-    ) -> Result<Option<ene_inference::UsageReservation>, InferenceTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let ticket_text = encode_id(ticket.0);
-            let guard = lock_shared(&conn);
-            let found: Option<crate::usage_cap::ReservationRow> = guard
-                .query_row(
-                    crate::usage_cap::SQL_SELECT_RESERVATION_BY_TICKET,
-                    params![ticket_text],
-                    crate::usage_cap::reservation_row,
-                )
-                .optional()
-                .map_err(|error| inference_unavailable(error.to_string()))?;
-            found
-                .as_ref()
-                .map(|raw| crate::usage_cap::decode_reservation(raw).map_err(inference_unavailable))
-                .transpose()
-        })
-        .await
-    }
-
-    async fn reconcile_orphaned_usage_reservations(&self) -> Result<u64, InferenceTechnicalError> {
+    async fn reconcile_orphaned_usage_reservations(&self) -> Result<(), InferenceTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let mut guard = lock_shared(&conn);
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| inference_unavailable(error.to_string()))?;
+            // One bounded read of every reservation still `reserved` (the
+            // only stored non-terminal state); each one settles as
+            // CommittedUnknown in this transaction. The external consumption
+            // cannot be denied after a crash, so the reserved upper bound stays
+            // counted and the ticket records an unknown token usage fact:
+            // recovery never releases a slot and never estimates zero.
             let orphans: Vec<crate::usage_cap::ReservationRow> = {
                 let mut statement = tx
                     .prepare(crate::usage_cap::SQL_SELECT_ORPHANED_RESERVATIONS)
@@ -950,21 +858,15 @@ impl UsageRepository for Store {
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| inference_unavailable(error.to_string()))?
             };
-            let mut settled = 0_u64;
             for raw in orphans {
-                let state = ene_permission::UsageReservationState::from_name(&raw.state)
-                    .ok_or_else(|| {
-                        inference_unavailable(String::from("unknown usage reservation state"))
-                    })?;
-                if state.is_terminal() {
-                    continue;
-                }
-                let route: Option<(String, String, Option<String>)> = tx
-                    .query_row(SQL_SELECT_ATTEMPT_ROUTE, params![raw.ticket], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                    })
-                    .optional()
-                    .map_err(|error| inference_unavailable(error.to_string()))?;
+                // `SQL_SELECT_ORPHANED_RESERVATIONS` pins `state = 'reserved'`,
+                // the only stored non-terminal value, so every returned row is
+                // settled here; no second filter can diverge from the query.
+                // The attempt row and the reservation were written in one
+                // transaction, so a missing or disagreeing route correlation
+                // is corruption: fail closed instead of recording an
+                // unattributable usage fact.
+                let route = select_attempt_route(&tx, &raw.ticket)?;
                 let Some((provider, model, pricing)) = route else {
                     return Err(inference_unavailable(String::from(
                         "usage reservation has no claimed attempt",
@@ -992,24 +894,20 @@ impl UsageRepository for Store {
                     ],
                 )
                 .map_err(|error| inference_unavailable(error.to_string()))?;
-                let changed = tx
-                    .execute(
-                        crate::usage_cap::SQL_SETTLE_RESERVATION,
-                        params![
-                            raw.ticket,
-                            ene_permission::UsageReservationState::CommittedUnknown.as_str(),
-                            Option::<String>::None,
-                            Option::<i64>::None
-                        ],
-                    )
-                    .map_err(|error| inference_unavailable(error.to_string()))?;
-                if changed == 1 {
-                    settled += 1;
-                }
+                tx.execute(
+                    crate::usage_cap::SQL_SETTLE_RESERVATION,
+                    params![
+                        raw.ticket,
+                        ene_permission::UsageReservationState::CommittedUnknown.as_str(),
+                        Option::<String>::None,
+                        Option::<i64>::None
+                    ],
+                )
+                .map_err(|error| inference_unavailable(error.to_string()))?;
             }
             tx.commit()
                 .map_err(|error| inference_unavailable(error.to_string()))?;
-            Ok(settled)
+            Ok(())
         })
         .await
     }
@@ -1065,6 +963,16 @@ fn raw_usage_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawUsageSu
     })
 }
 
+/// Decodes one joined row into the owner-level usage summary.
+///
+/// The shapes that agree are the three legal combinations of fact and
+/// reservation state; anything else (a reported fact beside a
+/// non-reported reservation, a dangling pricing reference, or a committed
+/// amount that disagrees with the projected cost) is unreadable and fails
+/// closed, never a guessed status or amount. A `reported` fact beside a
+/// `CommittedUnknown` reservation is legal: the reservation settled with an
+/// unknown amount, as happens when a reported usage's cost cannot be
+/// represented, and the row stays viewable as an unknown cost.
 fn decode_usage_summary(
     raw: &RawUsageSummaryRow,
 ) -> Result<UsageSummaryRow, InferenceTechnicalError> {
@@ -1087,13 +995,7 @@ fn decode_usage_summary(
     };
     let source = match raw.usage_source.as_deref() {
         None => None,
-        Some("reported") => Some(UsageSource::Reported),
-        Some("unknown") => Some(UsageSource::Unknown),
-        Some(_) => {
-            return Err(inference_unavailable(String::from(
-                "unknown usage source in usage summary",
-            )));
-        }
+        Some(text) => Some(decode_usage_source(text).map_err(inference_unavailable)?),
     };
     let upper_bound = match (raw.reserved_currency.as_deref(), raw.reserved_upper_bound) {
         (None, None) => None,
@@ -1119,31 +1021,36 @@ fn decode_usage_summary(
     }
     match source {
         Some(UsageSource::Reported) => {
-            if !matches!(state, None | Some(UsageReservationState::CommittedReported)) {
+            if !matches!(
+                state,
+                None | Some(
+                    UsageReservationState::CommittedReported
+                        | UsageReservationState::CommittedUnknown
+                )
+            ) {
                 return Err(inference_unavailable(String::from(
                     "reported usage carries a non-reported reservation",
                 )));
             }
-            let counts = (
-                raw.input_tokens.map(decode_u64).transpose(),
-                raw.cached_input_tokens.map(decode_u64).transpose(),
-                raw.output_tokens.map(decode_u64).transpose(),
-            );
-            let (Ok(input_tokens), Ok(cached_input_tokens), Ok(output_tokens)) = counts else {
-                return Err(inference_unavailable(String::from(
-                    "reported usage is missing a token count",
-                )));
-            };
             let (Some(input_tokens), Some(cached_input_tokens), Some(output_tokens)) =
-                (input_tokens, cached_input_tokens, output_tokens)
+                (raw.input_tokens, raw.cached_input_tokens, raw.output_tokens)
             else {
                 return Err(inference_unavailable(String::from(
                     "reported usage is missing a token count",
                 )));
             };
-            if cached_input_tokens > input_tokens {
+            let input_tokens = decode_u64(input_tokens).map_err(inference_unavailable)?;
+            let cached_input_tokens =
+                decode_u64(cached_input_tokens).map_err(inference_unavailable)?;
+            let output_tokens = decode_u64(output_tokens).map_err(inference_unavailable)?;
+            if !usage_counts_agree(
+                UsageSource::Reported,
+                Some(input_tokens),
+                Some(cached_input_tokens),
+                Some(output_tokens),
+            ) {
                 return Err(inference_unavailable(String::from(
-                    "cached tokens are not an input subset",
+                    "usage source and counts disagree",
                 )));
             }
             let snapshot = match raw.usage_pricing.as_deref() {
@@ -1151,17 +1058,7 @@ fn decode_usage_summary(
                 Some(reference_text) => {
                     let reference =
                         decode_pricing_reference(reference_text).map_err(inference_unavailable)?;
-                    let pricing = raw.pricing.clone().ok_or_else(|| {
-                        inference_unavailable(String::from(
-                            "usage fact references a missing pricing snapshot",
-                        ))
-                    })?;
-                    let snapshot = decode_pricing(pricing)?;
-                    if snapshot.reference() != reference {
-                        return Err(inference_unavailable(String::from(
-                            "stored pricing snapshot does not match its reference",
-                        )));
-                    }
+                    let snapshot = decode_referenced_pricing(reference, raw.pricing.clone())?;
                     Some(snapshot)
                 }
             };
@@ -1174,11 +1071,22 @@ fn decode_usage_summary(
                 output_tokens: Some(output_tokens),
                 source: UsageSource::Reported,
             };
-            let cost = project_cost(&fact, snapshot.as_ref()).map_err(|error| {
-                InferenceTechnicalError::CostProjectionFailed {
-                    reason: error.to_string(),
+            let cost = match project_cost(&fact, snapshot.as_ref()) {
+                Ok(cost) => cost,
+                // The provider call already ran; an unrepresentable amount is
+                // an unknown cost, never a reason to hide the usage row.
+                Err(CostProjectionError::AmountOverflow) => UsageCostFact::Unknown {
+                    pricing: snapshot.as_ref().map(PricingSnapshot::reference),
+                },
+                Err(error) => {
+                    return Err(InferenceTechnicalError::CostProjectionFailed {
+                        reason: error.to_string(),
+                    });
                 }
-            })?;
+            };
+            // The cap accounting of a reported settlement is the committed
+            // total; a row whose committed amount disagrees with the
+            // projected cost cannot be displayed as both.
             if let (UsageCostFact::Reported(projected), Some(currency), Some(micros)) = (
                 &cost,
                 raw.committed_currency.as_deref(),
@@ -1207,7 +1115,10 @@ fn decode_usage_summary(
                     output_tokens,
                 }),
                 cost: Some(cost),
-                reserved: None,
+                reserved: match state {
+                    Some(UsageReservationState::CommittedUnknown) => upper_bound,
+                    _ => None,
+                },
                 started_at,
             })
         }
@@ -1228,7 +1139,15 @@ fn decode_usage_summary(
             let pricing = match raw.usage_pricing.as_deref() {
                 None => None,
                 Some(reference_text) => {
-                    Some(decode_pricing_reference(reference_text).map_err(inference_unavailable)?)
+                    let reference =
+                        decode_pricing_reference(reference_text).map_err(inference_unavailable)?;
+                    let snapshot = decode_referenced_pricing(reference, raw.pricing.clone())?;
+                    if snapshot.provider != raw.provider || snapshot.model != raw.model {
+                        return Err(inference_unavailable(String::from(
+                            "pricing snapshot route disagrees with the usage attribution",
+                        )));
+                    }
+                    Some(reference)
                 }
             };
             Ok(UsageSummaryRow {

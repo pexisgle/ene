@@ -30,8 +30,10 @@ mod imp {
     use crate::ipc::{
         GpuFailInfo, GpuFailReason, GpuInitStatus, LocalUiFact, PlacementBox, PresentationFeedback,
     };
-    use crate::render::{HitTestMask, RenderFailure, RenderOutcome, SurfaceRenderer};
-    use crate::window::OverlayProbe;
+    use crate::render::{HitTestMask, RenderOutcome, SurfaceRenderer};
+    use crate::window::{
+        DEFAULT_PLACEMENT, RESIZE_GRIP_LOGICAL_PX, gpu_disabled, gpu_info, physical,
+    };
 
     const CLASS_NAME: &[u16] = &[
         b'e' as u16,
@@ -97,17 +99,12 @@ mod imp {
             };
             // SAFETY: class is fully initialized.
             let _atom = unsafe { RegisterClassExW(&class) };
-            let placement = PlacementBox {
-                x: 24,
-                y: 24,
-                width: 420,
-                height: 640,
-                scale: 1.0,
-            };
+            let placement = DEFAULT_PLACEMENT;
             let mut state = Box::new(WindowState {
                 placement,
                 events: VecDeque::new(),
                 hidden: true,
+                fullscreen: false,
                 hit_test_mask: HitTestMask::empty(placement.width, placement.height),
                 region_dirty: true,
                 defer_region_refresh_once: false,
@@ -185,9 +182,7 @@ mod imp {
                     }
                 }
             } else {
-                gpu_failure = Some(GpuFailInfo {
-                    reason: GpuFailReason::NoAdapter,
-                });
+                gpu_failure = Some(gpu_disabled());
                 None
             };
             Ok(Self {
@@ -200,11 +195,7 @@ mod imp {
         }
 
         pub fn gpu_status(&self) -> GpuInitStatus {
-            if self.renderer.is_some() {
-                GpuInitStatus::Ok
-            } else {
-                GpuInitStatus::Failed
-            }
+            crate::window::gpu_status(self.renderer.as_ref())
         }
 
         pub fn gpu_failure(&self) -> Option<GpuFailInfo> {
@@ -213,14 +204,14 @@ mod imp {
 
         pub fn set_visible(&mut self, visible: bool) {
             self.visible = visible;
-            let show = visible && self.renderer.is_some() && !self.state.region_failed;
-            self.state.hidden = !show;
+            self.state.hidden = !(visible && self.renderer.is_some() && !self.state.region_failed);
+            let show = self.visible() && self.renderer.is_some() && !self.state.region_failed;
             // SAFETY: hwnd is live and owned by this object.
             unsafe { ShowWindow(self.hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
         }
 
         pub fn visible(&self) -> bool {
-            self.visible && !self.state.hidden
+            self.visible && !self.state.hidden && !self.state.fullscreen
         }
 
         pub fn set_placement(&mut self, placement: PlacementBox) {
@@ -247,10 +238,6 @@ mod imp {
             self.state.region_dirty = true;
         }
 
-        pub fn placement(&self) -> PlacementBox {
-            self.state.placement
-        }
-
         pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
             self.state.events.pop_front()
         }
@@ -261,13 +248,20 @@ mod imp {
 
         pub fn pump(&mut self) {
             self.pump_messages();
+            let fullscreen = foreground_is_fullscreen(self.hwnd);
+            if fullscreen != self.state.fullscreen {
+                self.state.fullscreen = fullscreen;
+                let show = self.visible() && self.renderer.is_some() && !self.state.region_failed;
+                // SAFETY: hwnd is live and owned by this object.
+                unsafe { ShowWindow(self.hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
+            }
             if self.state.region_failed {
                 self.fail_surface();
             }
         }
 
         pub fn ready_to_render(&self) -> bool {
-            self.visible() && !foreground_is_fullscreen(self.hwnd) && self.renderer.is_some()
+            self.visible() && self.renderer.is_some()
         }
 
         pub fn render(&mut self, meshes: &[crate::vrm::RenderMesh]) {
@@ -283,12 +277,13 @@ mod imp {
                     if should_refresh_input_region(
                         self.state.region_dirty,
                         &mut self.state.defer_region_refresh_once,
-                    ) {
-                        let hit_test_mask = HitTestMask::from_meshes(
+                    ) && let Some(hit_test_mask) = self.renderer.as_ref().and_then(|renderer| {
+                        renderer.hit_test_mask(
                             meshes,
                             physical(self.state.placement.width, self.state.placement.scale),
                             physical(self.state.placement.height, self.state.placement.scale),
-                        );
+                        )
+                    }) {
                         if self.state.hit_test_mask == hit_test_mask && !self.state.region_dirty {
                             return;
                         }
@@ -370,6 +365,7 @@ mod imp {
         placement: PlacementBox,
         events: VecDeque<LocalUiFact>,
         hidden: bool,
+        fullscreen: bool,
         hit_test_mask: HitTestMask,
         region_dirty: bool,
         defer_region_refresh_once: bool,
@@ -417,7 +413,7 @@ mod imp {
                 unsafe { ScreenToClient(hwnd, &mut point) };
                 // SAFETY: state pointer validity established above.
                 let placement = unsafe { (*state).placement };
-                let grip = physical(32, placement.scale);
+                let grip = physical(RESIZE_GRIP_LOGICAL_PX, placement.scale);
                 // SAFETY: state pointer validity established above.
                 let hit_test_mask = unsafe { &(*state).hit_test_mask };
                 if hit_test_mask.contains_resize_grip(point.x, point.y, grip) {
@@ -437,10 +433,12 @@ mod imp {
                     unsafe {
                         (*state).placement.x = rect.left;
                         (*state).placement.y = rect.top;
-                        (*state).events.push_back(LocalUiFact::Drag {
-                            x: rect.left,
-                            y: rect.top,
-                        });
+                        if !(*state).dpi_resize_in_progress {
+                            (*state).events.push_back(LocalUiFact::Drag {
+                                x: rect.left,
+                                y: rect.top,
+                            });
+                        }
                     }
                 }
                 return 0;
@@ -514,10 +512,6 @@ mod imp {
         }
         // SAFETY: unhandled messages follow the Win32 default procedure.
         unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-    }
-
-    fn physical(logical: u32, scale: f32) -> u32 {
-        ((logical as f64 * f64::from(scale)).round() as u64).clamp(1, u64::from(u32::MAX)) as u32
     }
 
     fn logical(physical: u32, scale: f32) -> u32 {
@@ -626,18 +620,6 @@ mod imp {
         }
     }
 
-    fn gpu_info(failure: RenderFailure) -> GpuFailInfo {
-        GpuFailInfo {
-            reason: match failure {
-                RenderFailure::Adapter => GpuFailReason::NoAdapter,
-                RenderFailure::Device => GpuFailReason::RequestDevice,
-                RenderFailure::Surface => GpuFailReason::Surface,
-                RenderFailure::DeviceLost => GpuFailReason::DeviceLost,
-                RenderFailure::OutOfMemory => GpuFailReason::OutOfMemory,
-            },
-        }
-    }
-
     fn foreground_is_fullscreen(overlay: HWND) -> bool {
         // SAFETY: these are read-only window-manager queries. Every pointer
         // targets an initialized writable structure for the duration of call.
@@ -666,13 +648,6 @@ mod imp {
                 && window.top <= monitor_info.rcMonitor.top
                 && window.right >= monitor_info.rcMonitor.right
                 && window.bottom >= monitor_info.rcMonitor.bottom
-        }
-    }
-
-    pub fn probe() -> OverlayProbe {
-        match WindowsOverlay::open(false) {
-            Ok(_) => OverlayProbe::Available,
-            Err(reason) => OverlayProbe::Unavailable { reason },
         }
     }
 
@@ -728,19 +703,3 @@ mod imp {
 
 #[cfg(target_os = "windows")]
 pub use imp::WindowsOverlay;
-
-use super::OverlayProbe;
-
-#[must_use]
-pub fn windows_dwm_probe() -> OverlayProbe {
-    #[cfg(target_os = "windows")]
-    {
-        imp::probe()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        OverlayProbe::Unavailable {
-            reason: String::from("not Windows"),
-        }
-    }
-}

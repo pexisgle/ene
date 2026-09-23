@@ -7,11 +7,8 @@ fn main() -> ExitCode {
     match run_main() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            let mut stderr = std::io::stderr().lock();
-            if writeln!(stderr, "{error}").is_err() {
-                return ExitCode::FAILURE;
-            }
-            ExitCode::from(error.exit_code())
+            drop(writeln!(std::io::stderr().lock(), "{error}"));
+            ExitCode::FAILURE
         }
     }
 }
@@ -26,7 +23,6 @@ fn run_main() -> Result<(), ene_body::BodyError> {
         endpoint,
         ene_body::RunOptions {
             try_gpu: std::env::var_os("ENE_BODY_SKIP_GPU").is_none(),
-            try_native_overlay: true,
         },
     ))
 }

@@ -1,3 +1,28 @@
+//! Targeted Deletion first-party request / confirmation / status surface.
+//!
+//! [Targeted Deletion Lifecycle](../../../docs/design/concrete/targeted-deletion-lifecycle.md)
+//! §15 puts the wire intent, the trusted Host-local confirmation, and the
+//! bounded status view in one first-party management boundary; §4 fixes the
+//! admission premise: an explicit privacy/security purpose **and** a trusted
+//! Owner confirmation.
+//!
+//! Types here keep those two apart:
+//!
+//! - [`TargetedDeletionRequest`] is a staged, still harmless request. The wire
+//!   can legitimately produce one; it can start nothing.
+//! - [`OwnerConfirmationFact`] is the durable Owner decision read from the
+//!   Host-local confirmation journal (IPC §18.1). It has no wire form.
+//! - [`TargetedDeletionRequest::into_command`] is the only production mint
+//!   site of the admission command; it needs both the staged request and its
+//!   durable confirmation fact, and the confirmation binds to the request
+//!   identity, so it can never be transferred to another target or purpose.
+//!   The store re-reads the confirmation row inside the same transaction that
+//!   commits the operation.
+//!
+//! No Client payload, LLM output, or Task Agent text can construct any of
+//! these: there is no `Deserialize`, no public literal constructor, and no
+//! caller boolean anywhere on the path.
+
 use ene_primitive::{RawId, WallClockWithTz};
 
 use crate::{
@@ -25,7 +50,6 @@ pub struct TargetedDeletionRequest {
     request: DeletionRequestId,
     target: TargetedDeletionTarget,
     purpose: DeletionPurpose,
-    requested_at: WallClockWithTz,
 }
 
 impl TargetedDeletionRequest {
@@ -34,13 +58,11 @@ impl TargetedDeletionRequest {
         request: DeletionRequestId,
         target: TargetedDeletionTarget,
         purpose: DeletionPurpose,
-        requested_at: WallClockWithTz,
     ) -> Self {
         Self {
             request,
             target,
             purpose,
-            requested_at,
         }
     }
 
@@ -50,26 +72,30 @@ impl TargetedDeletionRequest {
     }
 
     #[must_use]
-    pub fn target(&self) -> &TargetedDeletionTarget {
-        &self.target
-    }
-
-    #[must_use]
     pub fn purpose(&self) -> DeletionPurpose {
         self.purpose
     }
 
-    #[must_use]
-    pub fn requested_at(&self) -> WallClockWithTz {
-        self.requested_at
-    }
-
+    /// Protected target text for the Host-local Owner review surface (IPC
+    /// §18.1 preview): the trusted console shows exactly what would be
+    /// deleted before the Owner confirms. Never a log, `Debug`, or wire
+    /// representation.
     #[must_use]
     pub fn owner_review_text(&self) -> &str {
         let MechanicalDeletionTarget::ExactText(material) = &self.target.mechanical;
-        material.expose_for_owner_review()
+        material.expose_for_erasure()
     }
 
+    /// The admission command this staged request becomes once the Owner
+    /// confirmed it on the Host-local trusted surface.
+    ///
+    /// Returns [`None`] when `confirmation` names a different request: a
+    /// confirmation never transfers to another target, purpose, or request
+    /// identity. `admitted_at` is the commit-time premise the operation and
+    /// its current erasure condition open with.
+    /// `required_participants` is the current product surface's owner set the
+    /// Host composition decided on (lifecycle §8); the admission transaction
+    /// snapshots it durably with the operation.
     #[must_use]
     pub fn into_command(
         self,
@@ -81,7 +107,6 @@ impl TargetedDeletionRequest {
             return None;
         }
         Some(StartTargetedDeletionCommand::confirmed(
-            self.request.as_raw(),
             self.target,
             self.purpose,
             admitted_at,
@@ -93,29 +118,27 @@ impl TargetedDeletionRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OwnerConfirmationFact {
     request: DeletionRequestId,
-    confirmed_at: WallClockWithTz,
 }
 
 impl OwnerConfirmationFact {
+    /// Store-read construction for one durable confirmation row.
+    ///
+    /// Callers must have read and validated this exact row from the
+    /// confirmation journal; the admission transaction re-reads and re-checks
+    /// it before any operation row is committed.
     #[must_use]
-    pub fn from_durable(request: DeletionRequestId, confirmed_at: WallClockWithTz) -> Self {
-        Self {
-            request,
-            confirmed_at,
-        }
-    }
-
-    #[must_use]
-    pub fn request(self) -> DeletionRequestId {
-        self.request
-    }
-
-    #[must_use]
-    pub fn confirmed_at(self) -> WallClockWithTz {
-        self.confirmed_at
+    pub fn from_durable(request: DeletionRequestId) -> Self {
+        Self { request }
     }
 }
 
+/// Advisory staging input.
+///
+/// The mechanical target comes from the Host's parse of the wire grammar. The
+/// request identity is minted by the store; source correlations are
+/// Host-derived, never Client-supplied (lifecycle §4). A `semantic_hints` entry
+/// is usable only for the staging duplicate-scope decision, and the staged
+/// request journal re-derives the mechanical target and keeps no hints.
 #[derive(Debug, Clone)]
 pub struct StageTargetedDeletionRequestCommand {
     target: TargetedDeletionTarget,
@@ -187,12 +210,6 @@ impl DeletionSurfaceMark {
     }
 }
 
-impl core::fmt::Display for DeletionSurfaceMark {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use ene_primitive::{RawId, WallClockWithTz};
@@ -217,7 +234,6 @@ mod tests {
             DeletionRequestId::from_raw(RawId::new()),
             target("private target"),
             DeletionPurpose::Privacy,
-            WallClockWithTz::now(),
         )
     }
 
@@ -235,8 +251,7 @@ mod tests {
     fn confirmation_binds_to_its_own_request_identity() {
         let request = staged();
         let identity = request.request();
-        let fact = OwnerConfirmationFact::from_durable(identity, WallClockWithTz::now());
-        assert_eq!(fact.request(), identity);
+        let fact = OwnerConfirmationFact::from_durable(identity);
         let command = request
             .clone()
             .into_command(
@@ -248,16 +263,10 @@ mod tests {
                 ],
             )
             .expect("the matching confirmation must mint the command");
-        assert!(
-            command.is_confirmed(),
-            "the minted command carries the sealed confirmation premise"
-        );
         assert_eq!(command.purpose(), DeletionPurpose::Privacy);
 
-        let foreign = OwnerConfirmationFact::from_durable(
-            DeletionRequestId::from_raw(RawId::new()),
-            WallClockWithTz::now(),
-        );
+        let foreign =
+            OwnerConfirmationFact::from_durable(DeletionRequestId::from_raw(RawId::new()));
         assert!(
             request
                 .into_command(foreign, WallClockWithTz::now(), Vec::new())

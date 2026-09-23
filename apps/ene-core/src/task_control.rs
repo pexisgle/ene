@@ -1,3 +1,34 @@
+//! Host composition for conversation / first-party Task control.
+//!
+//! Every method here is composition only. The Task owner decides Task
+//! creation, revision commits, cancel admission, failure, and result
+//! adoption; the Action owner decides attempt starts and certainty. This
+//! module loads those durable facts, maps owner-defined premises across the
+//! boundary, and renders user-facing reports. It adds no Task lifecycle, no
+//! report master, no adoption queue, and no SQL: reopening a report never
+//! changes a canonical fact.
+//!
+//! The production triggers live here because they compose two owners:
+//!
+//! - `HostTaskControl` is the composition root behind the companion's
+//!   [`DialogueTaskControlPort`]: a companion `[task-control]` directive from
+//!   an ordinary dialogue turn resolves its target through the transient
+//!   conversation projection and maps onto the same owner boundaries below.
+//! - `HostTaskControl::propose` receives the dialogue layer's accepted
+//!   proposal, lets the Task owner commit the creation unit, then issues and
+//!   launches the first delegation through the existing AU3 orchestration.
+//! - [`HostHandle::settle_action_certainty`] is the late-evidence settlement
+//!   entry: it commits the Action owner's certainty CAS and then re-evaluates
+//!   the same execution's sealed-but-unadopted result through the Task
+//!   owner's adoption gate. The settlement is durable before the
+//!   re-evaluation, so a re-evaluation failure is a retryable partial
+//!   outcome, never a reported loss of the settlement.
+//! - [`HostHandle::reconcile_sealed_results`] is the explicit bounded startup
+//!   reconciliation producer for results sealed after AU15a but not adopted
+//!   before a stop. It never resumes an execution.
+//! - [`HostHandle::task_report`] composes the progress / cancel / completion
+//!   report from canonical Task and Action facts.
+
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 
@@ -6,23 +37,24 @@ use ene_action::{
     CertaintyUpdateOutcome, EffectGrounds,
 };
 use ene_api::v1::refs::ConnectionWireId;
+use ene_companion::ActionCertaintyWire;
 use ene_companion::CompanionId;
 use ene_companion::RecordResumeActivityCommand;
 use ene_companion::ResumeActivityOutcome;
 use ene_companion::dialogue::{
     DialogueTaskCommand, DialogueTaskControlPort, DialogueTaskControlReply, ProposeSteeringCommand,
-    ProposeTaskCommand, TaskReport, TaskReportAttempt, TaskReportCertainty,
+    ProposeTaskCommand, TaskReport, TaskReportAttempt,
 };
 use ene_primitive::RawId;
 use ene_task::{
     ConversationTaskRepository as _, CreateDelegationCommand, DelegatedWorkspace, DelegationId,
     DelegationOutcome, DelegationScope, OwnerMessageCurrentness, ResumeInstructionSource,
     ResumeTaskCommand, SteeringPremiseRef, TaskCancelOutcome, TaskContextOrigin,
-    TaskContextOriginKind, TaskCreationOutcome, TaskId, TaskProgress, TaskProposalOutcome,
-    TaskPurpose, TaskRef, TaskRepository as _, TaskResultAcceptance, TaskResumeOutcome,
-    TaskResumeReadiness, TaskTechnicalError, WorkspaceFolderRef, WorkspaceNeedRef,
-    orchestrate_delegation, orchestrate_resume, orchestrate_resume_current,
-    reevaluate_result_adoption, resume_commit_premise, route_available_result,
+    TaskContextOriginKind, TaskId, TaskProgress, TaskProposalOutcome, TaskPurpose, TaskRef,
+    TaskRepository as _, TaskResultAcceptance, TaskResumeOutcome, TaskResumeReadiness,
+    TaskTechnicalError, WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_delegation,
+    orchestrate_resume, orchestrate_resume_current, reevaluate_result_adoption,
+    resume_commit_premise, route_available_result,
 };
 use thiserror::Error;
 
@@ -36,36 +68,44 @@ pub enum TaskControlError {
     Action(#[from] ActionTechnicalError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TaskProposalHostOutcome {
-    AcceptedAsTask {
-        task: TaskRef,
-        delegation: DelegationId,
-    },
-    DelegationRefused {
-        task: TaskRef,
-        outcome: DelegationOutcome,
-    },
-    Proposal(TaskProposalOutcome),
-}
-
+/// The Action owner's settled certainty together with the adoption
+/// re-evaluation it may have triggered.
+///
+/// The two steps are ordered but not atomic: the certainty compare-and-set
+/// commits first and stays durable even when the follow-up re-evaluation
+/// fails. A re-evaluation failure is therefore a retryable partial outcome on
+/// `Ok` ([`Self::adoption_error`]), never an `Err`: `Err` means the settlement
+/// itself did not commit and nothing changed. Re-calling
+/// [`HostHandle::settle_action_certainty`] with the same arguments is the
+/// retry that converges on the re-evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectSettlementOutcome {
+    /// The Action owner's compare-and-set answer. `Updated` means this call
+    /// committed the settlement; `StaleCurrent` means an earlier settlement is
+    /// already durable and this call changed nothing.
     pub certainty: CertaintyUpdateOutcome,
+    /// The re-evaluation of the execution's sealed-but-unadopted result, when
+    /// the attempt exists, exactly one such result existed, and the
+    /// re-evaluation answered.
     pub adoption: Option<TaskResultAcceptance>,
+    /// The re-evaluation's technical failure, when it ran and failed.
+    ///
+    /// `Some` means the settlement (this call's or an earlier one's) is
+    /// durable and the re-evaluation is still pending: retry the same call to
+    /// converge. `None` alongside `Updated` / `StaleCurrent` means the
+    /// re-evaluation answered; `adoption == None` then means no
+    /// sealed-but-unadopted result was left to evaluate.
+    pub adoption_error: Option<TaskControlError>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ReconciliationSummary {
-    pub evaluated: u64,
-    pub adopted: u64,
-    pub withheld: u64,
-    pub recorded_to_original_only: u64,
-    pub missing: u64,
-    pub unavailable: u64,
-    pub first_error: Option<TaskTechnicalError>,
-}
-
+/// Transient conversation projection of the Task one dialogue is working on.
+///
+/// In-memory only, keyed by Companion, and never durable authority: it lets a
+/// task-less companion directive resolve to the Task the conversation most
+/// recently created, while every operation still goes through the Task
+/// owner's durable compare. The projection is dropped on restart, so a
+/// post-restart directive answers "no active task" instead of guessing;
+/// restart continuation is Stage 5.
 #[derive(Default)]
 pub(crate) struct ConversationTaskProjection {
     current: StdMutex<HashMap<CompanionId, ConversationTask>>,
@@ -242,6 +282,14 @@ impl TestResumeGate {
     }
 }
 
+/// Host composition root implementing the companion's Task control port.
+///
+/// The companion interprets its provider output into a
+/// [`DialogueTaskCommand`]; this adapter maps that command onto the existing
+/// Task owner boundaries ([`HostHandle::cancel_task`],
+/// [`HostHandle::task_report`]) and renders the typed outcome. It never
+/// writes Task state itself and never decides completion, cancellation
+/// meaning, or certainty.
 pub(crate) struct HostTaskControl<'a> {
     handle: &'a HostHandle,
     companion: CompanionId,
@@ -268,9 +316,7 @@ impl<'a> HostTaskControl<'a> {
     }
 
     fn no_active_task() -> DialogueTaskControlReply {
-        DialogueTaskControlReply::Answered(String::from(
-            "There is no active task in this conversation.",
-        ))
+        DialogueTaskControlReply::Answered(String::from(NO_ACTIVE_TASK))
     }
 
     async fn propose(&self, purpose: String, origin: RawId) -> DialogueTaskControlReply {
@@ -302,29 +348,41 @@ impl<'a> HostTaskControl<'a> {
         .await;
         match outcome {
             Err(_) => DialogueTaskControlReply::Unavailable,
-            Ok(TaskCreationOutcome::Superseded) => DialogueTaskControlReply::Unavailable,
-            Ok(TaskCreationOutcome::Created(task)) => match self.handle.delegate_task(task).await {
-                Err(_) => DialogueTaskControlReply::Unavailable,
-                Ok(DelegationOutcome::Delegated(delegation)) => {
-                    self.handle.conversation_tasks.record(
-                        self.companion,
-                        task.task,
-                        Some(delegation.delegation),
-                    );
-                    self.handle.launch_or_release(delegation.delegation);
-                    DialogueTaskControlReply::Answered(String::from(
-                        "Task accepted (status: in-progress). I will work on it.",
-                    ))
+            // The turn was superseded before the creation transaction: no
+            // Task, no delegation, no reply.
+            Ok(TaskProposalOutcome::Superseded) => DialogueTaskControlReply::Unavailable,
+            Ok(TaskProposalOutcome::AcceptedAsTask(task)) => {
+                match self.handle.delegate_task(task).await {
+                    Err(_) => DialogueTaskControlReply::Unavailable,
+                    Ok(DelegationOutcome::Delegated(delegation)) => {
+                        self.handle.conversation_tasks.record(
+                            self.companion,
+                            task.task,
+                            Some(delegation.delegation),
+                        );
+                        // Production launcher: the existing runner starts in
+                        // the background; this turn never awaits it. Without
+                        // a launcher the reservation is released and the
+                        // delegation stays durable and unexecuted.
+                        self.handle.launch_or_release(delegation.delegation);
+                        DialogueTaskControlReply::Answered(String::from(
+                            "Task accepted (status: in-progress). I will work on it.",
+                        ))
+                    }
+                    Ok(_) => {
+                        self.handle
+                            .conversation_tasks
+                            .record(self.companion, task.task, None);
+                        DialogueTaskControlReply::Answered(String::from(
+                            "Task accepted, but no execution could be delegated; it stays without an execution.",
+                        ))
+                    }
                 }
-                Ok(_) => {
-                    self.handle
-                        .conversation_tasks
-                        .record(self.companion, task.task, None);
-                    DialogueTaskControlReply::Answered(String::from(
-                        "Task accepted, but no execution could be delegated; it stays without an execution.",
-                    ))
-                }
-            },
+            }
+            // A fresh creation cannot answer a steering, staleness, terminal,
+            // missing, exhausted, or held-for-erasure outcome; refuse rather
+            // than inventing a reply for a state this path cannot produce.
+            Ok(_) => DialogueTaskControlReply::Unavailable,
         }
     }
 
@@ -358,10 +416,7 @@ impl<'a> HostTaskControl<'a> {
             Ok(Some(record)) => record,
         };
         if record.task.progress.is_terminal() {
-            return DialogueTaskControlReply::Answered(format!(
-                "That task is already {}.",
-                progress_label(record.task.progress)
-            ));
+            return DialogueTaskControlReply::Answered(already_text(record.task.progress));
         }
         let command = ProposeSteeringCommand {
             premise: SteeringPremiseRef {
@@ -434,10 +489,7 @@ impl<'a> HostTaskControl<'a> {
                 DialogueTaskControlReply::Answered(String::from("The task was already cancelled."))
             }
             Ok(TaskCancelOutcome::TaskTerminal { progress, .. }) => {
-                DialogueTaskControlReply::Answered(format!(
-                    "That task is already {}.",
-                    progress_label(progress)
-                ))
+                DialogueTaskControlReply::Answered(already_text(progress))
             }
             Ok(TaskCancelOutcome::MissingTask { .. }) => Self::no_active_task(),
         }
@@ -512,6 +564,12 @@ fn progress_label(progress: TaskProgress) -> String {
     progress.as_str().replace('_', "-")
 }
 
+fn already_text(progress: TaskProgress) -> String {
+    format!("That task is already {}.", progress_label(progress))
+}
+
+const NO_ACTIVE_TASK: &str = "There is no active task in this conversation.";
+
 fn task_outcome_text(outcome: &TaskProposalOutcome) -> String {
     match outcome {
         TaskProposalOutcome::AcceptedAsTask(_) | TaskProposalOutcome::AcceptedAsSteering(_) => {
@@ -521,12 +579,8 @@ fn task_outcome_text(outcome: &TaskProposalOutcome) -> String {
             "The task moved on; nothing was applied (current revision {}).",
             current.revision.as_u64()
         ),
-        TaskProposalOutcome::TaskTerminal { progress, .. } => {
-            format!("That task is already {}.", progress_label(*progress))
-        }
-        TaskProposalOutcome::MissingTask { .. } => {
-            String::from("There is no active task in this conversation.")
-        }
+        TaskProposalOutcome::TaskTerminal { progress, .. } => already_text(*progress),
+        TaskProposalOutcome::MissingTask { .. } => String::from(NO_ACTIVE_TASK),
         TaskProposalOutcome::RevisionExhausted { .. } => {
             String::from("The task cannot take another change.")
         }
@@ -546,9 +600,7 @@ fn resume_outcome_text(outcome: &TaskResumeOutcome) -> String {
             "The task moved on; nothing was resumed (current revision {}).",
             current.revision.as_u64()
         ),
-        TaskResumeOutcome::TaskTerminal { progress, .. } => {
-            format!("That task is already {}.", progress_label(*progress))
-        }
+        TaskResumeOutcome::TaskTerminal { progress, .. } => already_text(*progress),
         TaskResumeOutcome::AlreadyRunning { .. } => {
             String::from("That task is already running; nothing was resumed.")
         }
@@ -578,9 +630,7 @@ fn resume_outcome_text(outcome: &TaskResumeOutcome) -> String {
                 "No runner is available to continue the task; nothing was resumed."
             }
         }),
-        TaskResumeOutcome::MissingTask { .. } => {
-            String::from("There is no active task in this conversation.")
-        }
+        TaskResumeOutcome::MissingTask { .. } => String::from(NO_ACTIVE_TASK),
         TaskResumeOutcome::RevisionExhausted { .. } => {
             String::from("The task cannot take another change.")
         }
@@ -597,47 +647,27 @@ fn delegation_outcome_text(outcome: &DelegationOutcome) -> String {
             "The task moved on again; the latest instruction was not executed (current revision {}).",
             current.revision.as_u64()
         ),
-        DelegationOutcome::TaskTerminal { progress, .. } => {
-            format!("That task is already {}.", progress_label(*progress))
-        }
-        DelegationOutcome::MissingTask { .. } => {
-            String::from("There is no active task in this conversation.")
-        }
+        DelegationOutcome::TaskTerminal { progress, .. } => already_text(*progress),
+        DelegationOutcome::MissingTask { .. } => String::from(NO_ACTIVE_TASK),
     }
 }
 
 pub const RECONCILIATION_PAGE_SIZE: u64 = 64;
 
 impl HostHandle {
-    pub async fn propose_task(
-        &self,
-        requester: CompanionId,
-        purpose: TaskPurpose,
-        origin: TaskContextOrigin,
-        workspace_need: Option<WorkspaceNeedRef>,
-    ) -> Result<TaskProposalHostOutcome, TaskTechnicalError> {
-        let outcome = ene_companion::dialogue::propose_task(
-            ProposeTaskCommand {
-                requester,
-                purpose,
-                origin,
-                workspace_need,
-            },
-            &self.store,
-        )
-        .await?;
-        let TaskProposalOutcome::AcceptedAsTask(task) = outcome else {
-            return Ok(TaskProposalHostOutcome::Proposal(outcome));
-        };
-        Ok(match self.delegate_task(task).await? {
-            DelegationOutcome::Delegated(delegation) => TaskProposalHostOutcome::AcceptedAsTask {
-                task,
-                delegation: delegation.delegation,
-            },
-            outcome => TaskProposalHostOutcome::DelegationRefused { task, outcome },
-        })
-    }
-
+    /// Issues the existing AU3 delegation request for one committed Task.
+    ///
+    /// The committed unit supplies the boundary copy; the Task owner confirms
+    /// the association and revision inside its own commit. This is the shared
+    /// delegation step of the first-party and conversation proposal paths.
+    ///
+    /// The commit and the launch reservation share the registry commit scope
+    /// (CCT §7.4): the scope serializes this producer against every other
+    /// AU3/AU17 producer in the process, so the committed delegation is
+    /// reserved before any concurrent resume can observe the Task as free.
+    /// A lost reservation race is a technical error: the delegation is
+    /// durable but unlaunchable, and a retry is a new explicit delegation,
+    /// never an automatic relaunch.
     async fn delegate_task(&self, task: TaskRef) -> Result<DelegationOutcome, TaskTechnicalError> {
         let _scope = self.task_executions.commit_scope().await;
         let Some(record) = self.store.load_task(task.task).await? else {
@@ -681,13 +711,14 @@ impl HostHandle {
         }
     }
 
-    pub async fn propose_steering(
-        &self,
-        command: ProposeSteeringCommand,
-    ) -> Result<TaskProposalOutcome, TaskTechnicalError> {
-        ene_companion::dialogue::propose_steering(command, &self.store).await
-    }
-
+    /// Host-known readiness for one resume commit.
+    ///
+    /// Read under the launch commit scope: the final permission / cap
+    /// judgement stays with the AU14/AU5 gates (`permission_available` is
+    /// always `true` here), while the Task's reservation/registration state
+    /// and the launcher's presence are read now so the commit orders them
+    /// in its refusal priority. No presence check and no provider call are
+    /// involved: an explicit Owner instruction is sufficient premise.
     fn resume_readiness(&self, task: TaskId) -> TaskResumeReadiness {
         TaskResumeReadiness {
             permission_available: true,
@@ -760,13 +791,6 @@ impl HostHandle {
                 };
                 let outcome =
                     store.commit_task_resume_sync(resume_commit_premise(command, readiness))?;
-                if let TaskResumeOutcome::Resumed { delegation, .. } = &outcome
-                    && !registry.reserve(delegation.delegation, delegation.task.task)
-                {
-                    return Err(TaskTechnicalError::StorageUnavailable {
-                        reason: String::from("resume launch reservation lost its race"),
-                    });
-                }
                 Ok(outcome)
             })
         })
@@ -780,9 +804,7 @@ impl HostHandle {
         if let TaskResumeOutcome::ResultAvailable { task } = &outcome {
             route_available_result(&self.store, *task).await?;
         }
-        if let TaskResumeOutcome::Resumed { delegation, .. } = &outcome {
-            self.launch_or_release(delegation.delegation);
-        }
+        self.reserve_and_launch_resumed(&outcome)?;
         Ok(Some(outcome))
     }
 
@@ -810,6 +832,37 @@ impl HostHandle {
         Ok(outcome)
     }
 
+    /// Settles one Action attempt's late objective evidence and, when the
+    /// settlement commits, re-evaluates the execution's sealed result.
+    ///
+    /// This composes two owner operations without merging them: the Action
+    /// owner's certainty compare-and-set commits first (it alone may change
+    /// certainty), and only then does a bounded read of the attempt's
+    /// delegation and its sealed result run through the Task owner's
+    /// [`ene_task::reevaluate_result_adoption`]. A still-present blocker
+    /// legitimately answers `WithheldByEffectFacts`; no busy retry loop
+    /// exists. Nothing here re-executes a provider call or a filesystem
+    /// Action.
+    ///
+    /// The two steps are ordered, not atomic: a failure in the re-evaluation
+    /// can never retract a committed settlement, so it is reported as the
+    /// partial outcome [`EffectSettlementOutcome::adoption_error`] and the
+    /// same call is its retry. Re-invoking after a committed settlement is
+    /// idempotent: the compare-and-set answers `StaleCurrent` (or
+    /// `MissingAttempt` when the row is gone), certainty is never rewritten,
+    /// and an already-adopted result is never adopted twice. `StaleCurrent`
+    /// is not a dead end — the re-evaluation still runs against current
+    /// durable facts, so an attempt settled before its blocker cleared
+    /// converges without restart. Only an `Err` means nothing was committed.
+    /// After a restart, the bounded
+    /// [`HostHandle::reconcile_sealed_results`] pass covers the same
+    /// sealed-but-unadopted result.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskControlError`] only when the certainty compare-and-set itself
+    /// cannot answer; a re-evaluation failure is reported on the returned
+    /// outcome.
     pub async fn settle_action_certainty(
         &self,
         attempt: ActionAttemptId,
@@ -820,14 +873,20 @@ impl HostHandle {
             .store
             .compare_and_set_certainty(attempt, ActionCertainty::Unknown, new, grounds)
             .await?;
-        let adoption = if certainty == CertaintyUpdateOutcome::Updated {
-            self.reevaluate_sealed_result_for_attempt(attempt).await?
+        let (adoption, adoption_error) = if certainty == CertaintyUpdateOutcome::MissingAttempt {
+            // No attempt row means no delegation to correlate a sealed result
+            // with: nothing was committed and nothing is left to re-evaluate.
+            (None, None)
         } else {
-            None
+            match self.reevaluate_sealed_result_for_attempt(attempt).await {
+                Ok(adoption) => (adoption, None),
+                Err(error) => (None, Some(error)),
+            }
         };
         Ok(EffectSettlementOutcome {
             certainty,
             adoption,
+            adoption_error,
         })
     }
 
@@ -850,58 +909,53 @@ impl HostHandle {
         ))
     }
 
-    pub async fn reconcile_sealed_results(
-        &self,
-    ) -> Result<ReconciliationSummary, TaskTechnicalError> {
-        self.reconcile_sealed_results_with_page_size(RECONCILIATION_PAGE_SIZE)
-            .await
-    }
-
-    async fn reconcile_sealed_results_with_page_size(
-        &self,
-        page_size: u64,
-    ) -> Result<ReconciliationSummary, TaskTechnicalError> {
-        debug_assert_ne!(page_size, 0, "reconciliation page size must be non-zero");
-        let mut summary = ReconciliationSummary::default();
+    /// Re-evaluates the reconciliation candidate set, one bounded page at a
+    /// time, without materializing every candidate.
+    ///
+    /// This is the explicit recovery producer for results that were durably
+    /// recorded (AU15a) but whose adoption commit (AU15b) did not run before
+    /// a stop, and for withheld results whose blocking facts settled while
+    /// nothing was listening. The candidate predicate is canonical-facts
+    /// only: `adopted_revision IS NULL` and re-adoption is still possible (the
+    /// Task is non-terminal and its current revision is the relied revision).
+    /// A result that can only answer `RecordedToOriginalOnly` is not a
+    /// candidate, so permanent history is not re-evaluated on every startup;
+    /// no pending flag, retry queue, or second adoption state exists. The walk
+    /// uses keyset pages over `(recorded_at, result_id)`, so every candidate
+    /// is visited once per pass and a candidate already passed is never
+    /// re-read from the front. Each page read is bounded by
+    /// [`RECONCILIATION_PAGE_SIZE`]. Each candidate goes through the same
+    /// [`ene_task::reevaluate_result_adoption`] path, so a still-blocked
+    /// result keeps its existing semantics. An execution is never resumed and
+    /// no provider call or filesystem Action is replayed.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskTechnicalError`] when a candidate page cannot be read. A
+    /// per-candidate failure is neither completion nor withheld and does not
+    /// stop the remaining candidates or wedge startup.
+    pub async fn reconcile_sealed_results(&self) -> Result<(), TaskTechnicalError> {
         let mut cursor = None;
         loop {
             let page = self
                 .store
-                .list_unadopted_results_after(cursor, page_size)
+                .list_unadopted_results_after(cursor, RECONCILIATION_PAGE_SIZE)
                 .await?;
             let Some(last) = page.last() else {
                 break;
             };
             cursor = Some(*last);
-            let full_page = page.len() as u64 == page_size;
+            let full_page = page.len() as u64 == RECONCILIATION_PAGE_SIZE;
             for candidate in page {
-                summary.evaluated += 1;
-                match reevaluate_result_adoption(&self.store, candidate.result).await {
-                    Ok(TaskResultAcceptance::AdoptedAsCompletion(_)) => summary.adopted += 1,
-                    Ok(TaskResultAcceptance::WithheldByEffectFacts { .. }) => {
-                        summary.withheld += 1;
-                    }
-                    Ok(TaskResultAcceptance::RecordedToOriginalOnly) => {
-                        summary.recorded_to_original_only += 1;
-                    }
-                    Ok(
-                        TaskResultAcceptance::MissingResult { .. }
-                        | TaskResultAcceptance::MissingDelegation { .. }
-                        | TaskResultAcceptance::MissingTask { .. },
-                    ) => summary.missing += 1,
-                    Err(error) => {
-                        summary.unavailable += 1;
-                        if summary.first_error.is_none() {
-                            summary.first_error = Some(error);
-                        }
-                    }
-                }
+                // Fail-soft: a per-candidate failure is neither completion nor
+                // withheld, and the remaining candidates are still evaluated.
+                let _adoption = reevaluate_result_adoption(&self.store, candidate.result).await;
             }
             if !full_page {
                 break;
             }
         }
-        Ok(summary)
+        Ok(())
     }
 
     pub async fn task_report(
@@ -976,11 +1030,11 @@ impl HostHandle {
     }
 }
 
-fn report_certainty(certainty: ActionCertainty) -> TaskReportCertainty {
+fn report_certainty(certainty: ActionCertainty) -> ActionCertaintyWire {
     match certainty {
-        ActionCertainty::ConfirmedSuccess => TaskReportCertainty::ConfirmedSuccess,
-        ActionCertainty::ConfirmedFailure => TaskReportCertainty::ConfirmedFailure,
-        ActionCertainty::Unknown => TaskReportCertainty::Unknown,
+        ActionCertainty::ConfirmedSuccess => ActionCertaintyWire::ConfirmedSuccess,
+        ActionCertainty::ConfirmedFailure => ActionCertaintyWire::ConfirmedFailure,
+        ActionCertainty::Unknown => ActionCertaintyWire::Unknown,
     }
 }
 

@@ -1,3 +1,11 @@
+//! Canonical Group J admission and unfinished lifecycle. All mutations share
+//! SQLite's Immediate writer boundary with AU14 and Task resume; no I/O or
+//! participant erase runs under the transaction. The `PreservationRepository`
+//! read methods are SELECT-only and bound their validation to the rows they
+//! actually return; the Store coverage predicates fill the durable
+//! `erasure_use_hold` correspondence through `held_use` and are therefore not
+//! side-effect free.
+
 use std::sync::Arc;
 
 use ene_preservation::*;
@@ -6,18 +14,31 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, param
 
 use crate::{
     Store,
-    codec::{decode_id, encode_id, lock_shared},
+    codec::{
+        decode_id, encode_id, lock_shared, preservation_corrupt as corrupt,
+        preservation_storage as storage,
+    },
     run_blocking, run_deletion_blocking,
 };
 
-fn storage(_: rusqlite::Error) -> PreservationTechnicalError {
-    PreservationTechnicalError::StorageUnavailable
+pub(crate) fn check_page_limit(limit: u32) -> Result<(), PreservationTechnicalError> {
+    if !(1..=100).contains(&limit) {
+        return Err(PreservationTechnicalError::InvalidLimit);
+    }
+    Ok(())
 }
 
-fn corrupt() -> PreservationTechnicalError {
-    PreservationTechnicalError::CorruptState
-}
-
+/// Whether `condition` is the operation's current, unfinished condition
+/// (lifecycle §6-§7).
+///
+/// A participant-local erasure pass must run this check inside the same
+/// transaction as its mutation: a sweep the operation has moved past or a
+/// completed operation must never erase local state. Completion ends the
+/// text's meaning as a deletion target (§7: a completed operation is not a
+/// permanent keyword ban), so a late duplicate from a superseded run must be
+/// refused instead of erasing text the Owner provided afterwards. A condition
+/// that cannot be encoded, or that has no matching operation row, is not
+/// current.
 pub(crate) fn condition_is_current(
     conn: &Connection,
     condition: ErasureConditionRef,
@@ -37,10 +58,8 @@ pub(crate) fn source_is_covered(
     conn: &Connection,
     condition: ErasureConditionRef,
     source: RawId,
-) -> rusqlite::Result<bool> {
-    let Ok(sweep) = i64::try_from(condition.sweep.as_u64()) else {
-        return Ok(false);
-    };
+) -> Result<bool, PreservationTechnicalError> {
+    let sweep = i64::try_from(condition.sweep.as_u64()).map_err(|_| corrupt())?;
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM erasure_condition_source
          WHERE operation_id=?1 AND sweep=?2 AND source=?3)",
@@ -51,6 +70,7 @@ pub(crate) fn source_is_covered(
         ],
         |row| row.get(0),
     )
+    .map_err(storage)
 }
 
 fn candidate_page(
@@ -82,6 +102,38 @@ fn candidate_page(
         .map_err(storage)
 }
 
+/// The durable reconciliation cursor rows for one operation, as
+/// `(identity_table, sweep, complete)`.
+fn reconciliation_rows(
+    conn: &Connection,
+    operation: &str,
+) -> Result<Vec<(String, i64, i64)>, PreservationTechnicalError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT identity_table,sweep,complete FROM deletion_reconciliation
+             WHERE operation_id=?1",
+        )
+        .map_err(storage)?;
+    statement
+        .query_map([operation], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)
+}
+
+/// Structural integrity of one operation's reconciliation cursor rows,
+/// scoped to the operation a query actually touches.
+///
+/// Invariant: an unfinished operation carries exactly one row per known
+/// identity table for its current sweep; a `Finalizing` operation has every
+/// row complete (the completion premise was re-read before the marker was
+/// taken); a completed operation keeps zero rows. Any other shape — a missing
+/// table, a foreign sweep, an unknown table name, or leftover rows after
+/// completion — is torn canonical state that fails closed, never a silently
+/// incomplete walk. Rows for an operation that does not exist are torn state
+/// for the same reason a condition without its operation is.
 fn validate_reconciliation(
     conn: &Connection,
     operation: &str,
@@ -94,20 +146,7 @@ fn validate_reconciliation(
         )
         .optional()
         .map_err(storage)?;
-    let mut statement = conn
-        .prepare(
-            "SELECT identity_table,sweep,complete FROM deletion_reconciliation
-             WHERE operation_id=?1",
-        )
-        .map_err(storage)?;
-    let rows: Vec<(String, i64, i64)> = statement
-        .query_map([operation], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .map_err(storage)?
-        .collect::<Result<_, _>>()
-        .map_err(storage)?;
-    drop(statement);
+    let rows = reconciliation_rows(conn, operation)?;
     let Some((phase, sweep)) = row else {
         return if rows.is_empty() {
             Ok(())
@@ -142,6 +181,42 @@ fn validate_reconciliation(
     Ok(())
 }
 
+/// Structural integrity of one operation's canonical rows, scoped to the
+/// operation a query actually touches: an inner join must never silently hide
+/// an orphan correlation, an unfinished operation whose condition was closed
+/// early, or a completed operation that still holds protected material.
+///
+/// Source-correlation invariant (current-sweep canonical): an unfinished
+/// operation keeps `erasure_condition_source` rows only in its current sweep
+/// (`NextSweep` copies forward then deletes the old sweep atomically);
+/// historical `erasure_condition` rows remain but carry no source rows; a
+/// completed operation keeps zero source rows (the A5 completion boundary
+/// must delete them — A1 exposes no completion authority — and any remaining
+/// row fails closed). No second copy exists for audit/history.
+///
+/// Participant invariant: every operation carries a non-empty required
+/// participant snapshot from admission; every row tracks the operation's
+/// current sweep (`NextSweep` resets all progress to pending atomically); a
+/// `Finalizing` operation has every row `verified` (verification is terminal
+/// for its sweep) and a completed operation has every row `verified` for that
+/// sweep. A participant row for an unknown owner, a foreign sweep, or a
+/// missing snapshot is torn canonical state and fails closed, never a silently
+/// incomplete set.
+///
+/// Completion invariant: the audit row exists exactly when the operation is
+/// `completed`, matches the operation's purpose, start time, and final sweep,
+/// names every required participant exactly once with `verified` as its final
+/// status and the participant row's erased count, and a completed request's
+/// staged `exact_text` is wiped. Because the wipe, the audit, the condition
+/// closure, and the phase change share one commit, no partial shape (closed
+/// condition without completion, audit without closure, wiped material without
+/// audit) is ever readable.
+///
+/// Request provenance (A1b): an operation admitted from a staged request keeps
+/// that request's purpose for its whole life, and — while its protected
+/// material exists — the same exact mechanical text. A completed operation's
+/// material is gone by design, so only the purpose link is checked there.
+/// Bounded by the touching query's page, never a whole-store scan.
 fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechnicalError> {
     let broken: bool = conn
         .query_row(
@@ -245,22 +320,18 @@ pub(crate) const COVERING_TORN_PROBE_SQL: &str = "SELECT
          AND NOT EXISTS(SELECT 1 FROM erasure_condition c
              WHERE c.operation_id=o.operation_id AND c.sweep=o.sweep))";
 
-fn directly_covered_source(
+/// The unfinished operations whose current-sweep reconciliation is still
+/// walking, as `(operation_id, sweep)` in `operation_id` order.
+///
+/// The published current-sweep correlation is the fast path; while a sweep is
+/// incomplete, a covered identity may legitimately not be published yet. The
+/// direct-fallback probes share this candidate set so the fast-skip probe and
+/// the enumeration cannot drift. An empty result means no active/held
+/// operation is mid-reconciliation, so the published correlation set is
+/// already exhaustive.
+fn unreconciled_operations(
     conn: &Connection,
-    source: &str,
-) -> Result<Option<ErasureConditionRef>, PreservationTechnicalError> {
-    let pending: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM deletion_reconciliation r
-                 JOIN deletion_operation o ON o.operation_id=r.operation_id
-                 WHERE r.complete=0 AND r.sweep=o.sweep AND o.phase IN ('active','held'))",
-            (),
-            |row| row.get(0),
-        )
-        .map_err(storage)?;
-    if !pending {
-        return Ok(None);
-    }
+) -> Result<Vec<(String, i64)>, PreservationTechnicalError> {
     let mut statement = conn
         .prepare(
             "SELECT o.operation_id,o.sweep FROM deletion_operation o
@@ -276,17 +347,56 @@ fn directly_covered_source(
         .collect::<Result<_, _>>()
         .map_err(storage)?;
     drop(statement);
-    for (id, sweep) in candidates {
+    Ok(candidates)
+}
+
+/// The protected exact target of one operation, `None` when the material row
+/// is absent (completion wipe or missing row).
+fn load_exact_target(
+    conn: &Connection,
+    operation: &str,
+) -> Result<Option<String>, PreservationTechnicalError> {
+    conn.query_row(
+        "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
+        [operation],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(storage)
+}
+
+/// The unreconciled operations' protected targets, as
+/// `(operation_id, sweep, exact_text)` in `operation_id` order.
+///
+/// Active/held operations always keep protected material (`validate`); a
+/// missing row is torn state, never a "checked everything" default.
+fn unreconciled_targets(
+    conn: &Connection,
+) -> Result<Vec<(String, i64, String)>, PreservationTechnicalError> {
+    let mut targets = Vec::new();
+    for (id, sweep) in unreconciled_operations(conn)? {
         validate(conn, &id)?;
-        let target: Option<String> = conn
-            .query_row(
-                "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                [&id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        let target = target.ok_or_else(corrupt)?;
+        let target = load_exact_target(conn, &id)?;
+        targets.push((id, sweep, target.ok_or_else(corrupt)?));
+    }
+    Ok(targets)
+}
+
+/// Direct mechanical coverage of one source identity by an operation whose
+/// current-sweep reconciliation is still walking.
+///
+/// The published current-sweep correlation is the fast path; while a sweep is
+/// incomplete, a covered identity may legitimately not be published yet. The
+/// identity's own stored body is durable evidence independent of any page
+/// bound, so it is compared directly against each unreconciled operation's
+/// protected target. This keeps a new send or adoption from starting on a
+/// covered source between the condition commit and the end of the walk; after
+/// the walk the published correlation answers the same way.
+fn directly_covered_source(
+    conn: &Connection,
+    source: &str,
+) -> Result<Option<ErasureConditionRef>, PreservationTechnicalError> {
+    for (id, sweep, target) in unreconciled_targets(conn)? {
         if source_identity_carries(conn, source, &target)? {
             return Ok(Some(decode_ref(&id, sweep)?.condition()));
         }
@@ -318,53 +428,97 @@ pub(crate) fn covering_condition(
     directly_covered_source(conn, source)
 }
 
+/// One traversal of the canonical current conditions with their protected
+/// mechanical targets (lifecycle §7/§11).
+///
+/// Returns `(condition, target)` in `operation_id` order; `target` is `None`
+/// when the operation's protected material row is absent. Every unfinished
+/// operation is Owner-confirmed and validated here, so an operation whose
+/// structural rows are torn fails the read closed instead of being read as
+/// "not covering".
+fn current_operation_targets(
+    conn: &Connection,
+) -> Result<Vec<(ErasureConditionRef, Option<String>)>, PreservationTechnicalError> {
+    let orphan: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM erasure_condition c
+                 LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
+                 WHERE o.operation_id IS NULL)",
+            (),
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if orphan {
+        return Err(corrupt());
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT operation_id, sweep FROM deletion_operation
+             WHERE phase!='completed' ORDER BY operation_id",
+        )
+        .map_err(storage)?;
+    let ids: Vec<(String, i64)> = statement
+        .query_map((), |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    drop(statement);
+    let mut targets = Vec::with_capacity(ids.len());
+    for (id, sweep) in ids {
+        validate(conn, &id)?;
+        let target = load_exact_target(conn, &id)?;
+        targets.push((decode_ref(&id, sweep)?.condition(), target));
+    }
+    Ok(targets)
+}
+
+/// One mechanical text verdict against the canonical current conditions
+/// (lifecycle §7/§11).
+///
+/// [`Self::Target`] means a current condition's protected exact target occurs
+/// in the text; the target itself is never copied out of the store or rendered
+/// into a log, an outcome, a completion fact, or an audit row. [`Self::Unreadable`]
+/// is a current condition with no readable protected target: production never
+/// observes this shape (the completion wipe runs in the same transaction that
+/// commits `completed`), so it is a defensive branch for torn state. Should a
+/// wipe ever be observable before the completed commit, the condition still
+/// covers, but no target remains to redact mechanically, so callers fail
+/// closed (refuse; a collecting owner stores a body-free marker) rather than
+/// treating an unreadable target as "not covering".
 pub(crate) enum TextCoverage {
-    Target(String),
+    Target,
     Unreadable,
 }
 
+/// The exact-target premise of one bounded read pass (lifecycle §7/§11).
+///
+/// This is the page-shaped companion of [`covering_text`]: one canonical read
+/// of the unfinished operations' protected mechanical targets, reused for
+/// every row of one read. The premise is read from the canonical store inside
+/// the caller's transaction, so an empty target set across every current
+/// condition is the authoritative "not covered" (no sentinel, no cached
+/// verdict). A completed operation is excluded by the canonical
+/// `phase`/`closed_at` invariant: its condition stopped covering text (§7:
+/// completion is not a permanent keyword ban). Unfinished operations are the
+/// bounded candidate set: they are Owner-confirmed and validated here, so an
+/// operation whose structural rows are torn fails the read closed instead of
+/// being read as "not covering".
+///
+/// [`Self::covers`] is the same mechanical predicate the A3 owner sweeps apply
+/// — an exact substring match of a protected target. A current condition with
+/// no readable target at all (defensive: should a wipe ever be observable
+/// before the completed commit) leaves nothing to compare, so the premise is
+/// unreadable and every body is covered (fail closed) rather than served as
+/// uncovered.
 pub(crate) struct TextCoveragePremise {
     targets: Option<Vec<String>>,
 }
 
 impl TextCoveragePremise {
     pub(crate) fn read(conn: &Connection) -> Result<Self, PreservationTechnicalError> {
-        let orphan: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM erasure_condition c
-                     LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
-                     WHERE o.operation_id IS NULL)",
-                (),
-                |row| row.get(0),
-            )
-            .map_err(storage)?;
-        if orphan {
-            return Err(corrupt());
-        }
-        let mut statement = conn
-            .prepare(
-                "SELECT operation_id FROM deletion_operation
-                 WHERE phase!='completed' ORDER BY operation_id",
-            )
-            .map_err(storage)?;
-        let ids: Vec<String> = statement
-            .query_map((), |row| row.get(0))
-            .map_err(storage)?
-            .collect::<Result<_, _>>()
-            .map_err(storage)?;
-        drop(statement);
-        let mut targets = Vec::with_capacity(ids.len());
-        for id in ids {
-            validate(conn, &id)?;
-            let exact: Option<String> = conn
-                .query_row(
-                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                    [&id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
-            let Some(target) = exact else {
+        let mut targets = Vec::new();
+        for (_, target) in current_operation_targets(conn)? {
+            let Some(target) = target else {
                 return Ok(Self { targets: None });
             };
             if !target.is_empty() {
@@ -395,53 +549,22 @@ pub(crate) fn covering_text(
     Ok(targets
         .iter()
         .find(|target| text.contains(target.as_str()))
-        .cloned()
-        .map(TextCoverage::Target))
+        .map(|_| TextCoverage::Target))
 }
 
 pub(crate) fn covering_text_condition(
     conn: &Connection,
     text: &str,
 ) -> Result<Option<(ErasureConditionRef, TextCoverage)>, PreservationTechnicalError> {
-    let orphan: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM erasure_condition c
-                 LEFT JOIN deletion_operation o ON o.operation_id=c.operation_id
-                 WHERE o.operation_id IS NULL)",
-            (),
-            |row| row.get(0),
-        )
-        .map_err(storage)?;
-    if orphan {
-        return Err(corrupt());
-    }
-    let mut statement = conn
-        .prepare(
-            "SELECT operation_id, sweep FROM deletion_operation
-             WHERE phase!='completed' ORDER BY operation_id",
-        )
-        .map_err(storage)?;
-    let ids: Vec<(String, i64)> = statement
-        .query_map((), |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(storage)?
-        .collect::<Result<_, _>>()
-        .map_err(storage)?;
-    drop(statement);
-    for (id, sweep) in ids {
-        validate(conn, &id)?;
-        let exact: Option<String> = conn
-            .query_row(
-                "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                [&id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        let condition = decode_ref(&id, sweep)?.condition();
-        match exact {
+    for (condition, target) in current_operation_targets(conn)? {
+        match target {
+            // Defensive: production commits the completed phase and the wipe
+            // in one transaction, so an unfinished condition keeps its
+            // material. Should a wipe ever be observable first, the body is
+            // covered with no readable target.
             None => return Ok(Some((condition, TextCoverage::Unreadable))),
             Some(target) if !target.is_empty() && text.contains(&target) => {
-                return Ok(Some((condition, TextCoverage::Target(target))));
+                return Ok(Some((condition, TextCoverage::Target)));
             }
             Some(_) => {}
         }
@@ -461,25 +584,53 @@ pub(crate) fn covering_sources(
     Ok(None)
 }
 
+/// Collects one covered body instead of persisting it: redacts every current
+/// condition's mechanical target out of the text and returns the body-free
+/// result, or [`crate::erasure::ERASED_MARKER`] when a current condition's
+/// protected target is unreadable (defensive: see [`TextCoverage::Unreadable`])
+/// so no mechanical comparison is possible at all.
+///
+/// This is the "erase collection" side of the A4 boundary contract for bodies
+/// whose objective fact must survive (a Task result arrival seals its
+/// delegation): the fact is committed, the body is not. A marker inserted for
+/// one target can carry another (`"a"` and `"e"` both occur in the marker), so a
+/// later pass can re-create an earlier target and the marker phase has no
+/// fixpoint; it is therefore bounded at one pass per target. Residual coverage
+/// falls back to removal, which strictly shortens the value (a joined
+/// occurrence is removed on a later iteration) and so always reaches a
+/// body-free fixpoint instead of growing without limit.
 pub(crate) fn redact_covered_text(
     conn: &Connection,
     text: &str,
 ) -> Result<String, PreservationTechnicalError> {
+    let premise = TextCoveragePremise::read(conn)?;
+    let Some(targets) = premise.targets.as_ref() else {
+        return Ok(String::from(crate::erasure::ERASED_MARKER));
+    };
     let mut current = text.to_owned();
-    loop {
-        let Some(coverage) = covering_text(conn, &current)? else {
+    for _ in 0..=targets.len() {
+        let Some(target) = targets
+            .iter()
+            .find(|target| current.contains(target.as_str()))
+        else {
             return Ok(current);
         };
-        let target = match coverage {
-            TextCoverage::Target(target) => target,
-            TextCoverage::Unreadable => {
-                return Ok(String::from(crate::erasure::ERASED_MARKER));
-            }
-        };
-        match crate::erasure::redact_exact(&current, &target) {
+        match crate::erasure::redact_exact(&current, target) {
             Some((redacted, _)) => current = redacted,
+            // The premise matched the target, so a missing occurrence would be
+            // an inconsistent mechanical predicate; fail closed rather than
+            // storing a body that is still covered.
             None => return Err(corrupt()),
         }
+    }
+    loop {
+        let Some(target) = targets
+            .iter()
+            .find(|target| current.contains(target.as_str()))
+        else {
+            return Ok(current);
+        };
+        current = current.replace(target.as_str(), "");
     }
 }
 
@@ -588,19 +739,11 @@ fn raw_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawOperation> {
 fn decode_operation(
     raw: RawOperation,
 ) -> Result<DeletionOperationRecord, PreservationTechnicalError> {
-    let phase = match raw.2.as_str() {
-        "active" => DeletionOperationPhase::Active,
-        "held" => DeletionOperationPhase::Held,
-        "finalizing" => DeletionOperationPhase::Finalizing,
-        "completed" => DeletionOperationPhase::Completed,
-        _ => return Err(corrupt()),
-    };
+    let phase = DeletionOperationPhase::from_name(raw.2.as_str()).ok_or_else(corrupt)?;
     let purpose = decode_purpose(&raw.3)?;
     let hold = match raw.5.as_deref() {
         None => None,
-        Some("unavailable") => Some(DeletionHoldReason::Unavailable),
-        Some("generation_exhausted") => Some(DeletionHoldReason::GenerationExhausted),
-        _ => return Err(corrupt()),
+        Some(name) => Some(DeletionHoldReason::from_name(name).ok_or_else(corrupt)?),
     };
     Ok(DeletionOperationRecord {
         current: decode_ref(&raw.0, raw.1)?,
@@ -611,15 +754,58 @@ fn decode_operation(
     })
 }
 
-type RawParticipant = (
-    String,
-    String,
-    i64,
-    Option<String>,
-    i64,
-    i64,
-    Option<String>,
-);
+macro_rules! operation_columns {
+    () => {
+        "operation_id,sweep,phase,purpose,started_at,hold_reason"
+    };
+}
+
+fn load_operation(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<RawOperation>, PreservationTechnicalError> {
+    conn.query_row(
+        concat!(
+            "SELECT ",
+            operation_columns!(),
+            " FROM deletion_operation WHERE operation_id=?1"
+        ),
+        [id],
+        raw_operation,
+    )
+    .optional()
+    .map_err(storage)
+}
+
+fn load_operation_state(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<(i64, String)>, PreservationTechnicalError> {
+    conn.query_row(
+        "SELECT sweep,phase FROM deletion_operation WHERE operation_id=?1",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(storage)
+}
+
+fn require_operation(conn: &Connection, id: &str) -> Result<(), PreservationTechnicalError> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM deletion_operation WHERE operation_id=?1)",
+            [id],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(PreservationTechnicalError::UnknownOperation)
+    }
+}
+
+type RawParticipant = (String, String, i64, Option<String>, Option<String>);
 
 fn raw_participant(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawParticipant> {
     Ok((
@@ -628,11 +814,13 @@ fn raw_participant(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawParticipant> 
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
-        row.get(5)?,
-        row.get(6)?,
     ))
 }
 
+/// One participant row is composed only when it is internally consistent: a
+/// known owner and state name, a positive sweep, a hold class exactly when
+/// held, and a parseable report time. Anything else is an unreadable row,
+/// never a guessed progress.
 fn decode_participant(
     operation: DeletionOperationId,
     raw: RawParticipant,
@@ -646,23 +834,16 @@ fn decode_participant(
         None => None,
         Some(name) => Some(ParticipantHoldClass::from_name(name).ok_or_else(corrupt)?),
     };
-    let progress = match (raw.1.as_str(), hold) {
-        ("pending", None) => ParticipantProgress::Pending,
-        ("running", None) => ParticipantProgress::Running { sweep },
-        ("local_complete", None) => ParticipantProgress::LocalComplete { sweep },
-        ("verified", None) => ParticipantProgress::Verified { sweep },
-        ("held", Some(reason)) => ParticipantProgress::Held { sweep, reason },
-        _ => return Err(corrupt()),
-    };
-    let erased_count = u64::try_from(raw.4).map_err(|_| corrupt())?;
-    let remainder_count = u64::try_from(raw.5).map_err(|_| corrupt())?;
-    let reported_at = raw.6.as_deref().map(parse_time).transpose()?;
+    let progress =
+        ParticipantProgress::from_state_name(raw.1.as_str(), sweep, hold).ok_or_else(corrupt)?;
+    // The report time is not part of the record, but a stored value that does
+    // not parse is torn state and still fails the read closed.
+    if let Some(text) = raw.4.as_deref() {
+        parse_time(text)?;
+    }
     Ok(DeletionParticipantRecord {
         participant: DeletionParticipantRef { operation, owner },
         progress,
-        erased_count,
-        remainder_count,
-        reported_at,
     })
 }
 
@@ -683,6 +864,9 @@ fn decode_request(raw: RawRequest) -> Result<TargetedDeletionRequest, Preservati
     if exact_text.is_empty() {
         return Err(corrupt());
     }
+    // The stored request time is journal metadata with no reader; parsing it
+    // still fails closed on an unreadable column.
+    let _ = parse_time(&raw.3)?;
     Ok(TargetedDeletionRequest::from_durable(
         DeletionRequestId::from_raw(decode_id(&raw.0).map_err(|_| corrupt())?),
         TargetedDeletionTarget {
@@ -692,7 +876,6 @@ fn decode_request(raw: RawRequest) -> Result<TargetedDeletionRequest, Preservati
             semantic_hints: Vec::new(),
         },
         decode_purpose(&raw.1)?,
-        parse_time(&raw.3)?,
     ))
 }
 
@@ -728,28 +911,20 @@ fn unfinished_by_exact_text(
     }
 }
 
+/// Whether one unfinished operation already covers the whole scope of a
+/// duplicate request: every semantic hint and every required participant owner
+/// must already belong to it. Same mechanical target is an idempotent request
+/// only if its scope is covered; a duplicate never silently widens a confirmed
+/// operation. The participant snapshot is part of the operation's scope, so a
+/// duplicate whose set needs an owner outside the snapshot is a
+/// live-operation conflict, not a silent widening.
 fn scope_covered(
     tx: &rusqlite::Transaction<'_>,
     current: DeletionOperationRef,
-    sources: &[RawId],
     hints: &[DeletionSearchMaterial],
     participants: &[ParticipantOwnerRef],
 ) -> Result<bool, PreservationTechnicalError> {
     let mut covered = true;
-    for source in sources {
-        let found: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM erasure_condition_source WHERE operation_id=?1 AND sweep=?2 AND source=?3)",
-                params![
-                    encode_id(current.operation.as_raw()),
-                    current.sweep.as_u64() as i64,
-                    encode_id(*source)
-                ],
-                |r| r.get(0),
-            )
-            .map_err(storage)?;
-        covered &= found;
-    }
     for hint in hints {
         let found: bool = tx
             .query_row(
@@ -826,17 +1001,22 @@ pub(crate) const KNOWN_SOURCE_IDENTITIES: &[KnownSourceIdentity] = &[
     },
 ];
 
+/// Initializes the durable reconciliation cursors for one operation + sweep:
+/// exactly one row per known identity table, incomplete.
+///
+/// The confirmed admission path publishes its first bounded pages in the same
+/// transaction and the durable cursors carry the walk to its end; a row set
+/// that does not match the known table set is torn state and fails closed
+/// through [`validate`].
 fn insert_reconciliation_rows(
     tx: &rusqlite::Transaction<'_>,
     operation: &str,
     sweep: i64,
-    complete: bool,
 ) -> Result<(), PreservationTechnicalError> {
-    let complete = i64::from(complete);
     for identity in KNOWN_SOURCE_IDENTITIES {
         tx.execute(
-            "INSERT INTO deletion_reconciliation (operation_id,sweep,identity_table,cursor,complete) VALUES (?1,?2,?3,'',?4)",
-            params![operation, sweep, identity.table, complete],
+            "INSERT INTO deletion_reconciliation (operation_id,sweep,identity_table,cursor,complete) VALUES (?1,?2,?3,'',0)",
+            params![operation, sweep, identity.table],
         )
         .map_err(storage)?;
     }
@@ -848,21 +1028,12 @@ fn next_incomplete_identity(
     operation: &str,
     sweep: i64,
 ) -> Result<Option<KnownSourceIdentity>, PreservationTechnicalError> {
-    let mut statement = conn
-        .prepare(
-            "SELECT identity_table FROM deletion_reconciliation
-             WHERE operation_id=?1 AND sweep=?2 AND complete=0",
-        )
-        .map_err(storage)?;
-    let incomplete: Vec<String> = statement
-        .query_map(params![operation, sweep], |row| row.get(0))
-        .map_err(storage)?
-        .collect::<Result<_, _>>()
-        .map_err(storage)?;
-    Ok(KNOWN_SOURCE_IDENTITIES
-        .iter()
-        .copied()
-        .find(|identity| incomplete.iter().any(|table| table == identity.table)))
+    let rows = reconciliation_rows(conn, operation)?;
+    Ok(KNOWN_SOURCE_IDENTITIES.iter().copied().find(|identity| {
+        rows.iter().any(|(table, row_sweep, complete)| {
+            table == identity.table && *row_sweep == sweep && *complete == 0
+        })
+    }))
 }
 
 fn reconciliation_is_complete(
@@ -870,18 +1041,7 @@ fn reconciliation_is_complete(
     operation: &str,
     sweep: i64,
 ) -> Result<bool, PreservationTechnicalError> {
-    let mut statement = conn
-        .prepare(
-            "SELECT identity_table,sweep,complete FROM deletion_reconciliation WHERE operation_id=?1",
-        )
-        .map_err(storage)?;
-    let rows: Vec<(String, i64, i64)> = statement
-        .query_map([operation], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .map_err(storage)?
-        .collect::<Result<_, _>>()
-        .map_err(storage)?;
+    let rows = reconciliation_rows(conn, operation)?;
     if rows.len() != KNOWN_SOURCE_IDENTITIES.len() {
         return Ok(false);
     }
@@ -1212,45 +1372,8 @@ fn directly_covered_uses(
     use_kind: &str,
     use_id: RawId,
 ) -> Result<Vec<String>, PreservationTechnicalError> {
-    let pending: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM deletion_reconciliation r
-                 JOIN deletion_operation o ON o.operation_id=r.operation_id
-                 WHERE r.complete=0 AND r.sweep=o.sweep AND o.phase IN ('active','held'))",
-            (),
-            |row| row.get(0),
-        )
-        .map_err(storage)?;
-    if !pending {
-        return Ok(Vec::new());
-    }
-    let mut statement = conn
-        .prepare(
-            "SELECT o.operation_id FROM deletion_operation o
-             WHERE o.phase IN ('active','held') AND EXISTS
-                 (SELECT 1 FROM deletion_reconciliation r
-                  WHERE r.operation_id=o.operation_id AND r.complete=0)
-             ORDER BY o.operation_id",
-        )
-        .map_err(storage)?;
-    let candidates: Vec<String> = statement
-        .query_map((), |row| row.get(0))
-        .map_err(storage)?
-        .collect::<Result<_, _>>()
-        .map_err(storage)?;
-    drop(statement);
     let mut matched = Vec::new();
-    for id in candidates {
-        validate(conn, &id)?;
-        let target: Option<String> = conn
-            .query_row(
-                "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                [&id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        let target = target.ok_or_else(corrupt)?;
+    for (id, _sweep, target) in unreconciled_targets(conn)? {
         let covered = match use_kind {
             USE_KIND_INFERENCE_ATTEMPT => {
                 claimed_attempt_covers(conn, &encode_id(use_id), &target)?
@@ -1469,7 +1592,7 @@ impl Store {
             let guard = lock_shared(&conn);
             let mut flags = Vec::with_capacity(candidates.len());
             for source in candidates {
-                flags.push(source_is_covered(&guard, condition, source).map_err(storage)?);
+                flags.push(source_is_covered(&guard, condition, source)?);
             }
             Ok(flags)
         })
@@ -1536,11 +1659,7 @@ impl Store {
                 .test_parks
                 .fail_host_transient_arrival_sticky
                 .load(std::sync::atomic::Ordering::SeqCst);
-            let once = self
-                .test_parks
-                .fail_host_transient_arrival
-                .swap(false, std::sync::atomic::Ordering::SeqCst);
-            if sticky || once {
+            if sticky {
                 return Err(PreservationTechnicalError::StorageUnavailable);
             }
         }
@@ -1599,9 +1718,6 @@ fn note_host_transient_learning_arrival_sync(
             continue;
         }
         if phase != "finalizing" && state.as_deref() != Some("verified") {
-            continue;
-        }
-        if phase != "active" && phase != "held" && phase != "finalizing" {
             continue;
         }
         match open_next_sweep(tx, &id, sweep)? {
@@ -1728,7 +1844,7 @@ pub(crate) const ASSOCIATE_INFLIGHT_BODY_OBSERVING_DELEGATIONS_SQL: &str =
 
 pub(crate) const HOLD_OBSERVING_DELEGATIONS_SQL: &str =
     "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
-     SELECT ?3, d.delegation_id, ?1, ?4
+     SELECT ?2, d.delegation_id, ?1, ?3
      FROM delegation d
      WHERE EXISTS
          (SELECT 1 FROM task_agent_observation o WHERE o.delegation_id = d.delegation_id)";
@@ -1950,10 +2066,22 @@ fn durable_client_incarnations(
         .collect()
 }
 
+/// The canonical admission body for a durably confirmed staged request:
+/// duplicate detection plus the durable-before-enforce insert of operation,
+/// protected material, initial condition, and source correlations
+/// (lifecycle §4.1).
+///
+/// `request` is the Host-local request whose Owner confirmation is already
+/// durable; `deletion_operation.request_id` is `UNIQUE`, so one request can
+/// never start two operations. Admission enumerates the covered source
+/// correlations already durable in this store and publishes them with the
+/// operation (§4.1 point 4): the implementation walks the owner's durable
+/// identity rows whose stored text carries the confirmed exact target, in
+/// bounded pages. A Client, model output, or caller never names a source.
 fn admit_deletion(
     tx: &rusqlite::Transaction<'_>,
     command: &StartTargetedDeletionCommand,
-    request: Option<DeletionRequestId>,
+    request: DeletionRequestId,
 ) -> Result<StartTargetedDeletionOutcome, PreservationTechnicalError> {
     if command.required_participants().is_empty()
         || command
@@ -1977,7 +2105,6 @@ fn admit_deletion(
         let covered = scope_covered(
             tx,
             record.current,
-            command.known_sources(),
             &command.target().semantic_hints,
             &participants,
         )?;
@@ -1995,7 +2122,7 @@ fn admit_deletion(
     };
     let id = encode_id(current.operation.as_raw());
     let at = command.requested_at().to_rfc3339();
-    let request_text = request.map(|request| encode_id(request.as_raw()));
+    let request_text = encode_id(request.as_raw());
     tx.execute(
         "INSERT INTO deletion_operation (operation_id,request_id,sweep,phase,purpose,started_at) VALUES (?1,?2,1,'active',?3,?4)",
         params![id, request_text, command.purpose().as_str(), at],
@@ -2019,24 +2146,23 @@ fn admit_deletion(
         params![id, at],
     )
     .map_err(storage)?;
-    let enumerates = request.is_some();
-    insert_reconciliation_rows(tx, &id, 1, !enumerates)?;
-    if enumerates {
-        reconcile_admission_pages(
-            tx,
-            &id,
-            1,
-            material.expose_for_erasure(),
-            DELETION_RECONCILIATION_PAGE_SIZE,
-        )?;
-    }
-    for source in command.known_sources() {
-        tx.execute(
-            "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
-            params![id, encode_id(*source)],
-        )
-        .map_err(storage)?;
-    }
+    // §4.1 point 4: admission initializes the durable reconciliation cursors
+    // and publishes the first bounded page of every known identity table in
+    // this same transaction as the operation, the protected material, and the
+    // initial condition. The page is a work bound, not a correctness bound:
+    // the durable cursors carry the continuation, and completion refuses while
+    // any table is still incomplete.
+    insert_reconciliation_rows(tx, &id, 1)?;
+    reconcile_admission_pages(
+        tx,
+        &id,
+        1,
+        material.expose_for_erasure(),
+        DELETION_RECONCILIATION_PAGE_SIZE,
+    )?;
+    // The surveyed covered occurrence identities are published in the same
+    // transaction: the occurrence identity is the durable name of the
+    // observed source, never its body.
     for observation in &covered_observations {
         tx.execute(
             "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
@@ -2048,7 +2174,7 @@ fn admit_deletion(
     if observation_overflow {
         tx.execute(
             HOLD_OBSERVING_DELEGATIONS_SQL,
-            params![id, 1, USE_KIND_TASK_DELEGATION, at],
+            params![id, USE_KIND_TASK_DELEGATION, at],
         )
         .map_err(storage)?;
     }
@@ -2072,24 +2198,12 @@ fn completion_summary(
     if sweep == 0 {
         return Err(corrupt());
     }
-    let (required, verified, local_complete, in_progress, held): (i64, i64, i64, i64, i64) = conn
+    let (required, verified): (i64, i64) = conn
         .query_row(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(state='verified'),0),
-                    COALESCE(SUM(state='local_complete'),0),
-                    COALESCE(SUM(state IN ('pending','running')),0),
-                    COALESCE(SUM(state='held'),0)
+            "SELECT COUNT(*), COALESCE(SUM(state='verified'),0)
              FROM deletion_participant WHERE operation_id=?1 AND sweep=?2",
             params![operation, i64::try_from(sweep).map_err(|_| corrupt())?],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(storage)?;
     let count = |value: i64| u64::try_from(value).map_err(|_| corrupt());
@@ -2098,9 +2212,6 @@ fn completion_summary(
         sweep: DeletionSweepGeneration::from_u64(sweep),
         required: count(required)?,
         verified: count(verified)?,
-        local_complete: count(local_complete)?,
-        in_progress: count(in_progress)?,
-        held: count(held)?,
     })
 }
 
@@ -2148,7 +2259,7 @@ fn open_next_sweep(
         [id],
     )
     .map_err(storage)?;
-    insert_reconciliation_rows(tx, id, next, false)?;
+    insert_reconciliation_rows(tx, id, next)?;
     tx.execute(
         "UPDATE deletion_operation SET sweep=?2,phase='active',hold_reason=NULL WHERE operation_id=?1",
         params![id, next],
@@ -2192,32 +2303,6 @@ fn return_to_active_for_remainder(
 }
 
 impl PreservationRepository for Store {
-    async fn start_targeted_deletion(
-        &self,
-        command: StartTargetedDeletionCommand,
-    ) -> Result<StartTargetedDeletionOutcome, PreservationTechnicalError> {
-        let MechanicalDeletionTarget::ExactText(material) = &command.target().mechanical;
-        if material.expose_for_erasure().trim().is_empty() {
-            return Ok(StartTargetedDeletionOutcome::NeedsClarification);
-        }
-        if !command.is_confirmed() {
-            return Ok(StartTargetedDeletionOutcome::ConfirmationRequired);
-        }
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(storage)?;
-            let outcome = admit_deletion(&tx, &command, None)?;
-            if matches!(outcome, StartTargetedDeletionOutcome::Started(_)) {
-                tx.commit().map_err(storage)?;
-            }
-            Ok(outcome)
-        })
-        .await
-    }
-
     async fn stage_targeted_deletion(
         &self,
         command: StageTargetedDeletionRequestCommand,
@@ -2235,13 +2320,8 @@ impl PreservationRepository for Store {
             let MechanicalDeletionTarget::ExactText(material) = &command.target().mechanical;
             let text = material.expose_for_erasure();
             if let Some(record) = unfinished_by_exact_text(&tx, text)? {
-                let covered = scope_covered(
-                    &tx,
-                    record.current,
-                    &[],
-                    &command.target().semantic_hints,
-                    &[],
-                )?;
+                let covered =
+                    scope_covered(&tx, record.current, &command.target().semantic_hints, &[])?;
                 return Ok(if covered {
                     StageTargetedDeletionRequestOutcome::AlreadyCoveredBy(record.current)
                 } else {
@@ -2384,14 +2464,16 @@ impl PreservationRepository for Store {
                 return Ok(StartTargetedDeletionOutcome::ConfirmationRequired);
             };
             let staged = decode_request(staged)?;
-            let fact =
-                OwnerConfirmationFact::from_durable(request, parse_time(&confirmed_at)?);
+            // The confirmation row's timestamp is validated even though the
+            // fact itself carries only the request identity.
+            parse_time(&confirmed_at)?;
+            let fact = OwnerConfirmationFact::from_durable(request);
             let Some(command) =
                 staged.into_command(fact, WallClockWithTz::now(), required_participants)
             else {
                 return Ok(StartTargetedDeletionOutcome::ConfirmationRequired);
             };
-            let outcome = admit_deletion(&tx, &command, Some(request))?;
+            let outcome = admit_deletion(&tx, &command, request)?;
             if matches!(outcome, StartTargetedDeletionOutcome::Started(_)) {
                 tx.commit().map_err(storage)?;
             }
@@ -2405,9 +2487,7 @@ impl PreservationRepository for Store {
         after: Option<DeletionRequestId>,
         limit: u32,
     ) -> Result<Vec<TargetedDeletionRequest>, PreservationTechnicalError> {
-        if !(1..=100).contains(&limit) {
-            return Err(PreservationTechnicalError::InvalidLimit);
-        }
+        check_page_limit(limit)?;
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let guard = lock_shared(&conn);
@@ -2436,9 +2516,7 @@ impl PreservationRepository for Store {
         after: Option<DeletionOperationId>,
         limit: u32,
     ) -> Result<Vec<DeletionOperationRecord>, PreservationTechnicalError> {
-        if !(1..=100).contains(&limit) {
-            return Err(PreservationTechnicalError::InvalidLimit);
-        }
+        check_page_limit(limit)?;
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let guard = lock_shared(&conn);
@@ -2448,16 +2526,7 @@ impl PreservationRepository for Store {
             ids.into_iter()
                 .map(|id| {
                     validate(&tx, &id)?;
-                    let raw = tx
-                        .query_row(
-                            "SELECT operation_id,sweep,phase,purpose,started_at,hold_reason FROM deletion_operation WHERE operation_id=?1",
-                            [&id],
-                            raw_operation,
-                        )
-                        .optional()
-                        .map_err(storage)?
-                        .ok_or_else(corrupt)?;
-                    decode_operation(raw)
+                    decode_operation(load_operation(&tx, &id)?.ok_or_else(corrupt)?)
                 })
                 .collect()
         })
@@ -2522,15 +2591,7 @@ impl PreservationRepository for Store {
                 .map_err(storage)?;
             let id = encode_id(expected.operation.as_raw());
             validate(&tx, &id)?;
-            let raw = tx
-                .query_row(
-                    "SELECT operation_id,sweep,phase,purpose,started_at,hold_reason FROM deletion_operation WHERE operation_id=?1",
-                    [&id],
-                    raw_operation,
-                )
-                .optional()
-                .map_err(storage)?;
-            let Some(raw) = raw else {
+            let Some(raw) = load_operation(&tx, &id)? else {
                 return Ok(DeletionLifecycleOutcome::Missing);
             };
             let record = decode_operation(raw)?;
@@ -2568,6 +2629,17 @@ impl PreservationRepository for Store {
                     .map_err(storage)?;
                 }
                 DeletionLifecycleChange::NextSweep => {
+                    // A Held(Unavailable) operation keeps its current condition
+                    // active (§5.1) until an explicit Resume decides recovery:
+                    // advancing the generation underneath the hold would publish
+                    // a new current condition without a recovery decision and
+                    // silently flip the phase that A4/A5 participant sweep
+                    // tracking observes. Reject like the GenerationExhausted
+                    // hold below — no writes, no generation advance — so this
+                    // generic lifecycle call never moves a Held(Unavailable)
+                    // operation back to Active; only an explicit Resume, or the
+                    // §11 delayed-arrival sweep in
+                    // note_host_transient_learning_arrival_sync, may.
                     if record.phase == DeletionOperationPhase::Held
                         && record.hold == Some(DeletionHoldReason::Unavailable)
                     {
@@ -2608,9 +2680,7 @@ impl PreservationRepository for Store {
         after: Option<DeletionOperationId>,
         limit: u32,
     ) -> Result<Vec<DeletionOperationRecord>, PreservationTechnicalError> {
-        if !(1..=100).contains(&limit) {
-            return Err(PreservationTechnicalError::InvalidLimit);
-        }
+        check_page_limit(limit)?;
         let conn = Arc::clone(&self.conn);
         run_deletion_blocking(self, move || {
             let guard = lock_shared(&conn);
@@ -2620,18 +2690,74 @@ impl PreservationRepository for Store {
             ids.into_iter()
                 .map(|id| {
                     validate(&tx, &id)?;
-                    let raw = tx
-                        .query_row(
-                            "SELECT operation_id,sweep,phase,purpose,started_at,hold_reason FROM deletion_operation WHERE operation_id=?1",
-                            [&id],
-                            raw_operation,
-                        )
-                        .optional()
-                        .map_err(storage)?
-                        .ok_or_else(corrupt)?;
-                    decode_operation(raw)
+                    // An orphan condition candidate has no operation row:
+                    // that is exactly the torn state `validate` refuses.
+                    decode_operation(load_operation(&tx, &id)?.ok_or_else(corrupt)?)
                 })
                 .collect()
+        })
+        .await
+    }
+
+    async fn deletion_walk_cursor(
+        &self,
+        walk: DeletionWalk,
+    ) -> Result<Option<DeletionOperationId>, PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_deletion_blocking(self, move || {
+            let guard = lock_shared(&conn);
+            let after: Option<String> = guard
+                .query_row(
+                    "SELECT after_id FROM deletion_walk_cursor WHERE walk=?1",
+                    [walk.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            match after {
+                None => Ok(None),
+                Some(text) => Ok(Some(DeletionOperationId::from_raw(
+                    decode_id(&text).map_err(|_| corrupt())?,
+                ))),
+            }
+        })
+        .await
+    }
+
+    async fn set_deletion_walk_cursor(
+        &self,
+        walk: DeletionWalk,
+        after: Option<DeletionOperationId>,
+    ) -> Result<(), PreservationTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_deletion_blocking(self, move || {
+            let mut guard = lock_shared(&conn);
+            // The cursor is not completion state: it shares the single-writer
+            // boundary so concurrent drivers cannot interleave a torn position,
+            // and it never joins the operation/participant rows in a check.
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            match after {
+                // A wrapped walk keeps no row: absence means "start at the
+                // head", exactly like a fresh walk.
+                None => {
+                    tx.execute(
+                        "DELETE FROM deletion_walk_cursor WHERE walk=?1",
+                        [walk.as_str()],
+                    )
+                    .map_err(storage)?;
+                }
+                Some(operation) => {
+                    tx.execute(
+                        "INSERT INTO deletion_walk_cursor (walk,after_id) VALUES (?1,?2)
+                         ON CONFLICT(walk) DO UPDATE SET after_id=excluded.after_id",
+                        params![walk.as_str(), encode_id(operation.as_raw())],
+                    )
+                    .map_err(storage)?;
+                }
+            }
+            tx.commit().map_err(storage)
         })
         .await
     }
@@ -2641,9 +2767,7 @@ impl PreservationRepository for Store {
         after: Option<DeletionOperationId>,
         limit: u32,
     ) -> Result<Vec<CurrentErasureCondition>, PreservationTechnicalError> {
-        if !(1..=100).contains(&limit) {
-            return Err(PreservationTechnicalError::InvalidLimit);
-        }
+        check_page_limit(limit)?;
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let guard = lock_shared(&conn);
@@ -2667,7 +2791,6 @@ impl PreservationRepository for Store {
                     let current = decode_ref(id, sweep)?;
                     Ok(CurrentErasureCondition {
                         condition: current.condition(),
-                        scope: current.operation,
                         opened_at: parse_time(&opened)?,
                     })
                 })
@@ -2682,29 +2805,20 @@ impl PreservationRepository for Store {
         after: Option<ParticipantOwnerRef>,
         limit: u32,
     ) -> Result<Vec<DeletionParticipantRecord>, PreservationTechnicalError> {
-        if !(1..=100).contains(&limit) {
-            return Err(PreservationTechnicalError::InvalidLimit);
-        }
+        check_page_limit(limit)?;
         let conn = Arc::clone(&self.conn);
         run_deletion_blocking(self, move || {
             let guard = lock_shared(&conn);
             let tx = guard.unchecked_transaction().map_err(storage)?;
             let id = encode_id(operation.as_raw());
-            let exists: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM deletion_operation WHERE operation_id=?1)",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .map_err(storage)?;
-            if !exists {
-                return Err(PreservationTechnicalError::UnknownOperation);
-            }
+            require_operation(&tx, &id)?;
             validate(&tx, &id)?;
-            let after = after.map(ParticipantOwnerRef::storage_name).unwrap_or_default();
+            let after = after
+                .map(ParticipantOwnerRef::storage_name)
+                .unwrap_or_default();
             let mut statement = tx
                 .prepare(
-                    "SELECT participant_owner,state,sweep,hold_class,erased_count,remainder_count,reported_at
+                    "SELECT participant_owner,state,sweep,hold_class,reported_at
                      FROM deletion_participant WHERE operation_id=?1 AND participant_owner>?2
                      ORDER BY participant_owner LIMIT ?3",
                 )
@@ -2730,40 +2844,19 @@ impl PreservationRepository for Store {
             let guard = lock_shared(&conn);
             let tx = guard.unchecked_transaction().map_err(storage)?;
             let id = encode_id(operation.as_raw());
-            let row: Option<(i64, String)> = tx
-                .query_row(
-                    "SELECT sweep,phase FROM deletion_operation WHERE operation_id=?1",
-                    [&id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()
-                .map_err(storage)?;
-            let Some((_sweep, phase)) = row else {
+            let Some((_sweep, phase)) = load_operation_state(&tx, &id)? else {
                 return Ok(DeletionMaterialOutcome::Missing);
             };
             validate(&tx, &id)?;
             if phase == "completed" {
                 return Ok(DeletionMaterialOutcome::Destroyed);
             }
-            let material_exists: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM deletion_search_material WHERE operation_id=?1)",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .map_err(storage)?;
-            if !material_exists {
+            let Some(exact) = load_exact_target(&tx, &id)? else {
+                // `validate` refuses an active or held operation without
+                // material, so only a finalizing operation that already ran its
+                // wipe reaches this branch (§12); a read must not resurrect it.
                 return Ok(DeletionMaterialOutcome::Destroyed);
-            }
-            let exact: Option<String> = tx
-                .query_row(
-                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
-            let exact = exact.ok_or_else(corrupt)?;
+            };
             let mut statement = tx
                 .prepare(
                     "SELECT material FROM deletion_semantic_hint WHERE operation_id=?1 ORDER BY ordinal",
@@ -2778,15 +2871,12 @@ impl PreservationRepository for Store {
                 .map(DeletionSearchMaterial::new)
                 .collect();
             Ok(DeletionMaterialOutcome::Material(
-                DeletionOperationMaterial::new(
-                    TargetedDeletionTarget {
-                        mechanical: MechanicalDeletionTarget::ExactText(
-                            DeletionSearchMaterial::new(exact),
-                        ),
-                        semantic_hints: hints,
-                    },
-                    Vec::new(),
-                ),
+                DeletionOperationMaterial::new(TargetedDeletionTarget {
+                    mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                        exact,
+                    )),
+                    semantic_hints: hints,
+                }),
             ))
         })
         .await
@@ -2805,15 +2895,7 @@ impl PreservationRepository for Store {
                 .map_err(storage)?;
             let id = encode_id(condition.operation.as_raw());
             validate(&tx, &id)?;
-            let row: Option<(i64, String)> = tx
-                .query_row(
-                    "SELECT sweep,phase FROM deletion_operation WHERE operation_id=?1",
-                    [&id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()
-                .map_err(storage)?;
-            let Some((sweep, phase)) = row else {
+            let Some((sweep, phase)) = load_operation_state(&tx, &id)? else {
                 return Ok(ParticipantDemandOutcome::Missing);
             };
             if phase == "completed" {
@@ -2864,15 +2946,7 @@ impl PreservationRepository for Store {
                 .map_err(storage)?;
             let id = encode_id(condition.operation.as_raw());
             validate(&tx, &id)?;
-            let row: Option<(i64, String)> = tx
-                .query_row(
-                    "SELECT sweep,phase FROM deletion_operation WHERE operation_id=?1",
-                    [&id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()
-                .map_err(storage)?;
-            let Some((sweep, phase)) = row else {
+            let Some((sweep, phase)) = load_operation_state(&tx, &id)? else {
                 return Ok(ParticipantCompletionOutcome::Missing);
             };
             if phase == "completed" {
@@ -2969,46 +3043,12 @@ impl PreservationRepository for Store {
         .await
     }
 
-    async fn deletion_completion_summary(
-        &self,
-        operation: DeletionOperationId,
-    ) -> Result<DeletionCompletionSummary, PreservationTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let guard = lock_shared(&conn);
-            let tx = guard.unchecked_transaction().map_err(storage)?;
-            let id = encode_id(operation.as_raw());
-            let exists: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM deletion_operation WHERE operation_id=?1)",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .map_err(storage)?;
-            if !exists {
-                return Err(PreservationTechnicalError::UnknownOperation);
-            }
-            validate(&tx, &id)?;
-            let sweep: i64 = tx
-                .query_row(
-                    "SELECT sweep FROM deletion_operation WHERE operation_id=?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .map_err(storage)?;
-            completion_summary(&tx, &id, sweep)
-        })
-        .await
-    }
-
     async fn reconcile_deletion_sources(
         &self,
         expected: DeletionOperationRef,
         page_size: u32,
     ) -> Result<DeletionReconciliationOutcome, PreservationTechnicalError> {
-        if !(1..=100).contains(&page_size) {
-            return Err(PreservationTechnicalError::InvalidLimit);
-        }
+        check_page_limit(page_size)?;
         let conn = Arc::clone(&self.conn);
         run_deletion_blocking(self, move || {
             let mut guard = lock_shared(&conn);
@@ -3017,15 +3057,7 @@ impl PreservationRepository for Store {
                 .map_err(storage)?;
             let id = encode_id(expected.operation.as_raw());
             validate(&tx, &id)?;
-            let row: Option<(i64, String)> = tx
-                .query_row(
-                    "SELECT sweep,phase FROM deletion_operation WHERE operation_id=?1",
-                    [&id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()
-                .map_err(storage)?;
-            let Some((sweep, phase)) = row else {
+            let Some((sweep, phase)) = load_operation_state(&tx, &id)? else {
                 return Ok(DeletionReconciliationOutcome::Missing);
             };
             let current = decode_ref(&id, sweep)?;
@@ -3041,15 +3073,10 @@ impl PreservationRepository for Store {
             if reconciliation_is_complete(&tx, &id, sweep)? {
                 return Ok(DeletionReconciliationOutcome::Complete);
             }
-            let exact: Option<String> = tx
-                .query_row(
-                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
-            let exact = exact.ok_or_else(corrupt)?;
+            // `validate` refuses an active/held operation without protected
+            // material, so the exact target is readable while the walk runs:
+            // reconciliation happens before completion destroys it.
+            let exact = load_exact_target(&tx, &id)?.ok_or_else(corrupt)?;
             let Some(identity) = next_incomplete_identity(&tx, &id, sweep)? else {
                 return Err(corrupt());
             };
@@ -3093,11 +3120,10 @@ impl PreservationRepository for Store {
                 "completed" => return Ok(DeletionFinalizationOutcome::CompletedAlready),
                 "finalizing" => return Ok(DeletionFinalizationOutcome::Finalizing),
                 "held" => {
-                    let reason = match hold.as_deref() {
-                        Some("unavailable") => DeletionHoldReason::Unavailable,
-                        Some("generation_exhausted") => DeletionHoldReason::GenerationExhausted,
-                        _ => return Err(corrupt()),
-                    };
+                    let reason = hold
+                        .as_deref()
+                        .and_then(DeletionHoldReason::from_name)
+                        .ok_or_else(corrupt)?;
                     return Ok(DeletionFinalizationOutcome::Held(reason));
                 }
                 "active" => {}
@@ -3110,15 +3136,14 @@ impl PreservationRepository for Store {
             if !reconciliation_is_complete(&tx, &id, sweep)? {
                 return Ok(DeletionFinalizationOutcome::ReconciliationIncomplete);
             }
-            let exact: String = tx
-                .query_row(
-                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(storage)?
-                .ok_or_else(corrupt)?;
+            // `validate` refuses an active operation without protected
+            // material, so the exact target is present while the sweep is
+            // being verified.
+            let exact = load_exact_target(&tx, &id)?.ok_or_else(corrupt)?;
+            // §12 step 1 before entering Finalizing: a generation that still
+            // has collected target data never finalizes. Returning to Active
+            // happens before any material is destroyed, so the new sweep keeps
+            // the material its participants need (§12).
             if system_remainder(&tx, &exact)? > 0 {
                 let outcome = return_to_active_for_remainder(&tx, &id, sweep)?;
                 tx.commit().map_err(storage)?;
@@ -3181,20 +3206,17 @@ impl PreservationRepository for Store {
             let purpose = decode_purpose(&purpose)?;
             let started_at = parse_time(&started_at)?;
             let erased_total = u64::try_from(erased_total).map_err(|_| corrupt())?;
-            let exact_row: Option<String> = tx
-                .query_row(
-                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
-            let Some(exact) = exact_row else {
+            let Some(exact) = load_exact_target(&tx, &id)? else {
+                // No readable target: the system-wide mechanical probe cannot
+                // run, so completion fails closed instead of guessing the
+                // target away (§12).
                 return Ok(DeletionFinalizationOutcome::UnverifiableMaterial);
             };
-            if !reconciliation_is_complete(&tx, &id, sweep)? {
-                return Ok(DeletionFinalizationOutcome::ReconciliationIncomplete);
-            }
+            // §12 step 1, inside the commit transaction: the current
+            // generation must not have grown a delayed arrival or remainder
+            // after verification. A remainder returns the operation to
+            // Active on a new sweep *without* destroying material, so a later
+            // verification can never lack what it needs.
             if system_remainder(&tx, &exact)? > 0 {
                 let outcome = return_to_active_for_remainder(&tx, &id, sweep)?;
                 tx.commit().map_err(storage)?;
@@ -3286,82 +3308,6 @@ impl PreservationRepository for Store {
             validate(&tx, &id)?;
             tx.commit().map_err(storage)?;
             Ok(DeletionFinalizationOutcome::Completed)
-        })
-        .await
-    }
-
-    async fn deletion_completion_audit(
-        &self,
-        operation: DeletionOperationId,
-    ) -> Result<Option<DeletionCompletionAudit>, PreservationTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let guard = lock_shared(&conn);
-            let tx = guard.unchecked_transaction().map_err(storage)?;
-            let id = encode_id(operation.as_raw());
-            let exists: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM deletion_operation WHERE operation_id=?1)",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .map_err(storage)?;
-            if !exists {
-                return Err(PreservationTechnicalError::UnknownOperation);
-            }
-            validate(&tx, &id)?;
-            let row: Option<(String, String, String, i64, i64)> = tx
-                .query_row(
-                    "SELECT purpose,started_at,completed_at,sweep_count,erased_count FROM deletion_completion_audit WHERE operation_id=?1",
-                    [&id],
-                    |r| {
-                        Ok((
-                            r.get(0)?,
-                            r.get(1)?,
-                            r.get(2)?,
-                            r.get(3)?,
-                            r.get(4)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(storage)?;
-            let Some((purpose, started_at, completed_at, sweep_count, erased_count)) = row else {
-                return Ok(None);
-            };
-            let mut statement = tx
-                .prepare(
-                    "SELECT participant_owner,final_state,erased_count FROM deletion_audit_participant WHERE operation_id=?1 ORDER BY participant_owner",
-                )
-                .map_err(storage)?;
-            let rows: Vec<(String, String, i64)> = statement
-                .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .map_err(storage)?
-                .collect::<Result<_, _>>()
-                .map_err(storage)?;
-            let participants = rows
-                .into_iter()
-                .map(|(owner, state, erased)| {
-                    if state != "verified" {
-                        return Err(corrupt());
-                    }
-                    Ok(DeletionAuditParticipant {
-                        owner: ParticipantOwnerRef::from_storage_name(&owner)
-                            .ok_or_else(corrupt)?,
-                        status: DeletionAuditStatus::Verified,
-                        erased_count: u64::try_from(erased).map_err(|_| corrupt())?,
-                    })
-                })
-                .collect::<Result<Vec<_>, PreservationTechnicalError>>()?;
-            Ok(Some(DeletionCompletionAudit {
-                operation,
-                purpose: decode_purpose(&purpose)?,
-                started_at: parse_time(&started_at)?,
-                completed_at: parse_time(&completed_at)?,
-                sweep_count: u64::try_from(sweep_count).map_err(|_| corrupt())?,
-                erased_count: u64::try_from(erased_count).map_err(|_| corrupt())?,
-                participants,
-            }))
         })
         .await
     }

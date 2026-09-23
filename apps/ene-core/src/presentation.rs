@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use ene_api::v1::command::CommandReplayRejectWire;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{CompanionWireRef, ConnectionWireId, RoundWireId};
 use ene_api::v1::reject::RejectKind;
@@ -37,6 +38,9 @@ use crate::serve::{
     reject_frame, stale_reject,
 };
 
+/// Keys per-connection presentation maps by the hyphenated wire form of the
+/// id: the same string form the connection layer uses, so keys match across
+/// the Host/connection boundary by construction.
 fn conn_key(id: &ConnectionWireId) -> String {
     connection_key(id)
 }
@@ -65,9 +69,26 @@ struct Subscription {
     companion: RawId,
     scan_floor: u64,
     drained_once: bool,
-    resume: Option<(UndeliveredCursor, bool, u32)>,
+    /// Undrained pass continuation: cursor, filter, bound, and the wire of the
+    /// cursor minted for it. A cursor-less request continues it before looking
+    /// for arrivals, so an abandoned page never resends its head as "new"; the
+    /// stored wire is consumed on that advance so the connection's cursor map
+    /// stays at one entry (forward-only paging contract).
+    resume: Option<(UndeliveredCursor, bool, u32, String)>,
 }
 
+/// Records a drained scan floor: advance the floor to `upper`, mark the
+/// subscription drained, and clear any pending continuation. No-op when the
+/// subscription is bound to a different companion.
+fn drain_sub(sub: &mut Subscription, companion: RawId, upper: u64) {
+    if sub.companion == companion {
+        sub.scan_floor = sub.scan_floor.max(upper);
+        sub.drained_once = true;
+        sub.resume = None;
+    }
+}
+
+/// One live presentation receipt (at most one per Companion).
 #[derive(Debug, Clone)]
 struct Receipt {
     id: String,
@@ -129,7 +150,10 @@ enum ResumeSlotState {
 pub(crate) struct PresentationState {
     subs: HashMap<String, Subscription>,
     receipts: HashMap<String, Receipt>,
-    receipt_ids: HashMap<String, String>,
+    /// Consumed/superseded receipt ids answering `StalePresentation`
+    /// (bounded; never-known ids still answer `UnknownRef`). The issuing
+    /// connection rides along so a foreign connection still hears
+    /// `StaleConnection` first: ACKs never migrate.
     retired: std::collections::VecDeque<(String, String)>,
     task_refs: HashMap<(String, String), TaskId>,
     carried: HashMap<(String, String), (UndeliveredId, Option<TaskId>)>,
@@ -138,7 +162,6 @@ pub(crate) struct PresentationState {
     resume: HashMap<Uuid, ResumeSlot>,
     resume_seq: u64,
     frame_budget: usize,
-    receipt_ttl: Duration,
 }
 
 impl Default for PresentationState {
@@ -146,7 +169,6 @@ impl Default for PresentationState {
         Self {
             subs: HashMap::new(),
             receipts: HashMap::new(),
-            receipt_ids: HashMap::new(),
             retired: std::collections::VecDeque::new(),
             task_refs: HashMap::new(),
             carried: HashMap::new(),
@@ -155,7 +177,6 @@ impl Default for PresentationState {
             resume: HashMap::new(),
             resume_seq: 0,
             frame_budget: PRESENTATION_FRAME_BUDGET,
-            receipt_ttl: RECEIPT_TTL,
         }
     }
 }
@@ -176,7 +197,6 @@ impl PresentationState {
 
     pub(crate) fn remove_receipt(&mut self, companion_key: &str) {
         if let Some(receipt) = self.receipts.remove(companion_key) {
-            self.receipt_ids.remove(&receipt.id);
             self.retire(&receipt.id, &receipt.connection);
         }
     }
@@ -189,7 +209,6 @@ impl PresentationState {
             .map(|receipt| (receipt.id.clone(), receipt.connection.clone()))
             .collect();
         self.receipts.clear();
-        self.receipt_ids.clear();
         for (id, connection) in receipts {
             self.retire(&id, &connection);
         }
@@ -427,12 +446,55 @@ impl HostHandle {
         PageCursorWire(wire)
     }
 
-    fn mint_task_ref(state: &mut PresentationState, conn: &str, task: TaskId) -> TaskWireRef {
+    /// Mints one undelivered continuation cursor and records it as the
+    /// subscription's resume slot. The slot is written only for the
+    /// subscription bound to `companion`: an unbound or retargeted
+    /// subscription's continuation is never selected for this companion, and
+    /// the stored cursor is what the next advance consumes.
+    fn install_continuation(
+        state: &mut PresentationState,
+        conn: &str,
+        companion: RawId,
+        next: UndeliveredCursor,
+        pending_only: bool,
+        limit: u32,
+    ) -> PageCursorWire {
+        let wire = Self::mint_cursor(
+            state,
+            conn,
+            StoredCursor::Undelivered {
+                companion,
+                cursor: next,
+                pending_only,
+                limit,
+            },
+        );
+        if let Some(sub) = state.subs.get_mut(conn)
+            && sub.companion == companion
+        {
+            sub.resume = Some((next, pending_only, limit, wire.0.clone()));
+        }
+        wire
+    }
+
+    fn mint_conn_ref<V: PartialEq + Clone>(
+        map: &mut HashMap<(String, String), V>,
+        conn: &str,
+        value: &V,
+    ) -> String {
+        if let Some(((_, wire), _)) = map
+            .iter()
+            .find(|((owner, _), mapped)| owner == conn && *mapped == value)
+        {
+            return wire.clone();
+        }
         let wire = Uuid::new_v4().as_hyphenated().to_string();
-        state
-            .task_refs
-            .insert((conn.to_string(), wire.clone()), task);
-        TaskWireRef(wire)
+        map.insert((conn.to_string(), wire.clone()), value.clone());
+        wire
+    }
+
+    fn mint_task_ref(state: &mut PresentationState, conn: &str, task: TaskId) -> TaskWireRef {
+        TaskWireRef(Self::mint_conn_ref(&mut state.task_refs, conn, &task))
     }
 
     fn mint_source_ref(
@@ -440,11 +502,7 @@ impl HostHandle {
         conn: &str,
         source: TaskReportSourceRef,
     ) -> ReportSourceWireRef {
-        let wire = Uuid::new_v4().as_hyphenated().to_string();
-        state
-            .source_refs
-            .insert((conn.to_string(), wire.clone()), source);
-        ReportSourceWireRef(wire)
+        ReportSourceWireRef(Self::mint_conn_ref(&mut state.source_refs, conn, &source))
     }
 
     fn sweep_carried(state: &mut PresentationState, conn: &str) {
@@ -457,6 +515,17 @@ impl HostHandle {
         }
     }
 
+    /// Drops this connection's in-flight usage-summary walk. A cursor-less
+    /// request starts a fresh walk, so its predecessor wire is superseded
+    /// rather than left behind while a new one is minted on every head read;
+    /// a supplied cursor still consumes only itself (`take_cursor`).
+    pub(crate) fn supersede_usage_cursors(state: &mut PresentationState, conn: &str) {
+        state.cursors.retain(|(owner, _), stored| {
+            owner != conn || !matches!(stored, StoredCursor::UsageSummary { .. })
+        });
+    }
+
+    /// Dispatch entry: one undelivered subscription/page request.
     pub(crate) async fn request_undelivered(
         &self,
         frame: &WireFrame,
@@ -490,6 +559,20 @@ impl HostHandle {
         }
     }
 
+    /// The presenting client of one live attribution: the deterministic
+    /// projection of the paired device, only when the attribution is `Present`
+    /// for exactly that client. A missing device, another active client, or
+    /// any other state is not formal presence.
+    fn presenting_client(live: &LiveInput, attribution: &PresenceAttribution) -> Option<ClientId> {
+        let client = device_client(live.paired_device.as_deref()?);
+        (attribution.state == PresenceState::Present && attribution.active_client == Some(client))
+            .then_some(client)
+    }
+
+    /// Presents one page: presence-checked, receipt-backed, frame-capped.
+    /// Store failures answer `Unavailable`; no row, cursor, or receipt moves,
+    /// and the next request retries the same pass rather than receiving a
+    /// lying page.
     async fn present_page(
         &self,
         frame: &WireFrame,
@@ -501,27 +584,24 @@ impl HostHandle {
     ) -> Option<UndeliveredResponse> {
         let companion = match companion {
             Some(wire) => match self.resolve_companion(&wire.0).await {
-                Err(_) => return Some(UndeliveredResponse::Summary(self.empty_shell())),
+                Err(_) => return Some(UndeliveredResponse::Unavailable),
                 Ok(None) => return Some(UndeliveredResponse::UnknownCompanion),
                 Ok(Some(companion)) => companion,
             },
             None => match self.store.ensure_running_companion().await {
-                Err(_) => return Some(UndeliveredResponse::Summary(self.empty_shell())),
+                Err(_) => return Some(UndeliveredResponse::Unavailable),
                 Ok(companion) => companion,
             },
         };
         let attribution = match self.store.load_attribution(companion.as_raw()).await {
             Ok(Some(attribution)) => attribution,
-            _ => return Some(UndeliveredResponse::NoCurrentPresence),
+            Ok(None) => return Some(UndeliveredResponse::NoCurrentPresence),
+            Err(_) => return Some(UndeliveredResponse::Unavailable),
         };
-        let Some(device_wire) = live.paired_device.clone() else {
+        let Some(client) = Self::presenting_client(live, &attribution) else {
             return Some(UndeliveredResponse::NoCurrentPresence);
         };
-        let client = device_client(&device_wire);
-        if attribution.state != PresenceState::Present
-            || attribution.active_client != Some(client)
-            || !live.connection_live
-        {
+        if !live.connection_live {
             return Some(UndeliveredResponse::NoCurrentPresence);
         }
         #[cfg(test)]
@@ -539,11 +619,6 @@ impl HostHandle {
             && let Some(receipt) = self.live_receipt(&companion_key, &conn)
         {
             return self.reemit_receipt(live, &conn, &receipt).await;
-        }
-        if let Some(cursor) = cursor
-            && !self.valid_undelivered_cursor(&conn, companion, cursor)
-        {
-            return Some(UndeliveredResponse::StaleBaseView { current: None });
         }
         self.begin_pass(
             live,
@@ -569,20 +644,22 @@ impl HostHandle {
         (receipt.connection == conn && !receipt.expired()).then_some(receipt)
     }
 
-    fn valid_undelivered_cursor(
-        &self,
-        conn: &str,
-        companion: CompanionId,
-        cursor: &PageCursorWire,
-    ) -> bool {
-        let state = crate::lock_unpoison(&self.presentations);
-        matches!(
-            state.cursors.get(&(conn.to_string(), cursor.0.clone())),
-            Some(StoredCursor::Undelivered { companion: bound, .. })
-                if *bound == companion.as_raw()
-        )
-    }
-
+    /// Re-emits a live receipt's own selection: no new receipt, no commit,
+    /// no cursor move. The item set is rehydrated from the receipt's exact
+    /// selected identities in their original order — never by re-scanning
+    /// the unpresented head, so rows before the selection, later backlog,
+    /// and continuation position cannot shrink or empty it. Over budget now
+    /// (excerpts only shrink) answers `FrameTooLarge` with the receipt
+    /// standing.
+    ///
+    /// A selected id that no longer resolves at all (deleted or foreign)
+    /// means the receipt can no longer cover the set its ACK names: the
+    /// receipt is retired and the request answers `StaleBaseView` so the
+    /// Client re-queries for a fresh page. A store failure fails closed the
+    /// same way. A selected row that is already `Presented` cannot be
+    /// re-painted and its ACK is already satisfied, so it is pruned from the
+    /// receipt's selection as it is omitted from the frame: the receipt then
+    /// covers exactly the delivered items.
     async fn reemit_receipt(
         &self,
         live: &LiveInput,
@@ -618,22 +695,28 @@ impl HostHandle {
         Self::sweep_carried(&mut crate::lock_unpoison(&self.presentations), conn);
         let items = self.carry_items(live, conn, &carried).await?;
         let companion_key = receipt.companion.as_uuid().as_hyphenated().to_string();
-        let pruned = self
-            .with_presentation_state(live, |state| {
-                if !satisfied.is_empty()
-                    && let Some(live_receipt) = state.receipts.get_mut(&companion_key)
-                    && live_receipt.id == receipt.id
-                {
-                    live_receipt.selected.retain(|id| !satisfied.contains(id));
-                }
-            })
-            .is_some();
-        if !pruned {
-            self.forget_carried(conn, &items).await;
-            return None;
-        }
-        if items.is_empty() && !carried.is_empty() {
-            return Some(UndeliveredResponse::FrameTooLarge);
+        let receipt_live = self.with_presentation_state(live, |state| {
+            if !satisfied.is_empty()
+                && let Some(live_receipt) = state.receipts.get_mut(&companion_key)
+                && live_receipt.id == receipt.id
+            {
+                live_receipt.selected.retain(|id| !satisfied.contains(id));
+            }
+            state
+                .receipts
+                .get(&companion_key)
+                .is_some_and(|live| live.id == receipt.id)
+        });
+        match receipt_live {
+            Some(true) => {}
+            Some(false) => {
+                self.forget_carried(conn, &items).await;
+                return Some(UndeliveredResponse::StaleBaseView { current: None });
+            }
+            None => {
+                self.forget_carried(conn, &items).await;
+                return None;
+            }
         }
         if estimate_summary_bytes(&items) > self.frame_budget() {
             return Some(UndeliveredResponse::FrameTooLarge);
@@ -658,6 +741,13 @@ impl HostHandle {
         UndeliveredResponse::StaleBaseView { current: None }
     }
 
+    /// Begins or continues one pass: fetches the longest fitting prefix of
+    /// one bounded fetch, commits it, installs the receipt.
+    ///
+    /// Returns `None` when the pass installed nothing: the connection was
+    /// superseded or closed before the commit, or the commit landed but the
+    /// connection was superseded before the report refs were attached (see
+    /// [`Self::commit_install`]).
     #[expect(
         clippy::too_many_arguments,
         reason = "pass state is intentionally explicit"
@@ -674,16 +764,30 @@ impl HostHandle {
         limit: u32,
         trigger: PassTrigger,
     ) -> Option<UndeliveredResponse> {
-        let from_cursor = cursor.map(|cursor| cursor.0.as_str());
+        // The wire this pass continues from, if any: the request's own cursor
+        // wire, or the one a stored continuation was minted under. It is
+        // consumed (see `take_cursor`) so a cursor-less advance replaces the
+        // predecessor wire instead of leaking it.
+        let mut from_cursor = cursor.map(|cursor| cursor.0.clone());
+        // A cursor supplied by this request is a continuation, not an explicit
+        // head pass: only the stored cursor-less catch-up may fall through to a
+        // head re-display when it drains.
+        let from_request_cursor = cursor.is_some();
+        // Resolve the fetch window: continue a stored pass, catch up on new
+        // arrivals, or rewind to the head for an explicit pass. The plan
+        // installs this connection's subscription, so it runs under the
+        // ownership section; a superseded connection plans nothing.
         let start: PlanStart = if let Some(cursor) = cursor {
             let state = crate::lock_unpoison(&self.presentations);
+            // A cursor bound to another companion (or no stored cursor at all)
+            // is StaleBaseView, never a silent restart.
             match state.cursors.get(&(conn.to_string(), cursor.0.clone())) {
                 Some(StoredCursor::Undelivered {
+                    companion: bound,
                     cursor,
                     pending_only,
                     limit,
-                    ..
-                }) => PlanStart::Continued {
+                }) if *bound == companion.as_raw() => PlanStart::Continued {
                     cursor: *cursor,
                     pending_only: *pending_only,
                     limit: *limit,
@@ -691,7 +795,12 @@ impl HostHandle {
                 _ => return Some(UndeliveredResponse::StaleBaseView { current: None }),
             }
         } else {
-            let bound = self.store.undelivered_pass_bound().await.unwrap_or(0);
+            // A newer connection supersedes a live receipt from a dead one:
+            // old rows stay Unknown and re-present under the new receipt.
+            let bound = match self.store.undelivered_pass_bound().await {
+                Ok(bound) => bound,
+                Err(_) => return Some(UndeliveredResponse::Unavailable),
+            };
             let planned = self.with_presentation_state(live, |state| {
                 let ckey = companion.as_raw().as_uuid().as_hyphenated().to_string();
                 if let Some(receipt) = state.receipts.get(&ckey).cloned()
@@ -708,17 +817,28 @@ impl HostHandle {
                 if sub.companion != companion.as_raw() {
                     sub.scan_floor = 0;
                     sub.drained_once = false;
-                    sub.resume = None;
+                    // A retarget never crosses companions: drop the abandoned
+                    // continuation wire with its resume slot.
+                    if let Some((_, _, _, wire)) = sub.resume.take() {
+                        state.cursors.remove(&(conn.to_string(), wire));
+                    }
                 }
+                // A cursor-less request is the next logical page: an undrained
+                // pass continues first (its rows are bounded to the captured
+                // upper, so mid-pass arrivals wait), then new arrivals, then an
+                // explicit head re-display. `Redisplay` forces the head pass;
+                // `Push` serves only a continuation or new arrivals and stays
+                // silent otherwise (a push is never a new presence).
                 let continuation = (trigger != PassTrigger::Redisplay)
-                    .then_some(sub.resume)
+                    .then_some(sub.resume.as_ref())
                     .flatten()
-                    .filter(|_| sub.companion == companion.as_raw());
-                let arrivals = trigger != PassTrigger::Redisplay
-                    && sub.drained_once
-                    && sub.scan_floor < bound
-                    && sub.companion == companion.as_raw();
-                let plan = if let Some((cursor, pending_only, saved)) = continuation {
+                    .map(|(cursor, pending_only, saved, wire)| {
+                        (*cursor, *pending_only, *saved, wire.clone())
+                    });
+                let arrivals =
+                    trigger != PassTrigger::Redisplay && sub.drained_once && sub.scan_floor < bound;
+                let plan = if let Some((cursor, pending_only, saved, wire)) = continuation {
+                    from_cursor = Some(wire);
                     Some(PlanStart::Continued {
                         cursor,
                         pending_only,
@@ -734,6 +854,16 @@ impl HostHandle {
                 } else {
                     Some(PlanStart::Explicit { upper: bound })
                 };
+                // A plan that abandons the stored continuation (explicit
+                // redisplay) must also drop its wire: otherwise the wire
+                // outlives its resume slot, still resolves as a valid
+                // continuation, and the map grows once per abandoned page
+                // (forward-only paging contract).
+                if !matches!(plan, Some(PlanStart::Continued { .. }))
+                    && let Some((_, _, _, wire)) = sub.resume.take()
+                {
+                    state.cursors.remove(&(conn.to_string(), wire));
+                }
                 sub.companion = companion.as_raw();
                 plan
             })?;
@@ -769,11 +899,7 @@ impl HostHandle {
                 .await
             {
                 Ok(page) => page,
-                Err(_) => {
-                    return Some(UndeliveredResponse::Summary(
-                        self.empty_attributed(attribution),
-                    ));
-                }
+                Err(_) => return Some(UndeliveredResponse::Unavailable),
             };
             let entries: Vec<UndeliveredRef> = if pending_only {
                 page.entries
@@ -796,7 +922,23 @@ impl HostHandle {
         };
         let (entries, items, fetched_next, upper, pending_only) = fitted;
         if entries.is_empty() {
-            if matches!(start, PlanStart::Continued { .. }) && trigger != PassTrigger::Push {
+            // A drained continued pass falls through to an explicit head
+            // re-display in the same response instead of stranding failed
+            // rows behind an empty arrival check. A push never does: it
+            // must not re-display Unknown rows without an explicit request
+            // or a new presence.
+            if matches!(start, PlanStart::Continued { .. })
+                && !from_request_cursor
+                && trigger != PassTrigger::Push
+            {
+                // The continued cursor is consumed by this drained pass: the
+                // recurrence below is an explicit head re-display under
+                // `None`, so without this the stored cursor would survive
+                // every repeat request and the map would grow with the page
+                // count (take_cursor's contract).
+                self.with_presentation_state(live, |state| {
+                    Self::take_cursor(state, conn, from_cursor.as_deref());
+                })?;
                 return Box::pin(self.begin_pass(
                     live,
                     conn,
@@ -810,27 +952,24 @@ impl HostHandle {
                 ))
                 .await;
             }
-            if fetched_next.is_none() && !self.mark_drained(live, conn, companion, upper) {
+            if fetched_next.is_none()
+                && !self.mark_drained(live, conn, companion, upper, from_cursor.as_deref())
+            {
                 return None;
             }
             let mut summary = self.empty_attributed(attribution);
             if let Some(next) = fetched_next {
                 let installed = self
                     .with_presentation_state(live, |state| {
-                        Self::take_cursor(state, conn, from_cursor);
+                        Self::take_cursor(state, conn, from_cursor.as_deref());
                         summary.has_more = true;
-                        if let Some(sub) = state.subs.get_mut(conn) {
-                            sub.resume = Some((next, pending_only, pass_limit));
-                        }
-                        summary.next_cursor = Some(Self::mint_cursor(
+                        summary.next_cursor = Some(Self::install_continuation(
                             state,
                             conn,
-                            StoredCursor::Undelivered {
-                                companion: companion.as_raw(),
-                                cursor: next,
-                                pending_only,
-                                limit: pass_limit,
-                            },
+                            companion.as_raw(),
+                            next,
+                            pending_only,
+                            pass_limit,
                         ));
                     })
                     .is_some();
@@ -853,11 +992,28 @@ impl HostHandle {
             upper,
             pending_only,
             pass_limit,
-            from_cursor,
+            from_cursor.as_deref(),
         )
         .await
     }
 
+    /// Commits the carried prefix (Pending→PresentationUnknown), installs
+    /// the receipt, advances the cursor past the carried prefix only.
+    ///
+    /// The whole commit — the per-row presentation-start CAS and the
+    /// receipt/cursor/subscription install — runs inside one
+    /// connection-ownership section (CCT §10.4): a replacement that wins the
+    /// table commits no row transition and installs no receipt, and a
+    /// commit that wins the table survives the later lifecycle sweep as a
+    /// durable row (CCT §10.5).
+    ///
+    /// Returns `None` in two distinct cases: (a) the ownership section
+    /// refused — no receipt, cursor, or subscription entry is created for a
+    /// superseded connection and the attempt's carried refs are dropped; or
+    /// (b) the section committed but the connection was superseded before
+    /// [`Self::attach_reports`] installed the report refs, so the durable
+    /// marks, round mapping, receipt, cursor, and subscription install all
+    /// stand and are released by the supersession sweep.
     #[expect(
         clippy::too_many_arguments,
         reason = "commit state is intentionally explicit"
@@ -943,7 +1099,11 @@ impl HostHandle {
                     state.carried.remove(&(conn.to_string(), item.reference.0));
                 }
                 let receipt_id = Uuid::new_v4().as_hyphenated().to_string();
-                let ttl = state.receipt_ttl;
+                // The carried prefix IS the fetched prefix (the fetch bound shrank
+                // instead), so the store cursor resumes exactly: a fetched
+                // continuation pages next, a bound-reaching fetch drains the floor.
+                // The round projection is minted inside the section: a stale
+                // attempt leaves no round wire behind either.
                 let round_wire = RoundWireId(RawId::new().as_uuid().to_string());
                 crate::lock_unpoison(&rounds).insert(round_wire.0.clone(), round);
                 let receipt = Receipt {
@@ -956,41 +1116,28 @@ impl HostHandle {
                     round_wire: round_wire.0.clone(),
                     generation,
                     selected,
-                    expires_at: Instant::now() + ttl,
+                    expires_at: Instant::now() + RECEIPT_TTL,
                 };
                 Self::take_cursor(state, conn, from_cursor);
-                if let Some(old) = state.receipts.insert(companion_key.clone(), receipt) {
-                    state.receipt_ids.remove(&old.id);
+                // One receipt per Companion: installing supersedes any leftover.
+                if let Some(old) = state.receipts.insert(companion_key, receipt) {
                     state.retire(&old.id, &old.connection);
                 }
-                state.receipt_ids.insert(receipt_id.clone(), companion_key);
                 let (next_cursor, drained) = match fetched_next {
-                    Some(next) => {
-                        let resume = (next, pending_only, limit);
-                        if let Some(sub) = state.subs.get_mut(conn) {
-                            sub.resume = Some(resume);
-                        }
-                        (
-                            Some(Self::mint_cursor(
-                                state,
-                                conn,
-                                StoredCursor::Undelivered {
-                                    companion: companion.as_raw(),
-                                    cursor: next,
-                                    pending_only,
-                                    limit,
-                                },
-                            )),
-                            false,
-                        )
-                    }
+                    Some(next) => (
+                        Some(Self::install_continuation(
+                            state,
+                            conn,
+                            companion.as_raw(),
+                            next,
+                            pending_only,
+                            limit,
+                        )),
+                        false,
+                    ),
                     None => {
-                        if let Some(sub) = state.subs.get_mut(conn)
-                            && sub.companion == companion.as_raw()
-                        {
-                            sub.scan_floor = sub.scan_floor.max(upper);
-                            sub.drained_once = true;
-                            sub.resume = None;
+                        if let Some(sub) = state.subs.get_mut(conn) {
+                            drain_sub(sub, companion.as_raw(), upper);
                         }
                         (None, true)
                     }
@@ -1121,12 +1268,10 @@ impl HostHandle {
             let Ok(Some(record)) = self.store.load_task(task).await else {
                 continue;
             };
-            let details = record.task.adopted_result.is_some()
-                || self
-                    .store
-                    .list_task_report_rows_after(task, None, 1)
-                    .await
-                    .is_ok_and(|rows| !rows.is_empty());
+            let details = self
+                .task_details_available(task, record.task.adopted_result.is_some())
+                .await
+                .unwrap_or(false);
             loaded.push((
                 task,
                 record.task.reference.revision.as_u64(),
@@ -1157,20 +1302,36 @@ impl HostHandle {
         }
     }
 
+    /// Whether a paged `GetTaskReport` has detail rows for `task`; `None`
+    /// when the bounded read failed. `adopted` is the loaded Task's
+    /// adopted-result shortcut.
+    async fn task_details_available(&self, task: TaskId, adopted: bool) -> Option<bool> {
+        if adopted {
+            return Some(true);
+        }
+        self.store
+            .list_task_report_rows_after(task, None, 1)
+            .await
+            .ok()
+            .map(|rows| !rows.is_empty())
+    }
+
+    /// Records one drained scan floor under the ownership section and consumes
+    /// the cursor the drained pass continued from (forward-only paging: a
+    /// cursor that no longer has a continuation must not stay in the map).
+    /// Returns `false` when the connection is no longer current.
     fn mark_drained(
         &self,
         live: &LiveInput,
         conn: &str,
         companion: CompanionId,
         upper: u64,
+        from_cursor: Option<&str>,
     ) -> bool {
         self.with_presentation_state(live, |state| {
-            if let Some(sub) = state.subs.get_mut(conn)
-                && sub.companion == companion.as_raw()
-            {
-                sub.scan_floor = sub.scan_floor.max(upper);
-                sub.drained_once = true;
-                sub.resume = None;
+            Self::take_cursor(state, conn, from_cursor);
+            if let Some(sub) = state.subs.get_mut(conn) {
+                drain_sub(sub, companion.as_raw(), upper);
             }
         })
         .is_some()
@@ -1178,12 +1339,6 @@ impl HostHandle {
 
     fn frame_budget(&self) -> usize {
         crate::lock_unpoison(&self.presentations).frame_budget
-    }
-
-    #[cfg(all(test, unix))]
-    #[expect(dead_code, reason = "test observation probe")]
-    pub(crate) fn set_receipt_ttl_for_test(&self, ttl: Duration) {
-        crate::lock_unpoison(&self.presentations).receipt_ttl = ttl;
     }
 
     fn receipt_shell(
@@ -1204,8 +1359,10 @@ impl HostHandle {
     }
 
     fn empty_attributed(&self, attribution: &PresenceAttribution) -> UndeliveredSummary {
-        let round = ene_presentation::RoundId::from_raw(RawId::new());
-        let round_wire = self.round_wire_or_mint(&round);
+        // A receipt-less shell has nothing to ACK, so its round is never
+        // resolved back: mint an opaque wire without registering a
+        // process-lifetime `rounds` mapping.
+        let round_wire = RoundWireId(RawId::new().as_uuid().to_string());
         UndeliveredSummary {
             receipt: PresentationReceiptWireRef(String::new()),
             round: round_wire,
@@ -1217,20 +1374,7 @@ impl HostHandle {
         }
     }
 
-    fn empty_shell(&self) -> UndeliveredSummary {
-        let round = ene_presentation::RoundId::from_raw(RawId::new());
-        let round_wire = self.round_wire_or_mint(&round);
-        UndeliveredSummary {
-            receipt: PresentationReceiptWireRef(String::new()),
-            round: round_wire,
-            presence_generation: 0,
-            items: Vec::new(),
-            reports: Vec::new(),
-            has_more: false,
-            next_cursor: None,
-        }
-    }
-
+    /// Dispatch entry: one receipt ACK, answering its typed outcome.
     pub(crate) async fn ack_undelivered(
         &self,
         frame: &WireFrame,
@@ -1276,7 +1420,16 @@ impl HostHandle {
             .with_current_connection_blocking(live, move || {
                 let verdict = (|| {
                     let mut state = crate::lock_unpoison(&presentations);
-                    let Some(companion_key) = state.receipt_ids.get(&ack.receipt.0).cloned() else {
+                    let Some(companion_key) = state
+                        .receipts
+                        .iter()
+                        .find(|(_, receipt)| receipt.id == ack.receipt.0)
+                        .map(|(key, _)| key.clone())
+                    else {
+                        // Consumed or superseded receipts stay stale (never silently
+                        // unknown); never-issued ids are unknown. A foreign
+                        // connection still hears StaleConnection first: ACKs never
+                        // migrate.
                         return match state
                             .retired
                             .iter()
@@ -1319,8 +1472,12 @@ impl HostHandle {
                 };
                 match ack.status {
                     PresentationStatus::Presented => {
+                        // Bounded to the carried ids; later arrivals are never
+                        // touched by this ACK.
                         let mut presented = 0_u32;
                         let mut held = 0_u32;
+                        let mut not_written = 0_u32;
+                        let mut unavailable = false;
                         for id in &receipt.selected {
                             match store.compare_and_mark_reported_sync(
                                 *id,
@@ -1333,31 +1490,55 @@ impl HostHandle {
                                 Ok(ene_companion::ReportStatusTransition::HeldForErasure) => {
                                     held += 1;
                                 }
-                                _ => {}
+                                // `AlreadyPresented` writes nothing but is a
+                                // true duplicate, so it is not "not written".
+                                Ok(ene_companion::ReportStatusTransition::AlreadyPresented) => {}
+                                // A stale/gone row or a rolled-back compare
+                                // wrote nothing and stays re-presentable:
+                                // never count it as already presented.
+                                Ok(_) => not_written += 1,
+                                // A store failure is not a domain answer: the
+                                // ACK cannot claim any status was written.
+                                Err(_) => unavailable = true,
                             }
                         }
-                        if held > 0 && presented == 0 {
+                        if unavailable {
+                            UndeliveredAckOutcome::Unavailable
+                        } else if held > 0 && presented == 0 {
                             UndeliveredAckOutcome::HeldForErasure
                         } else if presented > 0 {
                             UndeliveredAckOutcome::Presented { presented }
-                        } else {
+                        } else if not_written == 0 {
+                            // Every carried row was already presented (a parallel
+                            // round observation got there first): no write.
                             UndeliveredAckOutcome::AlreadyPresented
+                        } else {
+                            // Some rows were not written but stay
+                            // re-presentable: nothing durable changed.
+                            UndeliveredAckOutcome::KeptUnknown
                         }
                     }
                     PresentationStatus::Failed => {
                         let mut count = 0_u32;
+                        let mut unavailable = false;
                         for id in &receipt.selected {
-                            if let Ok(ene_companion::ReportStatusTransition::FailedToPending) =
-                                store.compare_and_mark_reported_sync(
-                                    *id,
-                                    ReportStatus::PresentationUnknown,
-                                    mark,
-                                )
-                            {
-                                count += 1;
+                            match store.compare_and_mark_reported_sync(
+                                *id,
+                                ReportStatus::PresentationUnknown,
+                                mark,
+                            ) {
+                                Ok(ene_companion::ReportStatusTransition::FailedToPending) => {
+                                    count += 1;
+                                }
+                                Ok(_) => {}
+                                Err(_) => unavailable = true,
                             }
                         }
-                        UndeliveredAckOutcome::ReturnedToPending { count }
+                        if unavailable {
+                            UndeliveredAckOutcome::Unavailable
+                        } else {
+                            UndeliveredAckOutcome::ReturnedToPending { count }
+                        }
                     }
                     PresentationStatus::Unknown => UndeliveredAckOutcome::KeptUnknown,
                 }
@@ -1394,11 +1575,18 @@ impl HostHandle {
                 }
             }
         };
-        let headlines: Vec<TaskHeadline> = self
-            .store
-            .list_tasks_after(after, limit)
-            .await
-            .unwrap_or_default();
+        let headlines: Vec<TaskHeadline> = match self.store.list_tasks_after(after, limit).await {
+            Ok(headlines) => headlines,
+            Err(_) => {
+                return vec![outgoing_frame(
+                    frame,
+                    live,
+                    WirePayload::TaskListResponse(TaskListResponse::Unavailable),
+                )];
+            }
+        };
+        // Test-only race gate: pause after the durable read and before the
+        // guarded mint.
         #[cfg(test)]
         if let Some(gate) = self.ref_mint_gate() {
             gate.pause().await;
@@ -1513,9 +1701,7 @@ impl HostHandle {
                 return vec![outgoing_frame(
                     frame,
                     live,
-                    WirePayload::TaskReportResponse(TaskReportResponse::StaleBaseView {
-                        current: None,
-                    }),
+                    WirePayload::TaskReportResponse(TaskReportResponse::Unavailable),
                 )];
             }
         };
@@ -1529,9 +1715,7 @@ impl HostHandle {
                 return vec![outgoing_frame(
                     frame,
                     live,
-                    WirePayload::TaskReportResponse(TaskReportResponse::StaleBaseView {
-                        current: None,
-                    }),
+                    WirePayload::TaskReportResponse(TaskReportResponse::Unavailable),
                 )];
             }
         };
@@ -1723,11 +1907,18 @@ impl HostHandle {
         };
         let record = match self.store.load_task(task).await {
             Ok(Some(record)) => record,
-            _ => {
+            Ok(None) => {
                 return vec![outgoing_frame(
                     frame,
                     live,
                     WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef),
+                )];
+            }
+            Err(_) => {
+                return vec![outgoing_frame(
+                    frame,
+                    live,
+                    WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable),
                 )];
             }
         };
@@ -1737,7 +1928,7 @@ impl HostHandle {
                 return vec![outgoing_frame(
                     frame,
                     live,
-                    WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef),
+                    WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable),
                 )];
             }
         };
@@ -1752,6 +1943,26 @@ impl HostHandle {
         if let Some(gate) = self.ref_mint_gate() {
             gate.pause().await;
         }
+        // The selection commit runs under the ownership section: a
+        // connection superseded while the Task was read selects nothing, and
+        // the new connection must select again (IPC §9.3 replacement).
+        // The report-row read is fallible, so it runs before the selection
+        // commit: a store failure answers `Unavailable` (documented as
+        // side-effect-free) while the projection is still untouched, never
+        // after the connection already selected the Task.
+        let details = match self
+            .task_details_available(task, record.task.adopted_result.is_some())
+            .await
+        {
+            Some(details) => details,
+            None => {
+                return vec![outgoing_frame(
+                    frame,
+                    live,
+                    WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable),
+                )];
+            }
+        };
         let selected = self
             .with_current_connection(live, || {
                 self.conversation_tasks
@@ -1765,12 +1976,6 @@ impl HostHandle {
                 "task selection on a superseded connection",
             )];
         }
-        let details = record.task.adopted_result.is_some()
-            || self
-                .store
-                .list_task_report_rows_after(task, None, 1)
-                .await
-                .is_ok_and(|rows| !rows.is_empty());
         vec![outgoing_frame(
             frame,
             live,
@@ -1804,11 +2009,12 @@ impl HostHandle {
                 live,
                 WirePayload::ResumeTaskOutcome(outcome),
             )],
-            ResumeApply::Conflict => vec![reject_frame(
+            ResumeApply::Conflict => vec![outgoing_frame(
                 frame,
                 live,
-                RejectKind::ConflictingCommand,
-                String::from("command id reused with different content"),
+                WirePayload::CommandReplayReject(CommandReplayRejectWire::CommandIdConflict {
+                    command_id,
+                }),
             )],
         }
     }
@@ -1878,7 +2084,9 @@ impl HostHandle {
         if claimed.is_none() {
             return ResumeApply::Outcome(ResumeTaskOutcomeWire::StaleConnection);
         }
-        let outcome = self.commit_resume(frame, live, command).await;
+        let outcome = self.commit_resume(live, command_id, command).await;
+        // Technical failures free the slot so the same command retries
+        // cleanly; every decided answer persists for replay.
         if matches!(outcome, ResumeTaskOutcomeWire::Unavailable) {
             crate::lock_unpoison(&self.presentations)
                 .resume
@@ -1894,8 +2102,8 @@ impl HostHandle {
 
     async fn commit_resume(
         &self,
-        frame: &WireFrame,
         live: &LiveInput,
+        command_id: Uuid,
         command: &ResumeTask,
     ) -> ResumeTaskOutcomeWire {
         let conn = conn_key(&live.connection_id);
@@ -1932,12 +2140,9 @@ impl HostHandle {
             Ok(None) => return ResumeTaskOutcomeWire::MissingTask,
             Err(_) => return ResumeTaskOutcomeWire::Unavailable,
         };
-        let command_raw = frame
-            .envelope
-            .correlation
-            .command_id
-            .map(|id| id.0)
-            .unwrap_or_else(Uuid::new_v4);
+        // The activity record and the AU17 commit run inside the guarded
+        // connection section, so a connection superseded before the section
+        // leaves no activity row, revision change, delegation, or launch.
         let outcome = match self
             .resume_task_guarded_by_connection(
                 live,
@@ -1953,7 +2158,7 @@ impl HostHandle {
                     task: record.task.reference,
                     purpose: record.task.purpose,
                     body: command.instruction.clone(),
-                    command: RawId::from_uuid(command_raw),
+                    command: RawId::from_uuid(command_id),
                 },
             )
             .await
@@ -1972,14 +2177,10 @@ impl HostHandle {
         companion: CompanionId,
         attribution: &PresenceAttribution,
     ) -> Vec<WireFrame> {
-        let Some(device_wire) = live.paired_device.clone() else {
+        let Some(client) = Self::presenting_client(live, attribution) else {
             return Vec::new();
         };
-        let client = device_client(&device_wire);
-        if attribution.state != PresenceState::Present
-            || attribution.active_client != Some(client)
-            || !live.connection_live
-        {
+        if !live.connection_live {
             return Vec::new();
         }
         let _gate = self.presentation_gate().await;
@@ -1999,7 +2200,9 @@ impl HostHandle {
                 sub.companion = companion.as_raw();
                 sub.scan_floor = 0;
                 sub.drained_once = false;
-                sub.resume = None;
+                if let Some((_, _, _, wire)) = sub.resume.take() {
+                    state.cursors.remove(&(conn.clone(), wire));
+                }
             })
             .is_some();
         if !prepared {
@@ -2083,12 +2286,7 @@ impl HostHandle {
             Ok(Some(attribution)) => attribution,
             _ => return None,
         };
-        let device_wire = live.paired_device.clone()?;
-        let client = device_client(&device_wire);
-        if attribution.state != PresenceState::Present || attribution.active_client != Some(client)
-        {
-            return None;
-        }
+        let client = Self::presenting_client(live, &attribution)?;
         let companion_key = companion.as_raw().as_uuid().as_hyphenated().to_string();
         if self.live_receipt(&companion_key, &conn).is_some() {
             return None;
@@ -2148,22 +2346,6 @@ impl HostHandle {
     pub(crate) fn undelivered_wakeup(&self) -> tokio::sync::watch::Receiver<u64> {
         self.store.undelivered_wakeup()
     }
-
-    #[cfg(test)]
-    #[expect(dead_code, reason = "test hook for receipt expiry")]
-    pub(crate) fn expire_receipt_for_test(&self, receipt: &str) -> bool {
-        let mut state = crate::lock_unpoison(&self.presentations);
-        let Some(companion_key) = state.receipt_ids.get(receipt).cloned() else {
-            return false;
-        };
-        match state.receipts.get_mut(&companion_key) {
-            Some(entry) => {
-                entry.expires_at = Instant::now() - Duration::from_secs(1);
-                true
-            }
-            None => false,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -2189,19 +2371,9 @@ impl TestPresentationCommitGate {
         let permit = self.release.acquire().await.expect("gate stays open");
         permit.forget();
     }
-
-    #[expect(dead_code, reason = "test gate hook")]
-    pub(crate) async fn wait_entered(&self) {
-        let permit = self.entered.acquire().await.expect("gate is entered");
-        permit.forget();
-    }
-
-    #[expect(dead_code, reason = "test gate hook")]
-    pub(crate) fn release(&self) {
-        self.release.add_permits(1);
-    }
 }
 
+/// One pass plan for a cursor-less request.
 #[derive(Debug, Clone, Copy)]
 enum PlanStart {
     Continued {

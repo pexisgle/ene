@@ -7,6 +7,7 @@ use crate::delegation::{
 };
 use crate::failure::{TaskFailureOutcome, TaskFailurePremise};
 use crate::observation::{TaskAgentObservationId, TaskAgentObservationPremise};
+use crate::orchestrate::TaskProposalOutcome;
 use crate::report::{
     PastExecutedFactsPage, TaskHeadline, TaskReportRow, TaskReportRowCursor, TaskReportSourcePage,
     TaskReportSourceRef,
@@ -17,8 +18,7 @@ use crate::result::{
 };
 use crate::resume::{TaskResumeCommitPremise, TaskResumeOutcome};
 use crate::task::{
-    TaskCommitPremise, TaskCreationOutcome, TaskCreationPremise, TaskId, TaskProgress, TaskRecord,
-    TaskRef,
+    TaskCommitPremise, TaskCreationPremise, TaskId, TaskProgress, TaskRecord, TaskRef,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -34,6 +34,9 @@ pub enum TaskCommitOutcome {
         current: TaskRef,
     },
     Superseded,
+    /// The Task is terminal (`Completed` / `Failed` / `Cancelled`); the revision and the
+    /// context are unchanged. Absorbing, so it is distinct from revision
+    /// staleness.
     TaskTerminal {
         task: TaskId,
         progress: TaskProgress,
@@ -77,6 +80,26 @@ pub trait TaskRepository: Send + Sync {
         premise: TaskFailurePremise,
     ) -> Result<TaskFailureOutcome, TaskTechnicalError>;
 
+    /// Creates one delegation correspondence for a Task revision (AU3).
+    ///
+    /// [`orchestrate_delegation`](crate::orchestrate_delegation) mints the
+    /// delegation and agent identities and passes them in the premise; the
+    /// repository never re-allocates them. Inside the atomic compare the
+    /// current Task row is read at exactly `premise.task.revision`, and the
+    /// assignee copied into the delegation is that row's assignee, checked
+    /// against the same revision's `task_revision` snapshot (a missing or
+    /// disagreeing snapshot is a technical error, never a composed value). The
+    /// same atomic snapshot reads the current progress: a missing Task returns
+    /// [`DelegationOutcome::MissingTask`], terminal progress (`Completed`,
+    /// `Failed`, or `Cancelled`) returns [`DelegationOutcome::TaskTerminal`],
+    /// and a revision mismatch on a non-terminal Task returns
+    /// [`DelegationOutcome::StaleTaskRevision`], all `Ok`-side domain outcomes
+    /// with zero writes. Terminal is decided before the revision compare, so it
+    /// is never folded into a stale answer.
+    ///
+    /// Creation never advances the Task revision and imposes no single
+    /// delegation constraint: multiple delegations of the same Task revision
+    /// are valid, and each is a new identity.
     async fn create_delegation(
         &self,
         premise: DelegationCreationPremise,
@@ -133,6 +156,16 @@ pub trait TaskRepository: Send + Sync {
         task: TaskId,
     ) -> Result<Vec<RawId>, TaskTechnicalError>;
 
+    /// Lists one bounded page of Task lifecycle headlines in canonical
+    /// `TaskId` byte order, starting strictly after `after`.
+    ///
+    /// `limit` is clamped to `1..=REPORT_PAGE_MAX` and applied by the SQL
+    /// query, so the bound is on the rows read. Every headline is stored
+    /// facts only — current revision, progress, and purpose — never a body.
+    /// The read runs no reconciliation, starts no runner, and re-evaluates no
+    /// stored result: "currently executing" is Host memory, so a
+    /// non-terminal Task with no registration is reported as saved and not
+    /// running.
     async fn list_tasks_after(
         &self,
         after: Option<TaskId>,
@@ -173,7 +206,7 @@ pub trait ConversationTaskRepository: TaskRepository {
         &self,
         premise: TaskCreationPremise,
         currentness: OwnerMessageCurrentness,
-    ) -> Result<TaskCreationOutcome, TaskTechnicalError>;
+    ) -> Result<TaskProposalOutcome, TaskTechnicalError>;
 
     async fn forward_steering_from_conversation(
         &self,

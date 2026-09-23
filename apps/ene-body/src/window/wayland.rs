@@ -24,7 +24,7 @@ mod imp {
         LayerSurfaceConfigure,
     };
     use smithay_client_toolkit::{delegate_dispatch2, delegate_registry, registry_handlers};
-    use wayland_client::globals::{GlobalList, registry_queue_init};
+    use wayland_client::globals::registry_queue_init;
     use wayland_client::protocol::{wl_output, wl_pointer, wl_region, wl_seat, wl_surface};
     use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
     use wayland_protocols::wp::presentation_time::client::{
@@ -36,12 +36,13 @@ mod imp {
         GpuFailInfo, GpuFailReason, GpuInitStatus, LocalUiFact, PlacementBox, PresentationFeedback,
         PresentationOutcome,
     };
-    use crate::render::{HitTestMask, RenderFailure, RenderOutcome, SurfaceRenderer};
-    use crate::window::OverlayProbe;
+    use crate::render::{HitTestMask, RenderOutcome, SurfaceRenderer};
+    use crate::window::{
+        DEFAULT_PLACEMENT, RESIZE_GRIP_LOGICAL_PX, gpu_disabled, gpu_info, physical,
+    };
 
     const LEFT_BUTTON: u32 = 0x110;
     const RIGHT_BUTTON: u32 = 0x111;
-    const RESIZE_GRIP_LOGICAL_PX: u32 = 32;
 
     pub struct WaylandOverlay {
         renderer: Option<SurfaceRenderer>,
@@ -49,7 +50,10 @@ mod imp {
         event_queue: EventQueue<State>,
         state: State,
         visible: bool,
-        placement: PlacementBox,
+        /// A hide frame was requested but the renderer skipped it; the last
+        /// visible buffer is still on screen and [`Self::render`] must retry
+        /// the transparent present instead of presenting meshes.
+        hide_pending: bool,
         gpu_failure: Option<GpuFailInfo>,
         next_commit: u64,
         renderer_size: (u32, u32),
@@ -60,7 +64,9 @@ mod imp {
             formatter
                 .debug_struct("WaylandOverlay")
                 .field("visible", &self.visible)
-                .field("placement", &self.placement)
+                .field("size", &self.state.size)
+                .field("position", &self.state.position)
+                .field("scale", &self.state.scale)
                 .field("gpu_ready", &self.renderer.is_some())
                 .finish()
         }
@@ -76,11 +82,19 @@ mod imp {
             let connection = Connection::connect_to_env().map_err(|error| error.to_string())?;
             let (globals, mut event_queue) =
                 registry_queue_init(&connection).map_err(|error| error.to_string())?;
-            require_kde_layer_shell(&globals)?;
             let qh = event_queue.handle();
             let compositor =
                 CompositorState::bind(&globals, &qh).map_err(|error| error.to_string())?;
-            let layer_shell = LayerShell::bind(&globals, &qh).map_err(|error| error.to_string())?;
+            let layer_shell = LayerShell::bind(&globals, &qh)
+                .map_err(|_| String::from("zwlr_layer_shell_v1 is unavailable"))?;
+            // Optional protocol: KWin, GNOME and wlroots compositors expose
+            // it. Drag and resize use its accelerated deltas (the cursor
+            // vector the user sees), with the unaccelerated delta only as a
+            // fallback when the compositor leaves the accelerated vector at
+            // zero, so the overlay never feeds its own surface movement back
+            // into the gesture (surface-local motion coordinates are relative
+            // to the moving surface, which made the overlay travel at half
+            // speed).
             let relative_pointer_state = RelativePointerState::bind(&globals, &qh);
             let presentation = globals
                 .bind(&qh, 1..=1, ())
@@ -93,13 +107,7 @@ mod imp {
                 Some("ene-body"),
                 None,
             );
-            let placement = PlacementBox {
-                x: 24,
-                y: 24,
-                width: 420,
-                height: 640,
-                scale: 1.0,
-            };
+            let placement = DEFAULT_PLACEMENT;
             layer.set_anchor(Anchor::TOP | Anchor::LEFT);
             layer.set_exclusive_zone(-1);
             layer.set_keyboard_interactivity(KeyboardInteractivity::None);
@@ -120,9 +128,9 @@ mod imp {
                 relative_pointer: None,
                 configured: false,
                 frame_ready: true,
+                closed: false,
                 scale: 1,
                 size: (placement.width, placement.height),
-                pointer_position: (0.0, 0.0),
                 position: (placement.x, placement.y),
                 interaction: None,
                 events: VecDeque::new(),
@@ -168,9 +176,7 @@ mod imp {
                     }
                 }
             } else {
-                gpu_failure = Some(GpuFailInfo {
-                    reason: GpuFailReason::NoAdapter,
-                });
+                gpu_failure = Some(gpu_disabled());
                 None
             };
             Ok(Self {
@@ -179,7 +185,7 @@ mod imp {
                 state,
                 renderer,
                 visible: false,
-                placement,
+                hide_pending: false,
                 gpu_failure,
                 next_commit: 1,
                 renderer_size: (placement.width, placement.height),
@@ -187,11 +193,7 @@ mod imp {
         }
 
         pub fn gpu_status(&self) -> GpuInitStatus {
-            if self.renderer.is_some() {
-                GpuInitStatus::Ok
-            } else {
-                GpuInitStatus::Failed
-            }
+            crate::window::gpu_status(self.renderer.as_ref())
         }
 
         pub fn gpu_failure(&self) -> Option<GpuFailInfo> {
@@ -199,36 +201,69 @@ mod imp {
         }
 
         pub fn set_visible(&mut self, visible: bool) {
-            if self.visible == visible {
+            if self.visible == visible && !self.hide_pending {
                 return;
             }
             if visible {
+                self.hide_pending = false;
                 self.visible = true;
                 self.state.frame_ready = true;
                 return;
             }
-            if self.renderer.is_some() {
-                self.render_frame(&[], true);
-            } else {
-                self.state.layer.wl_surface().attach(None, 0, 0);
-                self.state.layer.commit();
-                self.state
-                    .missing_all("surface hidden before presentation feedback");
+            // Hide by presenting one transparent frame and keeping the
+            // surface mapped. Unmapping (`attach(None)` + commit) makes KWin
+            // require a new configure before the next buffer attach, and that
+            // configure is not sent for a null-buffer commit, so a later show
+            // would never render again (observed on KWin 6.7.5: protocol
+            // error 0 "a buffer has been attached to a layer surface prior to
+            // the first layer_surface.configure event" and a dead renderer).
+            // The transparent frame also makes the alpha-aware input region
+            // empty, so the hidden overlay claims no input. A surface the
+            // compositor already closed must not be committed again.
+            if !self.state.closed {
+                if self.renderer.is_some() {
+                    if !self.present_hidden() {
+                        // Nothing was submitted, so the last visible buffer is
+                        // still on screen: stay logically visible and retry
+                        // rather than presenting the avatar again.
+                        self.hide_pending = true;
+                        return;
+                    }
+                } else {
+                    self.state.layer.wl_surface().attach(None, 0, 0);
+                    self.state.layer.commit();
+                    self.state
+                        .missing_all("surface hidden before presentation feedback");
+                }
             }
             self.visible = false;
         }
 
-        pub fn visible(&self) -> bool {
-            self.visible
+        /// Presents the transparent hide frame and empties the input region.
+        /// Returns false when the surface submitted no buffer, which leaves
+        /// the previous buffer on screen.
+        fn present_hidden(&mut self) -> bool {
+            if !self.render_frame(&[], true) {
+                return false;
+            }
+            // The presented hide frame already set the empty input region as
+            // double-buffered surface state; this state-only commit publishes it.
+            self.state.layer.commit();
+            true
         }
 
         pub fn set_placement(&mut self, placement: PlacementBox) {
-            self.placement = placement;
             self.state.size = (placement.width, placement.height);
             self.state.position = (placement.x, placement.y);
-            self.state.layer.set_margin(placement.y, 0, 0, placement.x);
-            self.state.layer.set_size(placement.width, placement.height);
+            // The alpha-aware region is recomputed from the next presented
+            // frame at the new size; until then the old region is not reused.
             self.state.region_dirty = true;
+            // A surface the compositor already closed must not be committed
+            // again (same invariant as set_visible).
+            if !self.state.closed {
+                self.state.layer.set_margin(placement.y, 0, 0, placement.x);
+                self.state.layer.set_size(placement.width, placement.height);
+            }
             if let Some(renderer) = &mut self.renderer {
                 let size = (
                     physical(placement.width, placement.scale),
@@ -237,15 +272,9 @@ mod imp {
                 renderer.resize(size.0, size.1);
                 self.renderer_size = size;
             }
-            self.state.layer.commit();
-        }
-
-        pub fn placement(&self) -> PlacementBox {
-            let mut placement = self.placement;
-            placement.scale = self.state.scale as f32;
-            placement.width = self.state.size.0;
-            placement.height = self.state.size.1;
-            placement
+            if !self.state.closed {
+                self.state.layer.commit();
+            }
         }
 
         pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
@@ -278,34 +307,50 @@ mod imp {
                 });
                 return;
             }
-            self.placement.scale = self.state.scale as f32;
-            self.placement.width = self.state.size.0;
-            self.placement.height = self.state.size.1;
-            self.placement.x = self.state.position.0;
-            self.placement.y = self.state.position.1;
+            // A compositor-closed layer surface is terminal (it is never
+            // committed or presented again), so report it like the DWM surface
+            // failure instead of leaving `gpu_status` Ok while nothing renders.
+            if self.state.closed && self.renderer.is_some() {
+                self.renderer = None;
+                self.gpu_failure = Some(GpuFailInfo {
+                    reason: GpuFailReason::Surface,
+                });
+            }
         }
 
         pub fn ready_to_render(&self) -> bool {
-            self.visible && self.state.frame_ready && self.renderer.is_some()
+            self.visible && !self.state.closed && self.state.frame_ready && self.renderer.is_some()
         }
 
         pub fn render(&mut self, meshes: &[crate::vrm::RenderMesh]) {
+            if self.hide_pending {
+                // Retry the transparent hide frame until the surface submits
+                // one. The mesh path must not present the avatar again.
+                if self.present_hidden() {
+                    self.hide_pending = false;
+                    self.visible = false;
+                }
+                return;
+            }
             self.render_frame(meshes, false);
         }
 
-        fn render_frame(&mut self, meshes: &[crate::vrm::RenderMesh], force: bool) {
+        /// Presents one frame, returning whether a buffer was submitted.
+        /// `force` skips the visible/frame pacing gate so the hide path can
+        /// present the transparent unmapping frame.
+        fn render_frame(&mut self, meshes: &[crate::vrm::RenderMesh], force: bool) -> bool {
             if self.renderer.is_none() {
-                return;
+                return false;
             }
             if !force && !self.ready_to_render() {
-                return;
+                return false;
             }
             let wanted_size = (
                 physical(self.state.size.0, self.state.scale as f32),
                 physical(self.state.size.1, self.state.scale as f32),
             );
             let Some(renderer) = &mut self.renderer else {
-                return;
+                return false;
             };
             if wanted_size != self.renderer_size {
                 renderer.resize(wanted_size.0, wanted_size.1);
@@ -336,6 +381,7 @@ mod imp {
             match outcome {
                 Ok(RenderOutcome::Presented) => {
                     self.refresh_input_region(meshes, wanted_size);
+                    true
                 }
                 Ok(RenderOutcome::Skipped) => {
                     let _ = (frame_callback, presentation_feedback);
@@ -353,6 +399,7 @@ mod imp {
                                 ),
                             },
                         }));
+                    false
                 }
                 Err(failure) => {
                     let _ = (frame_callback, presentation_feedback);
@@ -362,6 +409,7 @@ mod imp {
                     self.gpu_failure = Some(gpu_info(failure));
                     self.state
                         .missing_all("renderer failed before feedback resolved");
+                    false
                 }
             }
         }
@@ -371,7 +419,11 @@ mod imp {
             meshes: &[crate::vrm::RenderMesh],
             physical_size: (u32, u32),
         ) {
-            let mask = HitTestMask::from_meshes(meshes, physical_size.0, physical_size.1);
+            let Some(mask) = self.renderer.as_ref().and_then(|renderer| {
+                renderer.hit_test_mask(meshes, physical_size.0, physical_size.1)
+            }) else {
+                return;
+            };
             if !self.state.region_dirty && self.state.hit_test_mask.as_ref() == Some(&mask) {
                 return;
             }
@@ -419,25 +471,8 @@ mod imp {
         }
     }
 
-    impl Drop for WaylandOverlay {
-        fn drop(&mut self) {
-            self.state
-                .missing_all("body exited before presentation feedback");
-        }
-    }
-
-    fn require_kde_layer_shell(globals: &GlobalList) -> Result<(), String> {
-        let has_layer_shell = globals.contents().with_list(|list| {
-            list.iter()
-                .any(|global| global.interface == "zwlr_layer_shell_v1")
-        });
-        if has_layer_shell {
-            Ok(())
-        } else {
-            Err(String::from("zwlr_layer_shell_v1 is unavailable"))
-        }
-    }
-
+    /// Replaces the surface input region with the given surface-local
+    /// rectangles. Empty input makes the whole surface click-through.
     fn set_input_region(
         compositor: &CompositorState,
         qh: &QueueHandle<State>,
@@ -462,10 +497,8 @@ mod imp {
         region.destroy();
     }
 
-    fn physical(logical: u32, scale: f32) -> u32 {
-        ((logical as f64 * f64::from(scale)).round() as u64).clamp(1, u64::from(u32::MAX)) as u32
-    }
-
+    /// Output name reported by the compositor, or the proxy identity when the
+    /// output was not announced with a name.
     fn output_name(output_state: &OutputState, output: &wl_output::WlOutput) -> String {
         output_state
             .info(output)
@@ -493,25 +526,20 @@ mod imp {
         entered.unwrap_or_default().to_string()
     }
 
-    fn gpu_info(failure: RenderFailure) -> GpuFailInfo {
-        GpuFailInfo {
-            reason: match failure {
-                RenderFailure::Adapter => GpuFailReason::NoAdapter,
-                RenderFailure::Device => GpuFailReason::RequestDevice,
-                RenderFailure::Surface => GpuFailReason::Surface,
-                RenderFailure::DeviceLost => GpuFailReason::DeviceLost,
-                RenderFailure::OutOfMemory => GpuFailReason::OutOfMemory,
-            },
-        }
-    }
-
     #[derive(Debug)]
     enum Interaction {
+        /// Dragging the whole overlay. `origin` is the surface position at
+        /// press; `accum` is the accelerated pointer displacement since
+        /// press. `start_local` is only the fallback anchor for compositors
+        /// without `zwp_relative_pointer_v1`.
         Drag {
             origin: (i32, i32),
             accum: (f64, f64),
             start_local: (f64, f64),
         },
+        /// Resizing from the bottom-band grip. `origin` is the surface size
+        /// at press; `accum` is the accelerated pointer displacement since
+        /// press. `start_local` is the fallback anchor.
         Resize {
             origin: (u32, u32),
             accum: (f64, f64),
@@ -534,12 +562,20 @@ mod imp {
         layer: LayerSurface,
         presentation: wp_presentation::WpPresentation,
         pointer: Option<wl_pointer::WlPointer>,
+        /// Optional relative-motion source for drag / resize; its accelerated
+        /// delta is preferred.
         relative_pointer: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
         configured: bool,
         frame_ready: bool,
+        /// Set when the compositor sends `layer_surface.closed`; the surface
+        /// must not be committed or presented again.
+        closed: bool,
+        /// Surface buffer scale. Only [`CompositorHandler::scale_factor_changed`]
+        /// writes it: SCTK invokes that handler when the surface enters or
+        /// leaves an output with a different scale, so per-output scale
+        /// tracking must not be duplicated in the output handlers.
         scale: i32,
         size: (u32, u32),
-        pointer_position: (f64, f64),
         position: (i32, i32),
         interaction: Option<Interaction>,
         events: VecDeque<Event>,
@@ -553,8 +589,39 @@ mod imp {
     }
 
     impl State {
+        /// `origin` is the position captured at press; `total` is the pointer
+        /// displacement since then, so the overlay cannot feed its own surface
+        /// movement back into the gesture.
+        fn drag_to(&mut self, origin: (i32, i32), total: (f64, f64)) {
+            let (x, y) = dragged_position(origin, total);
+            if (x, y) != self.position {
+                self.position = (x, y);
+                self.layer.set_margin(y, 0, 0, x);
+                self.events
+                    .push_back(Event::LocalUi(LocalUiFact::Drag { x, y }));
+            }
+        }
+
+        /// `origin` is the size captured at press; `total` is the pointer
+        /// displacement since then. The next presented frame recomputes the
+        /// alpha-aware region at the new size; the pointer stays on this
+        /// surface through the implicit button-down grab.
+        fn resize_to(&mut self, origin: (u32, u32), total: (f64, f64)) {
+            let (width, height) = resized_extent(origin, total);
+            if (width, height) != self.size {
+                self.size = (width, height);
+                self.layer.set_size(width, height);
+                self.region_dirty = true;
+                self.events
+                    .push_back(Event::LocalUi(LocalUiFact::Resize { width, height }));
+            }
+        }
+
         fn missing_all(&mut self, reason: &str) {
             for correlation_id in std::mem::take(&mut self.pending_feedback) {
+                // A compositor terminal for an already-synthesized commit must
+                // be dropped, exactly as the Skipped/Err paths arrange.
+                self.ignored_feedback.insert(correlation_id);
                 self.events
                     .push_back(Event::Presentation(PresentationFeedback {
                         surface_id: self.surface_id.clone(),
@@ -611,13 +678,6 @@ mod imp {
             output: &wl_output::WlOutput,
         ) {
             let name = output_name(&self.output_state, output);
-            if let Some(info) = self.output_state.info(output) {
-                let scale = info.scale_factor.max(1);
-                if self.scale != scale {
-                    self.scale = scale;
-                    self.region_dirty = true;
-                }
-            }
             self.surface_output = Some((output.id().protocol_id(), name));
         }
 
@@ -658,13 +718,6 @@ mod imp {
             output: wl_output::WlOutput,
         ) {
             let name = output_name(&self.output_state, &output);
-            if let Some(info) = self.output_state.info(&output) {
-                let scale = info.scale_factor.max(1);
-                if self.scale != scale {
-                    self.scale = scale;
-                    self.region_dirty = true;
-                }
-            }
             if let Some((id, tracked)) = &mut self.surface_output
                 && *id == output.id().protocol_id()
             {
@@ -688,6 +741,7 @@ mod imp {
             _qh: &QueueHandle<Self>,
             _layer: &LayerSurface,
         ) {
+            self.closed = true;
             self.events.push_back(Event::LocalUi(LocalUiFact::Hide));
             self.missing_all("layer surface was closed");
         }
@@ -780,7 +834,6 @@ mod imp {
                 if &event.surface != self.layer.wl_surface() {
                     continue;
                 }
-                self.pointer_position = event.position;
                 match event.kind {
                     PointerEventKind::Press {
                         button: LEFT_BUTTON,
@@ -816,6 +869,12 @@ mod imp {
                         self.events.push_back(Event::LocalUi(LocalUiFact::Hide));
                     }
                     PointerEventKind::Motion { .. } => {
+                        // Fallback for compositors without
+                        // `zwp_relative_pointer_v1`: surface-local motion is
+                        // relative to the moving surface, so this path can
+                        // under-travel during sustained drags. KWin, GNOME and
+                        // wlroots use the relative-motion path below instead
+                        // (accelerated delta preferred).
                         if self.relative_pointer.is_none() {
                             match self.interaction {
                                 Some(Interaction::Resize {
@@ -823,37 +882,22 @@ mod imp {
                                     start_local,
                                     ..
                                 }) => {
-                                    let (width, height) = resized_extent(
-                                        origin,
-                                        (
-                                            event.position.0 - start_local.0,
-                                            event.position.1 - start_local.1,
-                                        ),
+                                    let total = (
+                                        event.position.0 - start_local.0,
+                                        event.position.1 - start_local.1,
                                     );
-                                    self.size = (width, height);
-                                    self.layer.set_size(width, height);
-                                    self.region_dirty = true;
-                                    self.events.push_back(Event::LocalUi(LocalUiFact::Resize {
-                                        width,
-                                        height,
-                                    }));
+                                    self.resize_to(origin, total);
                                 }
                                 Some(Interaction::Drag {
                                     origin,
                                     start_local,
                                     ..
                                 }) => {
-                                    let (x, y) = dragged_position(
-                                        origin,
-                                        (
-                                            event.position.0 - start_local.0,
-                                            event.position.1 - start_local.1,
-                                        ),
+                                    let total = (
+                                        event.position.0 - start_local.0,
+                                        event.position.1 - start_local.1,
                                     );
-                                    self.position = (x, y);
-                                    self.layer.set_margin(y, 0, 0, x);
-                                    self.events
-                                        .push_back(Event::LocalUi(LocalUiFact::Drag { x, y }));
+                                    self.drag_to(origin, total);
                                 }
                                 None => {}
                             }
@@ -895,47 +939,29 @@ mod imp {
                 Interaction::Drag { origin, accum, .. } => {
                     accum.0 += dx;
                     accum.1 += dy;
-                    let (x, y) = dragged_position(*origin, *accum);
-                    if (x, y) != self.position {
-                        self.position = (x, y);
-                        self.layer.set_margin(y, 0, 0, x);
-                        self.events
-                            .push_back(Event::LocalUi(LocalUiFact::Drag { x, y }));
-                    }
+                    self.drag_to(*origin, *accum);
                 }
                 Interaction::Resize { origin, accum, .. } => {
                     accum.0 += dx;
                     accum.1 += dy;
-                    let (width, height) = resized_extent(*origin, *accum);
-                    if (width, height) != self.size {
-                        self.size = (width, height);
-                        self.layer.set_size(width, height);
-                        self.region_dirty = true;
-                        self.events
-                            .push_back(Event::LocalUi(LocalUiFact::Resize { width, height }));
-                    }
+                    self.resize_to(*origin, *accum);
                 }
             }
             self.interaction = Some(interaction);
         }
     }
 
-    #[derive(Debug, Default)]
-    struct FeedbackInner {
-        output: String,
-    }
-
     #[derive(Debug, Clone)]
     struct FeedbackData {
         correlation_id: u64,
-        inner: Arc<Mutex<FeedbackInner>>,
+        inner: Arc<Mutex<String>>,
     }
 
     impl FeedbackData {
         fn new(correlation_id: u64) -> Self {
             Self {
                 correlation_id,
-                inner: Arc::new(Mutex::new(FeedbackInner::default())),
+                inner: Arc::new(Mutex::new(String::new())),
             }
         }
     }
@@ -966,13 +992,9 @@ mod imp {
         ) {
             match event {
                 wp_presentation_feedback::Event::SyncOutput { output } => {
-                    let output_name = state
-                        .output_state
-                        .info(&output)
-                        .and_then(|info| info.name.clone())
-                        .unwrap_or_else(|| format!("wl_output@{}", output.id().protocol_id()));
+                    let output_name = output_name(&state.output_state, &output);
                     if let Ok(mut inner) = data.inner.lock() {
-                        inner.output = output_name;
+                        *inner = output_name;
                     }
                 }
                 wp_presentation_feedback::Event::Presented {
@@ -992,7 +1014,7 @@ mod imp {
                     let sync_output = data
                         .inner
                         .lock()
-                        .map(|inner| inner.output.clone())
+                        .map(|inner| inner.clone())
                         .unwrap_or_default();
                     let output = presentation_output(
                         &sync_output,
@@ -1051,13 +1073,6 @@ mod imp {
         }
     }
 
-    pub fn probe() -> OverlayProbe {
-        match WaylandOverlay::open(false) {
-            Ok(_) => OverlayProbe::Available,
-            Err(reason) => OverlayProbe::Unavailable { reason },
-        }
-    }
-
     #[cfg(test)]
     mod tests {
         use super::presentation_output;
@@ -1077,19 +1092,3 @@ mod imp {
 
 #[cfg(target_os = "linux")]
 pub use imp::WaylandOverlay;
-
-use super::OverlayProbe;
-
-#[must_use]
-pub fn kde_layer_shell_probe() -> OverlayProbe {
-    #[cfg(target_os = "linux")]
-    {
-        imp::probe()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        OverlayProbe::Unavailable {
-            reason: String::from("not Linux"),
-        }
-    }
-}

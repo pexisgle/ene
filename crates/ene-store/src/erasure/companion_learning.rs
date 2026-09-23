@@ -1,22 +1,64 @@
+//! Local-erasure participants for the Companion and Learning owners
+//! (Targeted Deletion lifecycle §9–§10).
+//!
+//! Each implementation owns exactly its own durable rows and never updates
+//! another domain's tables:
+//!
+//! - [`companion_erasure_participant`] sweeps the content columns of
+//!   `history_message` and `activity_record` with the operation's exact
+//!   mechanical target, and removes `undelivered` reporting references whose
+//!   canonical source is gone (the reference carries no body; the source-side
+//!   erasure governs the referenced content).
+//! - [`learning_erasure_participant`] sweeps `learning_summary`,
+//!   `learning_memory`, and `learning_memory_revision` content, the derived
+//!   `learning_memory_term` token index, and follows the recorded
+//!   correspondence: a revision whose evidence Summary no longer exists is
+//!   erased, and a Memory whose current revision is erased goes with its
+//!   history and tokens, so derived text can never remain as the only copy of
+//!   the erased evidence.
+//!
+//! The mechanical layer is mandatory and LLM-independent: matching is exact
+//! substring / token equality, never a model judgment. Work is bounded per
+//! demand (`ERASURE_SCAN_ROWS` scanned rows), the continuation cursor is
+//! owned by the participant, and `(operation, sweep, participant)` is
+//! idempotent: re-scanning the same range after a crash deletes nothing new
+//! because the target rows are already gone. A demand for a different
+//! condition starts a fresh sweep, so a completion is never mixed across
+//! generations, and a lost cursor (restart) simply restarts the sweep from its
+//! head — never from a remembered position that could skip rows.
+//!
+//! The History→Summary correlation is the recorded correspondence only: the
+//! Summary's own source pins. A pin is correlated when the operation's
+//! current `erasure_condition_source` primary key names it (indexed
+//! membership, never a materialized copy of every covered identity) or when
+//! the pinned message still carries the target. Reading the History row for
+//! that check is a read-only cross-owner lookup; the Learning participant
+//! never writes another owner's rows. A Summary that paraphrases the target
+//! without an exact occurrence and without a recorded covered source is not
+//! mechanically reachable in this slice — no LLM and no guessed correlation
+//! is used to reach it.
+
 use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
 
-use ene_preservation::{
-    DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant, MechanicalDeletionTarget,
-    ParticipantCompletionFact, ParticipantHoldClass, ParticipantOwnerRef,
+use ene_preservation::{ErasureConditionRef, ParticipantOwnerRef};
+use rusqlite::{OptionalExtension, Transaction, params};
+
+use crate::Store;
+use crate::codec::{SOURCE_KIND_ACTIVITY_RECORD, SOURCE_KIND_HISTORY_MESSAGE};
+
+use super::{
+    ErasurePageError, LocalErasureParticipant, PageOutcome, PageRequest, SweepCursor, bounded_step,
 };
-use ene_primitive::WallClockWithTz;
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
-use crate::codec::{SOURCE_KIND_ACTIVITY_RECORD, SOURCE_KIND_HISTORY_MESSAGE, lock_shared};
-use crate::{Store, run_blocking};
-
-pub const ERASURE_SCAN_ROWS: u32 = 64;
-
+/// Content columns of the Companion owner. The system-wide remainder probe
+/// (`remainder.rs`) derives its Companion surface from this list, so a column
+/// added here is probed as well.
 pub(crate) const COMPANION_CONTENT: &[(&str, &str)] =
     &[("history_message", "body"), ("activity_record", "body")];
 
+/// Content columns of the Learning owner. The Learning sweep and the
+/// system-wide remainder probe both derive their surface from this list, so a
+/// column added here is swept and probed together.
 pub(crate) const LEARNING_CONTENT: &[(&str, &str)] = &[
     ("learning_summary", "content"),
     ("learning_memory", "content"),
@@ -29,133 +71,11 @@ const UNDELIVERED_KEY: &str = "undelivered_id";
 const SUMMARY_KEY: &str = "summary_id";
 const MEMORY_KEY: &str = "memory_id";
 const REVISION_KEY: &str = "revision";
-pub(crate) const TERM_TABLE: &str = "learning_memory_term";
+const TERM_TABLE: &str = "learning_memory_term";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SweepPhase {
-    Erase,
-    Verify,
-}
-
-#[derive(Debug, Clone)]
-struct SweepCursor {
-    condition: ErasureConditionRef,
-    phase: SweepPhase,
-    table: usize,
-    after: Option<String>,
-    after_ordinal: i64,
-    erased: u64,
-    remainder: u64,
-    verified: bool,
-}
-
-impl SweepCursor {
-    fn fresh(condition: ErasureConditionRef) -> Self {
-        Self {
-            condition,
-            phase: SweepPhase::Erase,
-            table: 0,
-            after: None,
-            after_ordinal: 0,
-            erased: 0,
-            remainder: 0,
-            verified: false,
-        }
-    }
-
-    fn reset_position(&mut self) {
-        self.after = None;
-        self.after_ordinal = 0;
-    }
-
-    fn begin_verify(&mut self) {
-        self.phase = SweepPhase::Verify;
-        self.table = 0;
-        self.remainder = 0;
-        self.reset_position();
-    }
-
-    fn fact(&self, owner: ParticipantOwnerRef, at: WallClockWithTz) -> ParticipantCompletionFact {
-        if self.verified {
-            ParticipantCompletionFact::verified(self.condition, owner, self.erased, at)
-        } else {
-            ParticipantCompletionFact::more_work(
-                self.condition,
-                owner,
-                self.erased,
-                self.remainder,
-                at,
-            )
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct PageOutcome {
-    scanned: u32,
-    matched: u64,
-    deleted: u64,
-    last: Option<(String, i64)>,
-}
-
-struct PageRequest<'a> {
-    target: &'a str,
-    after: &'a str,
-    after_ordinal: i64,
-    limit: i64,
-    delete: bool,
-}
-
-type LocalStep =
-    fn(tx: &Transaction<'_>, cursor: &mut SweepCursor, target: &str) -> Result<(), rusqlite::Error>;
-
-fn lock_cursor(slot: &Mutex<Option<SweepCursor>>) -> MutexGuard<'_, Option<SweepCursor>> {
-    match slot.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn exact_text(command: &DemandLocalErasureCommand) -> Option<String> {
-    let target = command.scope().target()?;
-    let MechanicalDeletionTarget::ExactText(material) = &target.mechanical;
-    let text = material.expose_for_erasure();
-    if text.is_empty() {
-        return None;
-    }
-    Some(text.to_owned())
-}
-
-fn run_local_demand(
-    store: &Store,
-    sweep: &Mutex<Option<SweepCursor>>,
-    condition: ErasureConditionRef,
-    owner: ParticipantOwnerRef,
-    target: &str,
-    step: LocalStep,
-) -> Result<ParticipantCompletionFact, rusqlite::Error> {
-    let mut guard = lock_shared(&store.conn);
-    let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let at = WallClockWithTz::now();
-    if !crate::preservation::condition_is_current(&tx, condition)? {
-        return Ok(ParticipantCompletionFact::local_complete(
-            condition, owner, 0, 0, at,
-        ));
-    }
-    let mut cursor = {
-        let slot = lock_cursor(sweep);
-        match slot.as_ref() {
-            Some(existing) if existing.condition == condition => existing.clone(),
-            _ => SweepCursor::fresh(condition),
-        }
-    };
-    step(&tx, &mut cursor, target)?;
-    tx.commit()?;
-    let fact = cursor.fact(owner, at);
-    *lock_cursor(sweep) = Some(cursor);
-    Ok(fact)
-}
-
+/// Deletes the rows named by `keys` from one table inside the caller's
+/// transaction. `table` / `column` are compile-time constants; the identities
+/// travel only as bound parameters.
 fn delete_keys(
     tx: &Transaction<'_>,
     table: &str,
@@ -174,33 +94,18 @@ fn delete_keys(
     Ok(u64::try_from(deleted).unwrap_or(u64::MAX))
 }
 
-fn count_keys(
-    tx: &Transaction<'_>,
-    table: &str,
-    column: &str,
-    keys: &[String],
-) -> Result<u64, rusqlite::Error> {
-    if keys.is_empty() {
-        return Ok(0);
-    }
-    let placeholders = std::iter::repeat_n("?", keys.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} IN ({placeholders})");
-    let counted: i64 = {
-        let mut statement = tx.prepare(&sql)?;
-        statement.query_row(rusqlite::params_from_iter(keys.iter()), |row| row.get(0))?
-    };
-    Ok(u64::try_from(counted).unwrap_or(u64::MAX))
-}
-
-fn exact_page(
+/// One exact-content page over a single-key table: walks `key > after` in key
+/// order, matches `instr(content, target) > 0`, and deletes the matches
+/// through `delete` when erasing. The delete action is the only per-owner
+/// difference, so the paging loop has one implementation.
+fn exact_page_with(
     tx: &Transaction<'_>,
     table: &str,
     key_column: &str,
     content_column: &str,
     request: &PageRequest<'_>,
-) -> Result<PageOutcome, rusqlite::Error> {
+    delete: impl FnOnce(&[String]) -> Result<u64, rusqlite::Error>,
+) -> Result<PageOutcome, ErasurePageError> {
     let sql = format!(
         "SELECT {key_column}, instr({content_column}, ?2) > 0 FROM {table} \
          WHERE {key_column} > ?1 ORDER BY {key_column} LIMIT ?3"
@@ -222,11 +127,7 @@ fn exact_page(
         }
         (keys, scanned, last)
     };
-    let deleted = if request.delete {
-        delete_keys(tx, table, key_column, &keys)?
-    } else {
-        0
-    };
+    let deleted = if request.delete { delete(&keys)? } else { 0 };
     Ok(PageOutcome {
         scanned,
         matched: u64::try_from(keys.len()).unwrap_or(u64::MAX),
@@ -235,24 +136,44 @@ fn exact_page(
     })
 }
 
+/// One exact-content page that deletes only the matching rows.
+fn exact_page(
+    tx: &Transaction<'_>,
+    table: &str,
+    key_column: &str,
+    content_column: &str,
+    request: &PageRequest<'_>,
+) -> Result<PageOutcome, ErasurePageError> {
+    exact_page_with(tx, table, key_column, content_column, request, |keys| {
+        delete_keys(tx, table, key_column, keys)
+    })
+}
+
+/// The dangling-reporting-reference predicate: a row matches when its
+/// canonical History or activity source no longer exists. The row itself
+/// carries no body, so the source side's erasure governs the content and only
+/// the dangling reference is removed here. `?1`/`?2` are the History-message
+/// and activity-record source kinds; the sweep page and the system-wide
+/// remainder probe share this one declaration.
+pub(crate) const SQL_DANGLING_UNDELIVERED: &str = "(u.source_kind = ?1 AND NOT EXISTS (SELECT 1 FROM history_message h WHERE h.message_id = u.source_id)) OR (u.source_kind = ?2 AND NOT EXISTS (SELECT 1 FROM activity_record a WHERE a.activity_id = u.source_id))";
+
+/// One page of the `undelivered` reference table. Only the dangling
+/// reference is removed here; the referenced source body is the owning
+/// table's concern.
 fn undelivered_page(
     tx: &Transaction<'_>,
     request: &PageRequest<'_>,
-) -> Result<PageOutcome, rusqlite::Error> {
+) -> Result<PageOutcome, ErasurePageError> {
     let sql = format!(
-        "SELECT u.{UNDELIVERED_KEY}, \
-         ((u.source_kind = ?2 AND NOT EXISTS \
-             (SELECT 1 FROM history_message h WHERE h.{HISTORY_MESSAGE_KEY} = u.source_id)) \
-          OR (u.source_kind = ?3 AND NOT EXISTS \
-             (SELECT 1 FROM activity_record a WHERE a.{ACTIVITY_RECORD_KEY} = u.source_id))) \
-         FROM undelivered u WHERE u.{UNDELIVERED_KEY} > ?1 ORDER BY u.{UNDELIVERED_KEY} LIMIT ?4"
+        "SELECT u.{UNDELIVERED_KEY}, ({SQL_DANGLING_UNDELIVERED}) \
+         FROM undelivered u WHERE u.{UNDELIVERED_KEY} > ?3 ORDER BY u.{UNDELIVERED_KEY} LIMIT ?4"
     );
     let (keys, scanned, last) = {
         let mut statement = tx.prepare(&sql)?;
         let mut rows = statement.query(params![
-            request.after,
             SOURCE_KIND_HISTORY_MESSAGE,
             SOURCE_KIND_ACTIVITY_RECORD,
+            request.after,
             request.limit
         ])?;
         let mut keys: Vec<String> = Vec::new();
@@ -309,128 +230,45 @@ fn companion_step(
     tx: &Transaction<'_>,
     cursor: &mut SweepCursor,
     target: &str,
-) -> Result<(), rusqlite::Error> {
-    let mut budget = ERASURE_SCAN_ROWS;
-    while budget > 0 {
-        if cursor.verified {
-            break;
-        }
-        if cursor.table >= COMPANION_TABLES {
-            if cursor.phase == SweepPhase::Erase {
-                cursor.begin_verify();
-                continue;
-            }
-            cursor.verified = true;
-            break;
-        }
-        let limit = i64::from(budget);
-        let after = cursor.after.clone().unwrap_or_default();
-        let erasing = cursor.phase == SweepPhase::Erase;
-        let request = PageRequest {
-            target,
-            after: &after,
-            after_ordinal: 0,
-            limit,
-            delete: erasing,
-        };
-        let outcome = match cursor.table {
+) -> Result<(), ErasurePageError> {
+    bounded_step(
+        tx,
+        cursor,
+        target,
+        COMPANION_TABLES,
+        |tx, table, request| match table {
             0 => exact_page(
                 tx,
                 COMPANION_CONTENT[0].0,
                 HISTORY_MESSAGE_KEY,
                 COMPANION_CONTENT[0].1,
-                &request,
-            )?,
+                request,
+            ),
             1 => exact_page(
                 tx,
                 COMPANION_CONTENT[1].0,
                 ACTIVITY_RECORD_KEY,
                 COMPANION_CONTENT[1].1,
-                &request,
-            )?,
-            _ => undelivered_page(tx, &request)?,
-        };
-        budget = budget.saturating_sub(outcome.scanned);
-        if outcome.matched > 0 && !erasing {
-            cursor.remainder = outcome.matched;
-            cursor.phase = SweepPhase::Erase;
-            cursor.reset_position();
-            continue;
-        }
-        if erasing {
-            cursor.erased += outcome.deleted;
-        }
-        if outcome.scanned < u32::try_from(limit).unwrap_or(u32::MAX) {
-            cursor.table += 1;
-            cursor.reset_position();
-        } else if let Some((last, ordinal)) = outcome.last {
-            cursor.after = Some(last);
-            cursor.after_ordinal = ordinal;
-        }
-    }
-    Ok(())
+                request,
+            ),
+            _ => undelivered_page(tx, request),
+        },
+    )
 }
 
-pub struct CompanionErasureParticipant {
-    store: Store,
-    sweep: Arc<Mutex<Option<SweepCursor>>>,
-}
+// --- Learning owner --------------------------------------------------------
 
-impl CompanionErasureParticipant {
-    #[must_use]
-    pub fn new(store: Store) -> Self {
-        Self {
-            store,
-            sweep: Arc::new(Mutex::new(None)),
-        }
-    }
-}
-
-impl ErasureParticipant for CompanionErasureParticipant {
-    fn owner(&self) -> ParticipantOwnerRef {
-        ParticipantOwnerRef::Companion
-    }
-
-    fn demand_local_erasure(
-        &self,
-        command: DemandLocalErasureCommand,
-    ) -> Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>> {
-        let store = self.store.clone();
-        let sweep = Arc::clone(&self.sweep);
-        Box::pin(async move {
-            #[cfg(any(test, feature = "test-support"))]
-            store.test_parks.erasure_mutation.pause_if_armed().await;
-            let condition = command.condition();
-            let owner = command.participant();
-            let held = |reason| {
-                ParticipantCompletionFact::held(condition, owner, reason, WallClockWithTz::now())
-            };
-            let Some(target) = exact_text(&command) else {
-                return held(ParticipantHoldClass::Failed);
-            };
-            match run_blocking(move || {
-                run_local_demand(&store, &sweep, condition, owner, &target, companion_step)
-            })
-            .await
-            {
-                Ok(fact) => fact,
-                Err(_) => held(ParticipantHoldClass::Failed),
-            }
-        })
-    }
-}
-
+/// Tables of the Learning sweep, in order: evidence Summaries, Memory
+/// revisions, current Memories, then the derived recall token index.
 const LEARNING_TABLES: usize = 4;
 
 fn delete_memories(tx: &Transaction<'_>, memories: &[String]) -> Result<u64, rusqlite::Error> {
     if memories.is_empty() {
         return Ok(0);
     }
-    let revisions = count_keys(tx, "learning_memory_revision", MEMORY_KEY, memories)?;
-    let terms = count_keys(tx, TERM_TABLE, MEMORY_KEY, memories)?;
     let current = delete_keys(tx, "learning_memory", MEMORY_KEY, memories)?;
-    delete_keys(tx, "learning_memory_revision", MEMORY_KEY, memories)?;
-    delete_keys(tx, TERM_TABLE, MEMORY_KEY, memories)?;
+    let revisions = delete_keys(tx, "learning_memory_revision", MEMORY_KEY, memories)?;
+    let terms = delete_keys(tx, TERM_TABLE, MEMORY_KEY, memories)?;
     Ok(current + revisions + terms)
 }
 
@@ -467,11 +305,12 @@ fn summary_page(
     request: &PageRequest<'_>,
     covered_memo: &mut HashMap<String, bool>,
     memo: &mut HashMap<String, bool>,
-) -> Result<PageOutcome, rusqlite::Error> {
+) -> Result<PageOutcome, ErasurePageError> {
     let (keys, scanned, last) = {
         let mut statement = tx.prepare(&format!(
-            "SELECT {SUMMARY_KEY}, source_start, source_end, instr(content, ?2) > 0 \
-             FROM learning_summary WHERE {SUMMARY_KEY} > ?1 ORDER BY {SUMMARY_KEY} LIMIT ?3"
+            "SELECT {SUMMARY_KEY}, source_start, source_end, instr({}, ?2) > 0 \
+             FROM learning_summary WHERE {SUMMARY_KEY} > ?1 ORDER BY {SUMMARY_KEY} LIMIT ?3",
+            LEARNING_CONTENT[0].1
         ))?;
         let mut rows = statement.query(params![request.after, request.target, request.limit])?;
         let mut keys: Vec<String> = Vec::new();
@@ -516,13 +355,14 @@ fn summary_page(
 fn revision_page(
     tx: &Transaction<'_>,
     request: &PageRequest<'_>,
-) -> Result<PageOutcome, rusqlite::Error> {
+) -> Result<PageOutcome, ErasurePageError> {
     let (rows, scanned, last) = {
         let mut statement = tx.prepare(&format!(
-            "SELECT {MEMORY_KEY}, {REVISION_KEY}, summary_id, instr(content, ?3) > 0 \
+            "SELECT {MEMORY_KEY}, {REVISION_KEY}, summary_id, instr({}, ?3) > 0 \
              FROM learning_memory_revision \
              WHERE ({MEMORY_KEY}, {REVISION_KEY}) > (?1, ?2) \
-             ORDER BY {MEMORY_KEY}, {REVISION_KEY} LIMIT ?4"
+             ORDER BY {MEMORY_KEY}, {REVISION_KEY} LIMIT ?4",
+            LEARNING_CONTENT[2].1
         ))?;
         let mut rows = statement.query(params![
             request.after,
@@ -601,45 +441,21 @@ fn revision_page(
 fn memory_page(
     tx: &Transaction<'_>,
     request: &PageRequest<'_>,
-) -> Result<PageOutcome, rusqlite::Error> {
-    let (table, content_column) = LEARNING_CONTENT[1];
-    let (keys, scanned, last) = {
-        let mut statement = tx.prepare(&format!(
-            "SELECT {MEMORY_KEY}, instr({content_column}, ?2) > 0 FROM {table} \
-             WHERE {MEMORY_KEY} > ?1 ORDER BY {MEMORY_KEY} LIMIT ?3"
-        ))?;
-        let mut rows = statement.query(params![request.after, request.target, request.limit])?;
-        let mut keys: Vec<String> = Vec::new();
-        let mut scanned = 0u32;
-        let mut last: Option<(String, i64)> = None;
-        while let Some(row) = rows.next()? {
-            scanned += 1;
-            let key: String = row.get(0)?;
-            let hit: bool = row.get(1)?;
-            if hit {
-                keys.push(key.clone());
-            }
-            last = Some((key, 0));
-        }
-        (keys, scanned, last)
-    };
-    let deleted = if request.delete {
-        delete_memories(tx, &keys)?
-    } else {
-        0
-    };
-    Ok(PageOutcome {
-        scanned,
-        matched: u64::try_from(keys.len()).unwrap_or(u64::MAX),
-        deleted,
-        last,
-    })
+) -> Result<PageOutcome, ErasurePageError> {
+    exact_page_with(
+        tx,
+        LEARNING_CONTENT[1].0,
+        MEMORY_KEY,
+        LEARNING_CONTENT[1].1,
+        request,
+        |keys| delete_memories(tx, keys),
+    )
 }
 
 fn term_page(
     tx: &Transaction<'_>,
     request: &PageRequest<'_>,
-) -> Result<PageOutcome, rusqlite::Error> {
+) -> Result<PageOutcome, ErasurePageError> {
     let (keys, scanned, last) = {
         let mut statement = tx.prepare(&format!(
             "SELECT rowid, term FROM {TERM_TABLE} WHERE rowid > ?1 ORDER BY rowid LIMIT ?2"
@@ -679,7 +495,7 @@ fn learning_page(
     request: &PageRequest<'_>,
     covered_memo: &mut HashMap<String, bool>,
     memo: &mut HashMap<String, bool>,
-) -> Result<PageOutcome, rusqlite::Error> {
+) -> Result<PageOutcome, ErasurePageError> {
     match table {
         0 => summary_page(tx, condition, request, covered_memo, memo),
         1 => revision_page(tx, request),
@@ -692,106 +508,25 @@ fn learning_step(
     tx: &Transaction<'_>,
     cursor: &mut SweepCursor,
     target: &str,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), ErasurePageError> {
     let mut covered_memo: HashMap<String, bool> = HashMap::new();
     let mut memo: HashMap<String, bool> = HashMap::new();
-    let mut budget = ERASURE_SCAN_ROWS;
-    while budget > 0 {
-        if cursor.verified {
-            break;
-        }
-        if cursor.table >= LEARNING_TABLES {
-            if cursor.phase == SweepPhase::Erase {
-                cursor.begin_verify();
-                continue;
-            }
-            cursor.verified = true;
-            break;
-        }
-        let limit = i64::from(budget);
-        let after = cursor.after.clone().unwrap_or_default();
-        let erasing = cursor.phase == SweepPhase::Erase;
-        let request = PageRequest {
-            target,
-            after: &after,
-            after_ordinal: cursor.after_ordinal,
-            limit,
-            delete: erasing,
-        };
-        let outcome = learning_page(
-            tx,
-            cursor.table,
-            cursor.condition,
-            &request,
-            &mut covered_memo,
-            &mut memo,
-        )?;
-        budget = budget.saturating_sub(outcome.scanned);
-        if outcome.matched > 0 && !erasing {
-            cursor.remainder = outcome.matched;
-            cursor.phase = SweepPhase::Erase;
-            cursor.reset_position();
-            continue;
-        }
-        if erasing {
-            cursor.erased += outcome.deleted;
-        }
-        if outcome.scanned < u32::try_from(limit).unwrap_or(u32::MAX) {
-            cursor.table += 1;
-            cursor.reset_position();
-        } else if let Some((last, ordinal)) = outcome.last {
-            cursor.after = Some(last);
-            cursor.after_ordinal = ordinal;
-        }
-    }
-    Ok(())
+    let condition = cursor.condition;
+    bounded_step(tx, cursor, target, LEARNING_TABLES, |tx, table, request| {
+        learning_page(tx, table, condition, request, &mut covered_memo, &mut memo)
+    })
 }
 
-pub struct LearningErasureParticipant {
-    store: Store,
-    sweep: Arc<Mutex<Option<SweepCursor>>>,
+/// Companion-owned local erasure (SO §4.3/4.4): History bodies, activity
+/// records, and the undelivered references that name an erased source.
+#[must_use]
+pub fn companion_erasure_participant(store: Store) -> LocalErasureParticipant {
+    LocalErasureParticipant::new(ParticipantOwnerRef::Companion, companion_step, store)
 }
 
-impl LearningErasureParticipant {
-    #[must_use]
-    pub fn new(store: Store) -> Self {
-        Self {
-            store,
-            sweep: Arc::new(Mutex::new(None)),
-        }
-    }
-}
-
-impl ErasureParticipant for LearningErasureParticipant {
-    fn owner(&self) -> ParticipantOwnerRef {
-        ParticipantOwnerRef::Learning
-    }
-
-    fn demand_local_erasure(
-        &self,
-        command: DemandLocalErasureCommand,
-    ) -> Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>> {
-        let store = self.store.clone();
-        let sweep = Arc::clone(&self.sweep);
-        Box::pin(async move {
-            #[cfg(any(test, feature = "test-support"))]
-            store.test_parks.erasure_mutation.pause_if_armed().await;
-            let condition = command.condition();
-            let owner = command.participant();
-            let held = |reason| {
-                ParticipantCompletionFact::held(condition, owner, reason, WallClockWithTz::now())
-            };
-            let Some(target) = exact_text(&command) else {
-                return held(ParticipantHoldClass::Failed);
-            };
-            match run_blocking(move || {
-                run_local_demand(&store, &sweep, condition, owner, &target, learning_step)
-            })
-            .await
-            {
-                Ok(fact) => fact,
-                Err(_) => held(ParticipantHoldClass::Failed),
-            }
-        })
-    }
+/// Learning-owned local erasure (SO §4.5-4.9): Experience Summary evidence,
+/// current and historical Memory content, and the derived recall index.
+#[must_use]
+pub fn learning_erasure_participant(store: Store) -> LocalErasureParticipant {
+    LocalErasureParticipant::new(ParticipantOwnerRef::Learning, learning_step, store)
 }

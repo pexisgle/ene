@@ -62,6 +62,24 @@ pub trait DevicePairingRepository: Send + Sync {
         origin_connection: String,
     ) -> Result<PendingPairing, CredentialTechnicalError>;
 
+    /// Approves the pending request `pending_id` issued on `origin_connection`,
+    /// pairing the device and issuing its one-time pairing secret.
+    ///
+    /// The pending delete and the paired insert share one transaction keyed on
+    /// both columns (compare-and-swap): only the row with this exact id and
+    /// origin pairs, so an unknown id, an already-approved id, or a wrong
+    /// connection yields `Ok(None)`. Re-approval never rotates a secret.
+    ///
+    /// Secret custody flow: the trait is secret-free in storage. The approve
+    /// caller (Host composition) holds the returned secret in memory,
+    /// short-lived, persists it through the protected device-auth store
+    /// (`FileDeviceAuthStore::save_secret`) for later proof verification, and
+    /// transfers it once through the authentication-only provision frame to
+    /// the live originating Client connection.
+    ///
+    /// Approval records an Owner decision transported from a trusted inlet;
+    /// the repository never decides whether pairing is allowed, it records
+    /// the decision it was given.
     async fn approve_pending(
         &self,
         pending_id: &str,
@@ -83,11 +101,17 @@ pub trait DevicePairingRepository: Send + Sync {
     async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError>;
 }
 
-#[must_use]
-pub fn pairing_proof_hex(secret: &str, nonce: &str) -> String {
-    encode_hex_lower(&compute_pairing_mac(secret, nonce))
-}
-
+/// Verifies a pairing ownership proof against the secret and nonce.
+///
+/// Hex-decodes `proof` (malformed input yields `false`) and compares the
+/// bytes against the recomputed MAC in constant time via `subtle`, so no
+/// early exit leaks how much of the proof matched. Minting stays the Client's
+/// contract — it holds the pairing secret and deliberately does not depend on
+/// this crate — while the Host only verifies. The secret is never logged or
+/// rendered in `Debug`, initial provisioning uses the authentication-only
+/// frame, and the nonce is single-use by caller contract: the Host mints a
+/// fresh nonce per challenge and rejects reuse, so a captured proof cannot be
+/// replayed.
 #[must_use]
 pub fn verify_pairing_proof(secret: &str, nonce: &str, proof: &str) -> bool {
     let Some(decoded) = decode_hex_lower(proof) else {

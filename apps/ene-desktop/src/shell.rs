@@ -65,7 +65,7 @@ impl Command {
 
     fn measured_operation(&self) -> Option<&'static str> {
         match self {
-            Self::CancelTask(_) => Some("cancel_task"),
+            Self::CancelTask(_) => Some(ene_desktop::measure::CANCEL_TASK_OPERATION),
             _ => None,
         }
     }
@@ -77,7 +77,7 @@ struct InteractionStart {
 }
 struct PendingPaint {
     start: InteractionStart,
-    host_intake_monotonic_ns: u64,
+    host_outcome_monotonic_ns: u64,
 }
 struct Request {
     command: Command,
@@ -129,6 +129,8 @@ impl Mailbox {
             .pop_front()
     }
     fn complete(&self, lane: usize, epoch: u64) {
+        // The guard serializes the epoch check with `erase`: a completion for
+        // an erased epoch must not decrement a counter `erase` already reset.
         let _queue = self
             .queue
             .lock()
@@ -165,18 +167,8 @@ impl Surfaces {
             return false;
         };
         let busy = lane != 0 && self.mailbox.pending[lane].load(Ordering::SeqCst) > 0;
-        if busy {
-            return false;
-        }
-        if !self.mailbox.push(command, lane) {
-            management.set_notice(
-                local(
-                    management.get_japanese(),
-                    "操作が混み合っています。少し待ってください。",
-                    "Too many pending actions. Please wait.",
-                )
-                .into(),
-            );
+        if busy || !self.mailbox.push(command, lane) {
+            backpressure_notice(&management);
             return false;
         }
         match lane {
@@ -199,8 +191,7 @@ impl Surfaces {
     fn dismiss(&self) {
         self.mailbox.generation.fetch_add(1, Ordering::SeqCst);
         if let Some(m) = self.management.upgrade() {
-            m.invoke_clear_secret();
-            ene_desktop_ui::discard_secret_input(&m);
+            ene_desktop::ui::presentation::discard_secret_input(&m);
             m.set_can_confirm(false);
             m.set_confirmation_key("".into());
             m.set_confirmation_target("".into());
@@ -210,8 +201,23 @@ impl Surfaces {
                 m.set_page(6);
             }
         }
-        self.mailbox.push(Command::Dismiss, 0);
+        if !self.mailbox.push(Command::Dismiss, 0)
+            && let Some(m) = self.management.upgrade()
+        {
+            backpressure_notice(&m);
+        }
     }
+}
+
+fn backpressure_notice(management: &ManagementWindow) {
+    management.set_notice(
+        local(
+            management.get_japanese(),
+            "操作が混み合っています。少し待ってください。",
+            "Too many pending actions. Please wait.",
+        )
+        .into(),
+    );
 }
 
 pub fn run() -> Result<(), DesktopError> {
@@ -230,18 +236,8 @@ fn run_launcher(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
         .build()
         .map_err(|e| DesktopError::Transport(e.to_string()))?;
     runtime.block_on(async move {
-        if !ene_desktop::host_launch::host_is_serving(&data_dir) {
-            let binary = ene_desktop::host_launch::locate_host_binary().ok_or_else(|| {
-                DesktopError::HostLaunch(String::from("ene-core binary was not found"))
-            })?;
-            let detached = ene_desktop::host_launch::detach_serve(&data_dir, &binary)
-                .map_err(|error| DesktopError::HostLaunch(error.to_string()))?;
-            if detached.pid == 0 {
-                return Err(DesktopError::HostLaunch(String::from(
-                    "detached host reported pid 0",
-                )));
-            }
-        }
+        ene_desktop::host_launch::ensure_serving(&data_dir)
+            .map_err(|error| DesktopError::HostLaunch(error.to_string()))?;
         let requester = ene_desktop::control::RequesterClient::new(&data_dir);
         let mut attempts = 0_u8;
         loop {
@@ -253,17 +249,31 @@ fn run_launcher(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
                     )));
                 }
                 Err(error) => {
-                    attempts = attempts.saturating_add(1);
-                    if attempts >= 80 {
+                    if !launcher_retries(&error) {
                         return Err(error);
                     }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    attempts = attempts.saturating_add(1);
+                    if attempts >= ene_desktop::session::BOOTSTRAP_ATTEMPTS {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(ene_desktop::session::BOOTSTRAP_DELAY).await;
                 }
             }
         }
     })
 }
 
+/// Whether the launcher's bootstrap may ask the Host to open the GUI again
+/// after this failure. Bootstrap failures are retried while the freshly
+/// started Host comes up; a `BackpressureHold` is instead an admission answer,
+/// and re-sending it without a new user action would be the automatic resend
+/// the design forbids.
+fn launcher_retries(error: &DesktopError) -> bool {
+    !matches!(error, DesktopError::BackpressureHold)
+}
+
+/// The Host-spawned GUI: adopt the inherited confirmation channel and run the
+/// windows.
 fn run_gui(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
     slint::BackendSelector::new()
         .backend_name(String::from("winit"))
@@ -357,7 +367,7 @@ fn drain_painted_interactions(
         .map(|paint| InteractionSample {
             operation: paint.start.operation.to_string(),
             input_monotonic_ns: paint.start.input_monotonic_ns,
-            host_intake_monotonic_ns: paint.host_intake_monotonic_ns,
+            host_outcome_monotonic_ns: paint.host_outcome_monotonic_ns,
             gui_painted_monotonic_ns: painted_monotonic_ns,
         })
         .collect()
@@ -657,8 +667,8 @@ fn bind(s: &Surfaces, c: &ChatWindow, m: &ManagementWindow) {
         move || {
             if let Some(m) = s.management.upgrade()
                 && m.get_can_confirm()
+                && s.submit(Command::Confirm(m.get_confirmation_key().to_string()), 3)
             {
-                s.submit(Command::Confirm(m.get_confirmation_key().to_string()), 3);
                 m.set_can_confirm(false);
             }
         }
@@ -674,13 +684,10 @@ fn attach_erasure(desktop: &mut DesktopRuntime, surfaces: Surfaces) {
                 s.mailbox.erase();
                 let cleared = if let (Some(c), Some(m)) = (s.chat.upgrade(), s.management.upgrade())
                 {
-                    c.invoke_clear_copies();
-                    m.invoke_clear_copies();
                     c.set_busy(false);
                     c.set_task_busy(false);
                     m.set_busy(false);
-                    m.set_confirmation_key("".into());
-                    ene_desktop_ui::erase_surface_copies(&c, &m)
+                    ene_desktop::ui::presentation::erase_surface_copies(&c, &m)
                 } else {
                     false
                 };
@@ -698,6 +705,13 @@ fn attach_erasure(desktop: &mut DesktopRuntime, surfaces: Surfaces) {
 }
 async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
     loop {
+        if desktop.confirmation_lost() {
+            desktop.close_after_confirmation_loss();
+            match slint::quit_event_loop() {
+                Ok(_) | Err(_) => {}
+            }
+            return;
+        }
         let notified = s.mailbox.wake.notified();
         let Some(request) = s.mailbox.pop() else {
             tokio::select! { ()=notified => {}, ()=tokio::time::sleep(Duration::from_millis(250)) => desktop.tick() }
@@ -724,7 +738,7 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
         let measured = if s.interaction_paint_evidence && result.is_ok() {
             request.interaction.map(|start| PendingPaint {
                 start,
-                host_intake_monotonic_ns: monotonic_ns(),
+                host_outcome_monotonic_ns: monotonic_ns(),
             })
         } else {
             None
@@ -737,19 +751,32 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
         let surfaces = s.clone();
         let (tx, rx) = oneshot::channel();
         if slint::invoke_from_event_loop(move || {
-            if let (Some(c),Some(m))=(surfaces.chat.upgrade(),surfaces.management.upgrade()) {
-                apply(&c,&m,&snap,reset_step);
+            if let (Some(c), Some(m)) = (surfaces.chat.upgrade(), surfaces.management.upgrade()) {
+                apply(&c, &m, &snap, reset_step);
                 if startup {
                     request_post_show_redraw(&m);
                 }
-                c.set_busy(surfaces.mailbox.pending[1].load(Ordering::SeqCst)>0);
-                c.set_task_busy(surfaces.mailbox.pending[2].load(Ordering::SeqCst)>0);
-                m.set_busy(surfaces.mailbox.pending[3].load(Ordering::SeqCst)>0);
-                let ja=m.get_japanese();
-                let failed=result.is_err();
-                c.set_notice_error(failed); m.set_notice_error(failed);
-                let notice=result.unwrap_or_else(|_| local(ja, "処理を完了できませんでした。接続や現在の状態を確認してください。送信済みの操作は自動再送しません。", "The action could not complete. Check the connection and current state. Submitted actions are not automatically retried.").into());
-                match request.lane { 1 => { c.set_notice(notice.into()); }, 2 => { c.set_task_notice(notice.into()); }, _ => { if request.management_page==Some(m.get_page()) { m.set_notice(notice.into()); } } }
+                c.set_busy(surfaces.mailbox.pending[1].load(Ordering::SeqCst) > 0);
+                c.set_task_busy(surfaces.mailbox.pending[2].load(Ordering::SeqCst) > 0);
+                m.set_busy(surfaces.mailbox.pending[3].load(Ordering::SeqCst) > 0);
+                let ja = m.get_japanese();
+                let (notice, failed) = result_notice(ja, result);
+                match request.lane {
+                    1 => {
+                        c.set_notice_error(failed);
+                        c.set_notice(notice.into());
+                    }
+                    2 => {
+                        c.set_task_notice_error(failed);
+                        c.set_task_notice(notice.into());
+                    }
+                    _ => {
+                        m.set_notice_error(failed);
+                        if request.management_page == Some(m.get_page()) {
+                            m.set_notice(notice.into());
+                        }
+                    }
+                }
                 if let Some(measured) = measured {
                     surfaces
                         .pending_paints
@@ -759,17 +786,31 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
                     c.window().request_redraw();
                 }
                 if request.generation == surfaces.mailbox.generation.load(Ordering::SeqCst) {
-                    if let Some(confirm)=&snap.confirmation {
+                    if let Some(confirm) = &snap.confirmation {
                         if confirmation_action {
-                            m.set_confirmation_key(confirm.key.as_str().into()); m.set_confirmation_title(confirm.title.as_str().into());
-                            m.set_confirmation_description(confirm.description.as_str().into()); m.set_confirmation_target(confirm.target.as_str().into());
-                            m.set_can_confirm(true); m.set_page(7); show(&m);
+                            m.set_confirmation_key(confirm.key.as_str().into());
+                            m.set_confirmation_title(confirm.title.as_str().into());
+                            m.set_confirmation_description(confirm.description.as_str().into());
+                            m.set_confirmation_target(confirm.target.as_str().into());
+                            m.set_can_confirm(true);
+                            m.set_page(7);
+                            show(&m);
                         }
-                    } else if m.get_page()==7 { m.set_page(6); m.set_can_confirm(false); m.set_confirmation_key("".into()); }
+                    } else if m.get_page() == 7 {
+                        m.set_page(6);
+                        m.set_can_confirm(false);
+                        m.set_confirmation_key("".into());
+                    }
                 }
             }
-            match tx.send(()) { Ok(_) | Err(_) => {} }
-        }).is_err() { return; }
+            match tx.send(()) {
+                Ok(_) | Err(_) => {}
+            }
+        })
+        .is_err()
+        {
+            return;
+        }
         if rx.await.is_err() {
             return;
         }
@@ -779,7 +820,7 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
     let ja = d.surface_snapshot().japanese;
     let outcome = match command {
         Command::Startup => {
-            d.ensure_host(None)?;
+            d.ensure_host()?;
             d.try_spawn_located_body();
             d.connect_or_begin_pairing().await?;
             None
@@ -880,7 +921,10 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         Command::RequestDeletion(text) => {
             d.set_deletion_exact_text(text);
             let result = d.request_deletion().await?;
-            d.refresh_deletion_requests().await?;
+            // The destructive submission already returned an Ok domain
+            // outcome; a failed follow-up read must not mask it as a failure
+            // the Owner would retry.
+            let _result = d.refresh_deletion_requests().await;
             Some(result)
         }
         Command::BeginDeletion(key) => {
@@ -906,7 +950,10 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
             return Ok(control_notice(ja, &result));
         }
         Command::Dismiss => {
-            d.cancel_secret();
+            d.reject_pending_challenge().await;
+            // The reject above owns the live challenge; a locally deferred one
+            // must stay reachable instead of being silently discarded.
+            d.cancel_secret_keep_pending();
             None
         }
     };
@@ -915,33 +962,44 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
 fn local<'a>(ja: bool, japanese: &'a str, english: &'a str) -> &'a str {
     if ja { japanese } else { english }
 }
-fn outcome_notice(ja: bool, outcome: &ManagementOutcome) -> String {
-    match outcome {
-        ManagementOutcome::AppliedAsOneTime | ManagementOutcome::StoredAsRuleView { .. } => {
-            local(ja, "反映しました。", "Applied.")
-        }
-        ManagementOutcome::NeedsClarification => local(
-            ja,
-            "対象や内容を具体的にしてください。",
-            "Clarify the target or requested change.",
+
+/// The Owner-visible notice for one worker result, and whether it is styled as
+/// a failure. A requester-queue hold is its own state: it has distinct text,
+/// is not an error, and nothing resends it. An unavailable Host carries the
+/// domain reason it answered with, and a boundary refusal renders the shared
+/// deny text; the remaining technical failures keep the generic
+/// not-automatically-retried notice.
+fn result_notice(ja: bool, result: Result<String, DesktopError>) -> (String, bool) {
+    match result {
+        Ok(notice) => (notice, false),
+        Err(DesktopError::BackpressureHold) => (
+            ene_desktop::i18n::backpressure_hold(if ja { Locale::Ja } else { Locale::En })
+                .to_string(),
+            false,
         ),
-        ManagementOutcome::DeniedByBoundary => local(
-            ja,
-            "この操作は許可されませんでした。",
-            "This action was denied.",
+        Err(DesktopError::Unavailable(reason)) => (reason, true),
+        Err(DesktopError::DeniedByBoundary) => (
+            ene_desktop::i18n::control_deny(
+                if ja { Locale::Ja } else { Locale::En },
+                &ene_local_control::FromConfirmation::DeniedByBoundary,
+            )
+            .to_string(),
+            true,
         ),
-        ManagementOutcome::StaleBaseView { .. } => local(
-            ja,
-            "表示後に状態が変わりました。更新して確認してください。",
-            "The state changed. Refresh and review before acting.",
-        ),
-        ManagementOutcome::HeldByOperation => local(
-            ja,
-            "要求を保留しています。状態を確認してください。",
-            "The request is on hold. Review its status.",
+        Err(_) => (
+            local(
+                ja,
+                "処理を完了できませんでした。接続や現在の状態を確認してください。送信済みの操作は自動再送しません。",
+                "The action could not complete. Check the connection and current state. Submitted actions are not automatically retried.",
+            )
+            .to_string(),
+            true,
         ),
     }
-    .into()
+}
+fn outcome_notice(ja: bool, outcome: &ManagementOutcome) -> String {
+    let locale = if ja { Locale::Ja } else { Locale::En };
+    ene_desktop::i18n::management_deny(locale, outcome).to_string()
 }
 fn control_notice(ja: bool, result: &ene_local_control::FromConfirmation) -> String {
     use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
@@ -973,6 +1031,34 @@ fn control_notice(ja: bool, result: &ene_local_control::FromConfirmation) -> Str
             "削除対象の確認が必要です。",
             "The deletion target needs clarification.",
         ),
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Resumed {
+            ..
+        })) => local(ja, "再開しました。", "Resumed."),
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::StaleSweep {
+            ..
+        })) => local(
+            ja,
+            "状態が進んだため再開できません。",
+            "The state moved on; the resume did not apply.",
+        ),
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Completed {
+            ..
+        })) => local(ja, "すでに完了しています。", "Already completed."),
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Finalizing {
+            ..
+        })) => local(ja, "完了処理中です。", "Finalization is in progress."),
+        FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Missing)) => {
+            local(ja, "対象が見つかりません。", "The target was not found.")
+        }
+        FromConfirmation::Outcome(ControlOutcome::Rejected { .. })
+        | FromConfirmation::Outcome(ControlOutcome::CredentialRefused { .. })
+        | FromConfirmation::Outcome(ControlOutcome::CredentialUncommitted { .. })
+        | FromConfirmation::Outcome(ControlOutcome::DeviceUnknown { .. })
+        | FromConfirmation::DeniedByBoundary
+        | FromConfirmation::Unavailable => {
+            let locale = if ja { Locale::Ja } else { Locale::En };
+            return ene_desktop::i18n::control_deny(locale, result).into();
+        }
         _ => local(
             ja,
             "完了を確認できません。現在の状態を確認してください。",
@@ -1064,11 +1150,104 @@ fn apply(c: &ChatWindow, m: &ManagementWindow, s: &SurfaceSnapshot, reset_step: 
     m.set_can_resume_deletion(s.can_resume_deletion);
     m.set_credential_present(s.credential);
     m.set_consent_assigned(s.consent);
+    m.set_assigned_model(s.assigned_model.as_str().into());
     if reset_step {
         m.set_step(s.step);
+        m.set_model(s.assigned_model.as_str().into());
     }
     if !m.get_setup_ready() && s.ready {
         show(c);
     }
     m.set_setup_ready(s.ready);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn queued_body_copies_are_discarded_and_old_generations_invalidated() {
+        let mailbox = Mailbox::default();
+        assert!(mailbox.push(Command::Send("private draft".into()), 1));
+        assert!(mailbox.push(Command::Secret(Zeroizing::new("private key".into())), 3));
+        let epoch = mailbox.epoch.load(Ordering::SeqCst);
+        let generation = mailbox.generation.load(Ordering::SeqCst);
+        mailbox.erase();
+        assert!(mailbox.pop().is_none());
+        assert_ne!(epoch, mailbox.epoch.load(Ordering::SeqCst));
+        assert_ne!(generation, mailbox.generation.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn erased_inflight_operation_cannot_clear_new_busy_state() {
+        let mailbox = Mailbox::default();
+        mailbox.push(Command::Send("old".into()), 1);
+        let old = mailbox.pop().expect("inflight");
+        mailbox.erase();
+        mailbox.push(Command::Send("new".into()), 1);
+        mailbox.complete(old.lane, old.epoch);
+        assert_eq!(mailbox.pending[1].load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn communication_backlog_is_bounded() {
+        let mailbox = Mailbox::default();
+        for _ in 0..16 {
+            assert!(mailbox.push(Command::History, 1));
+        }
+        assert!(!mailbox.push(Command::Send("not accepted".into()), 1));
+    }
+
+    #[test]
+    fn a_requester_hold_gets_its_own_notice_and_is_not_a_failure() {
+        let (ja, ja_failed) = result_notice(true, Err(DesktopError::BackpressureHold));
+        let (en, en_failed) = result_notice(false, Err(DesktopError::BackpressureHold));
+        assert_eq!(ja, ene_desktop::i18n::backpressure_hold(Locale::Ja));
+        assert_eq!(en, ene_desktop::i18n::backpressure_hold(Locale::En));
+        assert!(!ja_failed && !en_failed, "a hold is not an error notice");
+        assert!(!ja.contains("自動再送"));
+        assert!(!en.contains("could not complete"));
+    }
+
+    #[test]
+    fn other_failures_keep_the_generic_no_resend_notice() {
+        let (en, english_failed) =
+            result_notice(false, Err(DesktopError::Transport(String::from("x"))));
+        assert!(english_failed);
+        assert!(en.contains("not automatically retried"));
+        let (ja, japanese_failed) =
+            result_notice(true, Err(DesktopError::Control(String::from("x"))));
+        assert!(japanese_failed);
+        assert!(ja.contains("自動再送"));
+    }
+
+    #[test]
+    fn a_hold_is_not_resubmitted_by_the_launcher() {
+        assert!(!launcher_retries(&DesktopError::BackpressureHold));
+        assert!(launcher_retries(&DesktopError::Transport(String::from(
+            "x"
+        ))));
+    }
+
+    #[test]
+    fn successful_results_keep_their_notice() {
+        let (notice, failed) = result_notice(false, Ok(String::from("accepted")));
+        assert_eq!(notice, "accepted");
+        assert!(!failed);
+    }
+
+    #[test]
+    fn completed_redraw_drains_pending_interaction_with_paint_timestamp() {
+        let pending = Mutex::new(VecDeque::from([PendingPaint {
+            start: InteractionStart {
+                operation: "cancel_task",
+                input_monotonic_ns: 10,
+            },
+            host_outcome_monotonic_ns: 20,
+        }]));
+        let samples = drain_painted_interactions(&pending, 30);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].operation, "cancel_task");
+        assert_eq!(samples[0].input_monotonic_ns, 10);
+        assert_eq!(samples[0].host_outcome_monotonic_ns, 20);
+        assert_eq!(samples[0].gui_painted_monotonic_ns, 30);
+        assert!(pending.lock().expect("pending paint lock").is_empty());
+    }
 }

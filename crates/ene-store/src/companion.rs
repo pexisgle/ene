@@ -22,7 +22,8 @@ use crate::codec::{
     encode_undelivered_source, lock_shared, select_attribution, select_consent,
     undelivered_unavailable,
 };
-use crate::credential::SQL_SELECT_SET_REV;
+use crate::credential::current_set_revision;
+use crate::presence::SQL_UPSERT_HINT;
 use crate::run_blocking;
 
 const SQL_FIND_COMPANION: &str = "SELECT companion_id FROM companion LIMIT 1";
@@ -30,9 +31,10 @@ const SQL_FIND_COMPANION: &str = "SELECT companion_id FROM companion LIMIT 1";
 const SQL_INSERT_COMPANION: &str =
     "INSERT INTO companion (companion_id, lifecycle, created_at) VALUES (?1, ?2, ?3)";
 
-const SQL_SELECT_LIFECYCLE: &str = "SELECT lifecycle FROM companion WHERE companion_id = ?1";
-
-pub(crate) const SQL_SELECT_COMPANION_LIFECYCLE: &str =
+/// The companion lifecycle read for the Task resume commit (AU17): the same
+/// row the History appends compare, read inside the resume transaction so
+/// the `Running` requirement linearizes with the revision forward.
+pub(crate) const SQL_SELECT_LIFECYCLE: &str =
     "SELECT lifecycle FROM companion WHERE companion_id = ?1";
 
 pub(crate) const SQL_SELECT_HISTORY_PREMISE: &str =
@@ -40,24 +42,58 @@ pub(crate) const SQL_SELECT_HISTORY_PREMISE: &str =
 
 const SQL_INSERT_ATTRIBUTION: &str = "INSERT INTO presence_attribution (companion_id, state, active_client, generation) VALUES (?1, ?2, ?3, ?4)";
 
-const SQL_INSERT_HINT: &str = "INSERT INTO relocation_hint (companion_id, last_client, recovery_destination) VALUES (?1, NULL, NULL)";
-
 const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, at_utc, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)";
 
-const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND (?2 IS NULL OR round_id = ?2) AND (?3 IS NULL OR at_utc >= ?3) ORDER BY rowid ASC LIMIT ?4";
+/// The one column list every History read decodes with, in the exact order
+/// [`HistoryRow`] consumes it. Single-sourced so a column cannot be added to
+/// one read and missed in another.
+macro_rules! history_projection {
+    () => {
+        "message_id, round_id, role, body, lang, at, presence_generation, command_id, round_wire, round_intent, round_intent_ref, client_counter, client_random"
+    };
+}
+
+const SQL_SELECT_TIMELINE: &str = concat!(
+    "SELECT ",
+    history_projection!(),
+    " FROM history_message WHERE companion_id = ?1 AND (?2 IS NULL OR round_id = ?2) AND (?3 IS NULL OR at_utc >= ?3) ORDER BY rowid ASC LIMIT ?4"
+);
 
 const SQL_SELECT_ROUND_BY_WIRE: &str =
     "SELECT round_id FROM history_message WHERE companion_id = ?1 AND round_wire = ?2 LIMIT 1";
 
-const SQL_SELECT_RECENT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid DESC LIMIT ?2";
+const SQL_SELECT_RECENT_TIMELINE: &str = concat!(
+    "SELECT ",
+    history_projection!(),
+    " FROM history_message WHERE companion_id = ?1 ORDER BY rowid DESC LIMIT ?2"
+);
 
-const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_SELECT_HISTORY_BY_COMMAND: &str = concat!(
+    "SELECT ",
+    history_projection!(),
+    " FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1"
+);
 
-pub(crate) const SQL_SELECT_HISTORY_BY_MESSAGE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random, companion_id FROM history_message WHERE message_id = ?1";
+/// The single-message bounded read: `message_id` is the primary key, so the
+/// lookup touches exactly the addressed row and never scans the table. The
+/// companion column is appended after the shared [`HistoryRow`] column list
+/// so one decoder serves every History read.
+pub(crate) const SQL_SELECT_HISTORY_BY_MESSAGE: &str = concat!(
+    "SELECT ",
+    history_projection!(),
+    ", companion_id FROM history_message WHERE message_id = ?1"
+);
 
-pub(crate) const SQL_SELECT_OWNER_ROWID: &str =
-    "SELECT rowid FROM history_message WHERE message_id = ?1";
+/// Durable identity of an Owner-message premise, scoped to the companion:
+/// the expected row must be this companion's Owner row, not merely a
+/// resolvable message id.
+pub(crate) const SQL_SELECT_OWNER_ROWID_SCOPED: &str =
+    "SELECT rowid FROM history_message WHERE message_id = ?1 AND companion_id = ?2 AND role = ?3";
 
+/// Supersession probe for one reply premise: any accepted Owner row for
+/// this companion past the expected rowid, newest or otherwise. Served by
+/// the companion-plus-role covering index and stopping at the first hit,
+/// so the common current case is one index step, never a History scan.
 pub(crate) const SQL_EXISTS_NEWER_OWNER: &str = "SELECT 1 WHERE EXISTS (SELECT 1 FROM history_message WHERE companion_id = ?1 AND role = ?2 AND rowid > ?3 LIMIT 1)";
 
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_kind, source_id, source_phase, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT (companion_id, source_kind, source_id, source_phase) DO NOTHING";
@@ -65,18 +101,31 @@ const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, c
 const SQL_UPDATE_UNDELIVERED_STATUS: &str =
     "UPDATE undelivered SET status = ?1 WHERE undelivered_id = ?2";
 
-const SQL_UNPRESENTED_COLUMNS: &str = "row_seq, undelivered_id, companion_id, source_kind, source_id, source_phase, status, round_id, presence_generation, created_at";
-
-fn sql_select_unpresented() -> String {
-    format!(
-        "SELECT {SQL_UNPRESENTED_COLUMNS} FROM undelivered WHERE companion_id = ?1 AND status IN (?2, ?3) AND row_seq > ?4 AND row_seq <= ?5 ORDER BY row_seq ASC LIMIT ?6"
-    )
+/// The unpresented row projection shared by the paged and exact-identity
+/// reads, so both decode through [`RawUndelivered`] without drift.
+macro_rules! unpresented_projection {
+    () => {
+        "row_seq, undelivered_id, companion_id, source_kind, source_id, source_phase, status, round_id, presence_generation, created_at"
+    };
 }
+
+/// The bounded unpresented page: `Pending` and `PresentationUnknown` only,
+/// keyset over the non-reused insertion sequence, with the pass upper bound
+/// keeping rows registered while the pass runs out of it.
+const SQL_SELECT_UNPRESENTED: &str = concat!(
+    "SELECT ",
+    unpresented_projection!(),
+    " FROM undelivered WHERE companion_id = ?1 AND status IN (?2, ?3) AND row_seq > ?4 AND row_seq <= ?5 ORDER BY row_seq ASC LIMIT ?6"
+);
 
 fn sql_select_undelivered_by_ids(count: usize) -> String {
     let placeholders: Vec<String> = (0..count).map(|index| format!("?{}", index + 2)).collect();
     format!(
-        "SELECT {SQL_UNPRESENTED_COLUMNS} FROM undelivered WHERE companion_id = ?1 AND undelivered_id IN ({})",
+        concat!(
+            "SELECT ",
+            unpresented_projection!(),
+            " FROM undelivered WHERE companion_id = ?1 AND undelivered_id IN ({})"
+        ),
         placeholders.join(", ")
     )
 }
@@ -91,6 +140,24 @@ const SQL_EXCERPT_RESULT: &str = "SELECT length(CAST(body AS BLOB)), substr(CAST
 
 const SQL_EXCERPT_ATTEMPT: &str = "SELECT length(CAST(real_target AS BLOB)), substr(CAST(real_target AS BLOB), 1, ?2) FROM action_attempt WHERE attempt_id = ?1";
 
+const SQL_EXCERPT_ACTIVITY: &str = "SELECT length(CAST(body AS BLOB)), substr(CAST(body AS BLOB), 1, ?2) FROM activity_record WHERE activity_id = ?1";
+
+fn read_excerpt(
+    conn: &Connection,
+    sql: &str,
+    values: &[&dyn rusqlite::ToSql],
+) -> Result<Option<(i64, Vec<u8>)>, UndeliveredTechnicalError> {
+    conn.query_row(sql, values, |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()
+        .map_err(|error| undelivered_unavailable(error.to_string()))
+}
+
+/// Byte-bounded excerpt of one undelivered source's canonical body.
+///
+/// This is the source owner's bounded projection, never a copy stored on the
+/// `undelivered` row. `total_bytes` is the full body length so a caller can
+/// report truncation and page the rest; `text` is cut on a UTF-8 character
+/// boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndeliveredExcerpt {
     pub text: String,
@@ -188,19 +255,24 @@ fn append_history(
         }
     }
     if let Some(expected) = cmd.expected_credential_set {
-        let stored: i64 = tx
-            .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        let current = decode_u64(stored).map_err(companion_unavailable)?;
-        if current != expected.as_u64() {
+        // The text was scrubbed under this credential-set revision. A set
+        // that moved past it may have registered a value still present in
+        // the text, so nothing is written.
+        let current =
+            current_set_revision(&tx).map_err(|error| companion_unavailable(error.to_string()))?;
+        if current != expected {
             return Ok((HistoryAppendOutcome::StaleCredentialSet, None));
         }
     }
     if let Some(expected) = cmd.expected_owner_message {
         let expected_rowid: Option<i64> = tx
             .query_row(
-                SQL_SELECT_OWNER_ROWID,
-                params![encode_id(expected)],
+                SQL_SELECT_OWNER_ROWID_SCOPED,
+                params![
+                    encode_id(expected),
+                    companion_text,
+                    encode_role(HistoryRole::Owner)
+                ],
                 |row| row.get(0),
             )
             .optional()
@@ -274,6 +346,12 @@ fn append_history(
         )
         .map_err(|error| companion_unavailable(error.to_string()))?
     {
+        // `held_use`'s direct-correlation fallback may have written the
+        // durable hold for an unreconciled operation; commit it even though
+        // the reply is refused, so the correspondence survives this arrival
+        // instead of rolling back with the refused try.
+        tx.commit()
+            .map_err(|error| companion_unavailable(error.to_string()))?;
         return Ok((HistoryAppendOutcome::HeldForErasure, None));
     }
     let (client_counter, client_random) = match cmd.incarnation {
@@ -380,8 +458,14 @@ impl CompanionRepository for Store {
                 ],
             )
             .map_err(|error| companion_unavailable(error.to_string()))?;
-            tx.execute(SQL_INSERT_HINT, params![fresh_text])
-                .map_err(|error| companion_unavailable(error.to_string()))?;
+            // The relocation hint row is seeded empty with the companion: it
+            // records history only, and recovery writes are upserts that
+            // never invent a client.
+            tx.execute(
+                SQL_UPSERT_HINT,
+                params![fresh_text, Option::<String>::None, Option::<String>::None],
+            )
+            .map_err(|error| companion_unavailable(error.to_string()))?;
             tx.commit()
                 .map_err(|error| companion_unavailable(error.to_string()))?;
             Ok(CompanionId::from_raw(fresh))
@@ -479,26 +563,18 @@ impl HistoryRepository for Store {
         &self,
         cmd: AppendHistoryCommand,
     ) -> Result<HistoryAppendOutcome, CompanionTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let (outcome, _) = append_history(&conn, &cmd, false, None)?;
-            Ok(outcome)
-        })
-        .await
+        let store = self.clone();
+        run_blocking(move || store.append_message_sync(cmd)).await
     }
 
     async fn append_reply_with_undelivered(
         &self,
         cmd: AppendHistoryCommand,
-        register_unpresented: bool,
         inference_claim: Option<RawId>,
     ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError> {
         let conn = Arc::clone(&self.conn);
         self.hint_after_commit(
-            run_blocking(move || {
-                append_history(&conn, &cmd, register_unpresented, inference_claim)
-            })
-            .await,
+            run_blocking(move || append_history(&conn, &cmd, true, inference_claim)).await,
         )
     }
 
@@ -507,30 +583,9 @@ impl HistoryRepository for Store {
         companion: CompanionId,
         command: &CommandId,
     ) -> Result<Option<HistoryMessage>, CompanionTechnicalError> {
-        let conn = Arc::clone(&self.conn);
+        let store = self.clone();
         let command = *command;
-        run_blocking(move || {
-            let key = encode_id(companion.as_raw());
-            let command_key = encode_id(command.0);
-            let guard = lock_shared(&conn);
-            let found: Option<HistoryRow> = guard
-                .query_row(
-                    SQL_SELECT_HISTORY_BY_COMMAND,
-                    params![key, command_key],
-                    HistoryRow::from_row,
-                )
-                .optional()
-                .map_err(|error| companion_unavailable(error.to_string()))?;
-            match found {
-                Some(row) => {
-                    let message =
-                        decode_history_message(companion, row).map_err(companion_unavailable)?;
-                    Ok(Some(message))
-                }
-                None => Ok(None),
-            }
-        })
-        .await
+        run_blocking(move || store.lookup_command_sync(companion, &command)).await
     }
 
     async fn load_message(
@@ -545,7 +600,7 @@ impl HistoryRepository for Store {
                 .query_row(
                     SQL_SELECT_HISTORY_BY_MESSAGE,
                     params![message_text],
-                    |row| Ok((HistoryRow::from_row(row)?, row.get(14)?)),
+                    |row| Ok((HistoryRow::from_row(row)?, row.get(13)?)),
                 )
                 .optional()
                 .map_err(|error| companion_unavailable(error.to_string()))?;
@@ -745,7 +800,7 @@ fn compare_and_mark_reported(
         return Ok(ReportStatusTransition::StaleSource);
     }
     let (next, transition) = match (mark.presented, current) {
-        (true, ReportStatus::Pending | ReportStatus::PresentationUnknown) => (
+        (true, _) => (
             ReportStatus::Presented,
             ReportStatusTransition::PendingToPresented,
         ),
@@ -753,13 +808,13 @@ fn compare_and_mark_reported(
             ReportStatus::PresentationUnknown,
             ReportStatusTransition::MarkedPresentationUnknown,
         ),
-        (false, ReportStatus::PresentationUnknown) => (
+        // `Presented` returned already above; the remaining state is
+        // `PresentationUnknown`, and a not-presented mark against it is a
+        // current receipt that confirmed the item was not presented.
+        (false, _) => (
             ReportStatus::Pending,
             ReportStatusTransition::FailedToPending,
         ),
-        (_, ReportStatus::Presented) => {
-            return Ok(ReportStatusTransition::AlreadyPresented);
-        }
     };
     tx.execute(
         SQL_UPDATE_UNDELIVERED_STATUS,
@@ -810,7 +865,7 @@ impl UndeliveredRepository for Store {
             let after_raw = encode_u64(after).map_err(undelivered_unavailable)?;
             let upper_raw = encode_u64(upper).map_err(undelivered_unavailable)?;
             let mut statement = guard
-                .prepare(&sql_select_unpresented())
+                .prepare(SQL_SELECT_UNPRESENTED)
                 .map_err(|error| undelivered_unavailable(error.to_string()))?;
             let rows = statement
                 .query_map(
@@ -835,11 +890,7 @@ impl UndeliveredRepository for Store {
             let next = (entries.len() == usize::try_from(cap).unwrap_or(usize::MAX)
                 && last_seq < upper)
                 .then(|| UndeliveredCursor::begin(last_seq, upper));
-            Ok(UndeliveredPage {
-                entries,
-                next,
-                pass_upper_bound: upper,
-            })
+            Ok(UndeliveredPage { entries, next })
         })
         .await
     }
@@ -892,6 +943,15 @@ impl UndeliveredRepository for Store {
 }
 
 impl Store {
+    /// Loads a byte-bounded excerpt of one undelivered source's canonical
+    /// body.
+    ///
+    /// SELECT-only, and each source kind reads its owner row directly (the
+    /// history message primary key, the Task revision snapshot, the result
+    /// body, the Action attempt's recorded target). Nothing is copied into
+    /// `undelivered`. `None` means this source kind carries no bounded body
+    /// (delegation, terminal) or the addressed row is gone; absence is
+    /// reported, never defaulted to an empty success.
     pub async fn load_undelivered_excerpt(
         &self,
         source: UndeliveredSource,
@@ -902,54 +962,35 @@ impl Store {
             let cap = i64::from(max_bytes.max(1));
             let guard = lock_shared(&conn);
             let found: Option<(i64, Vec<u8>)> = match source {
-                UndeliveredSource::HistoryMessage(message) => guard
-                    .query_row(
-                        SQL_EXCERPT_HISTORY,
-                        params![encode_id(message), cap],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                UndeliveredSource::HistoryMessage(message) => {
+                    read_excerpt(&guard, SQL_EXCERPT_HISTORY, &[&encode_id(message), &cap])?
+                }
                 UndeliveredSource::TaskRecord {
                     fact: TaskFact::TaskRevision { task, revision },
                     ..
-                } => guard
-                    .query_row(
+                } => {
+                    let revision_raw = encode_u64(revision).map_err(undelivered_unavailable)?;
+                    read_excerpt(
+                        &guard,
                         SQL_EXCERPT_TASK_REVISION,
-                        params![
-                            encode_id(task),
-                            encode_u64(revision).map_err(undelivered_unavailable)?,
-                            cap
-                        ],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                        &[&encode_id(task), &revision_raw, &cap],
+                    )?
+                }
                 UndeliveredSource::TaskRecord {
                     fact: TaskFact::ResultRecorded(result) | TaskFact::ResultAdopted(result),
                     ..
-                } => guard
-                    .query_row(SQL_EXCERPT_RESULT, params![encode_id(result), cap], |row| {
-                        Ok((row.get(0)?, row.get(1)?))
-                    })
-                    .optional()
-                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                } => read_excerpt(&guard, SQL_EXCERPT_RESULT, &[&encode_id(result), &cap])?,
                 UndeliveredSource::TaskRecord {
                     fact: TaskFact::ActionAttempt { attempt, .. },
                     ..
-                } => guard
-                    .query_row(
-                        SQL_EXCERPT_ATTEMPT,
-                        params![encode_id(attempt), cap],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                } => read_excerpt(&guard, SQL_EXCERPT_ATTEMPT, &[&encode_id(attempt), &cap])?,
+                UndeliveredSource::ActivityRecord(activity) => {
+                    read_excerpt(&guard, SQL_EXCERPT_ACTIVITY, &[&encode_id(activity), &cap])?
+                }
                 UndeliveredSource::TaskRecord {
                     fact: TaskFact::Delegation(_) | TaskFact::Terminal { .. },
                     ..
-                }
-                | UndeliveredSource::ActivityRecord(_) => None,
+                } => None,
             };
             let Some((total_raw, bytes)) = found else {
                 return Ok(None);
@@ -964,22 +1005,20 @@ impl Store {
     }
 }
 
-const ACTIVITY_KIND_RESUME_INSTRUCTION: &str = "resume_instruction";
+/// The stored activity kind this slice records; an unknown stored value is
+/// an unreadable row and is rejected on read.
+pub(crate) const ACTIVITY_KIND_RESUME_INSTRUCTION: &str = "resume_instruction";
 
 const SQL_INSERT_ACTIVITY: &str = "INSERT INTO activity_record (activity_id, companion_id, kind, task_id, task_revision, purpose_adopted_revision, body, created_at, command_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT (command_id) DO NOTHING";
 
 const SQL_SELECT_ACTIVITY: &str = "SELECT companion_id, kind, task_id, task_revision, purpose_adopted_revision, body, created_at FROM activity_record WHERE activity_id = ?1";
 
-const SQL_SELECT_ACTIVITY_BY_COMMAND: &str = "SELECT activity_id, companion_id, kind, task_id, task_revision, purpose_adopted_revision, body, created_at FROM activity_record WHERE command_id = ?1";
+const SQL_SELECT_ACTIVITY_BY_COMMAND: &str = "SELECT companion_id, kind, task_id, task_revision, purpose_adopted_revision, body, created_at, activity_id FROM activity_record WHERE command_id = ?1";
 
 pub(crate) const SQL_SELECT_ACTIVITY_PREMISE: &str = "SELECT companion_id, kind, task_id, task_revision, purpose_adopted_revision FROM activity_record WHERE activity_id = ?1";
 
-fn activity_unavailable(reason: impl core::fmt::Display) -> CompanionTechnicalError {
-    CompanionTechnicalError::StorageUnavailable {
-        reason: reason.to_string(),
-    }
-}
-
+/// One decoded `activity_record` row: the stored columns without the
+/// primary key, which the caller already holds.
 struct StoredActivityRow {
     companion_text: String,
     kind_text: String,
@@ -990,43 +1029,57 @@ struct StoredActivityRow {
     created_at: String,
 }
 
+impl StoredActivityRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            companion_text: row.get(0)?,
+            kind_text: row.get(1)?,
+            task_text: row.get(2)?,
+            task_revision: row.get(3)?,
+            purpose_adopted_revision: row.get(4)?,
+            body: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    }
+}
+
 fn decode_activity_row(
     activity: ActivityId,
     row: StoredActivityRow,
 ) -> Result<ManagementActivity, CompanionTechnicalError> {
     if row.kind_text != ACTIVITY_KIND_RESUME_INSTRUCTION {
-        return Err(activity_unavailable("unknown activity record kind"));
+        return Err(companion_unavailable("unknown activity record kind"));
     }
     let (Some(task_text), Some(task_revision), Some(purpose_adopted_revision)) = (
         row.task_text,
         row.task_revision,
         row.purpose_adopted_revision,
     ) else {
-        return Err(activity_unavailable(
+        return Err(companion_unavailable(
             "resume activity record missing its selected task",
         ));
     };
-    let task = decode_id(&task_text).map_err(activity_unavailable)?;
+    let task = decode_id(&task_text).map_err(companion_unavailable)?;
     Ok(ManagementActivity {
         id: activity,
         companion: CompanionId::from_raw(
-            decode_id(&row.companion_text).map_err(activity_unavailable)?,
+            decode_id(&row.companion_text).map_err(companion_unavailable)?,
         ),
         task: ene_task::TaskRef {
             task: ene_task::TaskId::from_raw(task),
             revision: ene_task::TaskRevision::from_u64(
-                decode_u64(task_revision).map_err(activity_unavailable)?,
+                decode_u64(task_revision).map_err(companion_unavailable)?,
             ),
         },
         purpose: ene_task::TaskPurposeRef {
             task: ene_task::TaskId::from_raw(task),
             adopted_revision: ene_task::TaskRevision::from_u64(
-                decode_u64(purpose_adopted_revision).map_err(activity_unavailable)?,
+                decode_u64(purpose_adopted_revision).map_err(companion_unavailable)?,
             ),
         },
         body: row.body,
         created_at: WallClockWithTz::parse_rfc3339(&row.created_at)
-            .map_err(activity_unavailable)?,
+            .map_err(companion_unavailable)?,
     })
 }
 
@@ -1037,9 +1090,15 @@ fn record_resume_activity_locked(
     let mut guard = lock_shared(conn);
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| activity_unavailable(error.to_string()))?;
+        .map_err(|error| companion_unavailable(error.to_string()))?;
+    // The A4 delayed-instruction gate: the resume instruction body is
+    // compared against the canonical current conditions inside this same
+    // transaction, so a covered instruction is never recorded — and the
+    // resume it would feed is held instead of re-saving the target. A
+    // completed operation is not a current condition, so a fresh resume
+    // instruction proceeds.
     if crate::preservation::covering_text(&tx, &cmd.body)
-        .map_err(|error| activity_unavailable(error.to_string()))?
+        .map_err(|error| companion_unavailable(error.to_string()))?
         .is_some()
     {
         return Ok(ResumeActivityOutcome::HeldForErasure);
@@ -1052,53 +1111,43 @@ fn record_resume_activity_locked(
             encode_id(cmd.companion.as_raw()),
             ACTIVITY_KIND_RESUME_INSTRUCTION,
             encode_id(cmd.task.task.as_raw()),
-            encode_u64(cmd.task.revision.as_u64()).map_err(activity_unavailable)?,
-            encode_u64(cmd.purpose.adopted_revision.as_u64()).map_err(activity_unavailable)?,
+            encode_u64(cmd.task.revision.as_u64()).map_err(companion_unavailable)?,
+            encode_u64(cmd.purpose.adopted_revision.as_u64()).map_err(companion_unavailable)?,
             cmd.body,
             WallClockWithTz::now().to_rfc3339(),
             command_text,
         ],
     )
-    .map_err(|error| activity_unavailable(error.to_string()))?;
+    .map_err(|error| companion_unavailable(error.to_string()))?;
+    // The same epoch key always names the same activity: a retry
+    // reads the winner back, and different content under one key
+    // fails closed instead of recording a second row.
     let found: Option<(String, StoredActivityRow)> = tx
         .query_row(
             SQL_SELECT_ACTIVITY_BY_COMMAND,
             params![command_text],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    StoredActivityRow {
-                        companion_text: row.get(1)?,
-                        kind_text: row.get(2)?,
-                        task_text: row.get(3)?,
-                        task_revision: row.get(4)?,
-                        purpose_adopted_revision: row.get(5)?,
-                        body: row.get(6)?,
-                        created_at: row.get(7)?,
-                    },
-                ))
-            },
+            |row| Ok((row.get(7)?, StoredActivityRow::from_row(row)?)),
         )
         .optional()
-        .map_err(|error| activity_unavailable(error.to_string()))?;
+        .map_err(|error| companion_unavailable(error.to_string()))?;
     let Some((activity_text, stored)) = found else {
-        return Err(activity_unavailable(
+        return Err(companion_unavailable(
             "resume activity record missing after insert",
         ));
     };
-    let activity = ActivityId::from_raw(decode_id(&activity_text).map_err(activity_unavailable)?);
+    let activity = ActivityId::from_raw(decode_id(&activity_text).map_err(companion_unavailable)?);
     let reread = decode_activity_row(activity, stored)?;
     if reread.companion != cmd.companion
         || reread.task != cmd.task
         || reread.purpose != cmd.purpose
         || reread.body != cmd.body
     {
-        return Err(activity_unavailable(
+        return Err(companion_unavailable(
             "resume activity command reuses a key with different content",
         ));
     }
     tx.commit()
-        .map_err(|error| activity_unavailable(error.to_string()))?;
+        .map_err(|error| companion_unavailable(error.to_string()))?;
     Ok(ResumeActivityOutcome::Recorded(activity))
 }
 
@@ -1131,20 +1180,10 @@ impl ActivityRepository for Store {
                 .query_row(
                     SQL_SELECT_ACTIVITY,
                     params![encode_id(activity.as_raw())],
-                    |row| {
-                        Ok(StoredActivityRow {
-                            companion_text: row.get(0)?,
-                            kind_text: row.get(1)?,
-                            task_text: row.get(2)?,
-                            task_revision: row.get(3)?,
-                            purpose_adopted_revision: row.get(4)?,
-                            body: row.get(5)?,
-                            created_at: row.get(6)?,
-                        })
-                    },
+                    StoredActivityRow::from_row,
                 )
                 .optional()
-                .map_err(|error| activity_unavailable(error.to_string()))?;
+                .map_err(|error| companion_unavailable(error.to_string()))?;
             found
                 .map(|row| decode_activity_row(activity, row))
                 .transpose()

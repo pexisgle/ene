@@ -7,6 +7,7 @@ use ene_inference::{
     InferenceTechnicalError, NotSentReason, TaskAgentAttemptPremise,
 };
 use ene_primitive::RevisionInner;
+use ene_store::Store;
 use ene_task::{
     TaskAgentInference, TaskAgentInferenceError, TaskAgentInferenceOutcome,
     TaskAgentInferencePremise, TaskAgentNotSent, TaskAgentOutput, TaskContextOrigin,
@@ -14,14 +15,20 @@ use ene_task::{
     TaskInstructionSourceRecord,
 };
 
+/// Adapts one [`InferenceExecutor`] to the Task Agent port.
+///
+/// `abort` is the running execution's local cooperative stop token: the
+/// adapter forwards it into the dispatch boundary, which owns the post-claim
+/// accounting, so an abort stops the provider wait without losing the
+/// attempt's usage fact.
 pub struct TaskAgentInferenceAdapter<'a, I> {
     executor: &'a I,
-    abort: Option<&'a DispatchAbort>,
+    abort: &'a DispatchAbort,
 }
 
 impl<'a, I> TaskAgentInferenceAdapter<'a, I> {
     #[must_use]
-    pub fn new(executor: &'a I, abort: Option<&'a DispatchAbort>) -> Self {
+    pub fn new(executor: &'a I, abort: &'a DispatchAbort) -> Self {
         Self { executor, abort }
     }
 }
@@ -53,7 +60,7 @@ impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, 
         let mut sink = DiscardSink;
         match self
             .executor
-            .dispatch(*authorized, premise.prompt, &mut sink, self.abort)
+            .dispatch(*authorized, premise.prompt, &mut sink, Some(self.abort))
             .await
         {
             Ok(InferenceDispatchOutcome::Completed { arrival, adopted }) => {
@@ -69,39 +76,45 @@ impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, 
     }
 }
 
-pub struct OwnerInstructionSource<'a, H, A> {
-    history: &'a H,
-    activity: &'a A,
+/// Adapts the companion-owned canonical sources to the Task-owned
+/// instruction-source port.
+///
+/// The adapter resolves the origin kind to its table — Owner conversation
+/// messages by History primary key, first-party management activities by
+/// activity primary key — with one bounded single-record read each, and
+/// maps the row into the Task-owned record. It adds no behavior: no body is
+/// cached or copied into Task state, an absent row is `Ok(None)`, and a
+/// malformed row or read failure becomes a fixed-class technical error
+/// without the row or the body. Timeline loads, recent windows, and command
+/// lookups are never a substitute for either read.
+pub struct OwnerInstructionSource<'a> {
+    store: &'a Store,
 }
 
-impl<'a, H, A> OwnerInstructionSource<'a, H, A> {
+impl<'a> OwnerInstructionSource<'a> {
     #[must_use]
-    pub fn new(history: &'a H, activity: &'a A) -> Self {
-        Self { history, activity }
+    pub fn new(store: &'a Store) -> Self {
+        Self { store }
     }
 }
 
-impl<H: HistoryRepository + Sync, A: ActivityRepository + Sync> TaskInstructionSource
-    for OwnerInstructionSource<'_, H, A>
-{
+impl TaskInstructionSource for OwnerInstructionSource<'_> {
     async fn load_owner_instruction(
         &self,
         origin: TaskContextOrigin,
     ) -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError> {
         match origin.kind {
             TaskContextOriginKind::OwnerConversation => {
-                let message = self
-                    .history
-                    .load_message(origin.source)
-                    .await
-                    .map_err(|_| TaskInstructionSourceError::SourceUnavailable {
+                let message = self.store.load_message(origin.source).await.map_err(|_| {
+                    TaskInstructionSourceError::SourceUnavailable {
                         reason: String::from("history message read failed"),
-                    })?;
+                    }
+                })?;
                 Ok(message.map(map_history_message))
             }
             TaskContextOriginKind::OwnerManagement => {
                 let activity = self
-                    .activity
+                    .store
                     .load_activity(ActivityId::from_raw(origin.source))
                     .await
                     .map_err(|_| TaskInstructionSourceError::SourceUnavailable {

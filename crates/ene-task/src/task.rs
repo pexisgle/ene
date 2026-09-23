@@ -161,12 +161,14 @@ pub struct TaskCreationPremise {
     pub workspace: Option<WorkspaceAssociationPremise>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskCreationOutcome {
-    Created(TaskRef),
-    Superseded,
-}
-
+/// A purpose adoption proposed by one steering commit (AU4).
+///
+/// The repository stamps the adopted revision (`expected.revision + 1`) after
+/// the CAS succeeds; the caller supplies the text and the provenance, and
+/// never names a future revision. For steering, `origin` is the same
+/// utterance record as the adopted instruction's: kind
+/// [`TaskContextOriginKind::OwnerConversation`](crate::TaskContextOriginKind::OwnerConversation)
+/// with `source` equal to the steering proposal's instruction source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPurposeAdoptionPremise {
     pub purpose: TaskPurpose,

@@ -7,7 +7,6 @@ use ene_api::v1::management::{
     credential_target,
 };
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::presence::PresenceStateWire;
 use ene_api::v1::refs::{
     BaseViewMark, ClientLocalId, CommandWireId, CompanionWireRef, ManagementTargetWire,
     StreamWireId, TextLangWire,
@@ -19,25 +18,19 @@ use ene_api::v1::round::{
 use ene_client::error::ClientError;
 use ene_client::{Client, ConnectProgress, DEFAULT_COMPANION_REF, PendingPairingClient};
 
-use crate::ui::DesktopError;
+use crate::ui::{DesktopError, request_with_timeout};
 
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
-#[cfg(any(windows, test))]
-#[must_use]
-pub fn client_pipe_name(data_dir: &Path) -> String {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0100_0000_01b3;
-    let mut tag = FNV_OFFSET;
-    for byte in data_dir.as_os_str().as_encoded_bytes() {
-        tag ^= u64::from(*byte);
-        tag = tag.wrapping_mul(FNV_PRIME);
-    }
-    format!(r"\\.\pipe\ene-{tag:016x}")
-}
 pub const SETUP_PROVIDER_OPENAI: &str = "openai";
 pub const CAPABILITY_DIALOGUE: &str = "dialogue";
 pub const DEFAULT_HISTORY_LIMIT: u64 = 50;
+
+/// The GUI's bounded bootstrap budget while a freshly started Host comes up.
+/// The launcher and the Client connect share the budget; only the retried
+/// error class differs.
+pub const BOOTSTRAP_ATTEMPTS: u8 = 80;
+pub const BOOTSTRAP_DELAY: Duration = Duration::from_millis(50);
 const HOST_SETUP_SECTIONS: &[&str] = &["provider", "model", "consent", "credential", "learning"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,10 +78,13 @@ impl SetupFacts {
     }
 }
 
-pub async fn connect(data_dir: &Path, descriptor: &str) -> Result<Client, ClientError> {
-    Client::connect(data_dir, descriptor, &ene_client::platform_display()).await
-}
-
+/// One GUI connect attempt: an established session, or a pairing that is
+/// still waiting for the Owner.
+///
+/// A stored device authenticates and returns [`Paired`](Self::Paired); only a
+/// first run (or a run whose device file is gone) pends. The two are never
+/// conflated: a successful connect is not an error, and a pending pairing owns
+/// the connection the GUI must retain until confirmation completes.
 pub enum DesktopConnect {
     Paired(Box<Client>),
     PendingOwnerConfirmation(PendingPairingClient),
@@ -109,10 +105,10 @@ pub async fn connect_or_pending(
             }
             Err(ClientError::Transport(error)) => {
                 attempts = attempts.saturating_add(1);
-                if attempts >= 80 {
+                if attempts >= BOOTSTRAP_ATTEMPTS {
                     return Err(DesktopError::Client(ClientError::Transport(error)));
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(BOOTSTRAP_DELAY).await;
             }
             Err(error) => return Err(DesktopError::Client(error)),
         }
@@ -178,16 +174,8 @@ pub fn setup_complete_intent(mark: &str) -> WirePayload {
     })
 }
 
-pub fn confirmed_true_intent(mark: &str) -> WirePayload {
-    let mut intent = assignment_intent(mark, SETUP_PROVIDER_OPENAI, "must-not-apply");
-    if let WirePayload::ManagementIntent(inner) = &mut intent {
-        inner.confirmed = true;
-    }
-    intent
-}
-
 pub async fn fetch_setup_view(client: &mut Client) -> Result<ManagementView, DesktopError> {
-    match ask(client, setup_view_request()).await? {
+    match request_with_timeout(client, setup_view_request(), Duration::from_secs(15)).await? {
         WirePayload::ManagementView(view) => Ok(view),
         other => Err(DesktopError::Protocol(format!(
             "expected ManagementView, got {}",
@@ -202,7 +190,7 @@ pub async fn submit_and_collect(
     lang: &str,
 ) -> Result<ChatTurn, DesktopError> {
     let companion = client.companion_ref();
-    let send = ask(
+    let send = request_with_timeout(
         client,
         WirePayload::SubmitTextInput(SubmitTextInput {
             companion: CompanionWireRef(companion),
@@ -214,14 +202,24 @@ pub async fn submit_and_collect(
                 lang: TextLangWire(lang.to_string()),
             },
         }),
+        Duration::from_secs(15),
     )
     .await?;
-    let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) = send
-    else {
-        return Err(DesktopError::Protocol(format!(
-            "intake was not accepted: {}",
-            send.message_type()
-        )));
+    let round = match send {
+        WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) => {
+            round
+        }
+        WirePayload::RoundIntakeOutcome(refusal) => {
+            return Err(DesktopError::Unavailable(describe_intake_refusal(
+                lang, &refusal,
+            )));
+        }
+        other => {
+            return Err(DesktopError::Protocol(format!(
+                "expected RoundIntakeOutcome, got {}",
+                other.message_type()
+            )));
+        }
     };
     let mut reply = String::new();
     let mut stream_id = None;
@@ -237,6 +235,13 @@ pub async fn submit_and_collect(
                 }
                 break;
             }
+            // Protocol-defined interleavings the Client must absorb: state-only
+            // facts (`Client::next_frame` already observed them) and an
+            // auto-presented backlog summary the explicit UndeliveredRequest
+            // path re-presents. A stream turn must not fail on any of them.
+            WirePayload::PresenceAttribution(_)
+            | WirePayload::UndeliveredResponse(_)
+            | WirePayload::BodyStateHint(_) => {}
             other => {
                 return Err(DesktopError::Protocol(format!(
                     "unexpected stream {}",
@@ -252,6 +257,43 @@ pub async fn submit_and_collect(
     })
 }
 
+/// Maps an intake refusal to the Owner-facing reason in the Owner's locale.
+/// The wire type defines these as distinct domain outcomes, so a hold, a stale
+/// round, and a revalidation demand must not read as one another.
+fn describe_intake_refusal(lang: &str, outcome: &RoundIntakeOutcomeWire) -> String {
+    let ja = lang.eq_ignore_ascii_case("ja");
+    let text = |japanese: &str, english: &str| {
+        if ja {
+            String::from(japanese)
+        } else {
+            String::from(english)
+        }
+    };
+    match outcome {
+        RoundIntakeOutcomeWire::StaleRound { .. } => text(
+            "前回の状態が古くなっています。最新の状態を確認して、もう一度お送りください。",
+            "The previous state is stale. Review the current state and send again.",
+        ),
+        RoundIntakeOutcomeWire::HeldForTransition => text(
+            "パートナーの状態が切り替わっています。落ち着いてからもう一度お試しください。",
+            "A presence change is in progress; try again once it settles.",
+        ),
+        RoundIntakeOutcomeWire::NeedsRevalidation { .. } => text(
+            "送信前に最新の状態を確認してください。",
+            "Refresh the current state before sending.",
+        ),
+        // The accepted variant is handled before this helper is reached.
+        RoundIntakeOutcomeWire::AcceptedForRound { .. } => text(
+            "送信は受け付けられませんでした。",
+            "The message was not accepted.",
+        ),
+    }
+}
+
+/// Presentation ACK for one collected chat turn. Call only from the path
+/// that actually presented that receipt. Mere receive is not
+/// [`PresentationStatus::Presented`]. `send_text` ACKs
+/// PresentationStatus::Presented only after the timeline shows the turn.
 pub async fn confirm_chat_presentation(
     client: &mut Client,
     turn: &ChatTurn,
@@ -283,33 +325,24 @@ pub async fn fetch_history(
         limit,
         round: None,
     });
-    match ask(client, payload).await? {
+    match request_with_timeout(client, payload, Duration::from_secs(15)).await? {
         WirePayload::HistoryResponse(HistoryResponse::Items(items)) => Ok(items),
-        WirePayload::HistoryResponse(_) => Err(DesktopError::Protocol(String::from(
-            "history was unavailable",
-        ))),
+        WirePayload::HistoryResponse(HistoryResponse::Unavailable) => Err(
+            DesktopError::Unavailable(String::from("the timeline could not be read; retry later")),
+        ),
+        WirePayload::HistoryResponse(HistoryResponse::StaleCompanion) => {
+            Err(DesktopError::Unavailable(String::from(
+                "the companion projection is stale; re-read presence and retry",
+            )))
+        }
+        WirePayload::HistoryResponse(HistoryResponse::InvalidRequest) => Err(
+            DesktopError::Protocol(String::from("history request is unusable")),
+        ),
         other => Err(DesktopError::Protocol(format!(
             "expected HistoryResponse, got {}",
             other.message_type()
         ))),
     }
-}
-
-pub fn presence_label(state: PresenceStateWire) -> &'static str {
-    match state {
-        PresenceStateWire::Present => "present",
-        PresenceStateWire::NoActive => "no-active",
-        PresenceStateWire::InTransition => "in-transition",
-        PresenceStateWire::Stopped => "stopped",
-        PresenceStateWire::RecoveryWait => "recovery-wait",
-    }
-}
-
-async fn ask(client: &mut Client, payload: WirePayload) -> Result<WirePayload, DesktopError> {
-    tokio::time::timeout(Duration::from_secs(15), client.request(payload))
-        .await
-        .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
-        .map_err(DesktopError::Client)
 }
 
 async fn ask_stream(client: &mut Client) -> Result<WirePayload, DesktopError> {

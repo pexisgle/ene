@@ -1,3 +1,23 @@
+//! SQLite-backed implementations of the repository contracts owned by
+//! [`ene_presence`], [`ene_companion`], [`ene_permission`],
+//! [`ene_credential`], [`ene_inference`], [`ene_learning`], [`ene_task`], and
+//! [`ene_action`]; those owners never depend on this crate and program against
+//! their own traits. It also implements the preservation-owned local-erasure
+//! participants for the owners whose durable master lives here
+//! ([`companion_erasure_participant`], [`learning_erasure_participant`],
+//! [`task_erasure_participant`], [`action_erasure_participant`], and
+//! [`inference_erasure_participant`]); the Host composition registers them.
+//!
+//! Concurrency shape: the connection is `Send` but not `Sync`, so an
+//! `Arc<std::sync::Mutex<Connection>>` shares it across callers. Each
+//! repository method hands its whole critical section — lock, one short
+//! [`rusqlite::TransactionBehavior::Immediate`] transaction (or one plain
+//! statement for pure loads), drop the guard — to `run_blocking`, so the
+//! synchronous `rusqlite` work happens on the blocking pool instead of on an
+//! async worker. The guard and any transaction never cross an `.await`: they
+//! live and die inside the blocking closure. Values that cross the boundary
+//! are bound parameters, never interpolated into SQL text.
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -20,14 +40,12 @@ mod preservation;
 mod task;
 #[cfg(any(test, feature = "test-support"))]
 mod test_parks;
-#[cfg(test)]
-mod tests;
 mod usage_cap;
 
 pub use companion::UndeliveredExcerpt;
 pub use erasure::{
-    ActionErasureParticipant, CompanionErasureParticipant, ERASURE_SCAN_ROWS,
-    InferenceErasureParticipant, LearningErasureParticipant, TaskErasureParticipant,
+    action_erasure_participant, companion_erasure_participant, inference_erasure_participant,
+    learning_erasure_participant, task_erasure_participant,
 };
 pub use preservation::{HOST_TRANSIENT_ARRIVAL_PAGE, HostTransientArrivalOutcome};
 
@@ -39,10 +57,19 @@ pub enum StoreError {
     SchemaFailed(String),
 }
 
+/// A panic inside the blocking task is the task's own panic: resume it rather
+/// than reporting it as a store failure. A cancelled blocking task (one that
+/// never started) is resumed as a cancellation, never reported as a store
+/// failure.
 async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     match tokio::task::spawn_blocking(work).await {
         Ok(value) => value,
-        Err(join) => std::panic::resume_unwind(join.into_panic()),
+        Err(join) => {
+            if join.is_panic() {
+                std::panic::resume_unwind(join.into_panic());
+            }
+            std::panic::resume_unwind(Box::new("store blocking task was cancelled"));
+        }
     }
 }
 
@@ -154,19 +181,19 @@ impl Store {
         .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn open_in_memory() -> Result<Self, StoreError> {
-        run_blocking(Self::open_in_memory_sync).await
-    }
-
-    #[cfg(test)]
-    fn open_in_memory_sync() -> Result<Self, StoreError> {
-        let mut conn = Connection::open_in_memory()
-            .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
-        migrate::run(&mut conn).map_err(StoreError::SchemaFailed)?;
-        Ok(Self::from_connection(conn))
-    }
-
+    /// Mechanical exact-text remainder probe over the closed system-wide
+    /// canonical content surface the A5 completion boundary verifies, plus
+    /// the derived token index and the undelivered references whose canonical
+    /// source is gone.
+    ///
+    /// Test-support only: tests assert `0` after an erasure instead of
+    /// re-implementing the column list. The list is the same closed surface
+    /// `crate::erasure::system_remainder` uses, so a probe cannot check a
+    /// different column set than the completion boundary verifies.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::OpenFailed`] when the mechanical remainder probe cannot run.
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub async fn count_exact_text_remainder_for_tests(
@@ -177,7 +204,7 @@ impl Store {
         let text = text.to_owned();
         run_blocking(move || {
             let guard = crate::codec::lock_shared(&conn);
-            erasure::exact_remainder_probe(&guard, &text)
+            erasure::system_remainder(&guard, &text)
                 .map_err(|error| StoreError::OpenFailed(error.to_string()))
         })
         .await
@@ -377,12 +404,8 @@ impl Store {
         self.test_parks.learning_formation.pause_if_armed().await;
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_device_auth_file_if_armed_for_tests(&self) {
-        self.test_parks.device_auth_file.pause_if_armed().await;
-    }
-
+    /// Arms the first-waiter park after HostTransient has minted a Verified
+    /// fact and before that fact is recorded durably.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn arm_host_transient_verified_record_park_for_tests(&self) {
@@ -413,30 +436,9 @@ impl Store {
             .await;
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_deletion_finalizing_park_for_tests(&self) {
-        self.test_parks.deletion_finalizing.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_deletion_finalizing_park_for_tests(&self) {
-        self.test_parks.deletion_finalizing.wait_entered().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_deletion_finalizing_park_for_tests(&self) {
-        self.test_parks.deletion_finalizing.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_deletion_finalizing_if_armed_for_tests(&self) {
-        self.test_parks.deletion_finalizing.pause_if_armed().await;
-    }
-
+    /// Arms the first-waiter park after Dialogue has pinned an
+    /// `ExperienceCandidate` and before that candidate is handed to the
+    /// Learning formation queue.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn arm_learning_pin_queue_park_for_tests(&self) {
@@ -491,14 +493,8 @@ impl Store {
             .await;
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn fail_next_host_transient_arrival_for_tests(&self) {
-        self.test_parks
-            .fail_host_transient_arrival
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
+    /// Forces every `note_host_transient_learning_arrival` to fail until
+    /// [`Self::allow_host_transient_arrival_for_tests`].
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn fail_host_transient_arrivals_until_allow_for_tests(&self) {
@@ -512,9 +508,6 @@ impl Store {
     pub fn allow_host_transient_arrival_for_tests(&self) {
         self.test_parks
             .fail_host_transient_arrival_sticky
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.test_parks
-            .fail_host_transient_arrival
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 

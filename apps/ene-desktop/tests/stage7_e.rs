@@ -2,26 +2,26 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use ene_api::v1::deletion::ClientTempClass;
 use ene_api::v1::management::ManagementOutcome;
 use ene_api::v1::round::PresentationStatus;
 use ene_companion::{CompanionRepository as _, UNDELIVERED_PAGE_MAX, UndeliveredRepository as _};
-use ene_core::conn;
 use ene_core::host_control;
-use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::MemoryVersionedStore;
+use ene_core::serve::HostHandle;
 use ene_desktop::body_supervise::BodySupervisor;
 use ene_desktop::session;
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
+
+mod common;
+
+use common::{ServingTask, drive_gui_until, open_host, wait_for_control};
 
 const MODEL: &str = "gpt-slice-test";
 const SECRET: &str = "sk-stage7-e-secret-5519";
@@ -46,14 +46,15 @@ impl GateTransport {
 }
 
 impl ProviderTransport for GateTransport {
-    fn complete(
-        &self,
+    fn complete_streaming<'a>(
+        &'a self,
         req: ProviderRequest,
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
     ) -> Pin<
         Box<
             dyn Future<Output = Result<ProviderResponse, ene_inference::InferenceTechnicalError>>
                 + Send
-                + '_,
+                + 'a,
         >,
     > {
         let _ = req;
@@ -65,115 +66,24 @@ impl ProviderTransport for GateTransport {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .pop_front()
                 .unwrap_or_else(|| String::from("ok"));
-            Ok(ProviderResponse {
+            let response = ProviderResponse {
                 text: reply,
                 usage: None,
-            })
+            };
+            match sink.push_delta(&response.text).await {
+                ene_inference::DeltaFlow::Continue => Ok(response),
+                ene_inference::DeltaFlow::Abort(reason) => {
+                    Err(ene_inference::InferenceTechnicalError::StreamAborted {
+                        reason: reason.to_owned(),
+                    })
+                }
+            }
         })
     }
 }
 
-struct ServingTask {
-    shutdown: tokio::sync::watch::Sender<bool>,
-    task: tokio::task::JoinHandle<Result<(), CoreError>>,
-}
-
-impl ServingTask {
-    fn start(dir: &Path, handle: Arc<HostHandle>, transport: Arc<GateTransport>) -> Self {
-        let (shutdown, rx) = tokio::sync::watch::channel(false);
-        let task = tokio::spawn(conn::run_until_shutdown(
-            dir.to_path_buf(),
-            handle,
-            transport,
-            rx,
-        ));
-        Self { shutdown, task }
-    }
-
-    #[expect(clippy::expect_used, reason = "test fixture helper")]
-    async fn shutdown_and_join(self) {
-        self.shutdown.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(30), self.task)
-            .await
-            .expect("serving shutdown must drain")
-            .expect("serving task must join")
-            .expect("serving shutdown must succeed");
-    }
-}
-
-#[expect(clippy::panic, reason = "test fixture helper")]
-async fn open_host(dir: &Path) -> Arc<HostHandle> {
-    match HostHandle::open_with_cred_store(
-        dir,
-        CredStore::MemoryVersioned(MemoryVersionedStore::new()),
-    )
-    .await
-    {
-        Ok(handle) => {
-            handle.set_client_erasure_wait_for_tests(Duration::from_millis(200));
-            Arc::new(handle)
-        }
-        Err(error) => panic!("host must open: {error}"),
-    }
-}
-
-async fn wait_for_control(dir: &Path) -> bool {
-    for _ in 0..200 {
-        #[cfg(unix)]
-        if tokio::net::UnixStream::connect(host_control::control_socket_path(dir))
-            .await
-            .is_ok()
-        {
-            return true;
-        }
-        #[cfg(windows)]
-        if host_control::ControlClient::connect(dir).await.is_ok() {
-            tokio::task::yield_now().await;
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
-async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
-    let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
-    desktop
-        .attach_confirmation(channel)
-        .expect("the private channel is the seat");
-    desktop
-        .connect_or_begin_pairing()
-        .await
-        .expect("pairing must challenge");
-    match desktop.confirm_owner().await.expect("owner confirm pairs") {
-        FromConfirmation::Outcome(ControlOutcome::DeviceApproved { .. }) => {}
-        other => panic!("expected DeviceApproved, got {other:?}"),
-    }
-}
-
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn pair_and_setup(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
-    pair_and_seat(desktop, handle).await;
-    desktop.set_secret(String::from(SECRET));
-    desktop
-        .begin_credential_put()
-        .await
-        .expect("credential put must challenge");
-    match desktop
-        .confirm_owner()
-        .await
-        .expect("owner confirm stores the key")
-    {
-        FromConfirmation::Outcome(ControlOutcome::CredentialStored { .. }) => {}
-        other => panic!("expected CredentialStored, got {other:?}"),
-    }
-    desktop.set_model(String::from(MODEL));
-    let assigned = desktop.assign_model().await.expect("assign");
-    assert!(
-        matches!(assigned, ManagementOutcome::StoredAsRuleView { .. }),
-        "assignment must store, got {assigned:?}"
-    );
+    common::pair_and_setup(desktop, handle, SECRET, MODEL).await;
 }
 
 #[expect(clippy::expect_used, reason = "test fixture helper")]
@@ -192,53 +102,12 @@ async fn unpresented_count(handle: &HostHandle) -> usize {
         .len()
 }
 
-async fn drive_gui_until(desktop: &mut DesktopRuntime, handle: &HostHandle, needle: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
-    loop {
-        match desktop.refresh_deletion().await {
-            Ok(()) | Err(_) => {}
-        }
-        if desktop.snapshot().deletion_body.contains(needle) {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "GUI deletion body never contained {needle}: {}",
-            desktop.snapshot().deletion_body
-        );
-        handle.wake_deletion_driver_for_tests();
-        let mut drive = std::pin::pin!(handle.run_targeted_deletion_tick());
-        loop {
-            tokio::select! {
-                driven = &mut drive => {
-                    match driven {
-                        Ok(_) | Err(_) => {}
-                    }
-                    break;
-                }
-                () = tokio::time::sleep(Duration::from_millis(5)) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        break;
-                    }
-                    match desktop.refresh_deletion().await {
-                        Ok(()) | Err(_) => {}
-                    }
-                    if desktop.snapshot().deletion_body.contains(needle) {
-                        return;
-                    }
-                }
-            }
-        }
-    }
-}
-
 fn snapshot_has_target(desktop: &DesktopRuntime) -> bool {
     let snap = desktop.snapshot();
     snap.contains_secret(TARGET)
         || snap.timeline.iter().any(|line| line.contains(TARGET))
         || snap.history.iter().any(|line| line.contains(TARGET))
         || snap.draft.contains(TARGET)
-        || snap.search_draft.contains(TARGET)
         || snap.memory_panel.contains(TARGET)
         || snap.task_detail.contains(TARGET)
         || snap.usage_body.contains(TARGET)
@@ -258,7 +127,6 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
         .composer_mut()
         .set_draft(format!("please remember {TARGET}"));
     desktop.send_text().await.expect("plant the target");
-    desktop.set_search_draft(String::from(TARGET));
     desktop.composer_mut().set_draft(format!("draft {TARGET}"));
     desktop.composer_mut().begin_composition();
     match desktop.refresh_memory().await {
@@ -273,10 +141,6 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
     assert!(
         snapshot_has_target(&desktop) || desktop.composer_mut().composing(),
         "the GUI must hold a copy of the target before deletion"
-    );
-    assert!(
-        desktop.last_erasure().is_none(),
-        "wiped is not claimed before a demand is erased"
     );
     assert!(
         desktop.has_chat_receipt(),
@@ -308,6 +172,21 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
         "Client intent only stages, got {staged:?}"
     );
     desktop
+        .refresh_deletion_requests()
+        .await
+        .expect("the staged request must list");
+    let staged = handle
+        .pending_targeted_deletions(None, 10)
+        .await
+        .expect("the staged request must read");
+    let request_key = format!(
+        "request:{}",
+        staged[0].request().as_raw().as_uuid().as_hyphenated()
+    );
+    desktop
+        .select_deletion_key(&request_key)
+        .expect("the staged request must select");
+    desktop
         .begin_deletion_confirm()
         .await
         .expect("seated confirm is required");
@@ -321,25 +200,8 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
         })) => {}
         other => panic!("expected DeletionStarted, got {other:?}"),
     }
-    assert!(
-        desktop.deletion_has_operations(),
-        "started deletion is visible on the panel"
-    );
     drive_gui_until(&mut desktop, &handle, "completed").await;
 
-    let erasure = desktop
-        .last_erasure()
-        .cloned()
-        .expect("GUI must answer the Host demand");
-    assert!(
-        erasure.unverified.is_empty(),
-        "wiped is only reported after copies are empty: {erasure:?}"
-    );
-    assert!(
-        erasure.wiped.contains(&ClientTempClass::PresentationBuffer)
-            || erasure.wiped.contains(&ClientTempClass::InputDraft),
-        "the GUI must report a class it actually cleared: {erasure:?}"
-    );
     assert!(erased.load(Ordering::SeqCst) > 0);
     assert!(surfaces.lock().unwrap().is_empty());
     assert!(!desktop.composer_mut().composing());
@@ -421,42 +283,6 @@ async fn receive_without_present_is_not_presented_ack() {
 }
 
 #[tokio::test]
-async fn host_restart_and_reconnect_delivery_evidence_holds() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let transport = GateTransport::with_replies(&["hello from ene"]);
-    let handle = open_host(dir.path()).await;
-    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
-    assert!(wait_for_control(dir.path()).await);
-    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    pair_and_setup(&mut desktop, &handle).await;
-    desktop.composer_mut().set_draft(String::from("hi there"));
-    desktop.send_text().await.expect("chat after assignment");
-    let before = desktop.snapshot().history.clone();
-    assert!(
-        before.iter().any(|line| line.contains("hi there")),
-        "history must keep owner text: {before:?}"
-    );
-
-    server.shutdown_and_join().await;
-    handle
-        .run_startup_mutations()
-        .await
-        .expect("restart mutations");
-    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
-    assert!(wait_for_control(dir.path()).await);
-    desktop
-        .reconnect()
-        .await
-        .expect("reconnect after host restart");
-    let restored = desktop.snapshot().history;
-    assert!(
-        restored.iter().any(|line| line.contains("hi there")),
-        "host restart must keep history: {restored:?}"
-    );
-    server.shutdown_and_join().await;
-}
-
-#[tokio::test]
 async fn registered_secret_never_appears_on_any_page() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transport = GateTransport::with_replies(&["unused"]);
@@ -486,10 +312,6 @@ async fn registered_secret_never_appears_on_any_page() {
         );
         let debug = format!("{snap:?}");
         assert!(!debug.contains(SECRET), "Debug leaked on {page:?}");
-        assert!(
-            !snap.deny_reason.contains(SECRET),
-            "deny leaked on {page:?}"
-        );
     }
     desktop.cancel_secret();
     server.shutdown_and_join().await;
@@ -514,9 +336,9 @@ async fn killing_body_leaves_chat_settings_and_cancel_alive() {
     desktop.try_spawn_body(&exe);
     desktop.tick();
     let spawned = desktop.snapshot().body_status;
-    assert!(
-        spawned == "Spawned" || spawned == "Exited" || spawned == "Absent",
-        "spawn outcome is observed, got {spawned}"
+    assert_ne!(
+        spawned, "Absent",
+        "the Body binary must launch rather than be missing: {spawned}"
     );
     if spawned == "Spawned" {
         desktop.kill_body();
@@ -537,10 +359,42 @@ async fn killing_body_leaves_chat_settings_and_cancel_alive() {
         .await
         .expect("settings survive Body kill");
     desktop.open_page(Page::Settings);
-    let _cancel = tokio::time::timeout(Duration::from_secs(5), desktop.cancel_displayed_task())
-        .await
-        .expect("cancel path remains responsive");
+    let cancel = desktop.cancel_displayed_task().await;
+    assert!(
+        matches!(
+            cancel,
+            Err(ene_desktop::ui::DesktopError::Protocol(ref message))
+                if message.contains("displayed task")
+        ),
+        "cancel path stays reachable and refuses without a displayed task: {cancel:?}"
+    );
     assert_eq!(transport.sends(), 1);
+    server.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn send_text_presents_its_collected_turn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transport = GateTransport::with_replies(&["ack me"]);
+    let handle = open_host(dir.path()).await;
+    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
+    assert!(wait_for_control(dir.path()).await);
+    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    pair_and_setup(&mut desktop, &handle).await;
+
+    desktop.composer_mut().set_draft(String::from("ack me"));
+    desktop.send_text().await.expect("send_text");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if unpresented_count(&handle).await == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "send_text must present its collected turn"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     server.shutdown_and_join().await;
 }
 

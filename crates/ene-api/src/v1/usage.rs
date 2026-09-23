@@ -1,29 +1,21 @@
 use serde::{Deserialize, Serialize};
 
-use super::refs::UsageCursorWire;
+use super::refs::{UsageCursorWire, ViewMarkWire};
 
 pub const USAGE_PAGE_LIMIT_MAX: u32 = 50;
 pub const USAGE_PAGE_LIMIT_DEFAULT: u32 = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UsageSummaryRequest {
-    #[serde(default)]
     pub from: Option<String>,
-    #[serde(default)]
     pub to: Option<String>,
-    #[serde(default)]
     pub provider: Option<String>,
-    #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
     pub consumer: Option<String>,
-    #[serde(default)]
     pub purpose: Option<String>,
-    #[serde(default)]
     pub status: Option<String>,
-    #[serde(default)]
+    /// Host-issued cursor continuing a previous page of the same query.
     pub cursor: Option<UsageCursorWire>,
-    #[serde(default)]
     pub limit: Option<u32>,
 }
 
@@ -63,8 +55,11 @@ pub struct UsageSummaryRowView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageCapView {
-    pub mark: String,
-    pub scope: String,
+    /// Opaque mark for this exact `(provider, window)` slot. Echo it
+    /// as a cap intent's `base_view`; it names the revision the reader saw,
+    /// or the none state when `stored` is `None`.
+    pub mark: ViewMarkWire,
+    /// Provider the slot scopes, or `None` for the system scope.
     pub provider: Option<String>,
     pub window: String,
     pub stored: Option<UsageCapStoredView>,
@@ -102,4 +97,101 @@ pub enum UsageSummaryResponse {
     Page(UsageSummaryPage),
     StaleBaseView { current: Option<UsageCursorWire> },
     Unavailable,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        USAGE_PAGE_LIMIT_DEFAULT, USAGE_PAGE_LIMIT_MAX, UsageCapConsumptionView,
+        UsageCapStoredView, UsageCapView, UsageCostView, UsageMoneyView, UsageSummaryPage,
+        UsageSummaryRequest, UsageSummaryRowView, UsageTokenUsageView,
+    };
+    use crate::v1::refs::{UsageCursorWire, ViewMarkWire};
+
+    fn money(micros: u64) -> UsageMoneyView {
+        UsageMoneyView {
+            currency: String::from("USD"),
+            micros,
+        }
+    }
+
+    #[test]
+    fn page_bounds_match_the_wire_contract() {
+        assert_eq!(USAGE_PAGE_LIMIT_MAX, 50);
+        assert_eq!(USAGE_PAGE_LIMIT_DEFAULT, 50);
+    }
+
+    #[test]
+    fn request_roundtrips_through_json_with_omitted_fields() {
+        let json = r#"{"cursor":null}"#;
+        let decoded: UsageSummaryRequest =
+            serde_json::from_str(json).expect("optional fields may be omitted");
+        assert_eq!(decoded.limit, None);
+        assert_eq!(decoded.provider, None);
+        assert_eq!(decoded.status, None);
+        let decoded: UsageSummaryRequest = serde_json::from_str(
+            r#"{"provider":"openai","status":"reserved","limit":10,"cursor":"cursor-1"}"#,
+        )
+        .expect("the request roundtrips");
+        assert_eq!(decoded.provider.as_deref(), Some("openai"));
+        assert_eq!(decoded.status.as_deref(), Some("reserved"));
+        assert_eq!(decoded.limit, Some(10));
+        assert_eq!(
+            decoded.cursor,
+            Some(UsageCursorWire(String::from("cursor-1")))
+        );
+    }
+
+    #[test]
+    fn page_carries_attribution_tokens_cost_and_caps_without_bodies() {
+        let page = UsageSummaryPage {
+            rows: vec![UsageSummaryRowView {
+                provider: String::from("openai"),
+                model: String::from("gpt-4o"),
+                consumer: String::from("companion_dialogue"),
+                purpose: String::from("dialogue_response"),
+                status: String::from("reported"),
+                tokens: Some(UsageTokenUsageView {
+                    input_tokens: 10,
+                    cached_input_tokens: 4,
+                    output_tokens: 2,
+                }),
+                cost: Some(UsageCostView {
+                    input: money(6),
+                    cached_input: money(1),
+                    output: money(4),
+                    total: money(11),
+                }),
+                reserved: None,
+                started_at: String::from("2026-09-17T00:00:00.000000000Z"),
+            }],
+            next_cursor: Some(UsageCursorWire(String::from("next-1"))),
+            caps: vec![UsageCapView {
+                mark: ViewMarkWire(String::from("usage-cap-system-daily_utc-rev-1")),
+                provider: None,
+                window: String::from("daily_utc"),
+                stored: Some(UsageCapStoredView {
+                    limit: money(1_000),
+                    consumption: UsageCapConsumptionView::Known {
+                        reserved: money(200),
+                        committed_reported: money(100),
+                        committed_unknown: money(200),
+                        consumed: money(500),
+                        remaining: money(500),
+                        held: false,
+                    },
+                }),
+            }],
+            evaluated_at: String::from("2026-09-17T00:00:00.000000000Z"),
+        };
+        let json = serde_json::to_string(&page).expect("the page serializes");
+        assert!(
+            json.contains("companion_dialogue"),
+            "attribution is present"
+        );
+        assert!(json.contains("cached_input"), "cost components are present");
+        assert!(json.contains("usage-cap-system-daily_utc-rev-1"));
+        let back: UsageSummaryPage = serde_json::from_str(&json).expect("the page roundtrips");
+        assert_eq!(back, page);
+    }
 }

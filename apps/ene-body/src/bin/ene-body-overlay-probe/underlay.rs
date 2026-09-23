@@ -1,6 +1,15 @@
+//! Probe-only top-layer surface that records real pointer input.
+//!
+//! The Body overlay is an `Overlay` layer surface with an alpha-aware input
+//! region. This underlay is a `Top` layer surface (immediately below the
+//! `Overlay` layer) anchored top-left and sized to
+//! `ENE_PROBE_UNDERLAY_WIDTH` x `ENE_PROBE_UNDERLAY_HEIGHT` (default 700x900),
+//! so it only receives clicks that fall inside that region: a click the
+//! overlay does not claim there lands here and is written as raw evidence. It
+//! is not a product surface.
+
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
@@ -41,8 +50,8 @@ enum UnderlayError {
     Wayland(String),
     #[error("shm: {0}")]
     Shm(String),
-    #[error("log: {0}")]
-    Log(#[from] std::io::Error),
+    #[error("evidence: {0}")]
+    Evidence(String),
 }
 
 fn run(path: PathBuf) -> Result<(), UnderlayError> {
@@ -82,6 +91,11 @@ fn run(path: PathBuf) -> Result<(), UnderlayError> {
     layer.set_size(width, height);
     layer.set_margin(0, 0, 0, 0);
     layer.commit();
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| UnderlayError::Evidence(format!("{}: {error}", path.display())))?;
     let mut state = State {
         registry_state,
         output_state,
@@ -90,10 +104,8 @@ fn run(path: PathBuf) -> Result<(), UnderlayError> {
         layer,
         pool,
         buffer: None,
-        configured: false,
         surface_size: (width, height),
-        log: Mutex::new(()),
-        log_path: path,
+        log,
     };
     queue
         .roundtrip(&mut state)
@@ -116,10 +128,10 @@ fn run(path: PathBuf) -> Result<(), UnderlayError> {
     state.layer.commit();
     state.buffer = Some(buffer);
     eprintln!(
-        "underlay: {}x{} bottom layer ready (evidence {})",
+        "underlay: {}x{} top layer ready (evidence {})",
         state.surface_size.0,
         state.surface_size.1,
-        state.log_path.display()
+        path.display()
     );
     loop {
         queue
@@ -150,17 +162,12 @@ struct State {
     layer: LayerSurface,
     pool: SlotPool,
     buffer: Option<smithay_client_toolkit::shm::slot::Buffer>,
-    configured: bool,
     surface_size: (u32, u32),
-    log: Mutex<()>,
-    log_path: PathBuf,
+    log: std::fs::File,
 }
 
 impl State {
-    fn record(&self, kind: &str, detail: serde_json::Value) {
-        let Ok(_guard) = self.log.lock() else {
-            return;
-        };
+    fn record(&mut self, kind: &str, detail: serde_json::Value) {
         let observed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
@@ -170,15 +177,9 @@ impl State {
             "kind": kind,
             "detail": detail,
         });
-        let opened = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_path);
-        let Ok(mut file) = opened else {
-            return;
-        };
-        if serde_json::to_writer(&mut file, &line).is_ok() && file.write_all(b"\n").is_err() {
+        if serde_json::to_writer(&mut self.log, &line).is_ok() {
             // Best effort: a lost newline is not a probe failure.
+            drop(self.log.write_all(b"\n"));
         }
     }
 }
@@ -275,7 +276,6 @@ impl LayerShellHandler for State {
         if configure.new_size.0 > 0 && configure.new_size.1 > 0 {
             self.surface_size = configure.new_size;
         }
-        self.configured = true;
     }
 }
 

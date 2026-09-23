@@ -6,9 +6,7 @@ use ene_companion::{
     HistoryMessage, HistoryRole, ReportStatus, RoundIntentMark, TaskFact, TerminalKindWire,
     UndeliveredSource, UndeliveredTechnicalError,
 };
-use ene_credential::{
-    CredentialTechnicalError, DeviceId, DeviceRecord, PendingCredentialApproval, PendingPairing,
-};
+use ene_credential::{CredentialTechnicalError, DeviceId, DeviceRecord, PendingPairing};
 use ene_inference::cost::CurrencyCode;
 use ene_inference::pricing::PricingSnapshotRef;
 use ene_inference::{InferenceTechnicalError, UsageSource};
@@ -20,6 +18,7 @@ use ene_presence::{
     ClientId, PresenceAttribution, PresenceGeneration, PresenceState, PresenceTechnicalError,
     RelocationHint, ThinMoveReason,
 };
+use ene_preservation::PreservationTechnicalError;
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -57,20 +56,22 @@ pub(crate) fn decode_id(text: &str) -> Result<RawId, String> {
     let parsed = text
         .parse()
         .map_err(|_| String::from("malformed identity text"))?;
-    Ok(RawId::from_uuid(parsed))
+    let raw = RawId::from_uuid(parsed);
+    // Only the canonical rendering `encode_id` writes is readable: another
+    // spelling (simple, braced, urn, uppercase) would be a second durable key
+    // for one identity, so it is an unreadable row.
+    if encode_id(raw) != text {
+        return Err(String::from("malformed identity text"));
+    }
+    Ok(raw)
 }
 
-pub(crate) fn encode_pricing_reference(reference: PricingSnapshotRef) -> String {
-    reference.to_text()
-}
-
+/// Pricing references have a text form by design: the durable row is what
+/// historical cost facts join on. Malformed text never becomes a fresh or
+/// default reference.
 pub(crate) fn decode_pricing_reference(text: &str) -> Result<PricingSnapshotRef, String> {
     PricingSnapshotRef::from_text(text)
         .ok_or_else(|| String::from("malformed pricing snapshot reference"))
-}
-
-pub(crate) fn encode_currency(currency: CurrencyCode) -> &'static str {
-    currency.as_str()
 }
 
 pub(crate) fn decode_currency(text: &str) -> Result<CurrencyCode, String> {
@@ -140,6 +141,9 @@ pub(crate) fn encode_round_intent(intent: &RoundIntentMark) -> (&'static str, Op
     }
 }
 
+/// `None` intent means the row carries no command key (replies): the caller
+/// fail-closes on replay instead of guessing. A kind and reference that
+/// disagree are a malformed row, never defaulted.
 pub(crate) fn decode_round_intent(
     kind: Option<&str>,
     reference: Option<String>,
@@ -282,6 +286,17 @@ fn resolve_source_task(
     decode_id(&task_text)
 }
 
+/// Decodes one stored source key back to its typed form.
+///
+/// An unknown kind, an undecodable identity, a phase that is not the kind's
+/// canonical rendering (a non-canonical revision decimal, a phase present for
+/// a kind that has none, an unknown certainty, an unknown terminal phase) are
+/// unreadable rows and fail closed. Delegation-, attempt-, and result-owned
+/// facts resolve
+/// their owning task from the canonical rows at read time (the delegation
+/// row, the attempt's delegation row, the result row): the `task` field is
+/// the owning task, never the source identity itself, so report composition
+/// finds the task behind every fact.
 pub(crate) fn decode_undelivered_source(
     conn: &Connection,
     kind: &str,
@@ -294,6 +309,9 @@ pub(crate) fn decode_undelivered_source(
             let revision = phase
                 .parse::<u64>()
                 .map_err(|_| String::from("malformed task revision source phase"))?;
+            if phase != revision.to_string() {
+                return Err(String::from("malformed task revision source phase"));
+            }
             Ok(UndeliveredSource::TaskRecord {
                 task: raw,
                 fact: TaskFact::TaskRevision {
@@ -303,6 +321,9 @@ pub(crate) fn decode_undelivered_source(
             })
         }
         SOURCE_KIND_DELEGATION => {
+            if !phase.is_empty() {
+                return Err(String::from("malformed delegation source phase"));
+            }
             let task = resolve_source_task(conn, SQL_SOURCE_DELEGATION_TASK, id, "delegation")?;
             Ok(UndeliveredSource::TaskRecord {
                 task,
@@ -322,6 +343,9 @@ pub(crate) fn decode_undelivered_source(
             })
         }
         SOURCE_KIND_RESULT_RECORDED => {
+            if !phase.is_empty() {
+                return Err(String::from("malformed recorded result source phase"));
+            }
             let task = resolve_source_task(conn, SQL_SOURCE_RESULT_TASK, id, "recorded result")?;
             Ok(UndeliveredSource::TaskRecord {
                 task,
@@ -329,6 +353,9 @@ pub(crate) fn decode_undelivered_source(
             })
         }
         SOURCE_KIND_RESULT_ADOPTED => {
+            if !phase.is_empty() {
+                return Err(String::from("malformed adopted result source phase"));
+            }
             let task = resolve_source_task(conn, SQL_SOURCE_RESULT_TASK, id, "adopted result")?;
             Ok(UndeliveredSource::TaskRecord {
                 task,
@@ -346,8 +373,18 @@ pub(crate) fn decode_undelivered_source(
                 },
             })
         }
-        SOURCE_KIND_HISTORY_MESSAGE => Ok(UndeliveredSource::HistoryMessage(raw)),
-        SOURCE_KIND_ACTIVITY_RECORD => Ok(UndeliveredSource::ActivityRecord(raw)),
+        SOURCE_KIND_HISTORY_MESSAGE => {
+            if !phase.is_empty() {
+                return Err(String::from("malformed history message source phase"));
+            }
+            Ok(UndeliveredSource::HistoryMessage(raw))
+        }
+        SOURCE_KIND_ACTIVITY_RECORD => {
+            if !phase.is_empty() {
+                return Err(String::from("malformed activity record source phase"));
+            }
+            Ok(UndeliveredSource::ActivityRecord(raw))
+        }
         _ => Err(String::from("unknown undelivered source kind")),
     }
 }
@@ -359,16 +396,18 @@ pub(crate) fn encode_usage_source(source: UsageSource) -> &'static str {
     }
 }
 
-pub(crate) fn encode_consumer(consumer: ConsumerKind) -> &'static str {
-    consumer.as_str()
+pub(crate) fn decode_usage_source(text: &str) -> Result<UsageSource, String> {
+    match text {
+        "reported" => Ok(UsageSource::Reported),
+        "unknown" => Ok(UsageSource::Unknown),
+        _ => Err(String::from("unknown usage source")),
+    }
 }
 
+/// Consumer/purpose storage vocabulary is owned by `ene-permission`; unknown
+/// stored names are unreadable rows and fail closed on decode.
 pub(crate) fn decode_consumer(text: &str) -> Result<ConsumerKind, String> {
     ConsumerKind::from_name(text).ok_or_else(|| String::from("unknown inference consumer"))
-}
-
-pub(crate) fn encode_purpose(purpose: PurposeKind) -> &'static str {
-    purpose.as_str()
 }
 
 pub(crate) fn decode_purpose(text: &str) -> Result<PurposeKind, String> {
@@ -384,20 +423,30 @@ pub(crate) fn encode_move_reason(reason: ThinMoveReason) -> &'static str {
     }
 }
 
-pub(crate) fn presence_unavailable(reason: String) -> PresenceTechnicalError {
-    PresenceTechnicalError::StorageUnavailable { reason }
+pub(crate) fn presence_unavailable(reason: impl core::fmt::Display) -> PresenceTechnicalError {
+    PresenceTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
 }
 
-pub(crate) fn companion_unavailable(reason: String) -> CompanionTechnicalError {
-    CompanionTechnicalError::StorageUnavailable { reason }
+pub(crate) fn companion_unavailable(reason: impl core::fmt::Display) -> CompanionTechnicalError {
+    CompanionTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
 }
 
-pub(crate) fn undelivered_unavailable(reason: String) -> UndeliveredTechnicalError {
-    UndeliveredTechnicalError::StorageUnavailable { reason }
+pub(crate) fn undelivered_unavailable(
+    reason: impl core::fmt::Display,
+) -> UndeliveredTechnicalError {
+    UndeliveredTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
 }
 
-pub(crate) fn permission_unavailable(reason: String) -> PermissionTechnicalError {
-    PermissionTechnicalError::StorageUnavailable { reason }
+pub(crate) fn permission_unavailable(reason: impl core::fmt::Display) -> PermissionTechnicalError {
+    PermissionTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
 }
 
 pub(crate) fn credential_unavailable(reason: impl core::fmt::Display) -> CredentialTechnicalError {
@@ -406,8 +455,18 @@ pub(crate) fn credential_unavailable(reason: impl core::fmt::Display) -> Credent
     }
 }
 
-pub(crate) fn inference_unavailable(reason: String) -> InferenceTechnicalError {
-    InferenceTechnicalError::StorageUnavailable { reason }
+pub(crate) fn inference_unavailable(reason: impl core::fmt::Display) -> InferenceTechnicalError {
+    InferenceTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
+}
+
+pub(crate) fn preservation_storage(_: rusqlite::Error) -> PreservationTechnicalError {
+    PreservationTechnicalError::StorageUnavailable
+}
+
+pub(crate) fn preservation_corrupt() -> PreservationTechnicalError {
+    PreservationTechnicalError::CorruptState
 }
 
 pub(crate) fn select_consent(
@@ -469,10 +528,10 @@ pub(crate) fn decode_intent_outcome(
 ) -> Result<IntentOutcome, String> {
     match (outcome_text, mark) {
         ("stored", Some(revision)) => Ok(IntentOutcome::StoredAsRuleView { revision }),
-        ("applied", _) => Ok(IntentOutcome::AppliedAsOneTime),
-        ("held", _) => Ok(IntentOutcome::HeldByOperation),
-        ("clarify", _) => Ok(IntentOutcome::NeedsClarification),
-        ("exhausted", _) => Ok(IntentOutcome::RevisionExhausted),
+        ("applied", None) => Ok(IntentOutcome::AppliedAsOneTime),
+        ("held", None) => Ok(IntentOutcome::HeldByOperation),
+        ("clarify", None) => Ok(IntentOutcome::NeedsClarification),
+        ("exhausted", None) => Ok(IntentOutcome::RevisionExhausted),
         ("stale", Some(current)) => Ok(IntentOutcome::StaleBaseView { current }),
         _ => Err(String::from("malformed intent outcome")),
     }
@@ -486,6 +545,8 @@ pub(crate) fn fingerprints_match(stored: &IntentFingerprint, incoming: &IntentFi
         && stored.rationale_quote == incoming.rationale_quote
 }
 
+/// Shared by every write-once claim check: an existing row decides, and exact
+/// content replays while anything else clarifies.
 pub(crate) fn replay_or_conflict<T>(
     stored: IntentOutcomeRecord,
     fingerprint: &IntentFingerprint,
@@ -497,11 +558,15 @@ pub(crate) fn replay_or_conflict<T>(
     }
 }
 
+/// Stores the decided row for an intent whose write-once claim already ran in
+/// the same `BEGIN IMMEDIATE` transaction. A constraint violation here is torn
+/// state, never a lost race: the write lock is held from the claim through
+/// this insert, so no other writer can commit the key in between.
 pub(crate) fn insert_decided_row_tx(
     tx: &Transaction<'_>,
     fingerprint: &IntentFingerprint,
     outcome: &IntentOutcome,
-) -> Result<Option<IntentOutcomeRecord>, String> {
+) -> Result<(), String> {
     let (outcome_text, mark) = encode_intent_outcome(outcome);
     match tx.execute(
         SQL_INSERT_INTENT_OUTCOME,
@@ -516,14 +581,11 @@ pub(crate) fn insert_decided_row_tx(
             mark,
         ],
     ) {
-        Ok(_) => Ok(None),
+        Ok(_) => Ok(()),
         Err(error)
             if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) =>
         {
-            select_intent_row_tx(tx, &fingerprint.intent_id)?.map_or_else(
-                || Err(String::from("intent row vanished after write conflict")),
-                |winner| Ok(Some(winner)),
-            )
+            Err(String::from("intent row appeared after write-once claim"))
         }
         Err(error) => Err(error.to_string()),
     }
@@ -548,11 +610,11 @@ pub(crate) fn decode_intent_outcome_row(
     })
 }
 
-pub(crate) fn select_intent_row_tx(
-    tx: &Transaction<'_>,
+pub(crate) fn select_intent_row(
+    conn: &Connection,
     intent_id: &str,
 ) -> Result<Option<IntentOutcomeRecord>, String> {
-    let found: Option<IntentOutcomeRow> = tx
+    let found: Option<IntentOutcomeRow> = conn
         .query_row(SQL_SELECT_INTENT_OUTCOME, params![intent_id], |row| {
             Ok((
                 row.get(0)?,
@@ -571,17 +633,20 @@ pub(crate) fn select_intent_row_tx(
         .transpose()
 }
 
+/// Decodes one `paired_device` row. The wire projection is non-null: an
+/// approval always stores a freshly minted opaque wire, so a row without one
+/// is unreadable rather than a legacy identity rendering.
 pub(crate) fn decode_device_record(
     device_text: &str,
     descriptor: String,
     paired_text: &str,
-    wire: Option<String>,
+    wire: String,
 ) -> Result<DeviceRecord, String> {
-    let paired_at = WallClockWithTz::parse_rfc3339(paired_text)
+    let paired_at = decode_wall_clock(paired_text)
         .map_err(|_| String::from("malformed device pairing timestamp"))?;
     Ok(DeviceRecord {
         id: DeviceId(decode_id(device_text)?),
-        wire: wire.unwrap_or_else(|| device_text.to_owned()),
+        wire,
         descriptor,
         paired_at,
     })
@@ -593,7 +658,7 @@ pub(crate) fn decode_pending_pairing(
     requested_text: &str,
     origin_connection: String,
 ) -> Result<PendingPairing, String> {
-    let requested_at = WallClockWithTz::parse_rfc3339(requested_text)
+    let requested_at = decode_wall_clock(requested_text)
         .map_err(|_| String::from("malformed pairing request timestamp"))?;
     Ok(PendingPairing {
         pending_id,
@@ -607,20 +672,10 @@ pub(crate) fn credential_pair_is_blank(provider: &str, label: &str) -> bool {
     provider.trim().is_empty() || label.trim().is_empty()
 }
 
-pub(crate) fn decode_pending_credential(
-    provider: String,
-    label: String,
-    requested_text: &str,
-) -> Result<PendingCredentialApproval, String> {
-    let requested_at = WallClockWithTz::parse_rfc3339(requested_text)
-        .map_err(|_| String::from("malformed credential approval timestamp"))?;
-    Ok(PendingCredentialApproval {
-        provider,
-        label,
-        requested_at,
-    })
-}
-
+/// `None` command text means no replay key; `None` wire projection is
+/// unreadable stored state (every current writer persists one); the
+/// incarnation appears only when both counter and random are present and
+/// decode.
 pub(crate) fn decode_history_message(
     companion: CompanionId,
     row: HistoryRow,
@@ -634,15 +689,14 @@ pub(crate) fn decode_history_message(
         at_text,
         generation_raw,
         command_text,
-        stored_local_id,
         round_wire,
         round_intent_kind,
         round_intent_ref,
         client_counter,
         client_random,
     } = row;
-    let at = WallClockWithTz::parse_rfc3339(&at_text)
-        .map_err(|_| String::from("malformed timeline timestamp"))?;
+    let at =
+        decode_wall_clock(&at_text).map_err(|_| String::from("malformed timeline timestamp"))?;
     let mut command_id = None;
     if let Some(text) = command_text.as_deref() {
         command_id = Some(CommandId(decode_id(text)?));
@@ -668,7 +722,6 @@ pub(crate) fn decode_history_message(
         round_wire,
         round_intent,
         incarnation,
-        local_id: stored_local_id,
     })
 }
 
@@ -744,6 +797,10 @@ pub(crate) fn decode_hint(
     })
 }
 
+/// Named fields keep column order in exactly one place:
+/// [`HistoryRow::from_row`]. The readers (`lookup_command`, `load_message`,
+/// `load_timeline`, `load_recent_timeline`, and `append_history`'s command
+/// lookup) share the column order through that constructor.
 pub(crate) struct HistoryRow {
     message_text: String,
     round_text: String,
@@ -753,7 +810,6 @@ pub(crate) struct HistoryRow {
     at_text: String,
     generation_raw: i64,
     command_text: Option<String>,
-    stored_local_id: Option<String>,
     round_wire: Option<String>,
     round_intent_kind: Option<String>,
     round_intent_ref: Option<String>,
@@ -772,12 +828,11 @@ impl HistoryRow {
             at_text: row.get(5)?,
             generation_raw: row.get(6)?,
             command_text: row.get(7)?,
-            stored_local_id: row.get(8)?,
-            round_wire: row.get(9)?,
-            round_intent_kind: row.get(10)?,
-            round_intent_ref: row.get(11)?,
-            client_counter: row.get(12)?,
-            client_random: row.get(13)?,
+            round_wire: row.get(8)?,
+            round_intent_kind: row.get(9)?,
+            round_intent_ref: row.get(10)?,
+            client_counter: row.get(11)?,
+            client_random: row.get(12)?,
         })
     }
 }
