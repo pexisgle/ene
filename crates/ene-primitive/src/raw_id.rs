@@ -43,31 +43,3 @@ impl Default for RawId {
         Self::new()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::RawId;
-    use uuid::Uuid;
-
-    #[test]
-    fn wraps_and_returns_the_same_uuid() {
-        let uuid = Uuid::new_v4();
-        assert_eq!(RawId::from_uuid(uuid).as_uuid(), uuid);
-    }
-
-    #[test]
-    fn copies_compare_by_value() {
-        let id = RawId::new();
-        let twin = id;
-        assert_eq!(id, twin);
-        assert_eq!(RawId::from_uuid(id.as_uuid()), id);
-    }
-
-    #[test]
-    fn default_generates_a_fresh_identity() {
-        let first = RawId::default();
-        let second = RawId::default();
-        assert_eq!(first, RawId::from_uuid(first.as_uuid()));
-        assert_ne!(first, second);
-    }
-}

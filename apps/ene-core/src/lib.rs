@@ -63,9 +63,6 @@ pub mod task_run;
 pub mod transient_erasure;
 pub mod usage;
 
-#[cfg(test)]
-pub(crate) mod test_support;
-
 use std::sync::{Mutex as StdMutex, MutexGuard};
 
 /// Locks a `std` mutex, recovering from poisoning.

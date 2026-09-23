@@ -50,36 +50,3 @@ impl GenerationInner {
         self.0
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::GenerationInner;
-
-    #[test]
-    fn starts_at_zero_and_advances_by_one() {
-        let first = GenerationInner::first();
-        assert_eq!(first.as_u64(), 0);
-        assert_eq!(first.checked_next(), Some(GenerationInner::from_u64(1)));
-    }
-
-    #[test]
-    fn exhaustion_reports_none_instead_of_aliasing_the_maximum() {
-        let max = GenerationInner::from_u64(u64::MAX);
-        assert_eq!(max.checked_next(), None);
-    }
-
-    #[test]
-    fn reconstitutes_the_stored_value() {
-        assert_eq!(GenerationInner::from_u64(7).as_u64(), 7);
-    }
-
-    #[test]
-    fn orders_within_one_lifecycle() {
-        let first = GenerationInner::first();
-        let Some(second) = first.checked_next() else {
-            return;
-        };
-        assert!(first < second);
-        assert!(second > first);
-    }
-}

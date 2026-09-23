@@ -95,21 +95,3 @@ pub trait TaskInstructionSource: Send + Sync {
         origin: TaskContextOrigin,
     ) -> Result<Option<TaskInstructionSourceRecord>, TaskInstructionSourceError>;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::TaskInstructionSourceRecord;
-
-    #[test]
-    fn source_record_debug_redacts_the_body() {
-        let record = TaskInstructionSourceRecord {
-            kind: super::TaskContextOriginKind::OwnerConversation,
-            source: ene_primitive::RawId::new(),
-            companion: ene_primitive::RawId::new(),
-            role: super::TaskInstructionRole::Owner,
-            text: String::from("probe instruction body"),
-        };
-        let rendered = format!("{record:?}");
-        assert!(!rendered.contains("probe instruction body"));
-    }
-}

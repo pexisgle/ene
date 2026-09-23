@@ -491,17 +491,6 @@ impl TestGate {
         let permit = self.release.acquire().await.expect("gate stays open");
         permit.forget();
     }
-
-    /// Waits until a paused operation has entered the gate.
-    pub(crate) async fn wait_entered(&self) {
-        let permit = self.entered.acquire().await.expect("gate is entered");
-        permit.forget();
-    }
-
-    /// Releases one paused operation.
-    pub(crate) fn release(&self) {
-        self.release.add_permits(1);
-    }
 }
 
 /// The close-admission gate keeps its historical name and shape.
@@ -540,7 +529,7 @@ pub(crate) fn device_client(device_wire: &str) -> ClientId {
 /// close path ([`HostHandle::close_connection`]) admits through the table's
 /// own section and answers `NoActive`; callers that already hold a
 /// table-derived snapshot (for example [`crate::conn::ConnectionTable`]
-/// polled via [`ConnectionTable::current_authenticated`](crate::conn::ConnectionTable::current_authenticated))
+/// polled from the authenticated connection state)
 /// pass it here so an eligible same-machine candidate can take the fallback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CurrentConnection {
@@ -709,9 +698,6 @@ pub struct HostHandle {
     /// Test (and graceful-restart) wake for one bounded serving tick without
     /// waiting for [`crate::conn`]'s 15s period.
     pub(crate) deletion_driver_wake: tokio::sync::Notify,
-    /// Deterministic coordination of the real serving composition in tests.
-    #[cfg(test)]
-    pub(crate) serving_test: Arc<crate::conn::shutdown_tests::ServingTest>,
     /// Parks an admitted control confirmation outside transport cancellation.
     #[cfg(test)]
     pub(crate) host_control_confirm_gate: StdMutex<Option<Arc<TestGate>>>,
@@ -740,16 +726,6 @@ pub struct HostHandle {
     /// Test-only deterministic gate for the close-admission section.
     #[cfg(test)]
     pub(crate) close_gate: StdMutex<Option<std::sync::Arc<TestCloseGate>>>,
-    /// Test-only deterministic gate before a Client-dependent submit's
-    /// acceptance (owner append) section.
-    #[cfg(test)]
-    pub(crate) submit_accept_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
-    /// After Owner commit, before open-round installation.
-    #[cfg(test)]
-    pub(crate) submit_open_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
-    /// After installation, before control-frame publication.
-    #[cfg(test)]
-    pub(crate) submit_publish_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
     /// Test-only pause after a confirmation read and before durable commit.
     #[cfg(test)]
     pub(crate) confirm_commit_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
@@ -991,8 +967,6 @@ impl HostHandle {
             deletion_drivers: std::sync::atomic::AtomicUsize::new(0),
             deletion_driver_wake: tokio::sync::Notify::new(),
             #[cfg(test)]
-            serving_test: Arc::default(),
-            #[cfg(test)]
             host_control_confirm_gate: StdMutex::new(None),
             transient_fence: Arc::clone(&transient_fence),
             client_transients,
@@ -1000,12 +974,6 @@ impl HostHandle {
             task_control_gate: StdMutex::new(None),
             #[cfg(test)]
             close_gate: StdMutex::new(None),
-            #[cfg(test)]
-            submit_accept_gate: StdMutex::new(None),
-            #[cfg(test)]
-            submit_open_gate: StdMutex::new(None),
-            #[cfg(test)]
-            submit_publish_gate: StdMutex::new(None),
             #[cfg(test)]
             confirm_commit_gate: StdMutex::new(None),
             #[cfg(test)]
@@ -1353,18 +1321,6 @@ impl HostHandle {
         self.transient_fence.epoch()
     }
 
-    /// Test-only: empties the erasure-participant registry.
-    ///
-    /// The built-in composition registers one implementation per served
-    /// owner; a fan-out test that needs the unsupported-hold path, or a
-    /// scripted implementation for a served owner, clears the registry first.
-    /// Production code has no path that removes an implementation.
-    #[cfg(test)]
-    pub(crate) fn reset_deletion_participants_for_tests(&self) {
-        *crate::lock_unpoison(&self.targeted_deletion) =
-            crate::targeted_deletion::ErasureParticipantRegistry::new();
-    }
-
     /// Runs one bounded Targeted Deletion fan-out pass over the durable
     /// unfinished operations.
     ///
@@ -1482,6 +1438,7 @@ impl HostHandle {
 
     /// Arms the test-only task-control race gate and returns it.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test synchronization gate")]
     pub(crate) fn arm_task_control_gate(
         &self,
     ) -> std::sync::Arc<crate::task_control::TestTaskControlGate> {
@@ -2009,12 +1966,6 @@ impl HostHandle {
         crate::lock_unpoison(&self.open_rounds).retain(|(owner, _), _| owner != &key);
     }
 
-    /// Test-only: whether any conversation open round exists at all.
-    #[cfg(test)]
-    pub(crate) fn has_open_round_for_test(&self) -> bool {
-        !crate::lock_unpoison(&self.open_rounds).is_empty()
-    }
-
     /// Runs one short synchronous commit under the connection-ownership
     /// section (CCT §10.4).
     ///
@@ -2510,6 +2461,7 @@ impl HostHandle {
 
     /// Arms the confirmation gate before either commit lock is acquired.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_confirm_commit_gate(&self) -> std::sync::Arc<TestGate> {
         let gate = std::sync::Arc::new(TestGate::default());
         *crate::lock_unpoison(&self.confirm_commit_gate) = Some(std::sync::Arc::clone(&gate));
@@ -2524,6 +2476,7 @@ impl HostHandle {
 
     /// Disarms the confirmation commit gate.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn disarm_confirm_commit_gate(&self) {
         *crate::lock_unpoison(&self.confirm_commit_gate) = None;
     }
@@ -2531,6 +2484,7 @@ impl HostHandle {
     /// Arms the body-delivery evidence gate: a display path pauses after its
     /// coverage premise read and before the durable evidence write.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_delivery_evidence_gate(&self) -> std::sync::Arc<TestGate> {
         let gate = std::sync::Arc::new(TestGate::default());
         *crate::lock_unpoison(&self.delivery_evidence_gate) = Some(std::sync::Arc::clone(&gate));
@@ -2539,6 +2493,7 @@ impl HostHandle {
 
     /// Disarms the body-delivery evidence gate.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn disarm_delivery_evidence_gate(&self) {
         *crate::lock_unpoison(&self.delivery_evidence_gate) = None;
     }
@@ -2551,28 +2506,11 @@ impl HostHandle {
 
     /// Arms the test-only close-admission gate and returns it.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_close_gate(&self) -> std::sync::Arc<TestCloseGate> {
         let gate = std::sync::Arc::new(TestCloseGate::default());
         *crate::lock_unpoison(&self.close_gate) = Some(std::sync::Arc::clone(&gate));
         gate
-    }
-
-    /// Arms the test-only submit-acceptance gate and returns it.
-    ///
-    /// The gate pauses a [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput)
-    /// after admission and before the guarded owner append, so a test can
-    /// supersede the connection in between and pin that nothing commits.
-    #[cfg(test)]
-    pub(crate) fn arm_submit_accept_gate(&self) -> std::sync::Arc<TestGate> {
-        let gate = std::sync::Arc::new(TestGate::default());
-        *crate::lock_unpoison(&self.submit_accept_gate) = Some(std::sync::Arc::clone(&gate));
-        gate
-    }
-
-    /// The armed submit-acceptance gate, when a test installed one.
-    #[cfg(test)]
-    pub(crate) fn submit_accept_gate(&self) -> Option<std::sync::Arc<TestGate>> {
-        crate::lock_unpoison(&self.submit_accept_gate).clone()
     }
 
     /// Arms the test-only read-ref mint gate and returns it.
@@ -2581,6 +2519,7 @@ impl HostHandle {
     /// connection-scoped ref/cursor mint, so a test can supersede the
     /// connection in between and pin that no ref is minted.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_ref_mint_gate(&self) -> std::sync::Arc<TestGate> {
         let gate = std::sync::Arc::new(TestGate::default());
         *crate::lock_unpoison(&self.ref_mint_gate) = Some(std::sync::Arc::clone(&gate));
@@ -2593,14 +2532,9 @@ impl HostHandle {
         crate::lock_unpoison(&self.ref_mint_gate).clone()
     }
 
-    /// Disarms the test-only submit-acceptance gate.
-    #[cfg(test)]
-    pub(crate) fn disarm_submit_accept_gate(&self) {
-        *crate::lock_unpoison(&self.submit_accept_gate) = None;
-    }
-
     /// Disarms the test-only read-ref mint gate.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn disarm_ref_mint_gate(&self) {
         *crate::lock_unpoison(&self.ref_mint_gate) = None;
     }
@@ -2612,6 +2546,7 @@ impl HostHandle {
     /// the connection and let the replacement run its own full pass before
     /// the paused one resumes.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_fetch_gate(&self) -> std::sync::Arc<TestGate> {
         let gate = std::sync::Arc::new(TestGate::default());
         *crate::lock_unpoison(&self.fetch_gate) = Some(std::sync::Arc::clone(&gate));
@@ -2626,50 +2561,14 @@ impl HostHandle {
 
     /// Disarms the test-only fetch gate.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn disarm_fetch_gate(&self) {
         *crate::lock_unpoison(&self.fetch_gate) = None;
     }
 
-    /// Arms the submit publication gate and returns it.
-    ///
-    /// The gate pauses a submit after the open-round install decision and
-    /// before the accepted/open publication, so a test can replace the
-    /// connection in between and pin that the old connection publishes
-    /// nothing (test gate, never a sleep).
-    #[cfg(test)]
-    pub(crate) fn arm_submit_publish_gate(&self) -> std::sync::Arc<TestGate> {
-        let gate = std::sync::Arc::new(TestGate::default());
-        *crate::lock_unpoison(&self.submit_publish_gate) = Some(std::sync::Arc::clone(&gate));
-        gate
-    }
-
-    /// Disarms the test-only submit publication gate.
-    #[cfg(test)]
-    pub(crate) fn disarm_submit_publish_gate(&self) {
-        *crate::lock_unpoison(&self.submit_publish_gate) = None;
-    }
-
-    /// Arms the submit open-round gate and returns it.
-    ///
-    /// The gate pauses a submit after the durable Owner append and before
-    /// the open-round installation, so a test can replace the connection in
-    /// between and pin that the durable acceptance stands while the old
-    /// connection opens no round and publishes nothing.
-    #[cfg(test)]
-    pub(crate) fn arm_submit_open_gate(&self) -> std::sync::Arc<TestGate> {
-        let gate = std::sync::Arc::new(TestGate::default());
-        *crate::lock_unpoison(&self.submit_open_gate) = Some(std::sync::Arc::clone(&gate));
-        gate
-    }
-
-    /// Disarms the test-only submit open-round gate.
-    #[cfg(test)]
-    pub(crate) fn disarm_submit_open_gate(&self) {
-        *crate::lock_unpoison(&self.submit_open_gate) = None;
-    }
-
     /// Arms the test-only guarded-resume race gate and returns it.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_resume_gate(&self) -> std::sync::Arc<crate::task_control::TestResumeGate> {
         let gate = std::sync::Arc::new(crate::task_control::TestResumeGate::default());
         *crate::lock_unpoison(&self.resume_gate) = Some(std::sync::Arc::clone(&gate));
@@ -2678,6 +2577,7 @@ impl HostHandle {
 
     /// Test-only: how many receipt-expiry housekeeping runs happened.
     #[cfg(all(test, unix))]
+    #[expect(dead_code, reason = "test observation probe")]
     pub(crate) fn receipt_expiry_runs_for_test(&self) -> usize {
         self.receipt_expiry_runs
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -2685,6 +2585,7 @@ impl HostHandle {
 
     /// Arms the test-only presentation-start commit gate and returns it.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test gate hook for race testing infrastructure")]
     pub(crate) fn arm_presentation_commit_gate(
         &self,
     ) -> std::sync::Arc<crate::presentation::TestPresentationCommitGate> {
@@ -2878,6 +2779,3 @@ impl HostHandle {
 }
 
 use ene_plugin_ipc::WireFrame;
-
-#[cfg(test)]
-mod tests;

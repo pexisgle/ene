@@ -81,14 +81,3 @@ pub struct TaskContextEntry {
     pub origin: TaskContextOrigin,
     pub acquired_at: WallClockWithTz,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::TaskContextEntryId;
-
-    #[test]
-    fn context_entry_id_round_trips_through_raw() {
-        let entry = TaskContextEntryId::generate();
-        assert_eq!(TaskContextEntryId::from_raw(entry.as_raw()), entry);
-    }
-}

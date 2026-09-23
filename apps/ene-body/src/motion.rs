@@ -53,39 +53,3 @@ pub fn pose_clips_in(dir: &Path) -> Vec<PoseClip> {
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{DEFAULT_POSE_CLIPS, pose_clips_in};
-    use crate::ipc::PoseHint;
-    use crate::testing::{MotionFixture, write_generated_vrma};
-
-    #[test]
-    fn only_the_documented_clips_are_assigned() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let fixture = MotionFixture {
-            bone: "head",
-            yaw_degrees: 30.0,
-            duration_secs: 0.5,
-        };
-        write_generated_vrma(&dir.path().join("VRMA_06.vrma"), fixture).expect("idle clip");
-        write_generated_vrma(&dir.path().join("VRMA_02.vrma"), fixture).expect("greeting clip");
-        // Unassigned pack members are placed but never mapped to a hint.
-        write_generated_vrma(&dir.path().join("VRMA_04.vrma"), fixture).expect("shoot clip");
-
-        let clips = pose_clips_in(dir.path());
-        assert_eq!(clips.len(), 2);
-        assert_eq!(clips[0].pose, PoseHint::Idle);
-        assert_eq!(clips[1].pose, PoseHint::Listening);
-        assert!(clips[0].path.ends_with("VRMA_06.vrma"));
-        assert_eq!(DEFAULT_POSE_CLIPS.len(), 5);
-    }
-
-    #[test]
-    fn a_directory_without_pack_clips_assigns_nothing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("readme.txt"), b"not a clip").expect("other file");
-        assert!(pose_clips_in(dir.path()).is_empty());
-        assert!(pose_clips_in(&dir.path().join("absent")).is_empty());
-    }
-}

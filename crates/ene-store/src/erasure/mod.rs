@@ -75,11 +75,5 @@ fn count_occurrences(text: &str, target: &str) -> u64 {
     text.matches(target).count() as u64
 }
 
-#[cfg(test)]
-pub(crate) use task_action_inference::{ERASED_LOCATOR, ROWS_PER_DEMAND};
-
-/// Test-support alias of the system-wide mechanical probe (see
-/// [`remainder::system_remainder`]). Tests assert `0` after an erasure pass
-/// instead of re-implementing the canonical content-surface list.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub(crate) use remainder::system_remainder as exact_remainder_probe;

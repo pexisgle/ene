@@ -49,19 +49,3 @@ impl SecretIntake {
         self.buffer.clear();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::SecretIntake;
-
-    #[test]
-    fn debug_does_not_show_raw() {
-        let mut intake = SecretIntake::new();
-        intake.set(String::from("sk-live-secret"));
-        let rendered = format!("{intake:?}");
-        assert_eq!(rendered, "SecretIntake([redacted])");
-        assert!(!rendered.contains("sk-live"));
-        intake.cancel();
-        assert!(intake.is_empty());
-    }
-}

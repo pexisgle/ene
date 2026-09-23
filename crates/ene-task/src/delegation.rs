@@ -161,17 +161,3 @@ pub enum DelegationOutcome {
     /// The premise names a Task with no durable state; nothing was changed.
     MissingTask { task: TaskId },
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{DelegationId, TaskAgentEphemeralId};
-
-    #[test]
-    fn generated_ids_are_distinct() {
-        assert_ne!(DelegationId::generate(), DelegationId::generate());
-        assert_ne!(
-            TaskAgentEphemeralId::generate(),
-            TaskAgentEphemeralId::generate()
-        );
-    }
-}

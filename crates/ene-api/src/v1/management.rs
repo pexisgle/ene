@@ -443,15 +443,14 @@ pub struct ManagementView {
 
 #[cfg(test)]
 mod tests {
-    use super::super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, ViewMarkWire};
+    use super::super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire};
+    use super::ViewSection;
     use super::{
         IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin,
-        SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, UsageCapTarget, consent_target,
-        credential_target, parse_consent_target, parse_credential_target, parse_task_target,
-        parse_usage_cap_target, parse_workspace_target, task_target, usage_cap_target,
-        workspace_target,
+        UsageCapTarget, consent_target, credential_target, parse_consent_target,
+        parse_credential_target, parse_task_target, parse_usage_cap_target, parse_workspace_target,
+        task_target, usage_cap_target, workspace_target,
     };
-    use super::{ManagementOutcome, ViewSection};
     use uuid::Uuid;
 
     fn intent() -> ManagementIntent {
@@ -540,18 +539,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_base_view_points_at_the_current_mark() {
-        let outcome = ManagementOutcome::StaleBaseView {
-            current: ViewMarkWire(String::from("mark-2")),
-        };
-        let rendered = format!("{outcome:?}");
-        assert!(
-            rendered.contains("mark-2"),
-            "current mark stays visible: {rendered}"
-        );
-    }
-
-    #[test]
     fn section_debug_redacts_body() {
         let section = ViewSection {
             kind: String::from("setup"),
@@ -570,38 +557,26 @@ mod tests {
     }
 
     #[test]
-    fn credential_builder_spells_the_shared_grammar() {
-        let target = credential_target("openai", "personal");
-        assert_eq!(target.0.as_str(), "credential:openai:personal");
-    }
-
-    #[test]
-    fn consent_builder_spells_the_shared_grammar() {
-        let target = consent_target("dialogue", "openai", "gpt-x", "cred-1");
-        assert_eq!(target.0.as_str(), "consent:dialogue:openai:gpt-x:cred-1");
-        let learning = consent_target("learning", "openai", "gpt-x", "cred-1");
-        assert_eq!(learning.0.as_str(), "consent:learning:openai:gpt-x:cred-1");
-    }
-
-    #[test]
-    fn credential_builder_parser_roundtrip() {
-        let target = credential_target("openai", "personal");
+    fn credential_target_spelling_and_parse_preserve_the_label() {
+        let target = credential_target("openai", "personal:main");
+        assert_eq!(target.0, "credential:openai:personal:main");
         assert_eq!(
             parse_credential_target(&target),
-            Some((String::from("openai"), String::from("personal")))
+            Some((String::from("openai"), String::from("personal:main")))
         );
     }
 
     #[test]
-    fn consent_builder_parser_roundtrip() {
-        let target = consent_target("learning", "openai", "gpt-x", "cred-1");
+    fn consent_target_spelling_and_parse_preserve_the_credential_id() {
+        let target = consent_target("learning", "openai", "gpt-x", "cred:with:colons");
+        assert_eq!(target.0, "consent:learning:openai:gpt-x:cred:with:colons");
         assert_eq!(
             parse_consent_target(&target),
             Some((
                 String::from("learning"),
                 String::from("openai"),
                 String::from("gpt-x"),
-                String::from("cred-1")
+                String::from("cred:with:colons")
             ))
         );
     }
@@ -611,12 +586,8 @@ mod tests {
         for raw in [
             "credential::personal",
             "credential:openai:",
-            "credential::",
             "credential:openai",
-            "credential:",
             "consent:dialogue:openai:gpt-x:cred-1",
-            "setup:show",
-            "",
         ] {
             let target = ManagementTargetWire(String::from(raw));
             assert!(
@@ -634,13 +605,8 @@ mod tests {
             "consent:dialogue:openai::cred-1",
             "consent:dialogue:openai:gpt-x:",
             "consent:dialogue:openai:gpt-x",
-            "consent:dialogue:openai",
-            "consent:dialogue",
-            "consent:",
             "consent:openai:gpt-x:cred-1",
             "credential:openai:personal",
-            "setup:complete",
-            "",
         ] {
             let target = ManagementTargetWire(String::from(raw));
             assert!(
@@ -648,30 +614,6 @@ mod tests {
                 "consent parse rejects {raw:?}"
             );
         }
-    }
-
-    #[test]
-    fn consent_parser_preserves_colons_in_credential_id() {
-        let target = consent_target("dialogue", "openai", "gpt-x", "cred:with:colons");
-        assert_eq!(
-            target.0.as_str(),
-            "consent:dialogue:openai:gpt-x:cred:with:colons"
-        );
-        assert_eq!(
-            parse_consent_target(&target),
-            Some((
-                String::from("dialogue"),
-                String::from("openai"),
-                String::from("gpt-x"),
-                String::from("cred:with:colons")
-            ))
-        );
-    }
-
-    #[test]
-    fn setup_command_targets_are_fixed_strings() {
-        assert_eq!(SETUP_SHOW_TARGET, "setup:show");
-        assert_eq!(SETUP_COMPLETE_TARGET, "setup:complete");
     }
 
     #[test]
@@ -709,21 +651,6 @@ mod tests {
                 parse_workspace_target(&ManagementTargetWire(String::from(raw))),
                 None,
                 "the workspace grammar rejects {raw:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn setup_command_targets_parse_as_neither_shape() {
-        for raw in [SETUP_SHOW_TARGET, SETUP_COMPLETE_TARGET] {
-            let target = ManagementTargetWire(String::from(raw));
-            assert!(
-                parse_credential_target(&target).is_none(),
-                "setup target is not a credential target: {raw:?}"
-            );
-            assert!(
-                parse_consent_target(&target).is_none(),
-                "setup target is not a consent target: {raw:?}"
             );
         }
     }

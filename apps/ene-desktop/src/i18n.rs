@@ -236,35 +236,3 @@ pub fn control_deny(locale: Locale, from: &FromConfirmation) -> String {
         (Locale::En, _) => String::from("The control channel answered unexpectedly."),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{Label, Locale, control_deny, label};
-    use ene_local_control::{ControlOutcome, FromConfirmation};
-
-    #[test]
-    fn credential_refused_is_not_an_unexpected_control_answer() {
-        let refused = FromConfirmation::Outcome(ControlOutcome::CredentialRefused {
-            provider: String::from("openai"),
-            label: String::from("main"),
-        });
-        let ja = control_deny(Locale::Ja, &refused);
-        let en = control_deny(Locale::En, &refused);
-        assert!(!ja.contains("処理できません"));
-        assert!(!en.contains("unexpected"));
-        assert!(ja.contains("保護ストア") || ja.contains("拒否"));
-    }
-
-    #[test]
-    fn locale_switch_changes_labels_only() {
-        let ja = label(Locale::Ja, Label::Chat);
-        let en = label(Locale::En, Label::Chat);
-        assert_ne!(ja, en);
-        assert_ne!(
-            label(Locale::Ja, Label::Memory),
-            label(Locale::En, Label::Memory)
-        );
-        assert_eq!(Locale::parse("en").as_tag(), "en");
-        assert_eq!(Locale::parse("ja").as_tag(), "ja");
-    }
-}

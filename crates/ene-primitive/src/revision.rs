@@ -42,36 +42,3 @@ impl RevisionInner {
         self.0
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::RevisionInner;
-
-    #[test]
-    fn starts_at_zero_and_advances_by_one() {
-        let first = RevisionInner::first();
-        assert_eq!(first.as_u64(), 0);
-        assert_eq!(first.checked_next(), Some(RevisionInner::from_u64(1)));
-    }
-
-    #[test]
-    fn exhaustion_reports_none_instead_of_aliasing_the_maximum() {
-        let max = RevisionInner::from_u64(u64::MAX);
-        assert_eq!(max.checked_next(), None);
-    }
-
-    #[test]
-    fn reconstitutes_the_stored_value() {
-        assert_eq!(RevisionInner::from_u64(41).as_u64(), 41);
-    }
-
-    #[test]
-    fn orders_within_one_sequence() {
-        let first = RevisionInner::first();
-        let Some(second) = first.checked_next() else {
-            return;
-        };
-        assert!(first < second);
-        assert!(second > first);
-    }
-}

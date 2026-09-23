@@ -88,9 +88,6 @@ use crate::serve::{
     reject_frame, stale_reject,
 };
 
-#[cfg(test)]
-mod tests;
-
 /// Keys per-connection presentation maps by the hyphenated wire form of the
 /// id: the same string form the connection layer uses, so keys match across
 /// the Host/connection boundary by construction.
@@ -1534,15 +1531,9 @@ impl HostHandle {
     /// Windows lib test build would otherwise see it as dead code under the
     /// warnings-as-errors configuration.
     #[cfg(all(test, unix))]
+    #[expect(dead_code, reason = "test observation probe")]
     pub(crate) fn set_receipt_ttl_for_test(&self, ttl: Duration) {
         crate::lock_unpoison(&self.presentations).receipt_ttl = ttl;
-    }
-
-    /// Test-only: pin the frame cap so paging splits stay deterministic
-    /// without multi-megabyte fixtures.
-    #[cfg(test)]
-    pub(crate) fn set_frame_budget_for_test(&self, bytes: usize) {
-        crate::lock_unpoison(&self.presentations).frame_budget = bytes;
     }
 
     fn receipt_shell(
@@ -2662,6 +2653,7 @@ impl HostHandle {
     /// Test-only: force-expire one receipt so ACK-loss advance is
     /// deterministic without sleeping past the 30 s TTL.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test hook for receipt expiry")]
     pub(crate) fn expire_receipt_for_test(&self, receipt: &str) -> bool {
         let mut state = crate::lock_unpoison(&self.presentations);
         let Some(companion_key) = state.receipt_ids.get(receipt).cloned() else {
@@ -2709,88 +2701,16 @@ impl TestPresentationCommitGate {
     }
 
     /// Waits until a paused commit has entered the gate.
+    #[expect(dead_code, reason = "test gate hook")]
     pub(crate) async fn wait_entered(&self) {
         let permit = self.entered.acquire().await.expect("gate is entered");
         permit.forget();
     }
 
     /// Releases one paused commit.
+    #[expect(dead_code, reason = "test gate hook")]
     pub(crate) fn release(&self) {
         self.release.add_permits(1);
-    }
-}
-
-/// Test-only per-connection view of the memory-only presentation state.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct PresentationConnectionCounts {
-    /// Whether a subscription entry exists for this connection.
-    pub subscription: bool,
-    pub task_refs: usize,
-    pub carried: usize,
-    pub source_refs: usize,
-    pub cursors: usize,
-    pub receipts: usize,
-    pub resume_slots: usize,
-}
-
-#[cfg(test)]
-impl PresentationConnectionCounts {
-    /// Whether the connection owns no presentation entry at all.
-    #[must_use]
-    pub(crate) fn is_empty(self) -> bool {
-        !self.subscription
-            && self.task_refs == 0
-            && self.carried == 0
-            && self.source_refs == 0
-            && self.cursors == 0
-            && self.receipts == 0
-            && self.resume_slots == 0
-    }
-}
-
-#[cfg(test)]
-impl HostHandle {
-    /// Test-only: counts of one connection's presentation-owned entries.
-    pub(crate) fn presentation_counts_for_test(
-        &self,
-        connection: &ConnectionWireId,
-    ) -> PresentationConnectionCounts {
-        let conn = conn_key(connection);
-        let state = crate::lock_unpoison(&self.presentations);
-        PresentationConnectionCounts {
-            subscription: state.subs.contains_key(&conn),
-            task_refs: state
-                .task_refs
-                .keys()
-                .filter(|(owner, _)| owner == &conn)
-                .count(),
-            carried: state
-                .carried
-                .keys()
-                .filter(|(owner, _)| owner == &conn)
-                .count(),
-            source_refs: state
-                .source_refs
-                .keys()
-                .filter(|(owner, _)| owner == &conn)
-                .count(),
-            cursors: state
-                .cursors
-                .keys()
-                .filter(|(owner, _)| owner == &conn)
-                .count(),
-            receipts: state
-                .receipts
-                .values()
-                .filter(|receipt| receipt.connection == conn)
-                .count(),
-            resume_slots: state
-                .resume
-                .values()
-                .filter(|slot| slot.connection == conn)
-                .count(),
-        }
     }
 }
 

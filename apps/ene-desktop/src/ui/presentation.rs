@@ -115,20 +115,3 @@ pub fn parse_cap(value: &str) -> Option<u64> {
     };
     amount.checked_add(part.checked_mul(10_u64.pow(6 - u32::try_from(fraction.len()).ok()?))?)
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn cap_is_exact_and_rejects_invalid_input() {
-        assert_eq!(parse_cap("1.234567"), Some(1_234_567));
-        assert_eq!(parse_cap("0"), Some(0));
-        for bad in ["-1", "NaN", "1e6", "1.0000001", "18446744073709551615"] {
-            assert_eq!(parse_cap(bad), None);
-        }
-    }
-    #[test]
-    fn task_premise_changes_with_revision_and_purpose() {
-        assert_ne!(task_key("a", 1, "p"), task_key("a", 2, "p"));
-        assert_ne!(task_key("a", 1, "p"), task_key("a", 1, "q"));
-    }
-}

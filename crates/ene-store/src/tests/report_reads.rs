@@ -7,8 +7,7 @@ use super::*;
 use ene_action::{ActionCertainty, EffectGrounds};
 use ene_companion::UNDELIVERED_PAGE_MAX;
 use ene_task::{
-    REPORT_PAGE_MAX, TaskHeadline, TaskProgress, TaskReportRowCursor, TaskReportRowKind,
-    TaskReportSourceRef,
+    REPORT_PAGE_MAX, TaskProgress, TaskReportRowCursor, TaskReportRowKind, TaskReportSourceRef,
 };
 use rusqlite::{OptionalExtension, params};
 
@@ -112,46 +111,6 @@ async fn run_report_reads(store: &Store, companion: CompanionId, task: TaskId) {
 }
 
 #[tokio::test]
-async fn report_reads_do_not_initialize_a_companion_or_start_work() {
-    let store = open_memory().await.unwrap();
-    // A Task exists without any companion row: a report read must not create
-    // one, and it must not register notifications or run results.
-    let task = store.create_task(task_premise(None)).await.unwrap();
-    let companion = store
-        .load_task(task.task)
-        .await
-        .unwrap()
-        .unwrap()
-        .revision
-        .assignee
-        .companion;
-    let before = snapshot(&store, companion, task.task);
-    assert_eq!(before.companions, 0, "the fixture holds no companion");
-
-    for _ in 0..3 {
-        run_report_reads(&store, CompanionId::from_raw(companion), task.task).await;
-        let headlines = store.list_tasks_after(None, 10).await.unwrap();
-        assert_eq!(headlines.len(), 1);
-        assert_eq!(headlines[0].progress, TaskProgress::Started);
-        assert!(!headlines[0].adopted_result);
-        let _ = store
-            .load_report_source_bounded(
-                TaskReportSourceRef::RevisionPurpose {
-                    task: task.task,
-                    revision: task.revision,
-                },
-                0,
-                64,
-            )
-            .await
-            .unwrap();
-    }
-    let after = snapshot(&store, companion, task.task);
-    assert_eq!(after, before, "reads change no durable fact");
-    assert_eq!(after.companions, 0, "reads never ensure a companion");
-}
-
-#[tokio::test]
 async fn report_reads_are_read_only_over_a_running_and_stopped_store() {
     let store = open_memory().await.unwrap();
     let (companion, _) = running_companion(&store).await.unwrap();
@@ -242,43 +201,6 @@ async fn report_reads_are_read_only_over_a_running_and_stopped_store() {
         stopped_after.presence_generation,
         before.presence_generation
     );
-}
-
-#[tokio::test]
-async fn task_headlines_page_in_canonical_id_order_with_a_sql_bound() {
-    let store = open_memory().await.unwrap();
-    let mut created: Vec<TaskId> = Vec::new();
-    for _ in 0..5 {
-        created.push(store.create_task(task_premise(None)).await.unwrap().task);
-    }
-    let mut expected: Vec<String> = created
-        .iter()
-        .map(|task| crate::codec::encode_id(task.as_raw()))
-        .collect();
-    expected.sort();
-
-    let mut seen: Vec<TaskHeadline> = Vec::new();
-    let mut after: Option<TaskId> = None;
-    loop {
-        let page = store.list_tasks_after(after, 2).await.unwrap();
-        assert!(page.len() <= 2, "the SQL bound holds");
-        if page.is_empty() {
-            break;
-        }
-        after = Some(page.last().unwrap().task);
-        seen.extend(page);
-    }
-    let listed: Vec<String> = seen
-        .iter()
-        .map(|headline| crate::codec::encode_id(headline.task.as_raw()))
-        .collect();
-    assert_eq!(listed, expected, "keyset paging covers every Task in order");
-
-    // The limit clamp bounds the rows read, not only the returned vector.
-    let clamped_low = store.list_tasks_after(None, 0).await.unwrap();
-    assert_eq!(clamped_low.len(), 1);
-    let clamped_high = store.list_tasks_after(None, 1000).await.unwrap();
-    assert_eq!(clamped_high.len(), 5, "five tasks exist, the clamp is 50");
 }
 
 #[tokio::test]

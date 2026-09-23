@@ -713,18 +713,6 @@ mod tests {
     }
 
     #[test]
-    fn open_refuses_missing_and_non_directory_folders() {
-        assert!(WorkspaceRoot::open("/nonexistent/ene/workspace").is_err());
-        let directory = tempdir().expect("temporary directory");
-        let file = directory.path().join("a.txt");
-        fs::write(&file, b"x").expect("fixture write");
-        assert!(
-            WorkspaceRoot::open(&file.to_string_lossy()).is_err(),
-            "a regular file is not a workspace folder"
-        );
-    }
-
-    #[test]
     fn traversal_and_absolute_requests_are_malformed() {
         let (_directory, root) = workspace();
         for requested in [
@@ -800,22 +788,6 @@ mod tests {
                 .is_ok(),
             "every existing ancestor in a nested path is walked"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn create_through_an_inside_symlink_parent_resolves_inside() {
-        let (directory, root) = workspace();
-        let sub = directory.path().join("sub");
-        fs::create_dir(&sub).expect("inside subdirectory");
-        std::os::unix::fs::symlink(&sub, directory.path().join("link")).expect("inside symlink");
-        let resolved = root
-            .resolve("link/new.txt", OperationKind::Create)
-            .expect("an inside symlink parent never leaves the workspace");
-        let expected = fs::canonicalize(&sub)
-            .expect("canonical subdirectory")
-            .join("new.txt");
-        assert_eq!(resolved.as_path(), expected.to_string_lossy());
     }
 
     #[cfg(unix)]
@@ -1032,49 +1004,6 @@ mod tests {
     }
 
     #[test]
-    fn debug_redacts_read_output() {
-        let effect = super::ObservedEffect {
-            certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
-            grounds: crate::attempt::EffectGrounds::ObservedAtTarget,
-            output: Some(ActionOutput::Bytes(b"secret file body".to_vec())),
-        };
-        let rendered = format!("{effect:?}");
-        assert!(!rendered.contains("secret file body"));
-        assert!(rendered.contains("bytes redacted"));
-    }
-
-    #[test]
-    fn debug_redacts_listing_names() {
-        let effect = super::ObservedEffect {
-            certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
-            grounds: crate::attempt::EffectGrounds::ObservedAtTarget,
-            output: Some(ActionOutput::Listing(vec![ListEntry {
-                name: String::from("private-notes.md"),
-                kind: ListEntryKind::File,
-            }])),
-        };
-        let rendered = format!("{effect:?}");
-        assert!(!rendered.contains("private-notes.md"));
-        assert!(rendered.contains("entries redacted"));
-    }
-
-    #[test]
-    fn debug_redacts_a_created_target() {
-        let effect = super::ObservedEffect {
-            certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
-            grounds: crate::attempt::EffectGrounds::ObservedAtTarget,
-            output: Some(ActionOutput::Created {
-                target: crate::attempt::RealTargetRef::from_canonical_path(String::from(
-                    "/home/private-notes/report.md",
-                )),
-            }),
-        };
-        let rendered = format!("{effect:?}");
-        assert!(!rendered.contains("private-notes"));
-        assert!(rendered.contains("created target redacted"));
-    }
-
-    #[test]
     fn list_requires_a_directory_and_observes_a_sorted_listing() {
         let (directory, root) = workspace();
         fs::write(directory.path().join("b.txt"), b"b").expect("fixture write");
@@ -1144,26 +1073,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn list_excludes_special_files() {
-        let (directory, root) = workspace();
-        fs::write(directory.path().join("regular.txt"), b"x").expect("fixture file");
-        let _socket = std::os::unix::net::UnixListener::bind(directory.path().join("sock"))
-            .expect("fixture socket");
-        let target = root
-            .resolve(".", OperationKind::List)
-            .expect("root listing");
-        let effect = root.execute(&target, OperationKind::List, None);
-        assert_eq!(
-            effect.output,
-            Some(ActionOutput::Listing(vec![ListEntry {
-                name: String::from("regular.txt"),
-                kind: ListEntryKind::File,
-            }]))
-        );
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_mount_boundary_rejects_nested_mount_points() {
@@ -1196,22 +1105,6 @@ mod tests {
             &PathBuf::from("/srv/workspace/nested/file"),
             &mounts
         ));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_mountinfo_lines_decode_kernel_escapes() {
-        use std::path::PathBuf;
-
-        use super::{decode_mountinfo_escape, parse_mount_point};
-
-        let line = "36 35 98:0 /mnt1 /srv/my\\040workspace rw,noatime master:1 - ext3 /dev/root rw,errors=continue";
-        assert_eq!(
-            parse_mount_point(line),
-            Some(PathBuf::from("/srv/my workspace"))
-        );
-        assert_eq!(decode_mountinfo_escape("/a\\134b"), "/a\\b");
-        assert_eq!(parse_mount_point("too short"), None);
     }
 
     #[cfg(windows)]

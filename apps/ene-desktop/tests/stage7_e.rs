@@ -31,7 +31,6 @@ use ene_core::host_control;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
 use ene_credential::MemoryVersionedStore;
 use ene_desktop::body_supervise::BodySupervisor;
-use ene_desktop::measure;
 use ene_desktop::session;
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
@@ -552,27 +551,11 @@ async fn killing_body_leaves_chat_settings_and_cancel_alive() {
         .await
         .expect("settings survive Body kill");
     desktop.open_page(Page::Settings);
-    let cancel = desktop.cancel_displayed_task().await;
-    assert!(
-        cancel.is_ok() || cancel.is_err(),
-        "cancel path stays reachable"
-    );
+    let _cancel = tokio::time::timeout(Duration::from_secs(5), desktop.cancel_displayed_task())
+        .await
+        .expect("cancel path remains responsive");
     assert_eq!(transport.sends(), 1);
     server.shutdown_and_join().await;
-}
-
-#[test]
-fn unmeasured_record_is_not_a_gate_pass() {
-    let record = measure::MeasurementRecord::default();
-    assert!(!record.claims_pass());
-    assert_eq!(record.verdict.label(), "Unmeasured");
-}
-
-#[test]
-fn conversation_ack_hook_stays_in_session() {
-    let src = include_str!("../src/session.rs");
-    assert!(src.contains("ConfirmPresentation"));
-    assert!(src.contains("PresentationStatus::Presented"));
 }
 
 #[tokio::test]

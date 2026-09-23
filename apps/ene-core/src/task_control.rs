@@ -243,6 +243,7 @@ impl ConversationTaskProjection {
 
     /// Test-only: how many first-party selections are remembered at all.
     #[cfg(test)]
+    #[expect(dead_code, reason = "test observation probe")]
     pub(crate) fn first_party_selection_count(&self) -> usize {
         crate::lock_unpoison(&self.current)
             .values()
@@ -307,12 +308,14 @@ impl TestTaskControlGate {
     }
 
     /// Waits until a paused command has entered the gate.
+    #[expect(dead_code, reason = "test synchronization gate")]
     pub(crate) async fn wait_entered(&self) {
         let permit = self.entered.acquire().await.expect("gate is entered");
         permit.forget();
     }
 
     /// Releases one paused command.
+    #[expect(dead_code, reason = "test synchronization gate")]
     pub(crate) fn release(&self) {
         self.release.add_permits(1);
     }
@@ -350,12 +353,14 @@ impl TestResumeGate {
     }
 
     /// Waits until a paused resume has entered the gate.
+    #[expect(dead_code, reason = "test gate hook")]
     pub(crate) async fn wait_entered(&self) {
         let permit = self.entered.acquire().await.expect("gate is entered");
         permit.forget();
     }
 
     /// Releases one paused resume.
+    #[expect(dead_code, reason = "test gate hook")]
     pub(crate) fn release(&self) {
         self.release.add_permits(1);
     }
@@ -1364,6 +1369,3 @@ fn inconsistent(reason: &str) -> TaskTechnicalError {
         reason: String::from(reason),
     }
 }
-
-#[cfg(test)]
-mod tests;

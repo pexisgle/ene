@@ -1709,26 +1709,6 @@ pub(crate) fn held_use(
     Ok(held || !operations.is_empty())
 }
 
-/// Whether one already-claimed use is associated with one specific operation.
-#[cfg(test)]
-pub(crate) fn held_use_for_operation(
-    conn: &Connection,
-    use_kind: &str,
-    use_id: RawId,
-    operation: &str,
-) -> Result<bool, PreservationTechnicalError> {
-    // Fill any still-unreconciled correspondence first so this read cannot
-    // miss a second operation the boolean [`held_use`] already knows about.
-    let _ = held_use(conn, use_kind, use_id)?;
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM erasure_use_hold
-             WHERE use_kind=?1 AND use_id=?2 AND operation_id=?3)",
-        params![use_kind, encode_id(use_id), operation],
-        |row| row.get(0),
-    )
-    .map_err(storage)
-}
-
 /// Publishes one body-free Learning formation identity and associates it with
 /// every unfinished operation whose covered sources intersect the pinned
 /// identities. Empty provenance cannot prove the queued transcript unrelated

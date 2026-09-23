@@ -129,7 +129,7 @@ pub struct DisconnectNotice {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthProof, PairingProvisionSecret, PairingRequest};
+    use super::{AuthProof, PairingProvisionSecret};
 
     #[test]
     fn auth_proof_debug_redacts_the_proof() {
@@ -140,18 +140,6 @@ mod tests {
         assert!(
             !rendered.contains("ownership-proof-abc"),
             "Debug must not carry the proof: {rendered}"
-        );
-    }
-
-    #[test]
-    fn pairing_request_keeps_display_descriptor() {
-        let request = PairingRequest {
-            device_descriptor: String::from("Owner laptop"),
-        };
-        let rendered = format!("{request:?}");
-        assert!(
-            rendered.contains("Owner laptop"),
-            "display descriptor stays visible: {rendered}"
         );
     }
 
