@@ -27,10 +27,9 @@ fn the_bundled_motion_pack_is_projected_to_the_body() {
     .expect("vrma fixture");
 
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
-    let plan = desktop.motion_plan();
-    assert_eq!(plan.clips.len(), 1);
-    assert_eq!(plan.clips[0].pose, PoseHint::Idle);
-    assert_eq!(plan.set().expect("assignment").clips.len(), 1);
+    let clips = desktop.motion_plan();
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0].pose, PoseHint::Idle);
 
     let Some(exe) = BodySupervisor::locate_binary() else {
         return;

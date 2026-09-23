@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ene_body::ipc::{MotionSetInfo, PoseClip};
+use ene_body::ipc::PoseClip;
 use ene_body::motion::pose_clips_in;
 
 pub const BUNDLED_MOTION_DIR: &str = "assets/motions";
@@ -27,53 +27,46 @@ impl MotionEnvironment {
     }
 }
 
-/// The pose → clip assignment resolved for one body spawn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MotionPlan {
-    /// Pose → clip assignment, in [`ene_body::motion::DEFAULT_POSE_CLIPS`]
-    /// order.
-    pub clips: Vec<PoseClip>,
-}
-
-impl MotionPlan {
-    #[must_use]
-    pub fn set(&self) -> Option<MotionSetInfo> {
-        (!self.clips.is_empty()).then(|| MotionSetInfo {
-            clips: self.clips.clone(),
-        })
-    }
-}
-
+/// Resolves the assignment from the standard locations, most specific first.
+///
+/// Placement is not this module's job: when nothing is placed, the body keeps
+/// its hand-authored staging and `HealthTick.motion` reports `Unsupported`.
 #[must_use]
-pub fn resolve(env: &MotionEnvironment) -> MotionPlan {
+pub fn resolve(env: &MotionEnvironment) -> Vec<PoseClip> {
     if let Some(dir) = &env.motion_dir {
-        return plan_from_dir(dir);
+        // An explicit override is used exactly as given: no search.
+        return pose_clips_in(dir);
     }
     search_dirs(env)
         .into_iter()
-        .map(|dir| plan_from_dir(&dir))
-        .find(|plan| !plan.clips.is_empty())
-        .unwrap_or(MotionPlan { clips: Vec::new() })
+        .map(|dir| pose_clips_in(&dir))
+        .find(|clips| !clips.is_empty())
+        .unwrap_or_default()
 }
 
-fn search_dirs(env: &MotionEnvironment) -> Vec<PathBuf> {
-    let mut dirs = vec![env.data_dir.join(BUNDLED_MOTION_DIR)];
+/// Install-asset roots, most specific first. The motion pack and the bundled
+/// sample model live under the same roots with their own relative path.
+#[must_use]
+pub fn install_roots(env: &MotionEnvironment) -> Vec<PathBuf> {
+    let mut roots = vec![env.data_dir.clone()];
     if let Some(exe_dir) = &env.exe_dir {
-        dirs.push(exe_dir.join(BUNDLED_MOTION_DIR));
+        roots.push(exe_dir.clone());
         if let Some(prefix) = exe_dir.parent() {
-            dirs.push(prefix.join("share/ene").join(BUNDLED_MOTION_DIR));
+            roots.push(prefix.join("share/ene"));
         }
     }
     if let Some(workspace) = &env.workspace_dir {
-        dirs.push(workspace.join(BUNDLED_MOTION_DIR));
+        roots.push(workspace.clone());
     }
-    dirs
+    roots
 }
 
-fn plan_from_dir(dir: &Path) -> MotionPlan {
-    MotionPlan {
-        clips: pose_clips_in(dir),
-    }
+/// Locations holding the motion pack, most specific first.
+fn search_dirs(env: &MotionEnvironment) -> Vec<PathBuf> {
+    install_roots(env)
+        .into_iter()
+        .map(|root| root.join(BUNDLED_MOTION_DIR))
+        .collect()
 }
 
 fn env_dir(name: &str) -> Option<PathBuf> {
@@ -126,9 +119,9 @@ mod tests {
         );
         environment.motion_dir = Some(override_dir.clone());
 
-        let plan = resolve(&environment);
-        assert_eq!(plan.clips.len(), 1);
-        assert_eq!(plan.clips[0].pose, PoseHint::Idle);
+        let clips = resolve(&environment);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].pose, PoseHint::Idle);
     }
 
     #[test]
@@ -140,9 +133,9 @@ mod tests {
         let exe_dir = environment.exe_dir.clone().expect("exe dir");
         write_clip(&exe_dir.join(BUNDLED_MOTION_DIR), "VRMA_06.vrma");
 
-        let plan = resolve(&environment);
-        assert_eq!(plan.clips.len(), 1);
-        assert_eq!(plan.clips[0].pose, PoseHint::Speaking);
+        let clips = resolve(&environment);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].pose, PoseHint::Speaking);
     }
 
     #[test]
@@ -152,9 +145,9 @@ mod tests {
         let workspace = environment.workspace_dir.clone().expect("workspace");
         write_clip(&workspace.join(BUNDLED_MOTION_DIR), "VRMA_06.vrma");
 
-        let plan = resolve(&environment);
-        assert_eq!(plan.clips.len(), 1);
-        assert_eq!(plan.clips[0].pose, PoseHint::Idle);
+        let clips = resolve(&environment);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].pose, PoseHint::Idle);
     }
 
     #[test]
@@ -166,10 +159,9 @@ mod tests {
             "VRMA_02.vrma",
         );
 
-        let plan = resolve(&environment);
-        assert_eq!(plan.clips.len(), 1);
-        assert_eq!(plan.clips[0].pose, PoseHint::Listening);
-        assert!(plan.set().is_some());
+        let clips = resolve(&environment);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].pose, PoseHint::Listening);
     }
 
     #[test]
@@ -177,9 +169,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let environment = environment(dir.path());
 
-        let plan = resolve(&environment);
-        assert!(plan.clips.is_empty());
-        assert!(plan.set().is_none());
+        let clips = resolve(&environment);
+        assert!(clips.is_empty());
         assert!(!environment.data_dir.join(BUNDLED_MOTION_DIR).exists());
     }
 }

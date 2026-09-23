@@ -7,7 +7,8 @@ use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::StreamWireId;
 use ene_api::v1::round::{HistoryItem, PresentationStatus};
 use ene_body::ipc::{
-    AssetRef, LocalUiFact, ParentToBody, PlacementBox, PoseHint, PresentationFeedback,
+    AssetRef, LocalUiFact, MotionSetInfo, ParentToBody, PlacementBox, PoseClip, PoseHint,
+    PresentationFeedback,
 };
 use ene_client::{Client, PendingPairingClient};
 use ene_local_control::{ControlOp, ControlOutcome, FromConfirmation};
@@ -18,7 +19,7 @@ use crate::erasure::{self, GuiOwned};
 use crate::host_launch;
 use crate::i18n::Locale;
 use crate::measure::WaylandFeedbackTraceLine;
-use crate::motion::{self, MotionEnvironment, MotionPlan};
+use crate::motion::{self, MotionEnvironment};
 use crate::secret::SecretIntake;
 use crate::session::{self, SETUP_PROVIDER_OPENAI, SetupFacts};
 use crate::ui::deletion::DeletionPanel;
@@ -235,9 +236,11 @@ impl DesktopRuntime {
         let mut commands = vec![ParentToBody::AssetRef(AssetRef::Path {
             path: asset.to_string_lossy().into_owned(),
         })];
-        let motion = self.motion_plan();
-        if let Some(set) = motion.set() {
-            commands.push(ParentToBody::MotionSet(set));
+        // The assignment travels next to the avatar path as asset data. A
+        // missing pack is not an error: the body keeps its staged pose.
+        let clips = self.motion_plan();
+        if !clips.is_empty() {
+            commands.push(ParentToBody::MotionSet(MotionSetInfo { clips }));
         }
         commands.push(ParentToBody::Placement(self.body_placement));
         commands.push(ParentToBody::PoseHint(PoseHint::Idle));
@@ -252,7 +255,7 @@ impl DesktopRuntime {
     }
 
     #[must_use]
-    pub fn motion_plan(&self) -> MotionPlan {
+    pub fn motion_plan(&self) -> Vec<PoseClip> {
         motion::resolve(&MotionEnvironment::from_process(&self.data_dir))
     }
 
@@ -333,29 +336,13 @@ impl DesktopRuntime {
         {
             return path;
         }
-        let data_candidate = self.data_dir.join(BUNDLED_SAMPLE_ASSET);
-        if data_candidate.is_file() {
-            return data_candidate;
-        }
-        if let Ok(executable) = std::env::current_exe()
-            && let Some(bin) = executable.parent()
-        {
-            for candidate in [
-                bin.join(BUNDLED_SAMPLE_ASSET),
-                bin.parent()
-                    .map(|prefix| prefix.join("share/ene").join(BUNDLED_SAMPLE_ASSET))
-                    .unwrap_or_default(),
-            ] {
-                if candidate.is_file() {
-                    return candidate;
-                }
+        let env = MotionEnvironment::from_process(&self.data_dir);
+        let data_candidate = env.data_dir.join(BUNDLED_SAMPLE_ASSET);
+        for root in motion::install_roots(&env) {
+            let candidate = root.join(BUNDLED_SAMPLE_ASSET);
+            if candidate.is_file() {
+                return candidate;
             }
-        }
-        let workspace_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(BUNDLED_SAMPLE_ASSET);
-        if workspace_candidate.is_file() {
-            return workspace_candidate;
         }
         data_candidate
     }
