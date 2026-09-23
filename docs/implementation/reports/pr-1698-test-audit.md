@@ -96,7 +96,7 @@
 
 | テスト | 保持理由 |
 | --- | --- |
-| [`stage6_targeted_deletion_completes_system_wide`](../../../apps/ene-core/tests/stage6_e2e.rs#L1395) | keep: checks client request, trusted confirmation, system-wide deletion, all-participant verification, and fresh origin through served Host |
+| [`stage6_targeted_deletion_completes_system_wide`](../../../apps/ene-core/tests/stage6_e2e.rs#L1395) | 実Host経由の削除要求・信頼された確認・全参加者の消去証明・新規由来の受入れを一連で確認 |
 | [`stage6_deletion_races_provider_wait_and_delayed_result`](../../../apps/ene-core/tests/stage6_e2e.rs#L1555) | 削除中の待機中推論結果が後から公開されないことを確認 |
 | [`stage6_deletion_presentation_ack_after_condition_holds`](../../../apps/ene-core/tests/stage6_e2e.rs#L1653) | 削除条件成立後の提示確認が対象を復活させないことを確認 |
 | [`stage6_deletion_during_learning_formation_never_forms_target_memory`](../../../apps/ene-core/tests/stage6_e2e.rs#L1730) | 学習形成中の削除で対象記憶が作られないことを確認 |
@@ -115,7 +115,7 @@
 | [`stage6_task_transient_observation_after_completion_is_collected`](../../../apps/ene-core/tests/stage6_e2e.rs#L3517) | 一時観測由来の遅延タスク結果を削除後に回収することを確認 |
 | [`stage6_task_sealed_observation_paraphrase_is_erased_after_workspace_rewrite`](../../../apps/ene-core/tests/stage6_e2e.rs#L3664) | 元ファイル書換後も封印済み観測の言い換えを追跡して消すことを確認 |
 | [`stage6_observation_write_across_deletion_stays_old_origin`](../../../apps/ene-core/tests/stage6_e2e.rs#L3800) | 削除をまたぐ観測書込が旧由来を失わないことを確認 |
-| [`stage6_reconciliation_erases_paraphrase_pinned_past_the_page`](../../../apps/ene-core/tests/stage6_e2e.rs#L3955) | keep: checks late-pinned semantic Summary/Memory erasure through served Host and independent database reads |
+| [`stage6_reconciliation_erases_paraphrase_pinned_past_the_page`](../../../apps/ene-core/tests/stage6_e2e.rs#L3955) | ページ境界より後に固定された要約・記憶の言い換えを消すことを実Hostと独立DB読出しで確認 |
 | [`stage6_task_result_commits_under_the_credential_set_current_at_its_scrub`](../../../apps/ene-core/tests/stage6_e2e.rs#L4237) | タスク結果のscrubと保存が同じ資格情報集合に拘束されることを確認 |
 
 ## `apps/ene-desktop-ui/tests/surfaces.rs`
@@ -380,36 +380,36 @@
 
 | テスト | 保持理由 |
 | --- | --- |
-| [`matching_consent_allows_for_exactly_one_use`](../../../crates/ene-permission/src/lib.rs#L707) | keep: matching consent mints an evaluation token consumed once |
-| [`unknown_id_does_not_consume`](../../../crates/ene-permission/src/lib.rs#L725) | keep: a token from another tracker cannot consume this tracker admission |
-| [`mismatched_fingerprint_rejects_without_burning_the_id`](../../../crates/ene-permission/src/lib.rs#L743) | keep: wrong fingerprint is refused without consuming the valid one-use token |
-| [`stale_expected_consent_needs_revalidation`](../../../crates/ene-permission/src/lib.rs#L762) | keep: stale expected revision yields revalidation |
-| [`missing_expected_consent_needs_revalidation_when_stored_exists`](../../../crates/ene-permission/src/lib.rs#L777) | keep: absent expected premise cannot silently use existing consent |
-| [`provider_mismatch_denies_as_stale_consent`](../../../crates/ene-permission/src/lib.rs#L792) | keep: provider mismatch yields typed stale-consent denial |
-| [`missing_stored_consent_denies_as_stale_consent`](../../../crates/ene-permission/src/lib.rs#L810) | keep: removed consent cannot authorize a pending attempt |
-| [`learning_formation_requires_a_learning_consent`](../../../crates/ene-permission/src/lib.rs#L833) | keep: learning candidate consumes only a learning-scoped evaluation |
-| [`dialogue_consent_never_authorizes_learning`](../../../crates/ene-permission/src/lib.rs#L855) | keep: dialogue consent cannot cross the capability boundary |
-| [`dialogue_and_learning_consumers_are_not_interchangeable`](../../../crates/ene-permission/src/lib.rs#L876) | keep: consumer/capability/purpose triples are closed-world |
-| [`task_agent_turn_inherits_the_dialogue_consent`](../../../crates/ene-permission/src/lib.rs#L923) | keep: task agent inherits dialogue consent but receives its own one-use fingerprint |
-| [`task_agent_turn_is_not_allowed_with_a_learning_consent`](../../../crates/ene-permission/src/lib.rs#L945) | keep: learning consent cannot authorize task-agent work |
-| [`task_agent_turn_does_not_masquerade_as_dialogue_or_learning`](../../../crates/ene-permission/src/lib.rs#L963) | keep: task-agent triple cannot masquerade as dialogue or learning |
-| [`consumer_and_purpose_storage_names_are_closed_world`](../../../crates/ene-permission/src/lib.rs#L1004) | keep: durable attribution vocabulary round-trips and rejects unknown tags |
-| [`base_view_expectation_covers_capability_marks_and_stale_faces`](../../../crates/ene-permission/src/lib.rs#L1024) | keep: capability-specific marks and stale faces map to distinct expectations |
-| [`mark_helpers_round_trip_both_capabilities`](../../../crates/ene-permission/src/lib.rs#L1089) | keep: combined marks parse regardless of segment order and cannot cross capability |
-| [`revision_exhaustion_is_reported_not_aliased`](../../../crates/ene-permission/src/lib.rs#L1130) | keep: consent revision cannot wrap and alias a previous premise |
+| [`matching_consent_allows_for_exactly_one_use`](../../../crates/ene-permission/src/lib.rs#L707) | 一致した同意で一回限りの評価tokenを消費することを確認 |
+| [`unknown_id_does_not_consume`](../../../crates/ene-permission/src/lib.rs#L725) | 別trackerのtokenがこの入場判定を消費しないことを確認 |
+| [`mismatched_fingerprint_rejects_without_burning_the_id`](../../../crates/ene-permission/src/lib.rs#L743) | fingerprint不一致の拒否で正しい一回用tokenを失わないことを確認 |
+| [`stale_expected_consent_needs_revalidation`](../../../crates/ene-permission/src/lib.rs#L762) | 古い同意改訂の前提が再検証を要求することを確認 |
+| [`missing_expected_consent_needs_revalidation_when_stored_exists`](../../../crates/ene-permission/src/lib.rs#L777) | 期待前提が欠けた要求に保存済み同意を暗黙流用しないことを確認 |
+| [`provider_mismatch_denies_as_stale_consent`](../../../crates/ene-permission/src/lib.rs#L792) | provider違いを型付きの古い同意拒否へ変換することを確認 |
+| [`missing_stored_consent_denies_as_stale_consent`](../../../crates/ene-permission/src/lib.rs#L810) | 削除済み同意で保留試行を承認しないことを確認 |
+| [`learning_formation_requires_a_learning_consent`](../../../crates/ene-permission/src/lib.rs#L833) | 学習候補に学習専用の同意評価を要求することを確認 |
+| [`dialogue_consent_never_authorizes_learning`](../../../crates/ene-permission/src/lib.rs#L855) | 対話同意を学習へ越境利用できないことを確認 |
+| [`dialogue_and_learning_consumers_are_not_interchangeable`](../../../crates/ene-permission/src/lib.rs#L876) | consumer・capability・purposeの組を閉じた集合として扱うことを確認 |
+| [`task_agent_turn_inherits_the_dialogue_consent`](../../../crates/ene-permission/src/lib.rs#L923) | Task Agentが対話同意を継ぎつつ独自の一回用fingerprintを持つことを確認 |
+| [`task_agent_turn_is_not_allowed_with_a_learning_consent`](../../../crates/ene-permission/src/lib.rs#L945) | 学習同意でTask Agent作業を承認できないことを確認 |
+| [`task_agent_turn_does_not_masquerade_as_dialogue_or_learning`](../../../crates/ene-permission/src/lib.rs#L963) | Task Agentの識別組を対話・学習へ偽装できないことを確認 |
+| [`consumer_and_purpose_storage_names_are_closed_world`](../../../crates/ene-permission/src/lib.rs#L1004) | 利用帰属の保存語彙が往復でき未知tagを拒否することを確認 |
+| [`base_view_expectation_covers_capability_marks_and_stale_faces`](../../../crates/ene-permission/src/lib.rs#L1024) | capability別のmarkと古い表示を異なる期待値へ対応付けることを確認 |
+| [`mark_helpers_round_trip_both_capabilities`](../../../crates/ene-permission/src/lib.rs#L1089) | 結合markを順序によらず解析しcapability越境を拒否することを確認 |
+| [`revision_exhaustion_is_reported_not_aliased`](../../../crates/ene-permission/src/lib.rs#L1130) | 同意改訂の枯渇で過去の前提と同じ番号を再利用しないことを確認 |
 
 ## `crates/ene-plugin-ipc/src/lib.rs`
 
 | テスト | 保持理由 |
 | --- | --- |
-| [`roundtrip_preserves_envelope_and_payload`](../../../crates/ene-plugin-ipc/src/lib.rs#L161) | keep: frame payload and envelope survive the codec round trip |
-| [`prefix_is_big_endian_body_length`](../../../crates/ene-plugin-ipc/src/lib.rs#L170) | keep: exact on-wire prefix format is stable |
-| [`short_prefix_is_truncated_needing_four`](../../../crates/ene-plugin-ipc/src/lib.rs#L182) | keep: prefix truncation reports the correct need without body decode |
-| [`short_body_is_truncated_needing_frame_total`](../../../crates/ene-plugin-ipc/src/lib.rs#L196) | keep: body truncation reports the total frame need |
-| [`oversize_prefix_rejected_without_large_read`](../../../crates/ene-plugin-ipc/src/lib.rs#L212) | keep: oversize claimed length is rejected before body-sized work |
-| [`corrupt_body_is_decode_failed_without_payload_echo`](../../../crates/ene-plugin-ipc/src/lib.rs#L226) | keep: corrupt body causes typed decode failure without leaking payload bytes |
-| [`concatenated_frames_decode_sequentially`](../../../crates/ene-plugin-ipc/src/lib.rs#L249) | keep: decoder consumes exactly one frame from a concatenated stream |
-| [`oversize_body_rejected_on_encode`](../../../crates/ene-plugin-ipc/src/lib.rs#L266) | keep: encoder enforces the frame cap on an actual oversized payload |
+| [`roundtrip_preserves_envelope_and_payload`](../../../crates/ene-plugin-ipc/src/lib.rs#L161) | IPCのenvelopeとpayloadがcodec往復で変わらないことを確認 |
+| [`prefix_is_big_endian_body_length`](../../../crates/ene-plugin-ipc/src/lib.rs#L170) | wire上の長さprefixがbig endianで本文長を表すことを確認 |
+| [`short_prefix_is_truncated_needing_four`](../../../crates/ene-plugin-ipc/src/lib.rs#L182) | 短いprefixを本文decode前に検出し必要長4を返すことを確認 |
+| [`short_body_is_truncated_needing_frame_total`](../../../crates/ene-plugin-ipc/src/lib.rs#L196) | 短い本文にフレーム全長の必要量を返すことを確認 |
+| [`oversize_prefix_rejected_without_large_read`](../../../crates/ene-plugin-ipc/src/lib.rs#L212) | 過大prefixを本文の大量読出し前に拒否することを確認 |
+| [`corrupt_body_is_decode_failed_without_payload_echo`](../../../crates/ene-plugin-ipc/src/lib.rs#L226) | 壊れた本文をdecode失敗にし値をエラーへ出さないことを確認 |
+| [`concatenated_frames_decode_sequentially`](../../../crates/ene-plugin-ipc/src/lib.rs#L249) | 連結ストリームから一フレームだけ消費することを確認 |
+| [`oversize_body_rejected_on_encode`](../../../crates/ene-plugin-ipc/src/lib.rs#L266) | encode側でも実際の過大payloadを拒否することを確認 |
 
 ## `crates/ene-preservation/src/request.rs`
 
@@ -480,4 +480,3 @@
 | --- | --- |
 | [`the_premise_binds_the_scrubbed_body_to_its_revision`](../../../crates/ene-task/src/result.rs#L297) | 結果採用前提が伏せ字本文と集合改訂を同時に拘束することを確認 |
 | [`a_stale_outcome_names_only_the_revision`](../../../crates/ene-task/src/result.rs#L310) | 古い結果の通知で本文を漏らさず改訂だけ示すことを確認 |
-
