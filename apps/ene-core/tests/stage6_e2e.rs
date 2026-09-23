@@ -5193,6 +5193,7 @@ async fn unknown_wire_values_are_typed_rejects_and_the_connection_stays_usable()
     drop(std::fs::remove_file(conn::socket_path(dir.path())));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_oversize_length_prefix_closes_the_connection_without_allocating() {
     use tokio::io::AsyncReadExt as _;
