@@ -450,7 +450,7 @@ impl SurfaceRenderer {
         // HWND swap chains expose only opaque alpha on DX12. The native
         // Windows overlay needs a DirectComposition visual for per-pixel alpha.
         #[cfg(target_os = "windows")]
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::DX12,
             backend_options: wgpu::BackendOptions {
                 dx12: wgpu::Dx12BackendOptions {
@@ -459,7 +459,7 @@ impl SurfaceRenderer {
                 },
                 ..Default::default()
             },
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         #[cfg(not(target_os = "windows"))]
         let instance = wgpu::Instance::default();
