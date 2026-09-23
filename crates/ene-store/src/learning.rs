@@ -18,9 +18,7 @@ use crate::run_blocking;
 const SQL_SELECT_MEMORY_TARGET: &str =
     "SELECT companion_id, revision FROM learning_memory WHERE memory_id = ?1";
 
-const SQL_INSERT_MEMORY: &str = "INSERT INTO learning_memory (memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
-
-const SQL_UPDATE_MEMORY: &str = "UPDATE learning_memory SET revision = ?2, content = ?3, importance = ?4, temporal = ?5, recall_suppressed = ?6, updated_at = ?7 WHERE memory_id = ?1";
+const SQL_INSERT_MEMORY: &str = "INSERT INTO learning_memory (memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(memory_id) DO UPDATE SET revision = excluded.revision, content = excluded.content, importance = excluded.importance, temporal = excluded.temporal, recall_suppressed = excluded.recall_suppressed, updated_at = excluded.updated_at";
 
 const SQL_INSERT_MEMORY_REVISION: &str = "INSERT INTO learning_memory_revision (memory_id, revision, companion_id, content, importance, temporal, recall_suppressed, change_kind, summary_id, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
 
@@ -148,7 +146,7 @@ fn commit_change_sync(
             if encode_revision(next).is_err() {
                 return Ok(MemoryChangeOutcome::RevisionExhausted { memory: id });
             }
-            update_current(&tx, id, next, change)?;
+            insert_current(&tx, id, next, change)?;
             insert_revision(&tx, id, next, change, commit.summary.as_ref())?;
             MemoryChangeOutcome::Committed {
                 memory: id,
@@ -181,17 +179,7 @@ fn insert_summary(
         .query_row(
             SQL_SELECT_SUMMARY,
             params![encode_id(summary.id.as_raw())],
-            |row| {
-                Ok(RawSummary {
-                    summary: row.get(0)?,
-                    companion: row.get(1)?,
-                    content: row.get(2)?,
-                    source_kind: row.get(3)?,
-                    source_start: row.get(4)?,
-                    source_end: row.get(5)?,
-                    formed_at: row.get(6)?,
-                })
-            },
+            raw_summary_row,
         )
         .optional()
         .map_err(learning_unavailable)?
@@ -204,6 +192,12 @@ fn insert_summary(
     Ok(())
 }
 
+/// Writes one Memory's current row for either branch of a committed change.
+///
+/// The `New`/`Existing` pre-check in [`commit_change_sync`] already decided
+/// the outcome and, for `Existing`, proved the row's scope and revision, so
+/// the upsert's conflict arm only ever overwrites that same row; the scope
+/// (`companion_id`) is deliberately not rewritten.
 fn insert_current(
     tx: &Transaction<'_>,
     memory: MemoryId,
@@ -228,29 +222,11 @@ fn insert_current(
     Ok(())
 }
 
-fn update_current(
-    tx: &Transaction<'_>,
-    memory: MemoryId,
-    revision: MemoryRevision,
-    change: &MemoryChange,
-) -> Result<(), LearningTechnicalError> {
-    tx.execute(
-        SQL_UPDATE_MEMORY,
-        params![
-            encode_id(memory.as_raw()),
-            encode_revision(revision)?,
-            change.content,
-            encode_importance(change.importance),
-            encode_temporal(change.temporal),
-            i64::from(change.recall_suppressed),
-            change.at.to_rfc3339(),
-        ],
-    )
-    .map_err(learning_unavailable)?;
-    refresh_memory_terms(tx, memory, change)?;
-    Ok(())
-}
-
+/// Re-derives the recall token rows for one Memory inside the commit
+/// transaction, so the index never observes a half-written recognition.
+/// Suppression needs no reindexing: the lexical arm filters suppressed rows
+/// at read time, and clearing the flag re-exposes the already-indexed
+/// tokens.
 fn refresh_memory_terms(
     tx: &Transaction<'_>,
     memory: MemoryId,
@@ -551,17 +527,7 @@ fn load_summaries_sync(
     let rows = statement
         .query_map(
             rusqlite::params_from_iter(unique.iter().map(|id| encode_id(id.as_raw()))),
-            |row| {
-                Ok(RawSummary {
-                    summary: row.get(0)?,
-                    companion: row.get(1)?,
-                    content: row.get(2)?,
-                    source_kind: row.get(3)?,
-                    source_start: row.get(4)?,
-                    source_end: row.get(5)?,
-                    formed_at: row.get(6)?,
-                })
-            },
+            raw_summary_row,
         )
         .map_err(learning_unavailable)?;
     let mut summaries = Vec::new();
@@ -581,6 +547,18 @@ fn raw_memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawMemory> {
         temporal: row.get(5)?,
         recall_suppressed: row.get(6)?,
         updated_at: row.get(7)?,
+    })
+}
+
+fn raw_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawSummary> {
+    Ok(RawSummary {
+        summary: row.get(0)?,
+        companion: row.get(1)?,
+        content: row.get(2)?,
+        source_kind: row.get(3)?,
+        source_start: row.get(4)?,
+        source_end: row.get(5)?,
+        formed_at: row.get(6)?,
     })
 }
 

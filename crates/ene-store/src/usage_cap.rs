@@ -5,8 +5,8 @@ use ene_inference::pricing::PricingSnapshot;
 use ene_inference::{InferenceTicketId, UsageReservation};
 use ene_permission::{
     PermissionTechnicalError, SetUsageCapCommand, SetUsageCapOutcome, UsageCap,
-    UsageCapConsumption, UsageCapId, UsageCapRef, UsageCapRepository, UsageCapRevision,
-    UsageCapScope, UsageCapStatus, UsageCapStatusQuery, UsageCapWindow, UsageReservationRef,
+    UsageCapConsumption, UsageCapId, UsageCapRepository, UsageCapRevision, UsageCapScope,
+    UsageCapStatus, UsageCapStatusQuery, UsageCapWindow, UsageReservationRef,
     UsageReservationState,
 };
 use ene_primitive::{CurrencyCode, RawId, WallClockWithTz};
@@ -25,8 +25,7 @@ const SQL_INSERT_CAP: &str = "INSERT INTO usage_cap (scope, provider, window, re
 
 const SQL_UPDATE_CAP: &str = "UPDATE usage_cap SET revision = ?4, currency = ?5, limit_micros = ?6 WHERE scope = ?1 AND provider = ?2 AND window = ?3";
 
-const SQL_SELECT_APPLICABLE_CAPS: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap WHERE scope = 'system' OR (scope = 'provider' AND provider = ?1)";
-
+/// Every stored cap, deterministically ordered for the status read.
 const SQL_SELECT_ALL_CAPS: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap ORDER BY scope, provider, window";
 
 const SQL_SELECT_CAPS_FOR_PROVIDER: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap WHERE scope = 'system' OR (scope = 'provider' AND provider = ?1) ORDER BY scope, provider, window";
@@ -47,32 +46,19 @@ const SQL_INSERT_RESERVATION: &str = "INSERT INTO usage_reservation (reservation
 
 pub(crate) const SQL_SETTLE_RESERVATION: &str = "UPDATE usage_reservation SET state = ?2, committed_currency = ?3, committed_micros = ?4 WHERE ticket = ?1 AND state = 'reserved'";
 
-pub(crate) struct CapRow {
-    id: UsageCapId,
-    revision: UsageCapRevision,
-    limit: Money,
-}
-
-impl CapRow {
-    pub(crate) fn reference(&self) -> UsageCapRef {
-        UsageCapRef::new(self.id.clone(), self.revision)
-    }
-
-    pub(crate) fn scope(&self) -> &UsageCapScope {
-        self.id.scope()
-    }
-
-    pub(crate) fn window(&self) -> UsageCapWindow {
-        self.id.window()
-    }
-
-    pub(crate) fn limit(&self) -> Money {
-        self.limit
-    }
-
-    pub(crate) fn revision(&self) -> UsageCapRevision {
-        self.revision
-    }
+/// The six stored cap columns every cap query selects, in `scope, provider,
+/// window, revision, currency, limit_micros` order.
+fn cap_fields(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(String, String, String, i64, String, i64)> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
 }
 
 fn decode_cap(
@@ -82,23 +68,23 @@ fn decode_cap(
     revision: i64,
     currency: &str,
     limit_micros: i64,
-) -> Result<CapRow, String> {
+) -> Result<UsageCap, String> {
     let scope = UsageCapScope::from_stored(scope, provider)
         .ok_or_else(|| String::from("unknown usage cap scope"))?;
     let window = UsageCapWindow::from_name(window)
         .ok_or_else(|| String::from("unknown usage cap window"))?;
-    Ok(CapRow {
-        id: UsageCapId::new(scope, window),
-        revision: UsageCapRevision::from_u64(decode_u64(revision)?),
-        limit: Money::from_micros(decode_currency(currency)?, decode_u64(limit_micros)?),
-    })
+    Ok(UsageCap::new(
+        UsageCapId::new(scope, window),
+        UsageCapRevision::from_u64(decode_u64(revision)?),
+        Money::from_micros(decode_currency(currency)?, decode_u64(limit_micros)?),
+    ))
 }
 
 fn select_cap(
     conn: &rusqlite::Connection,
     scope: &UsageCapScope,
     window: UsageCapWindow,
-) -> Result<Option<CapRow>, String> {
+) -> Result<Option<UsageCap>, String> {
     let provider = scope.provider().unwrap_or("");
     let found: Option<(i64, String, i64)> = conn
         .query_row(
@@ -122,21 +108,15 @@ fn select_cap(
         .transpose()
 }
 
-fn select_applicable_caps(tx: &Transaction<'_>, provider: &str) -> Result<Vec<CapRow>, String> {
+/// Reads every current cap applying to the route. The rows are ordered
+/// deterministically (system before provider, daily before monthly) so a
+/// multi-cap violation always answers with the same cap reference.
+fn select_applicable_caps(tx: &Transaction<'_>, provider: &str) -> Result<Vec<UsageCap>, String> {
     let mut statement = tx
-        .prepare(SQL_SELECT_APPLICABLE_CAPS)
+        .prepare(SQL_SELECT_CAPS_FOR_PROVIDER)
         .map_err(|error| error.to_string())?;
     let rows: Vec<(String, String, String, i64, String, i64)> = statement
-        .query_map(params![provider], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-            ))
-        })
+        .query_map(params![provider], cap_fields)
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
@@ -150,7 +130,8 @@ fn select_applicable_caps(tx: &Transaction<'_>, provider: &str) -> Result<Vec<Ca
     Ok(caps)
 }
 
-fn cap_order(cap: &CapRow) -> (u8, u8) {
+/// System before provider, daily before monthly.
+fn cap_order(cap: &UsageCap) -> (u8, u8) {
     let scope = match cap.scope() {
         UsageCapScope::System => 0,
         UsageCapScope::Provider(_) => 1,
@@ -162,11 +143,7 @@ fn cap_order(cap: &CapRow) -> (u8, u8) {
     (scope, window)
 }
 
-pub(crate) enum CapWindowConsumption {
-    Known(Money),
-    Indeterminate,
-}
-
+/// One non-released reservation row's accounting columns.
 struct ConsumptionRow {
     state: String,
     currency: String,
@@ -285,25 +262,7 @@ fn total_micros(breakdown: &WindowConsumption) -> Option<u64> {
     .ok()
 }
 
-/// Sums one scope's consumption over the UTC period containing `at`.
-pub(crate) fn consumed_in_window(
-    conn: &rusqlite::Connection,
-    scope: &UsageCapScope,
-    window: UsageCapWindow,
-    currency: CurrencyCode,
-    at: WallClockWithTz,
-) -> Result<CapWindowConsumption, String> {
-    let Some(breakdown) = consumption_breakdown(conn, scope, window, currency, at)? else {
-        return Ok(CapWindowConsumption::Indeterminate);
-    };
-    let Some(micros) = total_micros(&breakdown) else {
-        return Ok(CapWindowConsumption::Indeterminate);
-    };
-    Ok(CapWindowConsumption::Known(Money::from_micros(
-        currency, micros,
-    )))
-}
-
+/// The cap-admission decision for one attempt claim.
 pub(crate) enum ReservationAdmission {
     NoCap,
     Reserved,
@@ -345,9 +304,8 @@ pub(crate) fn admit_reservation(
         if cap.limit().currency() != upper_bound.currency() {
             return Ok(ReservationAdmission::Indeterminate);
         }
-        let consumed =
-            consumed_in_window(tx, cap.scope(), cap.window(), upper_bound.currency(), now)?;
-        let CapWindowConsumption::Known(consumed) = consumed else {
+        let consumed = cap_consumption(tx, cap, now)?;
+        let UsageCapConsumption::Known { consumed, .. } = consumed else {
             return Ok(ReservationAdmission::Indeterminate);
         };
         let Some(total) = consumed.checked_add(upper_bound) else {
@@ -460,7 +418,7 @@ impl UsageCapRepository for Store {
             };
             if !matches {
                 return Ok(SetUsageCapOutcome::Stale {
-                    current: current.as_ref().map(CapRow::reference),
+                    current: current.as_ref().map(UsageCap::reference),
                 });
             }
             let revision = match &current {
@@ -530,29 +488,11 @@ impl UsageCapRepository for Store {
                 .map_err(|error| permission_unavailable(error.to_string()))?;
             let rows: Vec<(String, String, String, i64, String, i64)> = match &query.provider {
                 None => statement
-                    .query_map((), |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                            row.get(5)?,
-                        ))
-                    })
+                    .query_map((), cap_fields)
                     .map_err(|error| permission_unavailable(error.to_string()))?
                     .collect::<Result<Vec<_>, _>>(),
                 Some(provider) => statement
-                    .query_map(params![provider], |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                            row.get(5)?,
-                        ))
-                    })
+                    .query_map(params![provider], cap_fields)
                     .map_err(|error| permission_unavailable(error.to_string()))?
                     .collect::<Result<Vec<_>, _>>(),
             }
@@ -563,10 +503,7 @@ impl UsageCapRepository for Store {
                     .map_err(permission_unavailable)?;
                 let consumption =
                     cap_consumption(&guard, &cap, query.at).map_err(permission_unavailable)?;
-                statuses.push(UsageCapStatus {
-                    cap: UsageCap::new(cap.id.clone(), cap.revision(), cap.limit()),
-                    consumption,
-                });
+                statuses.push(UsageCapStatus { cap, consumption });
             }
             Ok(statuses)
         })
@@ -576,7 +513,7 @@ impl UsageCapRepository for Store {
 
 fn cap_consumption(
     conn: &rusqlite::Connection,
-    cap: &CapRow,
+    cap: &UsageCap,
     at: WallClockWithTz,
 ) -> Result<UsageCapConsumption, String> {
     let currency = cap.limit().currency();
