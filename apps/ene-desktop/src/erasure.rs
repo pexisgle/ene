@@ -1,3 +1,13 @@
+//! GUI erasure participant: every copy this process actually holds.
+//!
+//! Inventory (Stage 7 E): timeline, Memory grounds/history, Task report,
+//! input draft, IME composition, undo, deferred frames (Client),
+//! usage/deletion panel bodies, and presented chat receipts. Registered
+//! secrets are not user content and are not wiped through this path; C1
+//! secret intake is zeroized by crate-private `SecretIntake`.
+//!
+//! `wiped` is returned only after the named copies are confirmed empty.
+
 use ene_api::v1::deletion::{
     ClientTempClass, DeletionDemand, DeletionTargetWire, LocalErasureResult,
 };
@@ -13,7 +23,6 @@ pub(crate) struct GuiOwned<'a> {
     pub timeline: &'a mut Vec<crate::ui::presentation::Message>,
     pub history: &'a mut Vec<HistoryItem>,
     pub composer: &'a mut Composer,
-    pub search_draft: &'a mut String,
     pub memory: &'a mut MemoryPage,
     pub tasks: &'a mut TaskPanel,
     pub usage: &'a mut UsagePanel,
@@ -33,7 +42,6 @@ pub(crate) fn apply_demand(
                 class: ClientTempClass::InputDraft,
             } => {
                 copies.composer.wipe();
-                copies.search_draft.clear();
                 copies.deletion.wipe_exact_text();
                 if input_draft_gone(copies) {
                     wiped.push(ClientTempClass::InputDraft);
@@ -75,7 +83,6 @@ fn input_draft_gone(copies: &GuiOwned<'_>) -> bool {
     copies.composer.draft().is_empty()
         && !copies.composer.composing()
         && copies.composer.undo_len() == 0
-        && copies.search_draft.is_empty()
         && copies.deletion.exact_text_cleared()
 }
 

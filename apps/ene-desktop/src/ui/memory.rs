@@ -284,9 +284,6 @@ fn parse_list_body(body: &str) -> (Vec<MemoryRow>, Option<String>) {
 fn parse_memory_header(header: &str) -> Option<MemoryRow> {
     let mut parts = header.split_whitespace();
     let id = parts.next()?.to_owned();
-    if id.is_empty() {
-        return None;
-    }
     let mut row = MemoryRow {
         id,
         scope: String::new(),

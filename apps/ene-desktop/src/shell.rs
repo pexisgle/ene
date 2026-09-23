@@ -191,7 +191,7 @@ impl Surfaces {
     fn dismiss(&self) {
         self.mailbox.generation.fetch_add(1, Ordering::SeqCst);
         if let Some(m) = self.management.upgrade() {
-            ene_desktop_ui::discard_secret_input(&m);
+            ene_desktop::ui::presentation::discard_secret_input(&m);
             m.set_can_confirm(false);
             m.set_confirmation_key("".into());
             m.set_confirmation_target("".into());
@@ -687,7 +687,7 @@ fn attach_erasure(desktop: &mut DesktopRuntime, surfaces: Surfaces) {
                     c.set_busy(false);
                     c.set_task_busy(false);
                     m.set_busy(false);
-                    ene_desktop_ui::erase_surface_copies(&c, &m)
+                    ene_desktop::ui::presentation::erase_surface_copies(&c, &m)
                 } else {
                     false
                 };

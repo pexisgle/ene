@@ -25,8 +25,8 @@ use crate::ui::deletion::DeletionPanel;
 use crate::ui::tasks::TaskPanel;
 use crate::ui::usage::UsagePanel;
 use crate::ui::{
-    Composer, DesktopError, GuiSnapshot, MemoryPage, Page, WizardStep, history_lines,
-    request_with_timeout,
+    Composer, DEFAULT_REQUEST_TIMEOUT, DesktopError, GuiSnapshot, MemoryPage, Page, WizardStep,
+    history_lines, request_with_timeout,
 };
 use crate::{BUNDLED_SAMPLE_ASSET, DESKTOP_DESCRIPTOR};
 
@@ -58,7 +58,6 @@ pub struct DesktopRuntime {
     tasks: TaskPanel,
     usage: UsagePanel,
     deletion: DeletionPanel,
-    search_draft: String,
     chat_receipt: Option<(String, Option<StreamWireId>)>,
 }
 
@@ -108,7 +107,6 @@ impl DesktopRuntime {
             tasks: TaskPanel::default(),
             usage: UsagePanel::default(),
             deletion: DeletionPanel::default(),
-            search_draft: String::new(),
             chat_receipt: None,
         }
     }
@@ -171,7 +169,6 @@ impl DesktopRuntime {
             memory_panel: self.memory.panel(),
             usage_body: self.usage.render(),
             deletion_body: self.deletion.render(),
-            search_draft: self.search_draft.clone(),
         }
     }
 
@@ -505,7 +502,6 @@ impl DesktopRuntime {
                 timeline,
                 history,
                 composer,
-                search_draft,
                 memory,
                 tasks,
                 usage,
@@ -523,7 +519,6 @@ impl DesktopRuntime {
                     timeline,
                     history,
                     composer,
-                    search_draft,
                     memory,
                     tasks,
                     usage,
@@ -600,7 +595,7 @@ impl DesktopRuntime {
             request_with_timeout(
                 client,
                 session::credential_intent(&mark, SETUP_PROVIDER_OPENAI),
-                Duration::from_secs(15),
+                DEFAULT_REQUEST_TIMEOUT,
             )
             .await?
         };
@@ -629,7 +624,7 @@ impl DesktopRuntime {
             request_with_timeout(
                 client,
                 session::assignment_intent(&mark, SETUP_PROVIDER_OPENAI, &model),
-                Duration::from_secs(15),
+                DEFAULT_REQUEST_TIMEOUT,
             )
             .await?
         };
@@ -649,7 +644,7 @@ impl DesktopRuntime {
                 request_with_timeout(
                     client,
                     session::setup_complete_intent(&mark),
-                    Duration::from_secs(15),
+                    DEFAULT_REQUEST_TIMEOUT,
                 )
                 .await?
             };
@@ -777,11 +772,6 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    pub async fn refresh_management_without_body(&mut self) -> Result<(), DesktopError> {
-        self.body_status = BodyStatus::Absent;
-        self.refresh_setup().await
-    }
-
     #[must_use]
     pub fn memory(&self) -> &MemoryPage {
         &self.memory
@@ -829,7 +819,7 @@ impl DesktopRuntime {
             match request_with_timeout(
                 client,
                 WirePayload::ManagementViewRequest(view_request.clone()),
-                Duration::from_secs(15),
+                DEFAULT_REQUEST_TIMEOUT,
             )
             .await?
             {
@@ -957,16 +947,6 @@ impl DesktopRuntime {
         self.tasks.has_presented_receipt()
     }
 
-    #[must_use]
-    pub fn displayed_task_revision(&self) -> Option<u64> {
-        self.tasks.displayed().map(|shown| shown.revision)
-    }
-
-    #[must_use]
-    pub fn displayed_task_purpose(&self) -> Option<String> {
-        self.tasks.displayed().map(|shown| shown.purpose.clone())
-    }
-
     pub async fn refresh_usage(&mut self) -> Result<(), DesktopError> {
         {
             let client = self
@@ -995,38 +975,8 @@ impl DesktopRuntime {
         self.usage.set_cap_limit_micros(micros);
     }
 
-    pub fn set_usage_status_filter(&mut self, status: Option<String>) {
-        self.usage.set_status_filter(status);
-    }
-
-    pub fn set_usage_period(&mut self, from: Option<String>, to: Option<String>) {
-        self.usage.set_period(from, to);
-    }
-
-    pub fn set_usage_attribution(
-        &mut self,
-        provider: Option<String>,
-        model: Option<String>,
-        consumer: Option<String>,
-        purpose: Option<String>,
-    ) {
-        self.usage
-            .set_attribution_filters(provider, model, consumer, purpose);
-    }
-
-    pub fn set_usage_cap_slot(
-        &mut self,
-        provider: Option<String>,
-        window: String,
-        currency: String,
-    ) {
-        self.usage.set_cap_slot(provider, window, currency);
-    }
-
-    pub fn set_deletion_purpose(&mut self, purpose: ene_api::v1::deletion::DeletionPurposeWire) {
-        self.deletion.set_purpose(purpose);
-    }
-
+    /// Cap mutation uses the last-read mark. Remaining on the panel is
+    /// display-only and is not consulted.
     pub async fn apply_usage_cap(&mut self) -> Result<ManagementOutcome, DesktopError> {
         let outcome = {
             let client = self
@@ -1037,11 +987,6 @@ impl DesktopRuntime {
         };
         self.flush_pending_erasure().await;
         Ok(outcome)
-    }
-
-    #[must_use]
-    pub fn usage_has_unknown_cost(&self) -> bool {
-        self.usage.has_unknown_cost()
     }
 
     pub fn set_deletion_exact_text(&mut self, text: String) {
@@ -1057,18 +1002,6 @@ impl DesktopRuntime {
             self.deletion.request(client).await?
         };
         self.page = Page::Deletion;
-        self.flush_pending_erasure().await;
-        Ok(outcome)
-    }
-
-    pub async fn deletion_confirmed_true(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        let outcome = {
-            let client = self
-                .client
-                .as_mut()
-                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
-            self.deletion.request_confirmed_true(client).await?
-        };
         self.flush_pending_erasure().await;
         Ok(outcome)
     }
@@ -1107,7 +1040,6 @@ impl DesktopRuntime {
             timeline,
             history,
             composer,
-            search_draft,
             memory,
             tasks,
             usage,
@@ -1129,7 +1061,6 @@ impl DesktopRuntime {
                         timeline,
                         history,
                         composer,
-                        search_draft,
                         memory,
                         tasks,
                         usage,
@@ -1153,22 +1084,6 @@ impl DesktopRuntime {
             Ok(()) | Err(_) => {}
         }
         Ok(reply)
-    }
-
-    #[must_use]
-    pub fn deletion_phase_token(&self) -> Option<&'static str> {
-        self.deletion
-            .phase_of_first()
-            .map(ene_api::v1::deletion::DeletionPhaseWire::as_str)
-    }
-
-    #[must_use]
-    pub fn deletion_has_operations(&self) -> bool {
-        self.deletion.has_operations()
-    }
-
-    pub fn set_search_draft(&mut self, text: String) {
-        self.search_draft = text;
     }
 
     #[must_use]
@@ -1201,7 +1116,6 @@ impl DesktopRuntime {
             timeline: &mut self.timeline,
             history: &mut self.history,
             composer: &mut self.composer,
-            search_draft: &mut self.search_draft,
             memory: &mut self.memory,
             tasks: &mut self.tasks,
             usage: &mut self.usage,

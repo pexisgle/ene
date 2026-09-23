@@ -1,4 +1,9 @@
-use std::time::Duration;
+//! Targeted Deletion management projection.
+//!
+//! Distinct from conversational forget. Client intent only stages a request;
+//! Host-local seated control confirms. Status is the bounded
+//! `DeletionStatusRequest`. Exact target text is Owner body and stays out of
+//! snapshots and Debug.
 
 use ene_api::v1::deletion::{
     DeletionHoldWire, DeletionOperationStatusView, DeletionParticipantReportWire,
@@ -15,8 +20,7 @@ use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
 use zeroize::Zeroize as _;
 
 use crate::control::ConfirmationClient;
-use crate::ui::DesktopError;
-use crate::ui::request_with_timeout;
+use crate::ui::{DEFAULT_REQUEST_TIMEOUT, DesktopError, request_with_timeout};
 
 pub struct DeletionPanel {
     exact_text: String,
@@ -148,10 +152,6 @@ impl DeletionPanel {
         self.exact_text = text;
     }
 
-    pub fn set_purpose(&mut self, purpose: DeletionPurposeWire) {
-        self.purpose = purpose;
-    }
-
     pub fn wipe_exact_text(&mut self) {
         self.exact_text.zeroize();
         self.exact_text.clear();
@@ -189,21 +189,7 @@ impl DeletionPanel {
         lines.join("\n")
     }
 
-    #[must_use]
-    pub fn phase_of_first(&self) -> Option<DeletionPhaseWire> {
-        self.page
-            .as_ref()
-            .and_then(|page| page.operations.first())
-            .map(|operation| operation.phase)
-    }
-
-    #[must_use]
-    pub fn has_operations(&self) -> bool {
-        self.page
-            .as_ref()
-            .is_some_and(|page| !page.operations.is_empty())
-    }
-
+    /// Advisory Client request. Destructive confirmation is Host-local.
     pub async fn request(
         &mut self,
         client: &mut Client,
@@ -229,7 +215,7 @@ impl DeletionPanel {
         match request_with_timeout(
             client,
             WirePayload::ManagementIntent(intent),
-            Duration::from_secs(15),
+            DEFAULT_REQUEST_TIMEOUT,
         )
         .await?
         {
@@ -244,37 +230,6 @@ impl DeletionPanel {
         }
     }
 
-    pub async fn request_confirmed_true(
-        &mut self,
-        client: &mut Client,
-    ) -> Result<ManagementOutcome, DesktopError> {
-        self.refresh(client).await?;
-        let intent = ManagementIntent {
-            intent_id: CommandWireId(uuid::Uuid::new_v4()),
-            kind: ManagementIntentKind::RequestDeletionBackupRestoreReset,
-            target: deletion_target(self.purpose, "must-not-apply"),
-            base_view: BaseViewMark(self.mark.clone()),
-            rationale: IntentRationaleWire {
-                origin: RationaleOrigin::ManagementSurface,
-                quote: None,
-            },
-            confirmed: true,
-        };
-        match request_with_timeout(
-            client,
-            WirePayload::ManagementIntent(intent),
-            Duration::from_secs(15),
-        )
-        .await?
-        {
-            WirePayload::ManagementOutcome(outcome) => Ok(outcome),
-            other => Err(DesktopError::Protocol(format!(
-                "expected ManagementOutcome, got {}",
-                other.message_type()
-            ))),
-        }
-    }
-
     pub async fn refresh(&mut self, client: &mut Client) -> Result<(), DesktopError> {
         match request_with_timeout(
             client,
@@ -282,7 +237,7 @@ impl DeletionPanel {
                 cursor: None,
                 limit: None,
             }),
-            Duration::from_secs(15),
+            DEFAULT_REQUEST_TIMEOUT,
         )
         .await?
         {

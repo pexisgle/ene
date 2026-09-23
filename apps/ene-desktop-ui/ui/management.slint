@@ -72,6 +72,14 @@ export component ManagementWindow inherits Window {
         root.selected-memory = ""; root.selected-deletion = ""; root.notice = "";
         root.confirmation-target = ""; root.confirmation-key = ""; root.confirmation-title = ""; root.confirmation-description = ""; root.can-confirm = false;
     }
+    function page-title(page: int) -> string {
+        return page == 0 ? (root.japanese ? "一般" : "General") :
+            page == 1 ? (root.japanese ? "AI・接続" : "AI & connection") :
+            page == 2 ? (root.japanese ? "記憶" : "Memory") :
+            page == 3 ? (root.japanese ? "利用量・上限" : "Usage & limits") :
+            page == 4 ? (root.japanese ? "データ削除" : "Data deletion") :
+            (root.japanese ? "ene について" : "About ene");
+    }
     if root.content-live: HorizontalLayout {
         spacing: 0px;
         Rectangle {
@@ -80,16 +88,16 @@ export component ManagementWindow inherits Window {
                 padding: 16px; spacing: 8px;
                 Text { text: "ene"; color: Theme.text; font-size: 24px; font-weight: 600; height: 52px; }
                 Caption { text: root.japanese ? "設定" : "PREFERENCES"; }
-                NavItem { text: root.japanese ? "一般" : "General"; selected: root.page == 0; clicked => { root.navigate(0); } }
-                NavItem { text: root.japanese ? "AI・接続" : "AI & connection"; selected: root.page == 1 || root.page == 6; clicked => { root.navigate(1); } }
+                NavItem { text: root.page-title(0); selected: root.page == 0; clicked => { root.navigate(0); } }
+                NavItem { text: root.page-title(1); selected: root.page == 1 || root.page == 6; clicked => { root.navigate(1); } }
                 Rectangle { height: 16px; }
                 Caption { text: root.japanese ? "データ管理" : "YOUR DATA"; }
-                NavItem { text: root.japanese ? "記憶" : "Memory"; selected: root.page == 2; clicked => { root.navigate(2); } }
-                NavItem { text: root.japanese ? "利用量・上限" : "Usage & limits"; selected: root.page == 3; clicked => { root.navigate(3); } }
-                NavItem { text: root.japanese ? "データ削除" : "Data deletion"; selected: root.page == 4; clicked => { root.navigate(4); } }
+                NavItem { text: root.page-title(2); selected: root.page == 2; clicked => { root.navigate(2); } }
+                NavItem { text: root.page-title(3); selected: root.page == 3; clicked => { root.navigate(3); } }
+                NavItem { text: root.page-title(4); selected: root.page == 4; clicked => { root.navigate(4); } }
                 Rectangle { vertical-stretch: 1; }
                 Caption { text: root.status; }
-                NavItem { text: root.japanese ? "ene について" : "About ene"; selected: root.page == 5; clicked => { root.navigate(5); } }
+                NavItem { text: root.page-title(5); selected: root.page == 5; clicked => { root.navigate(5); } }
                 Action { text: root.japanese ? "会話を開く" : "Open chat"; clicked => { root.open-chat(); } }
             }
         }
@@ -98,13 +106,7 @@ export component ManagementWindow inherits Window {
             VerticalLayout {
                 padding: 32px; spacing: 20px;
                 if root.page < 6: HorizontalLayout {
-                    Heading { text: root.page == 0 ? (root.japanese ? "一般" : "General") :
-                        root.page == 1 ? (root.japanese ? "AI・接続" : "AI & connection") :
-                        root.page == 2 ? (root.japanese ? "記憶" : "Memory") :
-                        root.page == 3 ? (root.japanese ? "利用量・上限" : "Usage & limits") :
-                        root.page == 4 ? (root.japanese ? "データ削除" : "Data deletion") :
-                        (root.japanese ? "ene について" : "About ene");
-                    }
+                    Heading { text: root.page-title(root.page); }
                     if root.page > 0 && root.page < 5: Action { text: root.busy ? (root.japanese ? "取得中…" : "Loading…") : (root.japanese ? "更新" : "Refresh"); enabled: !root.busy && root.connected; clicked => { root.refresh(); } }
                 }
                 if root.notice != "": Notice { text: root.notice; error: root.notice-error; }
@@ -247,7 +249,7 @@ export component ManagementWindow inherits Window {
                                 }
                                 Heading { text: root.japanese ? "処理の状況" : "Operation status"; font-size: 18px; }
                                 if root.deletions.length == 0: Caption { text: root.japanese ? "取得済みの削除処理はありません。" : "No deletion operations have been retrieved."; }
-                                for operation in root.deletions: RowCard { item: operation; selected: operation.key == root.selected-deletion; clicked(key) => { root.select-deletion(key); } }
+                                for operation in root.deletions: RowCard { item: operation; selected: operation.key == root.selected-deletion; clicked(key) => { if !root.busy { root.select-deletion(key); } } }
                                 Action { text: root.japanese ? "選択した処理を再開" : "Resume selected operation"; enabled: root.can-resume-deletion && !root.busy; clicked => { root.resume-deletion(); } }
                             }
                             if root.page == 5: VerticalLayout {

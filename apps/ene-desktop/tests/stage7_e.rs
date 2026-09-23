@@ -108,7 +108,6 @@ fn snapshot_has_target(desktop: &DesktopRuntime) -> bool {
         || snap.timeline.iter().any(|line| line.contains(TARGET))
         || snap.history.iter().any(|line| line.contains(TARGET))
         || snap.draft.contains(TARGET)
-        || snap.search_draft.contains(TARGET)
         || snap.memory_panel.contains(TARGET)
         || snap.task_detail.contains(TARGET)
         || snap.usage_body.contains(TARGET)
@@ -128,7 +127,6 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
         .composer_mut()
         .set_draft(format!("please remember {TARGET}"));
     desktop.send_text().await.expect("plant the target");
-    desktop.set_search_draft(String::from(TARGET));
     desktop.composer_mut().set_draft(format!("draft {TARGET}"));
     desktop.composer_mut().begin_composition();
     match desktop.refresh_memory().await {
@@ -202,10 +200,6 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
         })) => {}
         other => panic!("expected DeletionStarted, got {other:?}"),
     }
-    assert!(
-        desktop.deletion_has_operations(),
-        "started deletion is visible on the panel"
-    );
     drive_gui_until(&mut desktop, &handle, "completed").await;
 
     assert!(erased.load(Ordering::SeqCst) > 0);

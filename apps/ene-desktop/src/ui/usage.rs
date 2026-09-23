@@ -1,4 +1,8 @@
-use std::time::Duration;
+//! Usage / cost / cap management projection.
+//!
+//! Reads the Stage 6 first-party bounded query over the Client channel.
+//! Cap mutation uses the existing revisioned intent; displayed remaining
+//! is never the admit authority.
 
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome,
@@ -12,8 +16,7 @@ use ene_api::v1::usage::{
 };
 use ene_client::Client;
 
-use crate::ui::DesktopError;
-use crate::ui::request_with_timeout;
+use crate::ui::{DEFAULT_REQUEST_TIMEOUT, DesktopError, request_with_timeout};
 
 const UNKNOWN: &str = "unknown";
 
@@ -172,54 +175,11 @@ impl UsagePanel {
         lines.join("\n")
     }
 
-    #[must_use]
-    pub fn has_unknown_cost(&self) -> bool {
-        self.page.as_ref().is_some_and(|page| {
-            page.rows.iter().any(|row| row.cost.is_none())
-                || page.caps.iter().any(|cap| {
-                    matches!(
-                        cap.stored.as_ref().map(|stored| &stored.consumption),
-                        Some(UsageCapConsumptionView::Indeterminate)
-                    )
-                })
-        })
-    }
-
-    pub fn set_status_filter(&mut self, status: Option<String>) {
-        self.request.status = status;
-        self.request.cursor = None;
-    }
-
-    pub fn set_period(&mut self, from: Option<String>, to: Option<String>) {
-        self.request.from = from;
-        self.request.to = to;
-        self.request.cursor = None;
-    }
-
-    pub fn set_attribution_filters(
-        &mut self,
-        provider: Option<String>,
-        model: Option<String>,
-        consumer: Option<String>,
-        purpose: Option<String>,
-    ) {
-        self.request.provider = provider;
-        self.request.model = model;
-        self.request.consumer = consumer;
-        self.request.purpose = purpose;
-        self.request.cursor = None;
-    }
-
     pub fn set_cap_limit_micros(&mut self, micros: u64) {
         self.cap_limit_micros = micros;
     }
 
-    pub fn set_cap_slot(&mut self, provider: Option<String>, window: String, currency: String) {
-        self.cap_provider = provider;
-        self.cap_window = window;
-        self.cap_currency = currency;
-    }
-
+    /// Drops the cached usage page. Filters stay; they are not target bodies.
     pub fn wipe_body(&mut self) {
         self.page = None;
         self.notice.clear();
@@ -274,7 +234,7 @@ impl UsagePanel {
         match request_with_timeout(
             client,
             WirePayload::ManagementIntent(intent),
-            Duration::from_secs(15),
+            DEFAULT_REQUEST_TIMEOUT,
         )
         .await?
         {
@@ -293,7 +253,7 @@ impl UsagePanel {
         match request_with_timeout(
             client,
             WirePayload::UsageSummaryRequest(self.request.clone()),
-            Duration::from_secs(15),
+            DEFAULT_REQUEST_TIMEOUT,
         )
         .await?
         {
@@ -310,7 +270,9 @@ impl UsagePanel {
                     }
                     None => String::from("usage cursor is stale; restart from the head"),
                 };
-                Err(DesktopError::Protocol(String::from("stale usage page")))
+                Err(DesktopError::Stale(String::from(
+                    "usage cursor is stale; restart from the head",
+                )))
             }
             WirePayload::UsageSummaryResponse(UsageSummaryResponse::Unavailable) => {
                 self.page = None;

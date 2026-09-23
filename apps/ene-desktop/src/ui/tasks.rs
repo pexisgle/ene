@@ -17,7 +17,7 @@ use ene_api::v1::undelivered::{
 use ene_client::Client;
 
 use crate::ui::DesktopError;
-use crate::ui::request_with_timeout;
+use crate::ui::{request_observed_with_timeout, request_with_timeout};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -170,11 +170,6 @@ impl TaskPanel {
     }
 
     #[must_use]
-    pub(crate) fn displayed(&self) -> Option<&DisplayedTask> {
-        self.displayed.as_ref()
-    }
-
-    #[must_use]
     pub(crate) fn has_presented_receipt(&self) -> bool {
         self.presented.is_some()
     }
@@ -216,6 +211,11 @@ impl TaskPanel {
             .await?;
             let page = match answer {
                 WirePayload::TaskListResponse(TaskListResponse::Page(page)) => page,
+                WirePayload::TaskListResponse(TaskListResponse::StaleBaseView { .. }) => {
+                    return Err(DesktopError::Stale(String::from(
+                        "task list cursor is stale",
+                    )));
+                }
                 WirePayload::TaskListResponse(TaskListResponse::Unavailable) => {
                     return Err(DesktopError::Unavailable(String::from(
                         "task list is unavailable; retry later",
@@ -483,22 +483,17 @@ impl TaskPanel {
                 "ack requires a presented receipt",
             )));
         };
-        let answer = tokio::time::timeout(
+        let answer = request_observed_with_timeout(
+            client,
+            WirePayload::UndeliveredAck(UndeliveredAck {
+                receipt: ene_api::v1::undelivered::PresentationReceiptWireRef(presented.receipt),
+                status: PresentationStatus::Presented,
+            }),
+            Some(presented.round),
+            Some(presented.generation),
             REQUEST_TIMEOUT,
-            client.request_observed(
-                WirePayload::UndeliveredAck(UndeliveredAck {
-                    receipt: ene_api::v1::undelivered::PresentationReceiptWireRef(
-                        presented.receipt,
-                    ),
-                    status: PresentationStatus::Presented,
-                }),
-                Some(presented.round),
-                Some(presented.generation),
-            ),
         )
-        .await
-        .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
-        .map_err(DesktopError::Client)?;
+        .await?;
         let WirePayload::UndeliveredAckOutcome(outcome) = answer else {
             return Err(DesktopError::Protocol(format!(
                 "ack answered {}",
@@ -541,7 +536,7 @@ impl TaskPanel {
                     )));
                 }
                 WirePayload::TaskReportResponse(TaskReportResponse::StaleBaseView { .. }) => {
-                    return Err(DesktopError::Protocol(String::from(
+                    return Err(DesktopError::Stale(String::from(
                         "task report cursor is stale",
                     )));
                 }

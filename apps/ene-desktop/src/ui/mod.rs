@@ -155,7 +155,6 @@ pub struct GuiSnapshot {
     pub memory_panel: String,
     pub usage_body: String,
     pub deletion_body: String,
-    pub search_draft: String,
 }
 
 impl GuiSnapshot {
@@ -186,6 +185,10 @@ pub enum DesktopError {
     /// peer that violated the shape of the exchange.
     #[error("unavailable: {0}")]
     Unavailable(String),
+    /// The Host answered a stale cursor / moved premise: a domain outcome, not
+    /// a protocol violation; restart from the head.
+    #[error("stale: {0}")]
+    Stale(String),
     /// The Host refused admission because its requester queue is saturated
     /// (`FromHost::BackpressureHold`). A hold, not a technical failure and not
     /// a boundary refusal: nothing was accepted, the Owner's surface shows the
@@ -196,6 +199,9 @@ pub enum DesktopError {
     Client(#[from] ClientError),
 }
 
+/// Default budget for one bounded panel request.
+pub(crate) const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Sends one Client request under a caller-chosen budget. The only shared
 /// difference between panels is the timeout, so it stays a parameter.
 pub(crate) async fn request_with_timeout(
@@ -203,7 +209,26 @@ pub(crate) async fn request_with_timeout(
     payload: ene_api::v1::payload::WirePayload,
     timeout: std::time::Duration,
 ) -> Result<ene_api::v1::payload::WirePayload, DesktopError> {
-    tokio::time::timeout(timeout, client.request(payload))
+    timed_request(client.request(payload), timeout).await
+}
+
+/// [`request_with_timeout`] on the observed request form, which also carries
+/// the presentation round and presence generation.
+pub(crate) async fn request_observed_with_timeout(
+    client: &mut ene_client::Client,
+    payload: ene_api::v1::payload::WirePayload,
+    round: Option<ene_api::v1::refs::RoundWireId>,
+    generation: Option<u64>,
+    timeout: std::time::Duration,
+) -> Result<ene_api::v1::payload::WirePayload, DesktopError> {
+    timed_request(client.request_observed(payload, round, generation), timeout).await
+}
+
+async fn timed_request(
+    request: impl std::future::Future<Output = Result<ene_api::v1::payload::WirePayload, ClientError>>,
+    timeout: std::time::Duration,
+) -> Result<ene_api::v1::payload::WirePayload, DesktopError> {
+    tokio::time::timeout(timeout, request)
         .await
         .map_err(|_| DesktopError::Transport(String::from("client request timed out")))?
         .map_err(DesktopError::Client)
