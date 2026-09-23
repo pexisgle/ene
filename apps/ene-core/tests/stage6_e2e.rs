@@ -17,7 +17,9 @@ use ene_api::v1::deletion::{
     DeletionParticipantReportWire, DeletionParticipantStatusWire, DeletionPhaseWire,
     DeletionPurposeWire, DeletionStatusPage, DeletionStatusRequest, DeletionStatusResponse,
 };
+#[cfg(unix)]
 use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender, new_outgoing_envelope};
+#[cfg(unix)]
 use ene_api::v1::handshake::{PairingRequest, PairingResult};
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome,
@@ -25,14 +27,16 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::StreamWireId;
+use ene_api::v1::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, RoundWireId};
+#[cfg(unix)]
 use ene_api::v1::refs::{
-    BaseViewMark, ClientIncarnationId, CommandWireId, CompanionWireRef, ManagementTargetWire,
-    RequestWireId, RoundWireId, WireMessageId, WireMessageType,
+    ClientIncarnationId, CompanionWireRef, RequestWireId, WireMessageId, WireMessageType,
 };
+#[cfg(unix)]
 use ene_api::v1::reject::RejectKind;
-use ene_api::v1::round::{
-    HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire, TextBodyWire,
-};
+#[cfg(unix)]
+use ene_api::v1::round::TextBodyWire;
+use ene_api::v1::round::{HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire};
 use ene_api::v1::undelivered::{
     TaskListPage, TaskListResponse, UndeliveredAckOutcome, UndeliveredResponse, UndeliveredSummary,
 };
@@ -46,6 +50,7 @@ use ene_ctl::client::{Client, ClientError, ConnectProgress, PendingPairingClient
 use ene_ctl::cmds;
 use ene_inference::cost::UsageEstimate;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport, RawUsage};
+#[cfg(unix)]
 use ene_plugin_ipc::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 use ene_preservation::{ConfirmTargetedDeletionOutcome, DeletionOperationRef};
 use ene_primitive::{RawId, WallClockWithTz};
@@ -4937,12 +4942,14 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
     served.server.abort();
 }
 
+#[cfg(unix)]
 #[derive(serde::Serialize)]
 struct IngressCrafted {
     envelope: WireEnvelope,
     payload: IngressPayload,
 }
 
+#[cfg(unix)]
 #[derive(serde::Serialize)]
 enum IngressPayload {
     FutureThing(IngressNote),
@@ -4950,17 +4957,20 @@ enum IngressPayload {
     SubmitTextInput(IngressPartialSubmit),
 }
 
+#[cfg(unix)]
 #[derive(serde::Serialize)]
 struct IngressNote {
     note: String,
 }
 
+#[cfg(unix)]
 #[derive(serde::Serialize)]
 struct IngressClose {
     stream: StreamWireId,
     status: String,
 }
 
+#[cfg(unix)]
 #[derive(serde::Serialize)]
 struct IngressPartialSubmit {
     companion: CompanionWireRef,
@@ -4970,6 +4980,7 @@ struct IngressPartialSubmit {
     body: TextBodyWire,
 }
 
+#[cfg(unix)]
 fn ingress_envelope(message_type: &str) -> WireEnvelope {
     new_outgoing_envelope(
         ProtocolVersion::V1,
@@ -4985,6 +4996,7 @@ fn ingress_envelope(message_type: &str) -> WireEnvelope {
     )
 }
 
+#[cfg(unix)]
 async fn ingress_dial(dir: &Path) -> tokio::net::UnixStream {
     let path = conn::socket_path(dir);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -5000,6 +5012,7 @@ async fn ingress_dial(dir: &Path) -> tokio::net::UnixStream {
     }
 }
 
+#[cfg(unix)]
 async fn ingress_write_bytes(stream: &mut tokio::net::UnixStream, bytes: &[u8]) {
     use tokio::io::AsyncWriteExt as _;
     tokio::time::timeout(Duration::from_secs(10), stream.write_all(bytes))
@@ -5008,6 +5021,7 @@ async fn ingress_write_bytes(stream: &mut tokio::net::UnixStream, bytes: &[u8]) 
         .expect("frame must be writable");
 }
 
+#[cfg(unix)]
 async fn ingress_write_crafted(
     stream: &mut tokio::net::UnixStream,
     frame: &IngressCrafted,
@@ -5020,11 +5034,13 @@ async fn ingress_write_crafted(
     message_id
 }
 
+#[cfg(unix)]
 async fn ingress_write_wire(stream: &mut tokio::net::UnixStream, frame: &WireFrame) {
     let bytes = encode_frame(frame).expect("wire frame must encode");
     ingress_write_bytes(stream, &bytes).await;
 }
 
+#[cfg(unix)]
 async fn ingress_read_reply(stream: &mut tokio::net::UnixStream) -> WireFrame {
     use tokio::io::AsyncReadExt as _;
 
@@ -5049,6 +5065,7 @@ async fn ingress_read_reply(stream: &mut tokio::net::UnixStream) -> WireFrame {
     }
 }
 
+#[cfg(unix)]
 async fn ingress_expect_reject(
     stream: &mut tokio::net::UnixStream,
     reply_to: WireMessageId,
@@ -5079,6 +5096,7 @@ async fn ingress_expect_reject(
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn unknown_wire_values_are_typed_rejects_and_the_connection_stays_usable() {
     let dir = tempfile::tempdir().expect("temp dir");
