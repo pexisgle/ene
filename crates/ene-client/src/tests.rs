@@ -2,7 +2,7 @@
 //! mutated; frames go through the in-memory codec or plain in-memory scripts.
 
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
-use ene_api::v1::handshake::{AuthResult, PairingProvisionSecret};
+use ene_api::v1::handshake::AuthResult;
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin, credential_target,
 };
@@ -16,8 +16,7 @@ use ene_api::v1::round::{HistoryRequest, SubmitTextInput, TextBodyWire};
 use ene_plugin_ipc::WireFrame;
 
 use super::frames::{
-    PreparedRequest, auth_rejected_guidance, capability_frame, frame_for, frame_for_session,
-    missing_secret_guidance, pairing_frame, proof_frame,
+    PreparedRequest, capability_frame, frame_for, frame_for_session, pairing_frame, proof_frame,
 };
 use super::session::{
     AuthDecision, DEFERRED_CAP, PENDING_ERASURE_CAP, SessionState, decide_auth, stale_generation_of,
@@ -127,7 +126,7 @@ fn pairing_frame_is_pre_pairing_v1() -> Result<(), String> {
 #[test]
 fn capability_frame_speaks_v1_and_threads_device() -> Result<(), String> {
     let sender_device = ene_api::v1::refs::DeviceWireId(uuid::Uuid::new_v4());
-    let frame = capability_frame("linux-x86_64", incarnation(), Some(sender_device));
+    let frame = capability_frame("linux-x86_64", incarnation(), sender_device);
     let WirePayload::CapabilityAdvertise(advertise) = &frame.payload else {
         return Err(String::from(
             "capability builder must emit CapabilityAdvertise",
@@ -768,7 +767,7 @@ fn decide_frame_classifies_facts_answers_and_deferrals() {
         Some(own),
     );
     assert!(
-        matches!(decide_frame(own, &hint), FrameDecision::AbsorbBodyHint(_)),
+        matches!(decide_frame(own, &hint), FrameDecision::AbsorbBodyHint),
         "BodyStateHint is a fact, never an answer, even with matching reply_to"
     );
 }
@@ -924,37 +923,6 @@ fn proof_derives_from_the_secret_and_the_single_use_nonce() -> Result<(), String
         "the proof is bound to the single-use nonce"
     );
     Ok(())
-}
-
-#[test]
-fn guidance_names_provisioning_without_secrets() {
-    let missing = missing_secret_guidance();
-    assert!(
-        missing.contains("no pairing secret") && missing.contains("fresh pairing request"),
-        "missing-secret guidance must direct approval and provisioning: {missing:?}"
-    );
-    let rejected = auth_rejected_guidance("unknown proof");
-    assert!(
-        rejected.contains("unknown proof"),
-        "rejection guidance keeps the Host reason: {rejected:?}"
-    );
-}
-
-#[test]
-fn session_debug_redacts_the_secret() {
-    let mut session = SessionState::default();
-    session.set_pairing_secret(PairingProvisionSecret::new(String::from(
-        "secret-hex-marker-9d4e",
-    )));
-    let rendered = format!("{session:?}");
-    assert!(
-        !rendered.contains("secret-hex-marker-9d4e"),
-        "session Debug must not leak the secret: {rendered:?}"
-    );
-    assert!(
-        rendered.contains("[redacted]"),
-        "session Debug must mark the redaction: {rendered:?}"
-    );
 }
 
 #[test]

@@ -9,8 +9,8 @@ macro_rules! uuid_wire_id {
 }
 
 macro_rules! string_wire_ref {
-    ($name:ident, $($doc:literal),+ $(,)?) => {
-        $(#[doc = $doc])+
+    ($name:ident, $doc:literal) => {
+        #[doc = $doc]
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
         pub struct $name(pub String);
     };

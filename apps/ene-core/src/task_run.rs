@@ -595,7 +595,7 @@ fn completed_observation(effect: &ObservedEffect, fact_recorded: bool) -> String
             }
             listing
         }
-        (ActionCertainty::ConfirmedSuccess, Some(ene_action::ActionOutput::Created)) => {
+        (ActionCertainty::ConfirmedSuccess, Some(ene_action::ActionOutput::Created { .. })) => {
             String::from("create ok")
         }
         (ActionCertainty::ConfirmedSuccess, Some(ene_action::ActionOutput::Updated)) => {

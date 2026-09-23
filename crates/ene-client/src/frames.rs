@@ -23,11 +23,9 @@ pub fn proof_frame(
     )
 }
 
-#[must_use]
-pub fn missing_secret_guidance() -> String {
-    String::from("no pairing secret stored for this device; start a fresh pairing request")
-}
-
+/// The stored device file exists but is unusable. Re-running the first-run
+/// flow without reprovisioning cannot help, because the file must be replaced
+/// by a fresh proven secret.
 #[must_use]
 pub fn unreadable_device_file_guidance() -> String {
     String::from(
@@ -51,10 +49,12 @@ pub fn auth_rejected_guidance(reason: &str) -> String {
 /// (`HistoryRequest`, `ManagementViewRequest`): those pair by `request_id` and
 /// `reply_to` only and have no command saga to replay.
 ///
-/// A prepared command is bound to the sender incarnation that prepared it.
-/// The Host keys command idempotency on the authenticated sender epoch, so
-/// after a reconnect (new incarnation) the same handle can no longer be
-/// replayed — re-prepare under the new incarnation instead of retrying.
+/// A prepared command is admissible only in the authenticated sender epoch
+/// that prepared it: the Host binds retry admissibility to
+/// `(device_id, incarnation_id, connection_id)` (IPC §6.2), so any later
+/// epoch — a new connection, even one that keeps the process incarnation —
+/// must not replay the handle; re-prepare instead. A replay under an older
+/// epoch is answered with the Host's typed stale outcome, not re-executed.
 pub struct PreparedRequest {
     command_id: Option<CommandWireId>,
     payload: WirePayload,
@@ -130,10 +130,14 @@ pub fn pairing_frame(descriptor: &str, incarnation: ClientIncarnationId) -> Wire
     frame
 }
 
+/// Speaks [`ProtocolVersion::V1`] and carries the display platform string.
+/// Capability is sent after pairing or against a stored device, so the sender
+/// always names the paired device; a claim-less capability frame is refused
+/// by the Host.
 pub fn capability_frame(
     platform: &str,
     incarnation: ClientIncarnationId,
-    device_id: Option<DeviceWireId>,
+    device_id: DeviceWireId,
 ) -> WireFrame {
     frame_for(
         WirePayload::CapabilityAdvertise(CapabilityAdvertise {
@@ -141,7 +145,7 @@ pub fn capability_frame(
             platform: String::from(platform),
         }),
         WireSender {
-            device_id,
+            device_id: Some(device_id),
             incarnation_id: incarnation,
             connection_id: None,
         },

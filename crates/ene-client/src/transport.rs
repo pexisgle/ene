@@ -19,8 +19,8 @@ use crate::error::ClientError;
 
 #[cfg(any(unix, windows))]
 use super::frames::{
-    PreparedRequest, capability_frame, frame_for, missing_secret_guidance, pairing_frame,
-    proof_frame, unreadable_device_file_guidance,
+    PreparedRequest, capability_frame, frame_for, pairing_frame, proof_frame,
+    unreadable_device_file_guidance,
 };
 #[cfg(any(unix, windows))]
 use super::session::{
@@ -206,7 +206,7 @@ impl Client {
     ) -> Result<Self, ClientError> {
         write_frame(
             &mut stream,
-            &capability_frame(platform, incarnation, Some(device_id)),
+            &capability_frame(platform, incarnation, device_id),
         )
         .await?;
         match read_frame(&mut stream).await?.payload {
@@ -228,8 +228,6 @@ impl Client {
                 )));
             }
         }
-        let mut state = SessionState::default();
-        state.set_pairing_secret(secret);
         let mut session = Self {
             stream,
             sender: WireSender {
@@ -237,7 +235,7 @@ impl Client {
                 incarnation_id: incarnation,
                 connection_id: None,
             },
-            state,
+            state: SessionState::default(),
         };
         let challenge = read_frame(&mut session.stream).await?.payload;
         let WirePayload::AuthChallenge(challenge) = challenge else {
@@ -246,16 +244,13 @@ impl Client {
                 challenge.message_type()
             )));
         };
-        session.authenticate(&challenge).await?;
+        session
+            .authenticate(&challenge, secret.expose_secret(), device_id)
+            .await?;
         if persist_after_acceptance {
-            let Some(secret_value) = session.state.pairing_secret() else {
-                return Err(ClientError::Transport(String::from(
-                    "accepted authentication lost the client device secret",
-                )));
-            };
             device::store_device(
                 data_dir,
-                &device::StoredDevice::new(device_id, secret_value.to_owned()),
+                &device::StoredDevice::new(device_id, secret.expose_secret().to_owned()),
             )?;
         }
         let fact = session.next_frame().await?;
@@ -268,29 +263,26 @@ impl Client {
         Ok(session)
     }
 
-    /// Answers one authentication challenge using the session secret, storing
-    /// the accepted connection key into the sender (for all later frames).
-    /// [`Client::connect`] calls this for the
+    /// Answers one authentication challenge using the supplied device secret,
+    /// storing the accepted connection key into the sender (for all later
+    /// frames). [`Client::connect`] calls this for the
     /// post-negotiation challenge, the only challenge the Host sends on a
     /// connection.
     ///
     /// # Errors
     ///
     /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
-    /// exchange cannot be moved or framed; [`ClientError::ServerOutcome`] when no
-    /// secret is available or the Host rejects the proof (both require a fresh
-    /// pairing); and [`ClientError::ServerRejected`] when the Host answers
-    /// with an unexpected payload kind.
-    async fn authenticate(&mut self, challenge: &AuthChallenge) -> Result<(), ClientError> {
-        let Some(secret) = self.state.pairing_secret() else {
-            return Err(ClientError::ServerOutcome(missing_secret_guidance()));
-        };
+    /// exchange cannot be moved or framed; [`ClientError::ServerOutcome`] when
+    /// the Host rejects the proof (a fresh pairing is required); and
+    /// [`ClientError::ServerRejected`] when the Host answers with an unexpected
+    /// payload kind.
+    async fn authenticate(
+        &mut self,
+        challenge: &AuthChallenge,
+        secret: &str,
+        device: ene_api::v1::refs::DeviceWireId,
+    ) -> Result<(), ClientError> {
         let proof = pairing_proof_hex(secret, &challenge.nonce);
-        let Some(device) = self.sender.device_id else {
-            return Err(ClientError::ServerRejected(String::from(
-                "cannot prove ownership without a paired device",
-            )));
-        };
         write_frame(
             &mut self.stream,
             &proof_frame(&proof, self.sender.incarnation_id, device),
@@ -392,7 +384,7 @@ impl Client {
             }
             match decide_frame(own_message_id, &incoming) {
                 FrameDecision::AbsorbPresence(fact) => self.state.observe_presence(&fact),
-                FrameDecision::AbsorbBodyHint(_) => {}
+                FrameDecision::AbsorbBodyHint => {}
                 FrameDecision::Answer(payload) => {
                     if let Some(current) = stale_generation_of(&payload) {
                         self.state.note_stale_generation(current);
@@ -510,14 +502,12 @@ async fn read_frame(
             "frame body of {claimed} bytes exceeds the 256 KiB cap"
         )));
     }
-    let mut body = zeroize::Zeroizing::new(vec![0_u8; claimed]);
+    let mut bytes = zeroize::Zeroizing::new(vec![0_u8; 4 + claimed]);
+    bytes[..4].copy_from_slice(&prefix);
     stream
-        .read_exact(&mut body)
+        .read_exact(&mut bytes[4..])
         .await
         .map_err(|error| ClientError::Transport(format!("socket read failed: {}", error.kind())))?;
-    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(4 + claimed));
-    bytes.extend_from_slice(&prefix);
-    bytes.extend_from_slice(&body);
     decode_frame(&bytes)
         .map(|(frame, _consumed)| frame)
         .map_err(|error: CodecError| ClientError::Codec(format!("decode failed: {error}")))

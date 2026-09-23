@@ -104,10 +104,10 @@ pub(crate) fn atomic_replace(
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         Some(_) | None => PathBuf::from("."),
     };
-    let file_name = target
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| String::from(DEVICE_FILE_NAME));
+    let file_name = target.file_name().map_or_else(
+        || String::from("staged"),
+        |name| name.to_string_lossy().into_owned(),
+    );
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());

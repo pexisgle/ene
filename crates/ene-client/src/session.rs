@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use ene_api::v1::deletion::{ClientTempClass, DeletionDemand};
-use ene_api::v1::handshake::{AuthResult, PairingProvisionSecret};
-use ene_api::v1::payload::{BodyStateHint, WirePayload};
+use ene_api::v1::handshake::AuthResult;
+use ene_api::v1::payload::WirePayload;
 use ene_api::v1::presence::PresenceAttributionWire;
 use ene_api::v1::refs::{ConnectionWireId, WireMessageId};
 use ene_api::v1::round::RoundIntakeOutcomeWire;
@@ -16,19 +16,14 @@ pub const DEFERRED_CAP: usize = 32;
 /// never the newest; the Host holds and re-demands a dropped condition.
 pub const PENDING_ERASURE_CAP: usize = 32;
 
-/// Observed session: latest presence generation, companion projection,
-/// pairing secret, and the deferred out-of-order answer queue.
+/// Observed session: latest presence generation, companion projection, and
+/// the deferred out-of-order answer queue.
 ///
 /// Latest value supersedes: each new fact or stale answer overwrites. A
 /// missing generation is never read as current — a [`None`]-stamped input
 /// answered with `NeedsRevalidation` is the correct outcome; defaulting it
 /// (zero) would claim a generation the client never observed, and the Host
 /// would treat that stale claim as currentness evidence it is not.
-///
-/// The pairing secret lives here for the session lifetime only (loaded from
-/// the device file or the one-shot bootstrap at connect time) and is never
-/// logged; the custom [`core::fmt::Debug`] below renders it as `[redacted]`
-/// so a debug dump cannot leak key material.
 ///
 /// The deferred queue holds whole [`WireFrame`]s (payload plus envelope),
 /// never facts (absorbed on arrival); it is session-lifetime only, never
@@ -45,7 +40,6 @@ pub struct SessionState {
     /// Companion projection to echo on submits and history requests so the
     /// Host resolves them through its mapping.
     companion: Option<String>,
-    pairing_secret: Option<PairingProvisionSecret>,
     deferred: VecDeque<WireFrame>,
     defer_erasure: bool,
     /// Host erasure demands stashed for the GUI participant, bounded at
@@ -60,10 +54,6 @@ impl core::fmt::Debug for SessionState {
             .debug_struct("SessionState")
             .field("generation", &self.generation)
             .field("companion", &self.companion)
-            .field(
-                "pairing_secret",
-                &self.pairing_secret.as_ref().map(|_| "[redacted]"),
-            )
             .field("deferred_len", &self.deferred.len())
             .field("defer_erasure", &self.defer_erasure)
             .field("pending_erasure_len", &self.pending_erasure.len())
@@ -76,16 +66,9 @@ impl SessionState {
         self.generation
     }
 
-    pub fn pairing_secret(&self) -> Option<&str> {
-        self.pairing_secret
-            .as_ref()
-            .map(PairingProvisionSecret::expose_secret)
-    }
-
-    pub fn set_pairing_secret(&mut self, secret: PairingProvisionSecret) {
-        self.pairing_secret = Some(secret);
-    }
-
+    /// Applies an authoritative presence fact: its generation and companion
+    /// projection supersede what the session held, so later sends echo the
+    /// Host's current mapping instead of guessing.
     pub fn observe_presence(&mut self, fact: &PresenceAttributionWire) {
         self.generation = Some(fact.generation);
         self.companion = Some(fact.companion.0.clone());
@@ -173,7 +156,8 @@ pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameDecision {
     AbsorbPresence(PresenceAttributionWire),
-    AbsorbBodyHint(BodyStateHint),
+    /// Host → Client activity hint (IPC M-21). Never an answer.
+    AbsorbBodyHint,
     Answer(WirePayload),
     Defer,
 }
@@ -182,7 +166,7 @@ pub enum FrameDecision {
 pub fn decide_frame(own_message_id: WireMessageId, frame: &WireFrame) -> FrameDecision {
     match &frame.payload {
         WirePayload::PresenceAttribution(fact) => FrameDecision::AbsorbPresence(fact.clone()),
-        WirePayload::BodyStateHint(hint) => FrameDecision::AbsorbBodyHint(hint.clone()),
+        WirePayload::BodyStateHint(_) => FrameDecision::AbsorbBodyHint,
         _ if frame.envelope.correlation.reply_to == Some(own_message_id) => {
             FrameDecision::Answer(frame.payload.clone())
         }

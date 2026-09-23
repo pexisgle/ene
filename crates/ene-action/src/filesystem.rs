@@ -31,8 +31,10 @@ pub enum ListEntryKind {
 pub enum ActionOutput {
     Bytes(Vec<u8>),
     Listing(Vec<ListEntry>),
-    /// The created marker of a successful `Create`.
-    Created,
+    /// The created marker of a successful `Create`, carrying the exact
+    /// [`RealTargetRef`] the attempt was recorded and executed under; the
+    /// request path is never reconstructed into the result.
+    Created { target: RealTargetRef },
     /// The updated marker of a successful `Edit`.
     Updated,
 }
@@ -189,6 +191,15 @@ impl WorkspaceRoot {
         }
     }
 
+    /// Observes one directory as a sorted, non-recursive entry listing.
+    ///
+    /// Each direct child is classified from no-follow metadata: symlinks,
+    /// Windows reparse points, junctions, mounts/cross-device entries,
+    /// special files, and entries whose name is not valid UTF-8 are excluded
+    /// from the result rather than followed, mapped to `file`/`dir`, or
+    /// reported under a lossy name; an excluded child never fails the whole
+    /// listing. A partial read of the directory is a confirmed refusal (a
+    /// listing changes nothing).
     fn list_directory(&self, target: &RealTargetRef) -> ObservedEffect {
         let destination = Path::new(target.as_path());
         if !self.verified_existing_metadata(destination, true) {
@@ -205,7 +216,9 @@ impl WorkspaceRoot {
             let Some(kind) = self.listable_child(&entry.path()) else {
                 continue;
             };
-            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
             listing.push(ListEntry { name, kind });
         }
         listing.sort_by(|left, right| left.name.cmp(&right.name));
@@ -279,7 +292,9 @@ impl WorkspaceRoot {
             Ok(read_back) if read_back == bytes => confirmed(if replace {
                 ActionOutput::Updated
             } else {
-                ActionOutput::Created
+                ActionOutput::Created {
+                    target: target.clone(),
+                }
             }),
             // Something is at the destination but not what we intended; an
             // effect occurred, but it cannot be confirmed as the intended one.
@@ -464,7 +479,7 @@ impl core::fmt::Debug for ObservedEffect {
                     ActionOutput::Listing(entries) => {
                         format!("<{} entries redacted>", entries.len())
                     }
-                    ActionOutput::Created => String::from("<created marker>"),
+                    ActionOutput::Created { .. } => String::from("<created target redacted>"),
                     ActionOutput::Updated => String::from("<updated marker>"),
                 }),
             )
