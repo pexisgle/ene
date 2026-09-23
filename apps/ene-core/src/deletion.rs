@@ -290,7 +290,7 @@ impl HostHandle {
                 vec![field_reject(frame, live, "query limit must be 1..=50")]
             }
             Err(DeletionStatusQueryError::InvalidCursor) => vec![reject_frame(
-                frame,
+                &frame.envelope,
                 live,
                 RejectKind::UnsupportedFieldValue,
                 String::from("cursor is not a deletion-status cursor"),

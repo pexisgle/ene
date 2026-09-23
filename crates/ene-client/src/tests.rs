@@ -10,7 +10,7 @@ use ene_api::v1::refs::{
     ClientIncarnationId, ClientLocalId, CompanionWireRef, RoundWireId, TextLangWire,
 };
 use ene_api::v1::round::{HistoryRequest, SubmitTextInput, TextBodyWire};
-use ene_plugin_ipc::WireFrame;
+use ene_plugin_ipc::{DecodedFrame, WireFrame};
 
 use super::frames::{
     PreparedRequest, capability_frame, frame_for, frame_for_session, pairing_frame, proof_frame,
@@ -886,6 +886,11 @@ fn proof_frame_names_the_paired_device() -> Result<(), String> {
     let encoded = (ene_plugin_ipc::encode_frame(&frame)).expect("encode proof frame");
     let (decoded, _consumed) =
         (ene_plugin_ipc::decode_frame(&encoded)).expect("decode proof frame");
+    let DecodedFrame::Known(decoded) = decoded else {
+        return Err(String::from(
+            "the proof frame must decode as a known message",
+        ));
+    };
     assert!(decoded == frame, "codec must preserve the proof frame");
     Ok(())
 }
@@ -933,5 +938,225 @@ fn ene_client_manifest_stays_a_client_library() {
             !manifest.contains(forbidden),
             "ene-client must not depend on {forbidden}: {manifest}"
         );
+    }
+}
+
+#[cfg(unix)]
+mod unknown_wire {
+    use std::time::Duration;
+
+    use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender, new_outgoing_envelope};
+    use ene_api::v1::handshake::{AuthChallenge, AuthResult, NegotiatedConnection};
+    use ene_api::v1::payload::WirePayload;
+    use ene_api::v1::presence::{PresenceAttributionWire, PresenceStateWire};
+    use ene_api::v1::refs::{
+        ClientIncarnationId, CompanionWireRef, ConnectionWireId, DeviceWireId, WireMessageId,
+        WireMessageType,
+    };
+    use ene_api::v1::reject::RejectKind;
+    use ene_plugin_ipc::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
+    use serde::Serialize;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use crate::frames::frame_for;
+
+    fn host_sender(device: DeviceWireId, connection: ConnectionWireId) -> WireSender {
+        WireSender {
+            device_id: Some(device),
+            incarnation_id: ClientIncarnationId {
+                counter: 3,
+                random: 11,
+            },
+            connection_id: Some(connection),
+        }
+    }
+
+    fn presence() -> WirePayload {
+        WirePayload::PresenceAttribution(PresenceAttributionWire {
+            companion: CompanionWireRef(String::from("default")),
+            state: PresenceStateWire::Present,
+            active_client: None,
+            generation: 4,
+        })
+    }
+
+    #[derive(Serialize)]
+    struct CraftedUnknown {
+        envelope: WireEnvelope,
+        payload: CraftedUnknownPayload,
+    }
+
+    #[derive(Serialize)]
+    enum CraftedUnknownPayload {
+        FuturePush(UnknownBody),
+    }
+
+    #[derive(Serialize)]
+    struct UnknownBody {
+        note: String,
+    }
+
+    async fn read_client_frame(stream: &mut tokio::net::UnixStream) -> DecodedFrame {
+        let mut prefix = [0_u8; 4];
+        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut prefix))
+            .await
+            .expect("client frame prefix must arrive")
+            .expect("client frame prefix must be readable");
+        let claimed = u32::from_be_bytes(prefix) as usize;
+        assert!(claimed <= MAX_FRAME_BYTES, "client frames stay bounded");
+        let mut bytes = zeroize::Zeroizing::new(vec![0_u8; 4 + claimed]);
+        bytes[..4].copy_from_slice(&prefix);
+        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut bytes[4..]))
+            .await
+            .expect("client frame body must arrive")
+            .expect("client frame body must be readable");
+        let (decoded, consumed) = decode_frame(&bytes).expect("client frame must decode");
+        assert_eq!(consumed, bytes.len(), "one client frame per message");
+        decoded
+    }
+
+    async fn write_wire(stream: &mut tokio::net::UnixStream, frame: &WireFrame) {
+        let bytes = zeroize::Zeroizing::new(encode_frame(frame).expect("host frame encodes"));
+        tokio::time::timeout(Duration::from_secs(10), stream.write_all(&bytes))
+            .await
+            .expect("host frame write must finish")
+            .expect("host frame must be writable");
+    }
+
+    async fn write_unknown(
+        stream: &mut tokio::net::UnixStream,
+        device: DeviceWireId,
+        connection: ConnectionWireId,
+    ) -> WireMessageId {
+        let crafted = CraftedUnknown {
+            envelope: new_outgoing_envelope(
+                ProtocolVersion::V1,
+                host_sender(device, connection),
+                WireMessageType(String::from("FuturePush")),
+            ),
+            payload: CraftedUnknownPayload::FuturePush(UnknownBody {
+                note: String::from("a message type this client does not know"),
+            }),
+        };
+        let message_id = crafted.envelope.message_id;
+        let body = rmp_serde::to_vec_named(&crafted).expect("crafted host frame encodes");
+        let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&body);
+        tokio::time::timeout(Duration::from_secs(10), stream.write_all(&bytes))
+            .await
+            .expect("unknown host frame write must finish")
+            .expect("unknown host frame must be writable");
+        message_id
+    }
+
+    async fn run_mini_host(
+        listener: tokio::net::UnixListener,
+        device: DeviceWireId,
+        connection: ConnectionWireId,
+    ) -> (WireMessageId, DecodedFrame, WireMessageId, DecodedFrame) {
+        let (mut stream, _) = listener.accept().await.expect("client must connect");
+        let _capability = read_client_frame(&mut stream).await;
+        let sender = host_sender(device, connection);
+        write_wire(
+            &mut stream,
+            &frame_for(
+                WirePayload::NegotiatedConnection(NegotiatedConnection {
+                    version: ProtocolVersion::V1,
+                }),
+                sender,
+            ),
+        )
+        .await;
+        write_wire(
+            &mut stream,
+            &frame_for(
+                WirePayload::AuthChallenge(AuthChallenge {
+                    nonce: String::from("mini-host-nonce"),
+                }),
+                sender,
+            ),
+        )
+        .await;
+        let _proof = read_client_frame(&mut stream).await;
+        write_wire(
+            &mut stream,
+            &frame_for(
+                WirePayload::AuthResult(AuthResult::Accepted {
+                    connection_id: connection,
+                }),
+                sender,
+            ),
+        )
+        .await;
+        let first_id = write_unknown(&mut stream, device, connection).await;
+        let first_reject = read_client_frame(&mut stream).await;
+        write_wire(&mut stream, &frame_for(presence(), sender)).await;
+        let second_id = write_unknown(&mut stream, device, connection).await;
+        let second_reject = read_client_frame(&mut stream).await;
+        write_wire(&mut stream, &frame_for(presence(), sender)).await;
+        (first_id, first_reject, second_id, second_reject)
+    }
+
+    #[tokio::test]
+    async fn an_unknown_host_message_is_rejected_correlated_and_the_session_continues() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let device = DeviceWireId(uuid::Uuid::new_v4());
+        crate::device::store_device(
+            dir.path(),
+            &crate::device::StoredDevice::new(device, String::from("pairing-secret")),
+        )
+        .expect("stored device must be readable at connect");
+        let listener =
+            tokio::net::UnixListener::bind(crate::socket_path(dir.path())).expect("mini host bind");
+        let connection = ConnectionWireId(uuid::Uuid::new_v4());
+        let server = tokio::spawn(run_mini_host(listener, device, connection));
+
+        let connected = tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::Client::begin_connect(dir.path(), "mini host", "test"),
+        )
+        .await
+        .expect("connect must finish")
+        .expect("a stored device must authenticate");
+        let crate::ConnectProgress::Connected(mut client) = connected else {
+            panic!("a stored device must authenticate, not pend pairing");
+        };
+
+        let payload = tokio::time::timeout(Duration::from_secs(10), client.next_frame())
+            .await
+            .expect("the session must keep answering")
+            .expect("the session must keep reading");
+        assert!(
+            matches!(payload, WirePayload::PresenceAttribution(_)),
+            "the session continues after rejecting an unknown message"
+        );
+
+        let (first_id, first_reject, second_id, second_reject) =
+            tokio::time::timeout(Duration::from_secs(10), server)
+                .await
+                .expect("mini host must finish")
+                .expect("mini host must not panic");
+        for (unknown_id, reject) in [(first_id, first_reject), (second_id, second_reject)] {
+            let DecodedFrame::Known(reject) = reject else {
+                panic!("a reject reply must decode as a known frame, got {reject:?}");
+            };
+            assert_eq!(
+                reject.envelope.message_type.0, "Reject",
+                "the reply is a wire reject"
+            );
+            assert_eq!(
+                reject.envelope.correlation.reply_to,
+                Some(unknown_id),
+                "the reject correlates to the exact unknown message"
+            );
+            let WirePayload::Reject(notice) = reject.payload else {
+                panic!("expected Reject, got {}", reject.payload.message_type());
+            };
+            assert_eq!(
+                notice.kind,
+                RejectKind::UnsupportedMessage,
+                "an unknown message type is rejected as unsupported: {notice:?}"
+            );
+        }
     }
 }

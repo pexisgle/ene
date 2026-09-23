@@ -26,7 +26,7 @@ use ene_api::v1::handshake::NegotiatedConnection;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageId};
 #[cfg(any(unix, windows))]
-use ene_plugin_ipc::{MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
+use ene_plugin_ipc::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
@@ -776,7 +776,7 @@ async fn write_response(
 
 #[cfg(any(unix, windows))]
 #[cfg(any(unix, windows))]
-async fn read_frames<R>(mut read: R, frames: tokio::sync::mpsc::Sender<WireFrame>)
+async fn read_frames<R>(mut read: R, frames: tokio::sync::mpsc::Sender<DecodedFrame>)
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
@@ -923,7 +923,8 @@ async fn serve_connection<S, T>(
         return;
     };
     let (read_half, mut write_half) = tokio::io::split(stream);
-    let (frames_tx, mut frames_rx) = tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
+    let (frames_tx, mut frames_rx) =
+        tokio::sync::mpsc::channel::<DecodedFrame>(STREAM_BUFFER_FRAMES);
     let reader = AbortOnDrop {
         task: Some(tokio::spawn(read_frames(read_half, frames_tx))),
     };
@@ -957,7 +958,7 @@ async fn serve_connection<S, T>(
                     let Some(frame) = maybe else {
                         break 'connection;
                     };
-                    let live = match table.live_for(&connection, &frame.envelope) {
+                    let live = match table.live_for(&connection, frame.envelope()) {
                         LiveDecision::Ready(live) => live,
                         LiveDecision::Duplicate => continue,
                         LiveDecision::Invalid => break 'connection,
@@ -1017,7 +1018,9 @@ async fn serve_connection<S, T>(
                     if failed || terminal {
                         break 'connection;
                     }
-                    template = Some((frame_template, live_template));
+                    if let DecodedFrame::Known(frame_template) = frame_template {
+                        template = Some((frame_template, live_template));
+                    }
                     advance_output(
                         &mut write_half,
                         &handle,

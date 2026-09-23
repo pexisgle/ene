@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::pairing::pairing_proof_hex;
 use ene_api::v1::deletion::{DeletionDemand, LocalErasureResult};
 #[cfg(any(unix, windows))]
-use ene_api::v1::envelope::{ProtocolVersion, WireSender};
+use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender};
 use ene_api::v1::handshake::{AuthChallenge, PairingProvisionSecret, PairingResult};
 use ene_api::v1::payload::WirePayload;
 #[cfg(any(unix, windows))]
@@ -11,7 +11,10 @@ use ene_api::v1::refs::WireMessageId;
 #[cfg(any(unix, windows))]
 use ene_api::v1::reject::IncompatibleProtocol;
 #[cfg(any(unix, windows))]
-use ene_plugin_ipc::{CodecError, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
+use ene_plugin_ipc::{
+    CodecError, DecodedFrame, MAX_FRAME_BYTES, UnsupportedReason, WireFrame, decode_frame,
+    encode_frame,
+};
 
 #[cfg(any(unix, windows))]
 use crate::device;
@@ -68,7 +71,7 @@ impl PendingPairingClient {
             pending_id: _,
             pairing_message_id,
         } = self;
-        let provision_frame = read_frame(&mut stream).await?;
+        let provision_frame = read_known(&mut stream, "pairing provision").await?;
         require_reply_to(&provision_frame, pairing_message_id, "pairing provision")?;
         let WirePayload::PairingProvision(provision) = provision_frame.payload else {
             return Err(ClientError::ServerRejected(format!(
@@ -156,7 +159,7 @@ impl Client {
                 let request = pairing_frame(descriptor, incarnation);
                 let pairing_message_id = request.envelope.message_id;
                 write_frame(&mut stream, &request).await?;
-                let answer = read_frame(&mut stream).await?;
+                let answer = read_known(&mut stream, "pairing request").await?;
                 require_reply_to(&answer, pairing_message_id, "pairing request")?;
                 match answer.payload {
                     WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation {
@@ -203,7 +206,10 @@ impl Client {
             &capability_frame(platform, incarnation, device_id),
         )
         .await?;
-        match read_frame(&mut stream).await?.payload {
+        match read_known(&mut stream, "negotiated connection")
+            .await?
+            .payload
+        {
             WirePayload::NegotiatedConnection(negotiated) => {
                 if !negotiated.version.shares_major_with(&ProtocolVersion::V1) {
                     return Err(ClientError::ServerRejected(format!(
@@ -231,7 +237,9 @@ impl Client {
             },
             state: SessionState::default(),
         };
-        let challenge = read_frame(&mut session.stream).await?.payload;
+        let challenge = read_known(&mut session.stream, "auth challenge")
+            .await?
+            .payload;
         let WirePayload::AuthChallenge(challenge) = challenge else {
             return Err(ClientError::ServerRejected(format!(
                 "unexpected {} after negotiation; expected AuthChallenge",
@@ -269,7 +277,7 @@ impl Client {
             &proof_frame(&proof, self.sender.incarnation_id, device),
         )
         .await?;
-        let answer = read_frame(&mut self.stream).await?.payload;
+        let answer = read_known(&mut self.stream, "auth result").await?.payload;
         match decide_auth(&answer) {
             AuthDecision::Accepted { connection_id } => {
                 self.sender.connection_id = Some(connection_id);
@@ -324,7 +332,13 @@ impl Client {
         let own_message_id = frame.envelope.message_id;
         write_frame(&mut self.stream, &frame).await?;
         loop {
-            let incoming = read_frame(&mut self.stream).await?;
+            let incoming = match read_frame(&mut self.stream).await? {
+                DecodedFrame::Known(frame) => frame,
+                DecodedFrame::Unsupported { envelope, reason } => {
+                    self.reject_unsupported(&envelope, &reason).await?;
+                    continue;
+                }
+            };
             if self
                 .answer_deletion_demand_if_any(&incoming.payload)
                 .await?
@@ -396,9 +410,25 @@ impl Client {
         write_frame(&mut self.stream, &frame_for(payload, self.sender)).await
     }
 
+    async fn reject_unsupported(
+        &mut self,
+        envelope: &WireEnvelope,
+        reason: &UnsupportedReason,
+    ) -> Result<(), ClientError> {
+        let mut reply = frame_for(WirePayload::Reject(reason.notice()), self.sender);
+        reply.envelope.correlation.reply_to = Some(envelope.message_id);
+        write_frame(&mut self.stream, &reply).await
+    }
+
     pub async fn next_frame(&mut self) -> Result<WirePayload, ClientError> {
         loop {
-            let payload = read_frame(&mut self.stream).await?.payload;
+            let payload = match read_frame(&mut self.stream).await? {
+                DecodedFrame::Known(frame) => frame.payload,
+                DecodedFrame::Unsupported { envelope, reason } => {
+                    self.reject_unsupported(&envelope, &reason).await?;
+                    continue;
+                }
+            };
             if self.answer_deletion_demand_if_any(&payload).await? {
                 continue;
             }
@@ -429,7 +459,7 @@ async fn write_frame(
 #[cfg(any(unix, windows))]
 async fn read_frame(
     stream: &mut (impl tokio::io::AsyncRead + Unpin),
-) -> Result<WireFrame, ClientError> {
+) -> Result<DecodedFrame, ClientError> {
     use tokio::io::AsyncReadExt as _;
     let mut prefix = [0_u8; 4];
     stream
@@ -451,6 +481,20 @@ async fn read_frame(
     decode_frame(&bytes)
         .map(|(frame, _consumed)| frame)
         .map_err(|error: CodecError| ClientError::Codec(format!("decode failed: {error}")))
+}
+
+#[cfg(any(unix, windows))]
+async fn read_known(
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
+    stage: &str,
+) -> Result<WireFrame, ClientError> {
+    match read_frame(stream).await? {
+        DecodedFrame::Known(frame) => Ok(frame),
+        DecodedFrame::Unsupported { reason, .. } => Err(ClientError::ServerRejected(format!(
+            "unsupported message during {stage}: {}",
+            reason.notice().detail
+        ))),
+    }
 }
 
 #[cfg(any(unix, windows))]

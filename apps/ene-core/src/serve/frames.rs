@@ -4,7 +4,7 @@ use ene_api::v1::handshake::DisconnectNotice;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{DeviceWireId, WireMessageId, WireMessageType};
 use ene_api::v1::reject::{IncompatibleProtocol, RejectKind, RejectNotice};
-use ene_plugin_ipc::WireFrame;
+use ene_plugin_ipc::{UnsupportedReason, WireFrame};
 use uuid::Uuid;
 
 pub(crate) fn unpaired_close(frame: &WireFrame, live: &LiveInput) -> WireFrame {
@@ -17,14 +17,18 @@ pub(crate) fn unpaired_close(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     )
 }
 
-fn response_sender(frame: &WireFrame, live: &LiveInput, reveal_connection: bool) -> WireSender {
+fn response_sender(
+    envelope: &WireEnvelope,
+    live: &LiveInput,
+    reveal_connection: bool,
+) -> WireSender {
     WireSender {
         device_id: live
             .paired_device
             .as_deref()
             .and_then(|text| Uuid::parse_str(text).ok())
             .map(DeviceWireId),
-        incarnation_id: frame.envelope.sender.incarnation_id,
+        incarnation_id: envelope.sender.incarnation_id,
         connection_id: reveal_connection.then_some(live.connection_id),
     }
 }
@@ -35,23 +39,23 @@ pub(crate) fn outgoing_envelope(
     payload: &WirePayload,
     reply_to: Option<WireMessageId>,
 ) -> WireEnvelope {
-    outgoing_envelope_inner(frame, live, payload.message_type(), reply_to, true)
+    outgoing_envelope_inner(&frame.envelope, live, payload, reply_to, true)
 }
 
 fn outgoing_envelope_inner(
-    frame: &WireFrame,
+    envelope: &WireEnvelope,
     live: &LiveInput,
-    message_type: &str,
+    payload: &WirePayload,
     reply_to: Option<WireMessageId>,
     reveal_connection: bool,
 ) -> WireEnvelope {
-    let mut envelope = new_outgoing_envelope(
+    let mut outgoing = new_outgoing_envelope(
         ProtocolVersion::V1,
-        response_sender(frame, live, reveal_connection),
-        WireMessageType(message_type.to_string()),
+        response_sender(envelope, live, reveal_connection),
+        WireMessageType(payload.message_type().to_string()),
     );
-    envelope.correlation.reply_to = reply_to;
-    envelope
+    outgoing.correlation.reply_to = reply_to;
+    outgoing
 }
 
 pub(crate) fn outgoing_frame(
@@ -64,12 +68,17 @@ pub(crate) fn outgoing_frame(
 }
 
 pub(crate) fn stale_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
-    reject_frame(frame, live, RejectKind::StaleConnection, detail.to_string())
+    reject_frame(
+        &frame.envelope,
+        live,
+        RejectKind::StaleConnection,
+        detail.to_string(),
+    )
 }
 
 pub(crate) fn invalid_phase_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
     reject_frame(
-        frame,
+        &frame.envelope,
         live,
         RejectKind::InvalidHandshakePhase,
         detail.to_string(),
@@ -86,13 +95,13 @@ pub(crate) fn outgoing_fact(
 }
 
 pub(crate) fn incompatible_protocol(
-    frame: &WireFrame,
+    envelope: &WireEnvelope,
     live: &LiveInput,
     client_max: ProtocolVersion,
 ) -> WireFrame {
     let host_max = ProtocolVersion::V1;
-    outgoing_frame_pre_auth(
-        frame,
+    outgoing_frame_from_envelope(
+        envelope,
         live,
         WirePayload::IncompatibleProtocol(IncompatibleProtocol {
             host_max,
@@ -110,17 +119,39 @@ fn upgrade_hint(host_max: ProtocolVersion) -> String {
 }
 
 pub(crate) fn reject_frame(
-    frame: &WireFrame,
+    envelope: &WireEnvelope,
     live: &LiveInput,
     kind: RejectKind,
     detail: String,
 ) -> WireFrame {
     let payload = WirePayload::Reject(RejectNotice { kind, detail });
-    if live.authed {
-        outgoing_frame(frame, live, payload)
-    } else {
-        outgoing_frame_pre_auth(frame, live, payload)
+    outgoing_frame_from_envelope(envelope, live, payload)
+}
+
+fn outgoing_frame_from_envelope(
+    envelope: &WireEnvelope,
+    live: &LiveInput,
+    payload: WirePayload,
+) -> WireFrame {
+    let reply = outgoing_envelope_inner(
+        envelope,
+        live,
+        &payload,
+        Some(envelope.message_id),
+        live.authed,
+    );
+    WireFrame {
+        envelope: reply,
+        payload,
     }
+}
+
+pub(crate) fn unsupported_reject(
+    envelope: &WireEnvelope,
+    live: &LiveInput,
+    reason: &UnsupportedReason,
+) -> WireFrame {
+    outgoing_frame_from_envelope(envelope, live, WirePayload::Reject(reason.notice()))
 }
 
 pub(crate) fn outgoing_frame_pre_auth(
@@ -129,9 +160,9 @@ pub(crate) fn outgoing_frame_pre_auth(
     payload: WirePayload,
 ) -> WireFrame {
     let envelope = outgoing_envelope_inner(
-        frame,
+        &frame.envelope,
         live,
-        payload.message_type(),
+        &payload,
         Some(frame.envelope.message_id),
         false,
     );

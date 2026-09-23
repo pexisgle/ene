@@ -311,7 +311,7 @@ fn hold_name(hold: TaskResumeHold) -> &'static str {
 
 pub(crate) fn field_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
     reject_frame(
-        frame,
+        &frame.envelope,
         live,
         RejectKind::UnsupportedFieldValue,
         detail.to_string(),
@@ -1842,7 +1842,7 @@ impl HostHandle {
     ) -> Vec<WireFrame> {
         let Some(command_id) = frame.envelope.correlation.command_id else {
             return vec![reject_frame(
-                frame,
+                &frame.envelope,
                 live,
                 RejectKind::MissingRequiredField,
                 String::from("resume requires a command id"),

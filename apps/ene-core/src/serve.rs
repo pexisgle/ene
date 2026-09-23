@@ -44,7 +44,7 @@ use lifecycle::ensure_data_dir;
 
 pub(crate) use frames::{
     incompatible_protocol, invalid_phase_reject, outgoing_envelope, outgoing_fact, outgoing_frame,
-    outgoing_frame_pre_auth, reject_frame, stale_reject, unpaired_close,
+    outgoing_frame_pre_auth, reject_frame, stale_reject, unpaired_close, unsupported_reject,
 };
 pub(crate) use handshake::attribution_to_wire;
 pub use lifecycle::serve;
@@ -796,29 +796,18 @@ impl HostHandle {
 
     pub async fn handle_frame_to(
         &self,
-        frame: WireFrame,
+        frame: DecodedFrame,
         live: LiveInput,
         transport: &impl ProviderTransport,
         sink: &tokio::sync::mpsc::Sender<WireFrame>,
     ) {
-        if frame.envelope.message_type.0 != frame.payload.message_type() {
-            return emit_end(
-                sink,
-                reject_frame(
-                    &frame,
-                    &live,
-                    RejectKind::UnsupportedMessage,
-                    format!("unknown message type {:?}", frame.envelope.message_type.0),
-                ),
-            );
-        }
         let negotiated_version = live.negotiated.as_ref().map(|terms| terms.version);
-        match (negotiated_version, frame.envelope.protocol) {
+        match (negotiated_version, frame.envelope().protocol) {
             (Some(want), got) if got != want => {
                 return emit_end(
                     sink,
                     reject_frame(
-                        &frame,
+                        frame.envelope(),
                         &live,
                         RejectKind::IncompatibleProtocol,
                         format!("version {got:?} outside negotiated version {want:?}"),
@@ -826,9 +815,26 @@ impl HostHandle {
                 );
             }
             (None, got) if !got.shares_major_with(&ProtocolVersion::V1) => {
-                return emit_end(sink, incompatible_protocol(&frame, &live, got));
+                return emit_end(sink, incompatible_protocol(frame.envelope(), &live, got));
             }
             _ => {}
+        }
+        let frame = match frame {
+            DecodedFrame::Unsupported { envelope, reason } => {
+                return emit_end(sink, unsupported_reject(&envelope, &live, &reason));
+            }
+            DecodedFrame::Known(frame) => frame,
+        };
+        if frame.envelope.message_type.0 != frame.payload.message_type() {
+            return emit_end(
+                sink,
+                reject_frame(
+                    &frame.envelope,
+                    &live,
+                    RejectKind::UnsupportedMessage,
+                    format!("unknown message type {:?}", frame.envelope.message_type.0),
+                ),
+            );
         }
         match &frame.payload {
             WirePayload::PairingRequest(request) => match live.phase {
@@ -1560,4 +1566,4 @@ impl HostHandle {
     }
 }
 
-use ene_plugin_ipc::WireFrame;
+use ene_plugin_ipc::{DecodedFrame, WireFrame};

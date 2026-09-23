@@ -17,14 +17,22 @@ use ene_api::v1::deletion::{
     DeletionParticipantReportWire, DeletionParticipantStatusWire, DeletionPhaseWire,
     DeletionPurposeWire, DeletionStatusPage, DeletionStatusRequest, DeletionStatusResponse,
 };
+use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender, new_outgoing_envelope};
+use ene_api::v1::handshake::{PairingRequest, PairingResult};
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome,
     RationaleOrigin, workspace_target,
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::StreamWireId;
-use ene_api::v1::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, RoundWireId};
-use ene_api::v1::round::{HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire};
+use ene_api::v1::refs::{
+    BaseViewMark, ClientIncarnationId, CommandWireId, CompanionWireRef, ManagementTargetWire,
+    RequestWireId, RoundWireId, WireMessageId, WireMessageType,
+};
+use ene_api::v1::reject::RejectKind;
+use ene_api::v1::round::{
+    HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire, TextBodyWire,
+};
 use ene_api::v1::undelivered::{
     TaskListPage, TaskListResponse, UndeliveredAckOutcome, UndeliveredResponse, UndeliveredSummary,
 };
@@ -38,6 +46,7 @@ use ene_ctl::client::{Client, ClientError, ConnectProgress, PendingPairingClient
 use ene_ctl::cmds;
 use ene_inference::cost::UsageEstimate;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport, RawUsage};
+use ene_plugin_ipc::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 use ene_preservation::{ConfirmTargetedDeletionOutcome, DeletionOperationRef};
 use ene_primitive::{RawId, WallClockWithTz};
 
@@ -4926,4 +4935,240 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
     );
     assert!(db_target_hits(&dir.join("app.db"), SECRET).is_empty());
     served.server.abort();
+}
+
+#[derive(serde::Serialize)]
+struct IngressCrafted {
+    envelope: WireEnvelope,
+    payload: IngressPayload,
+}
+
+#[derive(serde::Serialize)]
+enum IngressPayload {
+    FutureThing(IngressNote),
+    TextStreamClose(IngressClose),
+    SubmitTextInput(IngressPartialSubmit),
+}
+
+#[derive(serde::Serialize)]
+struct IngressNote {
+    note: String,
+}
+
+#[derive(serde::Serialize)]
+struct IngressClose {
+    stream: StreamWireId,
+    status: String,
+}
+
+#[derive(serde::Serialize)]
+struct IngressPartialSubmit {
+    companion: CompanionWireRef,
+    round: Option<RoundWireId>,
+    #[serde(default)]
+    fresh: bool,
+    body: TextBodyWire,
+}
+
+fn ingress_envelope(message_type: &str) -> WireEnvelope {
+    new_outgoing_envelope(
+        ProtocolVersion::V1,
+        WireSender {
+            device_id: None,
+            incarnation_id: ClientIncarnationId {
+                counter: 5,
+                random: 900,
+            },
+            connection_id: None,
+        },
+        WireMessageType(message_type.to_string()),
+    )
+}
+
+async fn ingress_dial(dir: &Path) -> tokio::net::UnixStream {
+    let path = conn::socket_path(dir);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match tokio::net::UnixStream::connect(&path).await {
+            Ok(stream) => return stream,
+            Err(error) if tokio::time::Instant::now() < deadline => {
+                drop(error);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("the listener never bound: {error}"),
+        }
+    }
+}
+
+async fn ingress_write_bytes(stream: &mut tokio::net::UnixStream, bytes: &[u8]) {
+    use tokio::io::AsyncWriteExt as _;
+    tokio::time::timeout(Duration::from_secs(10), stream.write_all(bytes))
+        .await
+        .expect("host connection must accept writes")
+        .expect("frame must be writable");
+}
+
+async fn ingress_write_crafted(
+    stream: &mut tokio::net::UnixStream,
+    frame: &IngressCrafted,
+) -> WireMessageId {
+    let message_id = frame.envelope.message_id;
+    let body = rmp_serde::to_vec_named(frame).expect("crafted frame must encode");
+    let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
+    bytes.extend_from_slice(&body);
+    ingress_write_bytes(stream, &bytes).await;
+    message_id
+}
+
+async fn ingress_write_wire(stream: &mut tokio::net::UnixStream, frame: &WireFrame) {
+    let bytes = encode_frame(frame).expect("wire frame must encode");
+    ingress_write_bytes(stream, &bytes).await;
+}
+
+async fn ingress_read_reply(stream: &mut tokio::net::UnixStream) -> WireFrame {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut prefix = [0_u8; 4];
+    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut prefix))
+        .await
+        .expect("the host must answer")
+        .expect("the reply prefix must be readable");
+    let claimed = u32::from_be_bytes(prefix) as usize;
+    assert!(claimed <= MAX_FRAME_BYTES, "host replies stay bounded");
+    let mut bytes = vec![0_u8; 4 + claimed];
+    bytes[..4].copy_from_slice(&prefix);
+    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut bytes[4..]))
+        .await
+        .expect("the host must answer")
+        .expect("the reply body must be readable");
+    let (decoded, consumed) = decode_frame(&bytes).expect("host reply must decode");
+    assert_eq!(consumed, bytes.len(), "one host reply per message");
+    match decoded {
+        DecodedFrame::Known(frame) => frame,
+        other => panic!("the host must reply with known frames, got {other:?}"),
+    }
+}
+
+async fn ingress_expect_reject(
+    stream: &mut tokio::net::UnixStream,
+    reply_to: WireMessageId,
+    kind: RejectKind,
+) {
+    let reply = ingress_read_reply(stream).await;
+    assert_eq!(
+        reply.envelope.message_type.0, "Reject",
+        "an unsupported value is answered with a wire reject"
+    );
+    assert_eq!(
+        reply.envelope.correlation.reply_to,
+        Some(reply_to),
+        "the reject correlates to the exact rejected message"
+    );
+    match reply.payload {
+        WirePayload::Reject(notice) => {
+            assert_eq!(
+                notice.kind, kind,
+                "the reject carries the typed reason: {notice:?}"
+            );
+            assert!(
+                !notice.detail.is_empty(),
+                "the reject explains itself without echoing a body: {notice:?}"
+            );
+        }
+        other => panic!("expected Reject, got {}", other.message_type()),
+    }
+}
+
+#[tokio::test]
+async fn unknown_wire_values_are_typed_rejects_and_the_connection_stays_usable() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let mut stream = ingress_dial(dir.path()).await;
+
+    let unknown_type = ingress_write_crafted(
+        &mut stream,
+        &IngressCrafted {
+            envelope: ingress_envelope("FutureThing"),
+            payload: IngressPayload::FutureThing(IngressNote {
+                note: String::from("from a newer peer"),
+            }),
+        },
+    )
+    .await;
+    ingress_expect_reject(&mut stream, unknown_type, RejectKind::UnsupportedMessage).await;
+
+    let unknown_value = ingress_write_crafted(
+        &mut stream,
+        &IngressCrafted {
+            envelope: ingress_envelope("TextStreamClose"),
+            payload: IngressPayload::TextStreamClose(IngressClose {
+                stream: StreamWireId(uuid::Uuid::new_v4()),
+                status: String::from("Suspended"),
+            }),
+        },
+    )
+    .await;
+    ingress_expect_reject(
+        &mut stream,
+        unknown_value,
+        RejectKind::UnsupportedFieldValue,
+    )
+    .await;
+
+    let missing_field = ingress_write_crafted(
+        &mut stream,
+        &IngressCrafted {
+            envelope: ingress_envelope("SubmitTextInput"),
+            payload: IngressPayload::SubmitTextInput(IngressPartialSubmit {
+                companion: CompanionWireRef(String::from("default")),
+                round: None,
+                fresh: false,
+                body: TextBodyWire {
+                    text: String::from("local_id deliberately absent"),
+                    lang: ene_api::v1::refs::TextLangWire(String::from("en")),
+                },
+            }),
+        },
+    )
+    .await;
+    ingress_expect_reject(&mut stream, missing_field, RejectKind::MissingRequiredField).await;
+
+    let mut pairing = WireFrame {
+        envelope: ingress_envelope("PairingRequest"),
+        payload: WirePayload::PairingRequest(PairingRequest {
+            device_descriptor: String::from("raw ingress"),
+        }),
+    };
+    pairing.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
+    let pairing_id = pairing.envelope.message_id;
+    ingress_write_wire(&mut stream, &pairing).await;
+    let reply = ingress_read_reply(&mut stream).await;
+    assert_eq!(
+        reply.envelope.correlation.reply_to,
+        Some(pairing_id),
+        "the same connection still answers a real handshake step"
+    );
+    match reply.payload {
+        WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation { .. }) => {}
+        other => panic!(
+            "a live connection must still pair, got {}",
+            other.message_type()
+        ),
+    }
+
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+    drop(std::fs::remove_file(conn::socket_path(dir.path())));
 }
