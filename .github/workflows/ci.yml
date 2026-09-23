@@ -48,6 +48,10 @@ jobs:
         run: cargo build --locked --workspace --bins
       - name: Run tests
         run: cargo nextest run --locked --workspace --no-fail-fast
+      # nextest does not run doctests; the compile_fail blocks that guard
+      # secret-scrubbing APIs run here instead.
+      - name: Run doctests
+        run: cargo test --locked --workspace --doc
       - name: Build docs
         run: cargo doc --locked --workspace --no-deps
 
@@ -58,10 +62,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-      # nextest overlaps binaries enough to make Windows rename+read of the
-      # device file return Unreadable (ene-client concurrent_stores test).
-      # Also serialize cases within each binary: independent Host fixtures
-      # otherwise compete for disk/process startup within IPC deadlines.
-      # Concurrency exercised explicitly inside a test remains enabled.
+      # Windows keeps `cargo test`: the two-round runner comparison found no
+      # material nextest advantage once doctests were included, and cargo test
+      # runs doctests and keeps the strict device-file assertion. Parallel test
+      # threads are safe now that ene-body skips GPU init under test: 8 green
+      # runs across both experiment rounds.
       - name: Run tests
-        run: cargo test --locked --workspace -- --test-threads=1
+        run: cargo test --locked --workspace --no-fail-fast
