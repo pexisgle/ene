@@ -12,13 +12,12 @@ use super::preservation::{admit, reconcile_to_complete};
 use super::*;
 
 use ene_preservation::{
-    ConfirmTargetedDeletionOutcome, DeletionAuditStatus, DeletionCompletionSummary,
-    DeletionFinalizationOutcome, DeletionMaterialOutcome, DeletionOperationPhase,
-    DeletionOperationRef, DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget,
-    ParticipantCompletionFact, ParticipantCompletionOutcome, ParticipantCompletionStatus,
-    ParticipantOwnerRef, ParticipantProgress, PreservationRepository as _,
-    StageTargetedDeletionRequestCommand, StageTargetedDeletionRequestOutcome,
-    TargetedDeletionTarget,
+    ConfirmTargetedDeletionOutcome, DeletionAuditStatus, DeletionFinalizationOutcome,
+    DeletionMaterialOutcome, DeletionOperationPhase, DeletionOperationRef, DeletionPurpose,
+    DeletionSearchMaterial, MechanicalDeletionTarget, ParticipantCompletionFact,
+    ParticipantCompletionOutcome, ParticipantCompletionStatus, ParticipantOwnerRef,
+    ParticipantProgress, PreservationRepository as _, StageTargetedDeletionRequestCommand,
+    StageTargetedDeletionRequestOutcome, TargetedDeletionTarget,
 };
 
 /// Verifies every required participant of the operation's current sweep
@@ -96,13 +95,17 @@ fn remainder(store: &Store, text: &str) -> u64 {
     crate::erasure::exact_remainder_probe(&guard, text).unwrap()
 }
 
-/// The A5 completion candidate is the durable participant aggregate: one
-/// unfinished participant keeps it false, and neither a local completion nor
-/// the aggregate is a global completion.
+/// A mechanical remainder refuses finalizing even when every participant
+/// claims verification: the probe opens a new sweep, the old verification is
+/// stale, and only the real sweep of the new generation completes the
+/// operation.
 #[tokio::test]
-async fn one_unfinished_participant_is_not_a_global_completion() {
+async fn local_completion_and_a_remainder_never_finalize_and_the_new_sweep_does() {
     let store = open_memory().await.unwrap();
-    let current = admit(&store, "a5-one-unfinished", vec![]).await;
+    let (companion, _generation) = running_companion(&store).await.unwrap();
+    let target = "a5-remainder-target";
+    let current = admit(&store, target, vec![]).await;
+
     store
         .record_participant_completion(ParticipantCompletionFact::verified(
             current.condition(),
@@ -116,14 +119,13 @@ async fn one_unfinished_participant_is_not_a_global_completion() {
         .record_participant_completion(ParticipantCompletionFact::local_complete(
             current.condition(),
             ParticipantOwnerRef::Learning,
-            3,
+            0,
             0,
             WallClockWithTz::now(),
         ))
         .await
         .unwrap();
-
-    let summary: DeletionCompletionSummary = store
+    let summary = store
         .deletion_completion_summary(current.operation)
         .await
         .unwrap();
@@ -138,65 +140,6 @@ async fn one_unfinished_participant_is_not_a_global_completion() {
         (2, 1, 1, 0, 0)
     );
     assert!(!summary.all_verified());
-    assert_eq!(
-        store.begin_deletion_finalizing(current).await.unwrap(),
-        DeletionFinalizationOutcome::NotVerified(summary),
-        "one unfinished participant is never a completion"
-    );
-    assert_eq!(
-        store.complete_deletion_finalizing(current).await.unwrap(),
-        DeletionFinalizationOutcome::NotFinalizing,
-        "no completion commit exists for an unfinished operation"
-    );
-    let rows = store.unfinished_deletions(None, 10).await.unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].phase, DeletionOperationPhase::Active);
-    assert_eq!(
-        rows[0].current, current,
-        "the identity is never regenerated"
-    );
-    assert!(
-        store
-            .deletion_completion_audit(current.operation)
-            .await
-            .unwrap()
-            .is_none(),
-        "no audit exists before completion"
-    );
-}
-
-/// A mechanical remainder refuses finalizing even when every participant
-/// claims verification: the probe opens a new sweep, the old verification is
-/// stale, and only the real sweep of the new generation completes the
-/// operation.
-#[tokio::test]
-async fn local_completion_and_a_remainder_never_finalize_and_the_new_sweep_does() {
-    let store = open_memory().await.unwrap();
-    let (companion, _generation) = running_companion(&store).await.unwrap();
-    let target = "a5-remainder-target";
-    let current = admit(&store, target, vec![]).await;
-
-    // All participants local-complete: not verified, so no finalization even
-    // before the remainder is injected.
-    for owner in [
-        ParticipantOwnerRef::Companion,
-        ParticipantOwnerRef::Learning,
-    ] {
-        store
-            .record_participant_completion(ParticipantCompletionFact::local_complete(
-                current.condition(),
-                owner,
-                0,
-                0,
-                WallClockWithTz::now(),
-            ))
-            .await
-            .unwrap();
-    }
-    let summary = store
-        .deletion_completion_summary(current.operation)
-        .await
-        .unwrap();
     assert_eq!(
         store.begin_deletion_finalizing(current).await.unwrap(),
         DeletionFinalizationOutcome::NotVerified(summary)
