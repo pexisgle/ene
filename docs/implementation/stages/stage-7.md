@@ -24,6 +24,8 @@ Stage 0〜6 の機能を、初回セットアップから日常の会話・管�
 
 Stage 8 以降の schedule、backup / restore 本体、Host の OS 自動起動、Voice、Observation、group conversation、Global Memory、skill 自動生成、長期 emotion / relationship、remote Client、character editor / package distribution、multi-provider / automatic fallback は追加しません。同梱 `ene` の静的定義・表示アセットを使う最小経路は必要ですが、汎用の配布・編集基盤を先取りしません。
 
+音声中心の Task UX と作業 GUI の削除は [Stage 10](stage-10.md) / [#1686](https://github.com/pexisgle/ene/issues/1686) で扱います。D0 の要件・設計変更前に、この Stage の text-first 契約を実装だけで置き換えません。既存の Stage 完了・probe の記録は、新しい音声 UX の検証結果ではありません。
+
 ## 2. 固定する契約
 
 Stage 7 は Stage 0〜6 の domain authority と安全性契約を再設計しません。
@@ -37,9 +39,9 @@ Stage 7 は Stage 0〜6 の domain authority と安全性契約を再設計し�
 - GUI 専用の authoritative DB、permission registry、presence registry、accounting registry を作らない。
 - acceptance と performance gate を実装都合で弱めない。
 
-## 3. A0 結論（design。production Rust はまだ書かない）
+## 3. A0 の設計判断
 
-A0 の成果物は [First-party desktop](../../design/concrete/first-party-desktop.md) と、それを指す CM / IPC / IB の更新です。旧実装の `ene-stage` は移植しない。未検証 crate を恒久 contract として固定しない。
+A0 の成果物は [First-party desktop](../../design/concrete/first-party-desktop.md) と、それを指す CM / IPC / IB の更新です。旧実装の `ene-stage` は移植しない。未検証 crate を恒久 contract として固定しない。以下は A0 で固定した境界と選定方針であり、実装・probe の現在状態は [PROGRESS.md](../PROGRESS.md) から辿ります。
 
 ### 3.1 Process / 名前（確定）
 
@@ -55,7 +57,7 @@ A0 の成果物は [First-party desktop](../../design/concrete/first-party-deskt
 
 同一 process に avatar を入れる案、Body を第2の paired Client にする案、Body を Host に入れる案は不採用。根拠は first-party-desktop 第3節。
 
-### 3.2 依存（確定する不採用と provisional）
+### 3.2 依存（A0 時点の選定方針）
 
 | 領域 | 状態 | 内容 |
 |---|---|---|
@@ -70,19 +72,19 @@ Client channel（`ene-api`）は高権限の候補だけを受け、最終確認
 
 credential 生値の区間は first-party-desktop 第5.2節、有効化・失効・並行制御・crash 復旧は [Credential publication](../../design/concrete/credential-publication.md) を正本とする。OS candidate の保存だけで登録完了にせず、sweep / active version / revision の commit と snapshot 公開後に応答する。秘密を通常 DTO、log、DB、GUI 永続 state へ出さず、破棄を Targeted Deletion に預けない。
 
-### 3.4 Probe と acceptance の分離（未実施。合格したとは書かない）
+### 3.4 Probe と acceptance の分離
 
-NixOS 26.11 は Support Matrix の Linux 対象だが、この時点では正式リリース前である。公式 26.11 が無いことを Stage 7 全体の停止理由にしない。正本は first-party-desktop 第9節。
+NixOS 26.11 は Support Matrix の Linux 対象です。指定された正式リリースでの検証環境がまだ用意できない場合も、現在使える環境での技術成立 probe と独立した開発は進めます。正本は first-party-desktop 第9節です。
 
-**今実施する技術成立 probe**: 現在使える KDE Wayland（nixpkgs / Plasma を記録）と Windows 11。Host-spawned child への限定継承・空席時の不正接続拒否は A1b の gate。IME / 秘密入力面 / OS store adapter は B の gate。overlay / VRM runtime + SpringBone / 実表示計測は D の gate。26.11 最終 acceptance の代用にはしない。
+**技術成立 probe**: 使用した nixpkgs / Plasma を記録した KDE Wayland と Windows 11。Host-spawned child への限定継承・空席時の不正接続拒否は A1b の gate。IME / 秘密入力面 / OS store adapter は B の gate。overlay / VRM runtime + SpringBone / 実表示計測は D の gate。環境・アセット・tip の異なる最終 acceptance の代用にはしません。
 
 **A1**: GUI / overlay probe は待たない。Stage 6 完了後に A1a → A1b / A1c の順で進める。control 起動由来と credential publication の fault / race gate は省略しない。製品 GUI がまだ無い時点の高権限要求は ConfirmationUnavailable とする。
 
-**後日の最終 acceptance**: slice F。Windows 11 と正式リリースされた NixOS 26.11 KDE Wayland。今の KDE Wayland probe 成功を 26.11 合格と書かない。26.11 が F 時点で未リリースなら Linux 最終 acceptance は open のまま残す。
+**最終 acceptance**: slice F。Windows 11 と正式リリースされた NixOS 26.11 KDE Wayland。現在の KDE Wayland probe を、正式リリースを対象とする合格に読み替えません。指定環境で未実施なら Linux 最終 acceptance は open のまま残します。
 
 **A0 design gate**: 要件の本人による直接確認を維持する。要求接続と確認 channel、Host による GUI 起動由来、OS・インストール完全性の保証前提、秘密の有効化時点と復旧を確定する。CM / IPC / IB / PR / CCT に同じ契約を反映する。provisional 依存と未実施 probe を合格扱いしない。
 
-**A0 技術成立 probe（残。Stage 7 全体の blocker ではない）**: 上記。記録しただけで潰したことにしない。
+probe の完了と未実施は報告・Issue で管理し、ここに古い未実施一覧を重複して残しません。
 
 ## 4. PR 分割と各 slice の gate
 
@@ -114,11 +116,13 @@ A1 の完了は Host / transport / publication 基盤の成立であり、実 GU
 
 ### A2: 通常 Client 通信の WSS 統一（未実装）
 
-通常 Client channel の設計を先に確定し、実装は後続の作業とします。正本は [IPC 第7・9・10・22・23・25節](../../design/concrete/host-client-ipc.md)、[Crate / Module 分解](../../design/concrete/crate-module-decomposition.md)、[Persistence / Recovery Group K](../../design/concrete/persistence-recovery.md) です。既存 A1 の統合や旧 transport の検証成功は、A2 の完了を意味しません。
+実装 tracker は [#1705](https://github.com/pexisgle/ene/issues/1705) です。正本は [IPC 第7・9・10・22・23・25節](../../design/concrete/host-client-ipc.md)、[Crate / Module 分解](../../design/concrete/crate-module-decomposition.md)、[Persistence / Recovery Group K](../../design/concrete/persistence-recovery.md) です。既存 A1 の統合や旧 transport の検証成功は、A2 の完了を意味しません。
 
 - DTO と純粋な MessagePack codec を `ene-api` へ集約し、通常通信の `ene-plugin-ipc` 依存と独自の長さプレフィックスを外す。Host と `ene-client` の入出力を WSS へ置換し、GUI / CLI を同じ変更で切り替える。旧 transport の並行サポート、平文 WS、互換 fallback、新規 transport crate は作らない。
 - Host 証明書・鍵の保護、単一 Host lock、ローカル runtime 情報の安全な公開と読取、TLS 検証、トークンによる受付を接続する。`SameMachine` の検証結果を現在の connection に束縛し、既存の端末認証・currentness・presence commit に渡す。
 - bounded I/O、認証前の制限、Origin 拒否、Ping / Pong / Close を共通化する。Host-local control と投影 IPC は既存の経路を維持する。remote listener の製品公開・接続設定 UI・実 remote pairing は Stage 14 に残す。
+
+wire を変更する前に、[#1390](https://github.com/pexisgle/ene/issues/1390) の未知 payload の扱いと [#1700](https://github.com/pexisgle/ene/issues/1700) の round 指定を設計・PR 順へ反映します。これらを WSS 採用だけで解決済みにせず、通常 codec / DTO の境界でそれぞれ検証します。
 
 **gate**:
 
@@ -149,6 +153,8 @@ A1 の完了は Host / transport / publication 基盤の成立であり、実 GU
 
 **gate**: acceptance §4 と §5 の GUI 操作対象を通すこと。Unknown / 中断 / Failed / Cancelled / Completed、cancel の受付と作用の停止完了を区別します。resume は表示した Task revision / purpose に束縛し、stale を最新前提へ自動置換しません。
 
+この画面契約の変更は Stage 10 D0 で先に扱います。[#1687](https://github.com/pexisgle/ene/issues/1687) の GUI 削除は、音声操作・対象特定・権限・報告の代替経路と安全操作が成立した後です。
+
 ### C3: usage / cap・削除・安全な復旧の管理画面
 
 **範囲**: token と費用の内訳、provider / model / consumer / purpose、期間・ページ、cap と消費内訳を既存 query で表示します。cap 更新は既存 revision / intent 境界を通し、UI で独自集計した残額を利用許可にしません。
@@ -163,7 +169,7 @@ Targeted Deletion は通常の忘却と分け、request → Host-local 最終確
 
 renderer に渡す情報は必要なアセット参照と表示指示に限定し、会話本文、Memory、API key、management authority を渡しません。avatar の非表示・終了を Companion 停止や Task cancel と同一視せず、renderer 再起動で古い会話/操作を replay しません。
 
-待機/発話中の仕草は同梱モーションパック（VRoid `VRMA_MotionPack`、`.vrma`）で再生します。モーションは VRM と同じ install asset であり、本リポジトリには置きません（取り出し可能な形での二次配布は規約で禁止）。配布ページと配置先は [`assets/README.md`](../../../assets/README.md#vroid-motion-pack-install-asset) に記載し、手動で配置します。`ene-desktop` は探索して読み込むだけで、実行時にダウンロードやコピーは行いません。`ene-body` は渡された pose → clip の割り当てだけを再生します。探索順・環境変数・割り当て表は [`apps/ene-body/README.md`](../../../apps/ene-body/README.md#motion-pack-vrma) を正本とします。パックが無い状態は手書きの仕草で継続し、`HealthTick.motion` が `Unsupported` として明示されます。実機での見た目 acceptance は公式 `ene` VRM（#1651）と実 compositor が揃うまで **未実施** です。
+待機/発話中の仕草は同梱モーションパック（VRoid `VRMA_MotionPack`、`.vrma`）で再生します。モーションは VRM と同じ install asset であり、本リポジトリには置きません（取り出し可能な形での二次配布は規約で禁止）。配布ページと配置先は [`assets/README.md`](../../../assets/README.md#vroid-motion-pack-install-asset) に記載し、手動で配置します。`ene-desktop` は探索して読み込むだけで、実行時にダウンロードやコピーは行いません。`ene-body` は渡された pose → clip の割り当てだけを再生します。探索順・環境変数・割り当て表は [`apps/ene-body/README.md`](../../../apps/ene-body/README.md#motion-pack-vrma) を正本とします。パックが無い状態は手書きの仕草で継続し、`HealthTick.motion` が `Unsupported` として明示されます。公式 `ene` VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）での製品 acceptance は、サンプル VRM や motion pack の技術成立 probe と分けます。
 
 **gate**: B の実 GUI へ統合して acceptance §2 を両実 desktop で通すこと。renderer の異常終了・hang・初期化失敗を注入しても、text 入力、Task cancel、設定/復旧が利用できることを確認する。別 Client や test shell が生存しているだけでは GUI fallback 合格にしない。renderer 単体の作業は B と並行してよい。
 
@@ -179,9 +185,11 @@ renderer に渡す情報は必要なアセット参照と表示指示に限定�
 
 ### F: Milestone 1 の実機 acceptance / performance と closeout
 
-**範囲**: §6 の全行を統合 tip の GUI から確認し、§7 の測定生データと結果を残す。測り方は [First-party desktop](../../design/concrete/first-party-desktop.md) 第8節。閾値は acceptance の Performance Gates。Body を除外しない。Linux 検証は Cloud Agent 上の Linux（記録した distro / compositor）で行う。NixOS 26.11 公式 desktop を待たない。KDE Wayland overlay 成功を X11 で代替しない。
+**範囲**: §6 の全行を統合 tip の GUI から確認し、§7 の測定生データと結果を残す。測り方は [First-party desktop](../../design/concrete/first-party-desktop.md) 第8節。閾値は acceptance の Performance Gates。Body を除外しない。
 
-**gate**: 実施した OS・言語の対象 scenario と、測れた性能生データを残すこと。未実施、失敗、暫定回避は成功と区別する。Windows 11 と Performance Gate と overlay/VRM が残っていれば Stage 7 を完了とせず、`PROGRESS.md` を Stage 8 へ進めない。Linux 側の実施記録は [reports/stage-7-linux-2026-09-19.md](../reports/stage-7-linux-2026-09-19.md)。
+**gate**: [#1706](https://github.com/pexisgle/ene/issues/1706) で A2、公式 VRM、物理 HiDPI、指定 OS の最終 acceptance、統合後の性能・安全性回帰を追跡する。実施した OS・言語・asset・transport・exact SHA と測定生データを残し、未実施・失敗・暫定回避を成功と区別する。旧 transport の Windows / Linux 合格や、サンプル VRM の描画結果だけで close しない。
+
+Linux の事前検証は使用した distro / compositor を記録して進め、X11 の成功で KDE Wayland overlay を代替しない。正式 NixOS 26.11 を待たずに probe は行えるが、Support Matrix の指定環境での最終 acceptance は別に必要である。全 gate が揃うまで Stage 7 / Milestone 1 は未完了とする。後続 Stage の独立した着手は、この完了判定と区別する。
 
 ## 5. 依存順と並列化
 
@@ -191,11 +199,12 @@ GUI / secret-input / OS-store probe ──────────────�
 Overlay / VRM / measurement probe → D renderer ───→ D integration → E
                                                   ↑
                                                   B
+A1 / B + WSS design → A2 → E の WSS 回帰 → F の性能・実機再検証
 ```
 
-A1a は GUI / overlay probe を待たない。A1b は child provenance、A1c は credential publication の gate を満たす。B は A1 全体と GUI / 秘密入力 / 実 OS-store probe の後。D の単体 renderer は独立に進められるが、GUI fallback の完了 gate は B への統合後である。Linux 検証は F で実施し、NixOS 26.11 公式 desktop を待たない。
+A1a は GUI / overlay probe を待たない。A1b は child provenance、A1c は credential publication の gate を満たす。B は A1 全体と GUI / 秘密入力 / 実 OS-store probe の後。D の単体 renderer は独立に進められるが、GUI fallback の完了 gate は B への統合後である。
 
-A2 は既存の A1 / B 接続経路と本設計更新を前提に進めます。上図の初期実装順を遡って書き換えず、A2 → E の WSS 回帰 → F の性能・実機再検証を追加します。D の renderer 作業とは並列化できますが、A2 完了前の transport / 性能結果だけで Stage 7 を close しません。
+A2 は既存の A1 / B 接続経路と WSS の設計を前提に進めます。上図の初期実装順を遡って書き換えず、A2 後の回帰と F の再検証を追加します。D の renderer 作業や Stage 10 D0 とは並列化できますが、A2 完了前の transport / 性能結果だけで Stage 7 を close しません。
 
 C1 / C2 / C3 は異なる owner と画面に分け、共通 Client boundary・DTO・schema が確定した範囲だけ並列化します。
 
@@ -230,36 +239,12 @@ protocol / currentness / failure は、実 Host・store・Client transport と b
 
 | 場所 | 更新する内容 |
 |---|---|
-| この文書 | Stage 7 の範囲、slice、依存、検証対応。A0 結論は §3 |
+| この文書 | Stage 7 の範囲、slice、依存、検証対応。A0 の設計判断は §3 |
 | `docs/design/` | first-party-desktop、credential-publication、Runtime Topology と CM / IPC / IB / PR / CCT。production code より先 |
-| `docs/requirements/acceptance.md` | 原則変更しない |
-| Issues / PRs | 個別不足、probe 結果、exact tip。pass / fail / 未実施を区別する |
-| `PROGRESS.md` | current / completed / blocker / next の短い index のみ。Stage 6 完了前に Stage 7 を current としない |
+| `docs/requirements/acceptance.md` | 製品の受け入れ条件。変更時は要件・上位設計と先に整合させる |
+| Issues / PRs | 個別不足、probe 結果、exact tip。pass / fail / 未実施を区別する。A2 は #1705、最終 closeout は #1706 |
+| `PROGRESS.md` | current / completed / blocker / next の短い index のみ |
 
-次に残る検証は Windows 11、実 KDE Wayland overlay / 公式 VRM / IME、Performance Gate。Linux 自動テストと X11 GUI の記録は [reports/stage-7-linux-2026-09-19.md](../reports/stage-7-linux-2026-09-19.md)。D/F 実装と未実施項目の分離は [reports/stage-7-df-implementation-2026-09-21.md](../reports/stage-7-df-implementation-2026-09-21.md)。NixOS 26.11 を Linux 検証の完了条件にしない。
+報告は実施当時の記録として保持し、現在の残件一覧に流用しません。証拠の入口は [Linux 初期検証](../reports/stage-7-linux-2026-09-19.md)、[D/F 実装報告](../reports/stage-7-df-implementation-2026-09-21.md)、[Windows D/F acceptance](../reports/stage-7-windows-df-acceptance-2026-09-22.md)、[KDE Wayland probe](../reports/stage-7-kde-wayland-probe-2026-09-22.md) です。後日の Issue 完了コメントも確認し、古い「未実施」記述だけを理由に closed Issue を再び残件に戻しません。
 
-### A1 trust boundary の実装状況（2026-09-20）
-
-`ene-local-control` は要求専用 listener（`ToHost` / `FromHost`: 要求と非秘密の request state。challenge・秘密・completion の frame 型を持たない）と、Host が起動した GUI にだけ渡す専用確認 channel（`ToConfirmation` / `FromConfirmation`）に分離した。seat は Host の spawn から発行し、空席の先着では取得できない。`ene-core approve-*` は requester であり、pairing secret も credential 生値もその stdout / outcome には出ない。offline mutation fallback は削除した。
-
-#### A1c: credential publication（実装済み）
-
-`SecretVersionId` は値から導出しない採番であり、OS item は installation namespace と version ごとに作る。`credential_mutation` は attempt を write-once で記録し、`credential_active` は active / retired version だけを持つ（どちらも非秘密）。`activate_credential` は一つの transaction で、候補と置換対象の sweep、usable ref、active version、credential-set revision、`Activated` とその outcome を一緒に commit する。前提 revision が動いていれば候補は adopt せず sweep し、`Stale` を durable に残すので retry は保存済みの決定を返す。
-
-実 OS store adapter は `keyring` 経由で version item を作り、素の `put` を拒否する（owner の publish→activate だけが値を usable にする）。起動時は登録済み credential の active version を durable 記録から読み、item が読めることを確認してから adapter を向ける: 読めない active version は unactive のままにする。未完了 mutation（`Prepared` / `Staged`）は再実行も activate もしない。
-
-Windows Credential Manager での probe は成功（version 作成・読み戻し・上書き拒否・activate・削除）。Linux Secret Service は adapter を実装済みだが、この環境に service が無いため probe は 未実施であり、合格とは書かない。
-
-#### D/F 実装状況（2026-09-21）
-
-`ene-body` は `vrm-runtime` 0.1 の strict VRM 1.0 load、humanoid / expression / LookAt / SpringBone、約30 Hzの Body-local update、wgpu real surface と unlit fallback を実装した。生成 fixture は全 pose と renderer frame data を自動検証し、任意 asset 用の `ene-body-asset-probe` も追加した。これは公式 `ene` の acceptance ではない。
-
-KDE Wayland は `zwlr_layer_shell_v1` + input region + frame callback pacing + `wp_presentation.feedback`、Windows は layered/DWM popup + non-rectangular `WM_NCHITTEST` を実装した。headless fallback は `OverlayUnavailable` で明示し、production success には数えない。Linux build/test と Windows cross-check は通したが、このセッションに実 compositor / Windows desktop が無いため実表示 probe は未実施である。
-
-`ene-measure` は全 PID CPU/RSS、busy-wait、Wayland submitted/presented/discarded/missing、PresentMon CSV、cancel input→Host outcome→Slint `AfterRendering`、外部 compositor click-through evidence を同じ JSON/human reportへ集約する。Pass は再計算 APIだけが生成し、欠測・未解決 feedback・相関不能は Pass にならない。数値 gate 自体は実 desktop で未測定である。
-
-#### 未実施のまま残るもの
-
-- KDE Wayland と Windows 11 上の実 overlay / transparency / click-through / drag / resize / HiDPI / hide-restore probe。
-- VRM 1.0 サンプル `assets/seed-san.vrm`（Seed-san。公式 `ene` ではない）を同梱済み。公式同梱 `ene` VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）は未解決。
-- Windows 11 実機 acceptance、Linux Secret Service、IME、および Performance Gate（idle CPU / resident / 実表示 FPS / 1 秒受付）。
+transport・アセット・実装が変わった場合は、過去の証拠の適用範囲と再検証項目を #1706 で確かめます。未マージ PR の検証は `main` の実績に含めず、統合 tip の全 gate が揃ってから `PROGRESS.md` を更新します。

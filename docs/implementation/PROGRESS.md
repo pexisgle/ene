@@ -1,39 +1,45 @@
 # 実装進捗状況
 
-この文書は、現在の開発段階・完了済みステージ・ブロッカー・次のステージを把握するためのインデックスです。Stage ごとの実装計画は `stages/`、実装の詳細な契約は `docs/design/`、受け入れ条件は `docs/requirements/`、個別の作業履歴やフォローアップは GitHub Issues / Pull Requests で管理し、完了済みステージの内部スライスや実装履歴はここでは列挙しません。
+現在の開発段階・完了済み Stage・blocker・次の作業の短い index です。実装順と Issue の対応は [実装ガイド](README.md)、個別計画は `stages/`、契約は `docs/requirements/` と `docs/design/`、作業履歴は Issues / PRs を参照します。
+
+棚卸し: **2026-09-23、`main` `c03f7d18b4232ceb9883a0c912efa1cb1f218b2b`**。未マージの [#1697](https://github.com/pexisgle/ene/pull/1697) / [#1699](https://github.com/pexisgle/ene/pull/1699) の変更・検証は、この基準の完了実績に含めません。
 
 ## 現在進行中のステージ (Current Milestone)
 
-- **Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — A1 と B/C/E は統合済み、D/F の実 desktop acceptance に blocker が残る**
-  - 設計契約・実装順・完了条件は [Stage 7 実装計画](stages/stage-7.md) を参照する。
-  - 通常 Host–Client 通信の WSS 統一は設計更新済み・実装未着手。[Stage 7 A2](stages/stage-7.md#a2-通常-client-通信の-wss-統一未実装) で置換と再検証を行う。既存の OS ローカル接続の実装・検証を WSS 対応済みとは扱わない。
-  - Linux 検証は Cloud Agent 上の Ubuntu 24.04 X11 で実施済み（[報告](reports/stage-7-linux-2026-09-19.md)）。NixOS 26.11 を待たない。Stage 7 は完了しない。
-  - D/F production candidate（KDE layer-shell / Windows DWM、wgpu surface、`vrm-runtime` 0.1、presentation/CPU/RSS/operation measurement）は実装済み（[実装報告](reports/stage-7-df-implementation-2026-09-21.md)）。Windows 11 D/F runtime / platform acceptanceは完了（[Windows D/F acceptance報告](reports/stage-7-windows-df-acceptance-2026-09-22.md)）。
-  - KDE Wayland 実環境の技術成立 probe（layer-shell 表示、click-through、wp_presentation evidence、hide/restore/resize、入れ子 KWin scale=2、IME）、Linux Secret Service 実機 probe、Linux Performance Gate（release 5 分、全 PID、presented FPS、cancel 1 秒、click-through）を実施し、Pass と未実施を分離して記録した（[KDE Wayland probe 報告](reports/stage-7-kde-wayland-probe-2026-09-22.md)）。probe で見つけた実装欠陥 6 件（presentation output、clean exit segfault、input region、hide/restore、clippy gate、FPS 窓境界）は修正済みで、land を [#1677](https://github.com/pexisgle/ene/issues/1677) で追跡する。
-  - 残件: 公式 VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）、物理 display scale=2 の HiDPI（[#1678](https://github.com/pexisgle/ene/issues/1678)）、motion pack 実描画（[#1679](https://github.com/pexisgle/ene/issues/1679)）、IME 確定後の送信の切り分け（[#1680](https://github.com/pexisgle/ene/issues/1680)）。正式リリース NixOS 26.11 は存在しないため Linux 最終 acceptance は open のまま。Windows側の残件は公式VRMだけ。placeholder や Seed-san を製品キャラクターとして扱わない。
+**Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — 未完了。** A1 と B/C/E、D/F の production candidate は統合済みです。計画は [stage-7.md](stages/stage-7.md)、残件と統合後の完了判定は [#1706](https://github.com/pexisgle/ene/issues/1706) で追跡します。
 
-  - 統合 tip は [#1664](https://github.com/pexisgle/ene/pull/1664) として `main` に land 済み。Windows 報告の GUI 再起動 P1、`CredentialStored` の早すぎる返却、A1 の trust boundary 再設計（requester listener と Host-spawned GUI の専用確認 channel の分離、`SeatHello` 経路の削除、`ene-core approve-*` の requester 化、offline mutation fallback の削除）、credential publication、OS-store adapter、Linux gate 修正、CI 高速化を含む。
-  - credential の登録は version 公開として実装済み: OS item は version ごとに作り、activation transaction が sweep・active version・revision・outcome を一緒に commit する。実 OS store adapter は Windows Credential Manager と Linux Secret Service (ksecretd) の両方で実機 probe 済み（[KDE Wayland probe 報告](reports/stage-7-kde-wayland-probe-2026-09-22.md)）。
+通常 Host–Client 通信の WSS 統一は**設計済み・未実装**です（[A2](stages/stage-7.md#a2-通常-client-通信の-wss-統一未実装)、[#1705](https://github.com/pexisgle/ene/issues/1705)）。旧 transport の検証を WSS の合格に読み替えません。
+
+既存の検証記録:
+
+- [Windows 11 D/F runtime / platform acceptance](reports/stage-7-windows-df-acceptance-2026-09-22.md) と [KDE Wayland / Linux Secret Service / Linux Performance Gate の probe](reports/stage-7-kde-wayland-probe-2026-09-22.md) は実施済みです。各報告の tip・環境・アセット・transport の範囲に限る証拠であり、最終統合 tip や正式 NixOS 対象での合格ではありません。
+- [#1677](https://github.com/pexisgle/ene/issues/1677) は修正の land、[#1679](https://github.com/pexisgle/ene/issues/1679#issuecomment-5766485295) は KDE 上の motion pack 最小実描画検証として closed です。公式 VRM での見た目は #1651 に残ります。
+- [#1680](https://github.com/pexisgle/ene/issues/1680#issuecomment-5770099443) はユーザーの手動確認で UI 問題が確認されず closed です。追加の自動テストや全 OS の acceptance を実施した意味ではありません。
 
 ## 完了したステージ (Completed)
 
-- ✅ **Stage 0**: リポジトリとビルド基盤の構築（workspace, CI, lint）
-- ✅ **Stage 1**: 最小限の共通規約と基盤の作成（primitive, config, api contract）
-- ✅ **Stage 2**: セットアップとテキスト会話の最小開通（Host↔Client 接続、OpenAI 連携、履歴保存）
-- ✅ **Stage 3**: 経験の要約と記憶機能（Experience Summary、記憶の形成・検索・更新）
-- ✅ **Stage 4**: 作業用エージェント (Task Agent) とファイル操作タスク
-- ✅ **Stage 5**: クライアントのライフサイクルとホストでの作業継続
-- ✅ **Stage 6**: 指定データの完全削除 (Targeted Deletion) と利用量・機密安全（[完了確認 #1597](https://github.com/pexisgle/ene/issues/1597)）
+- **Stage 0**: リポジトリとビルド基盤。
+- **Stage 1**: 最小限の共通規約と基盤。
+- **Stage 2**: セットアップとテキスト会話。
+- **Stage 3**: Experience Summary / Memory の形成・検索・更新。
+- **Stage 4**: Task Agent とファイル操作。
+- **Stage 5**: Client lifecycle と Host での作業継続。
+- **Stage 6**: Targeted Deletion と利用量・機密安全（[完了確認 #1597](https://github.com/pexisgle/ene/issues/1597)）。
+
+完了記録は当時の実装・検証範囲を示します。後続の WSS 移行や音声 Task UX の完成を意味しません。
 
 ## 未解決のブロッカー (Blockers)
 
-- Stage 7 D の製品キャラクター完成に対する外部 blocker は、公式 VRM（[#1651](https://github.com/pexisgle/ene/issues/1651)）のみ。
-- Stage 7 完了には、公式VRM、正式リリース NixOS 26.11 での Linux 最終 acceptance、物理 display scale=2 の HiDPI、motion pack 実表示が必要。KDE Wayland 実 overlay、Linux Secret Service、Linux Performance Gate、IME は実環境 probe 済み（[報告](reports/stage-7-kde-wayland-probe-2026-09-22.md)）。Windows側の残件は公式VRM #1651だけ。
-- 個別の非ブロッキングな設計・実装フォローアップは GitHub Issues で管理します。
-- Stage 7 の Linux 自動テストと X11 GUI 操作は [Linux 報告](reports/stage-7-linux-2026-09-19.md) にある。Windows 11 D/F runtime / platform acceptanceは完了し、Windows側の残件は公式VRM #1651だけ。
+Stage 7 の closeout [#1706](https://github.com/pexisgle/ene/issues/1706) に、次を残します。
 
-## 次のステージ (Next Stage)
+- WSS 実装と両 OS の接続・安全性・性能回帰（[#1705](https://github.com/pexisgle/ene/issues/1705)）。
+- 公式同梱 `ene` VRM と製品キャラクターの検証（[#1651](https://github.com/pexisgle/ene/issues/1651)）、物理 display scale=2 の HiDPI 検証（[#1678](https://github.com/pexisgle/ene/issues/1678)）。Seed-san や入れ子 KWin で代替しません。
+- Support Matrix が指定する正式 NixOS 26.11 / KDE Wayland の最終 acceptance と、WSS・公式アセットを含む統合 tip の受け入れ・性能確認。
 
-- **Stage 8: 定期 schedule 実行**
-  - Stage 7 / Milestone 1 完了後、Task・permission・usage 管理を前提に進める。
-  - 着手時に `stages/stage-8.md` を作成し、実装順と完了条件を確定する（[roadmap](README.md#4-最初の-milestone-後の-roadmap)）。
+既存 Windows 報告に後発の WSS 移行は含まれません。「Windows 側は公式 VRM だけで完了」とは扱いません。外部アセットや指定 OS の検証待ちは、独立した後続開発の停止理由にしません。
+
+## 次の作業 (Next)
+
+**WSS 統一と並行して、Stage 10 の音声 Task UX の要件・設計を先に確定します。** [Stage 10 D0](stages/stage-10.md#2-d0-要件と設計を先に確定する) / [#1686](https://github.com/pexisgle/ene/issues/1686) は未完了です。音声操作・対象特定・Workspace/権限・報告の経路が成立する前に、既存の作業 GUI を削除しません。
+
+基盤整理と後続機能の着手条件は [roadmap](README.md#4-最初の-milestone-後の-roadmap) を参照します。Stage 8 の Schedule は音声による設定・報告へ接続する次の拡張とし、Stage 番号の順だけでは着手を決めません。
