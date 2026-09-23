@@ -467,7 +467,7 @@ impl SurfaceRenderer {
         // own the native objects and renderer together on one thread.
         let surface = unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: display,
+                raw_display_handle: Some(display),
                 raw_window_handle: window,
             })
         }
@@ -477,6 +477,7 @@ impl SurfaceRenderer {
                 power_preference: wgpu::PowerPreference::LowPower,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|_| RenderFailure::Adapter)?;
@@ -532,6 +533,7 @@ impl SurfaceRenderer {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: width.max(1),
             height: height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
@@ -567,7 +569,7 @@ impl SurfaceRenderer {
             address_mode_v: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
         let fallback_texture = create_texture_binding(
@@ -615,8 +617,8 @@ struct VertexOut {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ene-body unlit fallback"),
-            bind_group_layouts: &[&texture_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&texture_layout)],
+            immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("ene-body unlit fallback"),
@@ -625,7 +627,7 @@ struct VertexOut {
                 module: &shader,
                 entry_point: Some("vertex_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -645,7 +647,7 @@ struct VertexOut {
                             shader_location: 2,
                         },
                     ],
-                }],
+                })],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -654,8 +656,8 @@ struct VertexOut {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth24Plus,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -670,7 +672,7 @@ struct VertexOut {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
@@ -725,14 +727,16 @@ struct VertexOut {
         }
         let (vertices, indices, draws) = vertices(meshes, self.config.width, self.config.height);
         let frame = match self.surface.get_current_texture() {
-            Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
                 return Ok(RenderOutcome::Skipped);
             }
-            Err(wgpu::SurfaceError::Timeout) => return Ok(RenderOutcome::Skipped),
-            Err(wgpu::SurfaceError::OutOfMemory) => return Err(RenderFailure::OutOfMemory),
-            Err(wgpu::SurfaceError::Other) => return Err(RenderFailure::Surface),
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(RenderOutcome::Skipped);
+            }
+            wgpu::CurrentSurfaceTexture::Validation => return Err(RenderFailure::Surface),
         };
         let view = frame
             .texture
@@ -780,6 +784,7 @@ struct VertexOut {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             if let (Some(vertex_buffer), Some(index_buffer)) = (&vertex_buffer, &index_buffer) {
                 pass.set_pipeline(&self.pipeline);
@@ -796,7 +801,7 @@ struct VertexOut {
             }
         }
         self.queue.submit([encoder.finish()]);
-        frame.present();
+        self.queue.present(frame);
         Ok(RenderOutcome::Presented)
     }
 

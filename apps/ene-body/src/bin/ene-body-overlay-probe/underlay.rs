@@ -21,10 +21,7 @@ use smithay_client_toolkit::shell::wlr_layer::{
 };
 use smithay_client_toolkit::shm::slot::SlotPool;
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
-use smithay_client_toolkit::{
-    delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
-    delegate_seat, delegate_shm, registry_handlers,
-};
+use smithay_client_toolkit::{delegate_dispatch2, delegate_registry, registry_handlers};
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
 use wayland_client::{Connection, QueueHandle};
@@ -391,10 +388,5 @@ impl ProvidesRegistryState for State {
     registry_handlers![OutputState, SeatState];
 }
 
-delegate_compositor!(State);
-delegate_output!(State);
-delegate_seat!(State);
-delegate_pointer!(State);
-delegate_layer!(State);
 delegate_registry!(State);
-delegate_shm!(State);
+delegate_dispatch2!(State);

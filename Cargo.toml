@@ -40,7 +40,7 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
 # Stage 7 D: Body is the only process that owns a GPU device. OS overlay
 # dependencies remain confined to that package.
-wgpu = "27"
+wgpu = "30"
 libc = "0.2"
 glam = "0.29"
 vrm-runtime = "0.1.0"
@@ -50,7 +50,7 @@ pollster = "1.0"
 wayland-client = { version = "0.31", features = ["system", "dlopen"] }
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-smithay-client-toolkit = { version = "0.19", default-features = false }
+smithay-client-toolkit = { version = "0.21", default-features = false }
 csv = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 

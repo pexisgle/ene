@@ -14,7 +14,9 @@ mod imp {
     use raw_window_handle::{
         RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
     };
-    use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
+    use smithay_client_toolkit::compositor::{
+        CompositorHandler, CompositorState, FrameCallbackData,
+    };
     use smithay_client_toolkit::output::{OutputHandler, OutputState};
     use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
     use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
@@ -27,10 +29,7 @@ mod imp {
         Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
         LayerSurfaceConfigure,
     };
-    use smithay_client_toolkit::{
-        delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
-        delegate_relative_pointer, delegate_seat, registry_handlers,
-    };
+    use smithay_client_toolkit::{delegate_dispatch2, delegate_registry, registry_handlers};
     use wayland_client::globals::{GlobalList, registry_queue_init};
     use wayland_client::protocol::{wl_output, wl_pointer, wl_region, wl_seat, wl_surface};
     use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
@@ -346,11 +345,10 @@ mod imp {
             }
             self.state.frame_ready = false;
             let qh = self.event_queue.handle();
-            let frame_callback = self
-                .state
-                .layer
-                .wl_surface()
-                .frame(&qh, self.state.layer.wl_surface().clone());
+            let frame_callback = self.state.layer.wl_surface().frame(
+                &qh,
+                FrameCallbackData(self.state.layer.wl_surface().clone()),
+            );
             let correlation_id = self.next_commit;
             self.next_commit = self.next_commit.saturating_add(1);
             self.state.pending_feedback.insert(correlation_id);
@@ -1113,13 +1111,8 @@ mod imp {
         }
     }
 
-    delegate_compositor!(State);
-    delegate_output!(State);
-    delegate_seat!(State);
-    delegate_pointer!(State);
-    delegate_layer!(State);
     delegate_registry!(State);
-    delegate_relative_pointer!(State);
+    delegate_dispatch2!(State);
 
     impl ProvidesRegistryState for State {
         fn registry(&mut self) -> &mut RegistryState {
