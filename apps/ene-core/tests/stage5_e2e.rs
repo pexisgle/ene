@@ -941,9 +941,8 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
 
 /// S5-03: same device, C1 present, C2 authenticates, only C2 closes. C1
 /// stays superseded (its old connection never revives), and with no current
-/// the Host falls back so a fresh connection serves again. The lingering
-/// superseded socket is covered at serve level
-/// (`current_close_falls_back_even_with_a_lingering_superseded_socket`).
+/// the Host falls back so a fresh connection serves again while the
+/// superseded socket is still open.
 #[tokio::test]
 async fn s5_03_second_connection_close_keeps_superseded_and_falls_back() {
     let temp = tempfile::TempDir::new().unwrap();

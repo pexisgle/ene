@@ -299,7 +299,7 @@ async fn redelivery_keeps_the_connection_serving() {
         payload: WirePayload,
         incarnation: ClientIncarnationId,
         message: WireMessageId,
-    ) -> Option<Vec<u8>> {
+    ) -> Vec<u8> {
         let message_type = payload.message_type().to_string();
         let mut envelope = new_outgoing_envelope(
             ProtocolVersion::V1,
@@ -311,7 +311,7 @@ async fn redelivery_keeps_the_connection_serving() {
             WireMessageType(message_type),
         );
         envelope.message_id = message;
-        ene_plugin_ipc::encode_frame(&WireFrame { envelope, payload }).ok()
+        ene_plugin_ipc::encode_frame(&WireFrame { envelope, payload }).expect("frame must encode")
     }
 
     async fn read_answer(stream: &mut tokio::net::UnixStream) -> Option<WirePayload> {
@@ -353,10 +353,6 @@ async fn redelivery_keeps_the_connection_serving() {
         incarnation,
         duplicate,
     );
-    let Some(pairing) = pairing else {
-        worker.abort();
-        return;
-    };
     assert!(
         client.write_all(&pairing).await.is_ok(),
         "first delivery must send"
@@ -380,10 +376,6 @@ async fn redelivery_keeps_the_connection_serving() {
         incarnation,
         WireMessageId(uuid::Uuid::new_v4()),
     );
-    let Some(capability) = capability else {
-        worker.abort();
-        return;
-    };
     assert!(
         client.write_all(&capability).await.is_ok(),
         "post-duplicate send must send"

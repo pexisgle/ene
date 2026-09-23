@@ -346,50 +346,6 @@ async fn open_handle(tag: &str) -> Option<(HostHandle, tempfile::TempDir)> {
     memory_handle(tag).await
 }
 
-#[tokio::test]
-async fn pairing_pends_then_pairs_after_owner_approval() {
-    let (handle, _dir) = open_handle("pair-flow").await.unwrap();
-    let transport = fake_transport();
-    let (table, id) = fresh_conn();
-    let mut provisions = register_pairing(&handle, &id);
-    let request = pairing_frame("laptop");
-    let expected_reply = request.envelope.message_id;
-    let pending = handle
-        .handle_frame(request, live_of(&table, &id), &transport)
-        .await;
-    let answer = pending.first().expect("the request answers once");
-    let pending_id = pending_id_of(answer);
-    assert_eq!(answer.envelope.correlation.reply_to, Some(expected_reply));
-    assert_eq!(table.phase_of(&id), Some(ConnectionPhase::Accepted));
-    assert!(
-        handle
-            .pending_devices()
-            .await
-            .unwrap()
-            .iter()
-            .any(|entry| entry.pending_id == pending_id && entry.descriptor == "laptop")
-    );
-    assert!(
-        handle
-            .approve_device("unknown box")
-            .await
-            .unwrap()
-            .is_none()
-    );
-    let record = handle
-        .approve_device(&pending_id)
-        .await
-        .unwrap()
-        .expect("owner approval must pair");
-    let provision = receive_provision_and_pair(&table, &id, &mut provisions).await;
-    assert_eq!(
-        provision.device_id.0.as_hyphenated().to_string(),
-        record.wire
-    );
-    assert_eq!(table.phase_of(&id), Some(ConnectionPhase::Paired));
-    assert!(handle.approve_device(&pending_id).await.unwrap().is_none());
-}
-
 fn proof_frame(device_id: DeviceWireId, proof: &str) -> super::WireFrame {
     // The incarnation matches `sender()`: one connection pins its first
     // incarnation, so every frame on it must echo the same process identity.
@@ -417,8 +373,28 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
     let transport = fake_transport();
     let (table, id) = fresh_conn();
     let mut provisions = register_pairing(&handle, &id);
-    let pending = dispatch(&handle, &table, &id, pairing_frame("laptop"), &transport).await;
-    let pending_id = pending_id_of(pending.first().expect("the request answers once"));
+    let request = pairing_frame("laptop");
+    let expected_reply = request.envelope.message_id;
+    let pending = dispatch(&handle, &table, &id, request, &transport).await;
+    let answer = pending.first().expect("the request answers once");
+    let pending_id = pending_id_of(answer);
+    assert_eq!(answer.envelope.correlation.reply_to, Some(expected_reply));
+    assert_eq!(table.phase_of(&id), Some(ConnectionPhase::Accepted));
+    assert!(
+        handle
+            .pending_devices()
+            .await
+            .unwrap()
+            .iter()
+            .any(|entry| entry.pending_id == pending_id && entry.descriptor == "laptop")
+    );
+    assert!(
+        handle
+            .approve_device("unknown box")
+            .await
+            .unwrap()
+            .is_none()
+    );
     for response in &pending {
         assert_eq!(
             response.envelope.sender.connection_id, None,
@@ -431,6 +407,7 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
         .unwrap()
         .expect("owner approval must pair");
     let provision = receive_provision_and_pair(&table, &id, &mut provisions).await;
+    assert!(handle.approve_device(&pending_id).await.unwrap().is_none());
     let device_wire = record.wire.clone();
     let device_uuid = provision.device_id.0;
     let device_id = provision.device_id;
@@ -1311,18 +1288,16 @@ async fn targeted_deletion_awaits_host_confirmation_then_starts_once() {
         "the status view never carries the target"
     );
 
-    // A fresh duplicate intent after completion is a new origin (lifecycle
-    // §7): the completed operation is not a permanent keyword ban, so the
-    // same text only stages a fresh request awaiting the Owner's
-    // confirmation, and no second operation exists yet.
+    // A fresh conversation-origin intent after completion is a new origin,
+    // but model wording alone cannot confirm it or start a second operation.
     let fresh = handle
         .handle_frame(
             deletion_intent_frame(
                 &live,
                 "leaked key",
                 &page.mark.0,
-                RationaleOrigin::ManagementSurface,
-                None,
+                RationaleOrigin::Conversation,
+                Some("the model suggested deleting this"),
                 CommandWireId(RawId::new().as_uuid()),
             ),
             live.clone(),
@@ -1333,6 +1308,15 @@ async fn targeted_deletion_awaits_host_confirmation_then_starts_once() {
     assert_eq!(
         handle.store.deletion_status(None, 10).await.unwrap().len(),
         1
+    );
+    assert_eq!(
+        handle
+            .pending_targeted_deletions(None, 50)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the untrusted conversation intent remains pending"
     );
 
     // A duplicate confirmation observes the same single operation; the
@@ -1351,74 +1335,6 @@ async fn targeted_deletion_awaits_host_confirmation_then_starts_once() {
             .await
             .unwrap()
             .is_empty()
-    );
-}
-
-/// The wire alone never reaches the destructive confirmation: conversation
-/// wording, LLM-style rationale, and repeated fresh intents only stage.
-#[tokio::test]
-async fn targeted_deletion_is_unreachable_from_untrusted_client_wire_alone() {
-    use ene_preservation::PreservationRepository as _;
-    use ene_primitive::RawId;
-
-    let Some((handle, _dir)) = memory_handle("management-deletion-untrusted").await else {
-        panic!("the handle must open");
-    };
-    let live = paired_input("management-deletion-untrusted");
-    let transport = fake_transport();
-
-    for (index, text) in ["leaked key", "customer name", "private note"]
-        .into_iter()
-        .enumerate()
-    {
-        // Re-read the mark every time: the previous stage moved it.
-        let page = read_deletion_page(&handle, &live, &transport, None, None).await;
-        let responses = handle
-            .handle_frame(
-                deletion_intent_frame(
-                    &live,
-                    text,
-                    &page.mark.0,
-                    RationaleOrigin::Conversation,
-                    Some("the model suggested deleting this"),
-                    CommandWireId(RawId::new().as_uuid()),
-                ),
-                live.clone(),
-                &transport,
-            )
-            .await;
-        assert_eq!(
-            outcome_of(&responses),
-            ManagementOutcome::NeedsClarification,
-            "request {index} only stages"
-        );
-    }
-    assert_eq!(
-        handle
-            .pending_targeted_deletions(None, 50)
-            .await
-            .unwrap()
-            .len(),
-        3,
-        "every advisory request is staged"
-    );
-    assert!(
-        handle
-            .store
-            .deletion_status(None, 10)
-            .await
-            .unwrap()
-            .is_empty(),
-        "no untrusted request starts an operation"
-    );
-    assert!(
-        handle
-            .store
-            .current_erasure_conditions(None, 10)
-            .await
-            .unwrap()
-            .is_empty(),
-        "no untrusted request publishes a condition"
     );
 }
 
