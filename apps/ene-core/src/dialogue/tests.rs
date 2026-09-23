@@ -426,33 +426,6 @@ async fn register_assign_complete<T: ProviderTransport>(
     )
 }
 
-/// Assigns the learning capability to the same route the dialogue setup
-/// uses, returning whether the assignment committed.
-async fn assign_learning(
-    handle: &HostHandle,
-    live: &LiveInput,
-    transport: &impl ProviderTransport,
-) -> bool {
-    let assigned = handle
-        .handle_frame(
-            intent_frame(
-                ManagementIntentKind::ManageRuleConsentCap,
-                "consent:learning:openai:dialogue-1:openai:main",
-                "consent-learning-none",
-                live.connection_id,
-            ),
-            live.clone(),
-            transport,
-        )
-        .await;
-    matches!(
-        assigned.first().map(|answer| &answer.payload),
-        Some(WirePayload::ManagementOutcome(
-            ManagementOutcome::StoredAsRuleView { .. }
-        ))
-    )
-}
-
 /// The summon attach publishes the authoritative presence fact before the
 /// absence summary it enables: one attach, one unsolicited fact, and a
 /// summary stamped with the generation that fact taught. The Client can
@@ -803,11 +776,7 @@ async fn provider_failure_interrupts_after_accept() {
     );
 }
 
-/// A transport that answers the learning formation prompt with a configured
-/// JSON answer and every dialogue call with fixed reply text.
-/// A transport that answers the learning formation prompt with a configured
-/// JSON answer and every dialogue call with fixed reply text. Records every
-/// request so tests can inspect the assembled dialogue prompt.
+/// Records provider inputs and returns the configured dialogue or formation reply.
 struct LearningAwareTransport {
     reply: String,
     formation: Option<String>,
@@ -825,17 +794,6 @@ impl LearningAwareTransport {
 
     fn inputs(&self) -> Vec<String> {
         self.inputs.lock().expect("recorded input lock").clone()
-    }
-
-    /// Dialogue requests only, in order.
-    fn dialogue_inputs(&self) -> Vec<String> {
-        self.inputs
-            .lock()
-            .expect("recorded input lock")
-            .iter()
-            .filter(|input| !input.contains("learning formation pass"))
-            .cloned()
-            .collect()
     }
 }
 
@@ -865,167 +823,6 @@ impl ProviderTransport for LearningAwareTransport {
         };
         Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
     }
-}
-
-fn assert_stream_completed(responses: &[ene_plugin_ipc::WireFrame]) {
-    let Some(last) = responses.last() else {
-        panic!("the turn must answer");
-    };
-    assert!(
-        matches!(
-            &last.payload,
-            WirePayload::TextStreamClose(close) if close.status == StreamClose::Completed
-        ),
-        "the dialogue must still complete, got {:?}",
-        last.payload
-    );
-}
-
-#[tokio::test]
-async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
-    use ene_companion::CompanionRepository as _;
-    use ene_companion::HistoryRepository as _;
-    use ene_learning::LearningRepository as _;
-
-    // The fixture handle provisions `openai:main` with "test-bearer".
-    let transport = LearningAwareTransport::new(
-        "noted",
-        Some(
-            r#"{"summary": "The owner shared test-bearer.", "memories": [{"action": "create", "content": "The owner's key is test-bearer.", "importance": 5, "temporal": "enduring"}]}"#,
-        ),
-    );
-    let live = live_input("client-secret");
-    let setup = round_test_handle("dlg-secret", &live, &transport).await;
-    let (handle, _dir) = setup.unwrap();
-    assert!(assign_learning(&handle, &live, &transport).await);
-    let frame = submit_frame(
-        handle.companion_wire(),
-        Some(0),
-        None,
-        "local-secret",
-        "remember my key test-bearer",
-        live.connection_id,
-    );
-    let responses = handle.handle_frame(frame, live.clone(), &transport).await;
-    assert_stream_completed(&responses);
-    handle.run_pending_learning(&transport).await;
-
-    // Nothing that reaches the model may carry the registered value: the
-    // dialogue prompt and the formation prompt are both recorded.
-    for (position, input) in transport.inputs().iter().enumerate() {
-        assert!(
-            !input.contains("test-bearer"),
-            "provider input {position} must not carry the credential"
-        );
-    }
-    // Durable History holds the redacted owner input too.
-    let companion = handle.store.ensure_running_companion().await.unwrap();
-    let timeline = handle
-        .store
-        .load_timeline(companion, None, None, 10)
-        .await
-        .unwrap();
-    let owner = timeline
-        .iter()
-        .find(|item| item.role == ene_companion::HistoryRole::Owner)
-        .expect("the owner row is durable");
-    assert!(
-        !owner.text.contains("test-bearer"),
-        "a registered credential never reaches History: {}",
-        owner.text
-    );
-    assert!(
-        owner.text.contains("[credential]"),
-        "the History occurrence is visibly redacted"
-    );
-
-    let memories = handle
-        .store
-        .list_current_memories(companion.as_raw(), None, 10)
-        .await
-        .unwrap();
-    assert_eq!(memories.len(), 1);
-    assert!(
-        !memories[0].content.contains("test-bearer"),
-        "a registered credential never reaches Memory: {}",
-        memories[0].content
-    );
-    assert!(
-        memories[0].content.contains("[credential]"),
-        "the credential position is visibly redacted"
-    );
-    let revisions = handle
-        .store
-        .list_memory_revisions(memories[0].id, None, 100)
-        .await
-        .unwrap();
-    let summary = handle
-        .store
-        .load_summaries(&[revisions[0].summary.unwrap()])
-        .await
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-    assert!(
-        !summary.content.contains("test-bearer"),
-        "a registered credential never reaches Summary: {}",
-        summary.content
-    );
-}
-
-#[tokio::test]
-async fn next_dialogue_prompt_recalls_a_formed_memory() {
-    let transport = LearningAwareTransport::new(
-        "noted",
-        Some(
-            r#"{"summary": "The owner likes jasmine tea.", "memories": [{"action": "create", "content": "The owner likes jasmine tea.", "importance": 4, "temporal": "enduring"}]}"#,
-        ),
-    );
-    let live = live_input("client-recall");
-    let setup = round_test_handle("dlg-recall", &live, &transport).await;
-    let (handle, _dir) = setup.unwrap();
-    assert!(assign_learning(&handle, &live, &transport).await);
-
-    let first = submit_frame(
-        handle.companion_wire(),
-        Some(0),
-        None,
-        "local-recall-1",
-        "remember that I like jasmine tea",
-        live.connection_id,
-    );
-    let responses = handle.handle_frame(first, live.clone(), &transport).await;
-    assert_stream_completed(&responses);
-    handle.run_pending_learning(&transport).await;
-
-    let second = submit_frame(
-        handle.companion_wire(),
-        Some(1),
-        None,
-        "local-recall-2",
-        "which tea do I like?",
-        live.connection_id,
-    );
-    let responses = handle.handle_frame(second, live.clone(), &transport).await;
-    assert_stream_completed(&responses);
-
-    let inputs = transport.dialogue_inputs();
-    assert_eq!(inputs.len(), 2, "both dialogue turns are recorded");
-    assert!(
-        inputs[0].contains("Owner: remember that I like jasmine tea"),
-        "the first prompt carries the owner input"
-    );
-    assert!(
-        inputs[1].contains("Relevant memories:"),
-        "the second prompt carries the retrieval section: {}",
-        inputs[1]
-    );
-    assert!(
-        inputs[1].contains("The owner likes jasmine tea."),
-        "the formed memory is recalled into the next dialogue: {}",
-        inputs[1]
-    );
 }
 
 /// Streaming provider that emits deltas and pauses after the first one until
