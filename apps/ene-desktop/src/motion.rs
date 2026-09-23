@@ -3,8 +3,8 @@
 //! The desktop owns where the bundled clips live and which clip backs which
 //! activity hint; the body only plays what it is handed. The VRoid motion pack
 //! is an install asset: it is not in this repository and this module never
-//! redistributes it. `scripts/install-vrma-motionpack.ps1` places a copy in one
-//! of the locations below; resolution only reads them.
+//! redistributes it. `assets/README.md` documents how to place a copy in one of
+//! the locations below; resolution only reads them.
 
 use std::path::{Path, PathBuf};
 

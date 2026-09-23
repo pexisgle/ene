@@ -90,28 +90,11 @@ compositor evidence and no visual acceptance is claimed from it.
 
 The bundled pack is the VRoid `VRMA_MotionPack` (7 clips, `VRMC_vrm_animation`
 1.0). It is an **install asset**: it is not in this repository, and the pack's
-terms forbid redistributing the motions in an extractable form. The pack is
-published by pixiv as a BOOTH download, so the scripts take a direct archive URL
-on a source you are allowed to use, download it, and place its clips:
-
-```sh
-# Linux / macOS
-scripts/install-vrma-motionpack.sh --url <archive URL>
-```
-
-```powershell
-# Windows
-pwsh -File scripts/install-vrma-motionpack.ps1 -Url <archive URL>
-```
-
-`--url` / `-Url` may also come from `VRMA_MOTIONPACK_URL`. Both write the seven
-`.vrma` files into `<repository>/assets/motions`; `--destination` /
-`-Destination` places them somewhere else, and `--force` / `-Force` replaces
-clips that are already there. Without it existing clips are kept, and every file
-is written through a temporary file plus rename. They download with `curl` or
-`wget` (shell) and read the archive with `unzip`, or with `python3` when `unzip`
-is not installed. A local archive is never read: the clips always come from the
-URL.
+terms forbid redistributing the motions in an extractable form. Download it from
+the distribution page linked in
+[`assets/README.md`](../../assets/README.md#vroid-motion-pack-install-asset),
+which also describes the pack's terms, and place the seven `VRMA_*.vrma` files
+in `<repository>/assets/motions` for a development run.
 
 Resolution order (first directory holding a mapped clip wins):
 
@@ -119,7 +102,7 @@ Resolution order (first directory holding a mapped clip wins):
 2. `<data_dir>/assets/motions/`
 3. `<exe dir>/assets/motions/`
 4. `<exe dir>/../share/ene/assets/motions/`
-5. `<workspace root>/assets/motions/` (development runs, where the script places by default)
+5. `<workspace root>/assets/motions/` (development runs; this is where the install instructions above place the pack)
 
 The application only reads these locations: nothing is downloaded or copied at
 runtime. When no clip is placed, the affected hints keep the hand-authored
