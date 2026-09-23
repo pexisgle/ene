@@ -35,7 +35,6 @@ use ene_task::{
     TaskResultRecord, TaskResultScrubPremise, TaskRevision, TaskTechnicalError, WorkspaceAssocId,
     WorkspaceAssociationPremise, WorkspaceFolderRef, WorkspaceNeedRef, orchestrate_result_arrival,
 };
-use rusqlite::OptionalExtension;
 use rusqlite::params;
 
 fn fixture_clock() -> WallClockWithTz {
@@ -1807,12 +1806,6 @@ async fn record_result(store: &Store, delegation: DelegationId, text: &str) -> T
     }
 }
 
-mod client_delivery;
-mod preservation;
 mod report_reads;
-mod result_reevaluation;
-mod source_reconciliation;
-mod targeted_deletion;
 mod task_result;
-mod usage_cap;
 mod usage_query;

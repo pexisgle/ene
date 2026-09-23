@@ -131,16 +131,6 @@ pub(super) fn claim(result: TaskResultId, attempts: &[ActionAttemptId]) -> TaskR
     }
 }
 
-pub(super) fn raw_exec(store: &Store, sql: &str) {
-    let guard = match store.conn.lock() {
-        Ok(locked) => locked,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    guard
-        .execute_batch(sql)
-        .expect("the raw test statement applies");
-}
-
 // --- lifecycle ---
 
 #[tokio::test]
