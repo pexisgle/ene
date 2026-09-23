@@ -108,7 +108,7 @@ fn current_user_sid_string() -> std::io::Result<String> {
 
 fn owner_only_descriptor() -> std::io::Result<PSECURITY_DESCRIPTOR> {
     let sid = current_user_sid_string()?;
-    let sddl = format!("D:P(A;;FA;;;{sid})");
+    let sddl = format!("O:{sid}D:P(A;;FA;;;{sid})");
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     let mut length = 0_u32;
     // SAFETY: inputs are our own wide strings and out-pointers; the caller
