@@ -609,7 +609,9 @@ trait TaskInstructionSource: Send + Sync {
 
 #### H-A.1 中断 Task の明示 resume
 
-resume は `ene-task` が所有する、残作業を進める新しい Owner 指示です。Host の再起動、認証成功、presence 復旧、報告の ACK はこの command の producer になりません。会話の個体調整または第一者管理操作が対象 Task と保存済み進捗を示し、Owner の明示指示を受けた場合だけ発行します。推論された「続けた方がよい」は指示の代わりになりません。会話の閉じた protocol には `[task-control] {"kind":"resume"}` だけを追加します。Task ID、revision、purpose、指示本文を model に出力させず、Host が Owner の明示選択した Task とその表示時の前提、当該 Owner message から構成します。選択なし・曖昧な対象は実行せず選択を求め、通常の `steer` を resume の別名にしません。
+resume は `ene-task` が所有する、残作業を進める新しい Owner 指示です。Host の再起動、認証成功、presence 復旧、報告の ACK はこの command の producer になりません。会話の個体調整または第一者管理操作が対象 Task と保存済み進捗を示し、Owner の明示指示を受けた場合だけ発行します。推論された「続けた方がよい」は指示の代わりになりません。会話の閉じた protocol には `[task-control] {"kind":"resume"}` だけを追加します。Task ID、revision、purpose、指示本文を model に出力させず、Host が会話で確かめた対象 Task とその現在の前提、当該 Owner message から構成します。対象が曖昧なら会話で尋ねて保留し、番号付き一覧の選択を要求しません。通常の `steer` を resume の別名にしません。
+
+対象候補の取得は Task owner の read-only・上限付き query を通し、担当 Companion、依頼の対象手掛かり、会話との対応関係で絞ります。Client の Task 一覧の先頭ページや LLM が作った Task ID を検索境界にしません。候補の `TaskRef`・目的・進捗は判断材料であり、steering / cancel / resume の受付では owner が現在の対象、revision と必要な前提を再照合します。曖昧な確認中の会話状態は Task の採用指示ではなく、再起動後は保存済み History と Task facts から再確認します。検索に失敗したら作用せず、その理由を会話へ返します。
 
 ```rust
 struct ResumeTaskCommand {
@@ -1427,9 +1429,11 @@ struct UndeliveredSummaryFact {
 // 厳密な1回のみ配送（exactly-once）や、ユーザーが確実に読んだことの保証などを無理に追加しません。
 ```
 
-query は read-only です。入出力・提示が結果を画面向けに整形し、現在の connection / presence と対応する新 Round・receipt を発行します。`begin_presentation(receipt)` が選択行の提示開始を commit してから送信します。Task report は既存の facts の定型表示を基本とし、再接続のためだけに provider を呼びません。Companion の表示人格を保つ文面でも Task の certainty を強めず、LLM が unavailable でも進捗・結果・resume 操作へ到達できます。
+query は read-only です。入出力・提示が結果を会話タイムラインのテキストと音声向けに整形し、現在の connection / presence と対応する新 Round・receipt を発行します。`begin_presentation(receipt)` が選択行の提示開始を commit してから送信します。Task report は既存の facts の定型表示を基本とし、再接続のためだけに provider を呼びません。Companion の表示人格を保つ文面でも Task の certainty を強めず、LLM が unavailable でも進捗・結果・resume 操作へ到達できます。通常の Task 操作に一覧選択や専用 report 画面を要求せず、詳細記録の read query は診断・成果物確認・安全操作のために残します。
 
 receipt の内容は Host が保持する `(connection, incarnation, companion, client, round, generation, selected_ids)` です。Client による id 集合や帰属の組み替えは拒否します。`confirm_presentation(receipt, status)` は [CCT §10.5](concurrency-control.md#105-未伝達-ack-は選択した事項だけを確定する) の比較後、個体調整の report state を更新します。通常返信の既存 `ConfirmPresentation` も、その返信に対応する同じ receipt 境界を通します。元 Round の provenance と再提示用の新 Round は別に保持し、古い入力を再開しません。
+
+`Presented` にできるのは、選択した各事項について、その receipt に載せた要約本文全体が会話タイムラインに実際に表示されたか、音声として最後まで再生された場合だけです。読み上げが途中停止・失敗してもテキスト提示が成立すれば同じ事項は提示済みです。生成・送信・部分表示・音声の一部出力は提示済みの証拠になりません。batch の一部だけが提示された場合、未提示の事項を同じ ACK で Presented にしません。提示は既読、理解、正式な許可、Task 成功ではありません。
 
 ACK 待ちに切断・replacement・Host crash が起きたら durable な PresentationUnknown が残ります。再接続では Pending と Unknown を新 receipt で再提示できます。Presented はユーザーの既読・承認でも Task 成功でもありません。失敗・Unknown が同じ pass の自動送信を繰り返すことはなく、後続ページを先に扱います。通常の Task report query は表示だけで未伝達を消さず、表示した事項を消し込む UI はこの ACK を明示的に送ります。
 
@@ -1784,7 +1788,7 @@ LLMによる推論、タスクエージェントの自律処理、外部ツー�
 | バックアップ作成 | `CreateBackupCommand` | `BackupPointFact`（対象時点、参照関係、未完了状況の整合性が揃って確定） | `(バックアップID, 対象時点・参照整合性・除外データ・未完了状況)`。PR グループJ |
 | バックアップ復元 | `RequestRestoreCommand` → `StagedRestoreCandidate`（隔離ステージング検証） | `SwitchRestoreDecision`（復元世代の更新 ＋ マスター切り替え）→ `BulkEnableAfterRestoreCommand` | `(復元ID, バックアップID, RestoreGeneration, 安全保留, 認証情報照合)`。PR グループJ |
 | 個人データ完全削除 | `RequestTargetedDeletionCommand` → `DeletionScopeDecision` | `DemandLocalErasureCommand` → `ParticipantCompletionFact` → `VerifyRemainderQuery` → `GlobalDeletionCompletion` | `(操作ID, 消去スイープ世代, 有効期間, 参加者対応, 安全保留)`。PR グループJ、CI §5.9 |
-| 未伝達メッセージ報告 | `RegisterUndeliveredFact`（親の処理と不可分に登録） | `RequestUndeliveredSummaryQuery` → `UndeliveredSummaryFact` → `PresentationMark`（画面提示確認後にのみ確定） | `(未伝達ID, 元データとの対応, 報告状況, ラウンド・世代対応)`。PR グループB |
+| 未伝達メッセージ報告 | `RegisterUndeliveredFact`（親の処理と不可分に登録） | `RequestUndeliveredSummaryQuery` → `UndeliveredSummaryFact` → `PresentationMark`（要約本文全体の表示または音声再生完了の確認後にのみ確定） | `(未伝達ID, 元データとの対応, 報告状況, ラウンド・世代対応)`。PR グループB |
 | キャラクター適用 | `GetCharacterRevisionQuery`（資材供給） | `ProposeCharacterApplicationCandidate`（オーナー選択を伴う提案 → 適用確定） | `(キャラクターID, リビジョン, 選択部品, オーナー選択情報)`。PR グループA/B |
 
 完了報告を受け取る側は、永続化された情報から元の識別子、リビジョン、世代、試行番号、操作種別、発生由来を確実に辿れます。遅れて届いた成果物は、`試行ID → タスクリビジョン → 現在のタスク` の順序で厳格に照合し、「過去の事実としての記録」と、「現在の活動への採用・画面提示・後続処理の自動開始」を明確に切り離します（CI §6.3）。中断、失効、方針変更、端末移動、データ削除、バックアップ復元の後に遅れて到着した結果は、元の古いアクションやタスクの過去ログへ正しく記録するに留め、過去の古い承認を勝手に復活させたり、古い結果を新しい目的に勝手に流用したり、後続の処理を自動開始してはなりません。
@@ -2285,7 +2289,7 @@ trait UndeliveredRepository {
     // 相手 owner は RegisterUndeliveredFact を渡し、source-key の一意制約で既存 ID を読み戻す。
     // begin_presentation は current receipt の選択行を送信前に PresentationUnknown にする。
 
-    // 画面提示が確認されて初めて Presented とする（durable-after-confirmed。送信成功だけで提示完了にしない）。
+    // 画面・音声の実提示が確認されて初めて Presented とする（durable-after-confirmed。送信成功だけで提示完了にしない）。
     async fn compare_and_mark_reported(
         &self,
         id: UndeliveredId,

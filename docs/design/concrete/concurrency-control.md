@@ -508,6 +508,8 @@ fallback 候補は current authenticated、[IPC §10.5](host-client-ipc.md#105-s
 
 発生元 fact と未伝達登録は PR §4.6 の同一 transaction です。表示に使う source facts を read transaction で読み、同じ Task を現在の report へまとめます。receipt に含めるのは、その report に実際に含めた通知 ID だけです。後から追加された行や、同じ Task の未選択ページを ACK の対象にしません。
 
+各 selected ID の提示済み判定は、receipt に載せた要約本文全体の画面提示、または音声再生完了のいずれかです。音声だけが失敗してもテキスト提示が成立すれば確定できます。どちらも未成立・不明なら Unknown を保ちます。部分提示の batch 全体を成功 ACK にせず、提示済みの事実と Task の作用・承認を混同しません。
+
 提示開始と ACK は connection/receipt の同期区間を経て、行ごとの status と source の存在・current erasure 条件を同じ DB transaction で比較します。成功 ACK は選択行だけを Presented にし、重複 ACK は書込なしの AlreadyPresented とします。旧 connection、失効した receipt、別 Round/generation の ACK は状態を変えません。古い receipt の Failed/Unknown で、新 receipt が確定した Presented を戻しません。
 
 提示開始は bounded page/excerpt/frame fitting を prepare した後、同じ ownership 区間内で Pending→PresentationUnknown の同期 CAS、成功した selected 集合の確定、receipt/cursor/subscription install を行います。既に Unknown の再提示は status を変更しません。StaleSource/technical error の行は frame と selected の両方から除外します。replacement が先なら durable mutation も memory install もゼロ、commit が先なら cleanup は memory だけを落とし durable Unknown は再提示対象として残します。

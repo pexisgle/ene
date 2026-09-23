@@ -490,14 +490,14 @@ enum MoveOutcome {
 | `TextStreamOpen` | Host → Client | ストリーム開始 | 応答テキストストリームの開始（`StreamWireId`・Round・世代番号付き）。開始成功は提示完了やタスク達成ではない |
 | `TextStreamFrame` | Host → Client | ストリームフレーム | 逐次出力されるテキスト差分（連番 `seq`・差分文字列・完了フラグ `is_final`）。Client は `seq` 順に提示する |
 | `TextStreamClose` | Host → Client | ストリーム終了 | ストリームの終了理由（`Completed \| Interrupted \| Cancelled \| Stale`）の明示 |
-| `ConfirmPresentation` | Client → Host | 観測結果報告 | 画面表示の確認（`Presented \| Unknown \| Failed` ＋ 詳細）。送信成功と報告完了は別 |
+| `ConfirmPresentation` | Client → Host | 観測結果報告 | 画面・音声提示の確認（`Presented \| Unknown \| Failed` ＋ 詳細）。送信成功と報告完了は別 |
 
 - **入力の帰属 (Input Attribution)**: 入力電文には「どの Client 端末の、どのやり取り（Round）において、どの世代のキャラクターに対して送られたか」という厳密な対応情報を含めます。これをもって生体認証的な「話者認証」が完了したと過剰に解釈してはなりません。
 - **やり取りの識別 (Round Identity)**: Round は Host が発行する `RoundWireId` で識別します。移動、切断、再起動が発生したからといって、古い Round の入力や未提示の出力を新しい Round へ勝手に付け替えてはなりません。
 - **新規対話の開始**: 会話の最初の入力では、`SubmitTextInput.round = None` を指定して新しい Round の開始を要求できます（`observed.presence_generation_view` は必須、`observed.round_view` は None）。Host 側の `ene-presentation::round` が現在の接続、帰属、権限許可、停止・保留状態を厳格に照合した上で新しい Round を発行し、`AcceptedForRound { round }` を返します。通信マッピング層が勝手に Round ID を発行してはなりません。以降のその対話に対する入力は、払い出された `Some(round)` を使用し、古い Round が拒否されたからといって勝手に None で再送してチェックを迂回してはなりません。
 - **新規 Round 要求の再試行と冪等性**: 初回入力（round = None）がネットワーク不調で再送された場合、第6.2節の冪等性ルールに従います。同一セッション内で同じ `command_id` かつ同じフィンガープリントの再送であれば、Host は初回に発行した Round ID と結果をそのまま返し、2つ目の異なる Round を勝手に発行してはなりません。セッションが有効である間はこの対応を確実に保持します。
 - **逐次出力の完了条件**: テキストのストリーミングは `StreamWireId` ＋ `seq` ＋ `is_final` で順序制御します。`is_final = true` を伴わないフレームの到着をもって出力を完了とみなしてはなりません。
-- **未提示メッセージの引き継ぎ**: 画面表示前に切断等が発生した未提示の出力は、後述の `UndeliveredSummary`（第18節、W-3）に引き継がれ、次に接続した Client 端末上で、最新の状況や削除状態と照合された上で要約報告されます。送信や受信の完了をもって「報告完了」とみなしてはなりません。
+- **未提示メッセージの引き継ぎ**: テキスト表示・音声再生のいずれも成立する前に切断等が発生した未提示の出力は、後述の `UndeliveredSummary`（第18節、W-3）に引き継がれ、次に接続した Client 端末上で、最新の状況や削除状態と照合された上で要約報告されます。送信や受信の完了をもって「報告完了」とみなしてはなりません。
 
 ### 13.2 Voice
 
@@ -505,20 +505,22 @@ enum MoveOutcome {
 |---|---|---|---|
 | `VoiceStreamOpen` | 双方向の合意 | ストリーム開始 | 音声セッションの開始（`VoiceSessionWireId`・Round・コーデック・世代番号付き） |
 | `VoiceAudioFrame` | 双方向 | ストリームフレーム | 音声バイナリデータ（アタッチメント。連番 `seq`・タイムスタンプ付き） |
-| `VoiceControl` | 双方向 | コマンド ＋ 確定事実 | ミュート、発話割り込み（barge-in）、中断、停止要求などの制御。ミュートは Client 側で即座に適用し、Host へ通知する |
+| `VoiceControl` | 双方向 | コマンド ＋ 確定事実 | ミュート、発話割り込み（barge-in）、音声の中断・再生停止などの制御。ミュートは Client 側で即座に適用し、Host へ通知する。Task 中止の受理とは別 |
 | `VoiceStreamClose` | 双方向 | ストリーム終了 | セッション終了理由（`Completed \| Interrupted \| Cancelled \| Stale`）の明示 |
 
 - 音声ストリームの再接続時に、古いストリームを自動継続してはなりません。ストリームごとに一意な `VoiceSessionWireId` を発行し、再接続時は必ず新規にストリームを開き直します。古いセッションの音声フレームを新しいセッションへすり替えてはならず、遅延して届いた古いフレームは `StaleStream` として破棄します。
+- 音声認識で確定した発言だけを、現在の connection / presence / Round に束縛した X-B の入力候補として Host の通常の会話受付へ渡します。部分認識や音声フレーム到着を Task 指示の受理にしません。マイク・認識サービスの障害時は同じ会話のテキスト入力へ切り替え、既に受理済みの Task 指示を失わせたり再送したりしません。
+- `VoiceControl` の割り込み・再生停止は音声セッションを区切る制御です。Task の中止は別の明示指示を Task owner の cancel 境界で受理し、読み上げが止まったことを `CancelAccepted` に変換しません。
 - **キーボード等による代替手段の保証**: マイクのミュート、音声の停止、会話の中断、権限の拒否は、音声入力だけに依存せず、キーボード操作等で確実に実行できるようにします（アクセシビリティ・安全性要件）。プロトコル上も `VoiceControl` とは独立した管理コマンド（`ManagementIntent`）を通じて停止や拒否を送信できるようにします。単に音声データが途切れたことだけをもって「ユーザーが停止を指示した」あるいは「承認を拒否した」とみなしてはなりません。
-- 発話検知（VAD）や割り込み判定、音声バッファの管理は Client 端末内の局所的な一時データであり、通信電文として状態のマスターデータを送る必要はありません。送受信するのは制御電文と実際の音声フレームのみです。
+- 発話検知（VAD）や割り込み判定、音声バッファの管理は Client 端末内の局所的な一時データであり、その状態をマスターデータとして送る必要はありません。音声ストリームでは制御電文と音声フレームを送受信し、確定した発言は上記の X-B 入力候補として渡します。
 - マイクが周囲の環境音や他人の声を拾う可能性があることへの注意喚起は UI や管理画面の責務であり、プロトコルとして「話者認証が完了している」かのような意味付けを行ってはなりません。
 
 ### 13.3 presentation acknowledgement・delivery failure・undelivered
 
-- Client から Host へ送信される提示確認電文 `ConfirmPresentation { Presented | Unknown | Failed }` において、`Presented` は「その端末の画面に表示した / スピーカーから音を出した」という出力確認の事実にすぎず、タスクの達成や外部作用の成功、ユーザーの承認を意味するものではありません。出力が確認できなかった場合（`Unknown`）は成否不明として保持し、勝手に完了扱いにしてはなりません。
+- Client から Host へ送信される提示確認電文 `ConfirmPresentation { Presented | Unknown | Failed }` において、`Presented` は、その receipt に含む各事項の要約本文全体を会話タイムラインへ実際に表示したか、対応する音声を最後まで再生したという出力確認の事実です。音声のみが失敗・ミュート・中断しても全文テキストの提示が成立していれば `Presented` にできます。生成、送信、受信、一部だけの表示・再生は証拠になりません。どちらの出力も確認できなければ `Unknown` / `Failed` として未伝達を保持します。提示確認は既読・理解、タスク達成、外部作用の成功、ユーザーの承認を意味しません。
 - 通信エラー、デコード失敗、Client アプリのクラッシュ等による配信失敗（Delivery failure）が発生した場合、Host は該当するメッセージを「未伝達（Undelivered）」として永続化し、次回復帰した Client または別端末において要約報告します。配信失敗を理由にして勝手に報告完了とみなしたり、メッセージを闇に葬ったり、無制限に自動再送を繰り返したりしてはなりません。再送を行う場合は、新しい Round や新しいストリームとして現在の前提条件を再照合します。
 
-#### Stage 5 の未伝達提示 DTO
+#### Stage 5 で導入した未伝達提示 DTO
 
 ```rust
 struct UndeliveredSummary {
@@ -541,15 +543,15 @@ struct UndeliveredAck {
 }
 ```
 
-`TaskReportView` は `{ task, revision, progress, details_available }` という Task の現在の見出し情報とし、記録/採用・certainty・要約は今回の items の source に限定します。同一 Task の全 Action/result を展開しません。`HistoryMessage` / `ActivityRecord` も items の型付き表示内容として同じ上限に含めます。source 本文は最大 2 KiB の UTF-8 境界で切った抜粋と省略表示にし、frame 全体が §10.3 / §22 の合意した上限に収まるまで選択件数を減らします。選ぶのは取得したページの prefix とし、cursor は実際に処理した prefix の末尾だけ進めます。frame から外した後続事項は次ページに残します。1 件も収まらない場合は FrameTooLarge を返して提示を保留し、未提示行や cursor を更新しません。receipt は実際に載せた source に限り、要約として提示したことへの ACK であって原文の全文閲覧を要求しません。残りの facts は paged な `GetTaskReport`、本文は `GetReportSource { source, cursor, limit_bytes }` で読みます。後者は同じ source に束縛した byte cursor と `4..=16384`（省略時 4096）の上限を持ち、UTF-8 境界で区切ります。source owner の消去・閲覧条件に従い、read による ACK や実行は行いません。本文を安全に scrub した bounded view を作れなければ InputUnavailable とし、生の断片を送信しません。
+`TaskReportView` は `{ task, revision, progress, details_available }` という Task の現在の見出し情報とし、記録/採用・certainty・要約は今回の items の source に限定します。同一 Task の全 Action/result を展開しません。`HistoryMessage` / `ActivityRecord` も items の型付き表示内容として同じ上限に含めます。source 本文は最大 2 KiB の UTF-8 境界で切った抜粋と省略表示にし、frame 全体が §10.3 / §22 の合意した上限に収まるまで選択件数を減らします。選ぶのは取得したページの prefix とし、cursor は実際に処理した prefix の末尾だけ進めます。frame から外した後続事項は次ページに残します。1 件も収まらない場合は FrameTooLarge を返して提示を保留し、未提示行や cursor を更新しません。receipt は実際に載せた source に限り、要約として提示したことへの ACK であって原文の全文閲覧を要求しません。§13.3 の「要約本文全体」はこの bounded な提示内容を指し、source 原文の全文ではありません。残りの facts は paged な `GetTaskReport`、本文は `GetReportSource { source, cursor, limit_bytes }` で読みます。後者は同じ source に束縛した byte cursor と `4..=16384`（省略時 4096）の上限を持ち、UTF-8 境界で区切ります。source owner の消去・閲覧条件に従い、read による ACK や実行は行いません。本文を安全に scrub した bounded view を作れなければ InputUnavailable とし、生の断片を送信しません。
 
-認証完了後、Client は表示用の Task 一覧・未伝達一覧を取得します。通常の再接続で `NoActive` の場合も管理ビューは読めますが、Companion としての要約提示は正式な presence 成立後に行います。Client の「この画面で開く」操作は新しい `MoveIntent(OwnerSummon)` として伝え、認証だけから召喚を合成しません。Host restart の `RecoveryWait` だけが元 Client への自動復旧を行います。復旧・召喚成立時は Owner が問い合わせなくても未伝達を提示します。
+認証完了後も通常の Task 操作のために一覧を画面へ出す必要はありません。診断用の Task read query は利用でき、`NoActive` でも管理ビューを読めますが、Companion としての要約提示は正式な presence 成立後に行います。Client の「この画面で開く」操作は新しい `MoveIntent(OwnerSummon)` として伝え、認証だけから召喚を合成しません。Host restart の `RecoveryWait` だけが元 Client への自動復旧を行います。復旧・召喚成立時は Owner が問い合わせなくても現在の事実に基づく未伝達を音声と会話タイムラインのテキストで提示します。
 
 各接続の購読で backlog と以降の新着を扱い、同じ Companion に同時に発行する receipt は 1 個とします。ページは最大 50 件です。`begin_presentation` の commit 時から monotonic clock で 30 秒を receipt の期限とし、ACK・送信失敗・期限到来のいずれかで receipt を解放して次ページへ進みます。失敗を確定できない行は PresentationUnknown を保ち、期限後の ACK は StalePresentation とします。送信待ちもこの期限内に含め、接続が残っていても ACK 喪失で後続を止めません。
 
 購読は走査済み挿入キーをメモリで保持し、新着 pass はその先だけを走査します。明示再表示または新たな有効接続・presence の開始時だけ先頭へ戻します。`Unknown` / `Failed` は新着 pass を含めた同じ購読内で再送せず、次の明示再表示または次の有効な接続・presence 成立時に再提示します。送信 buffer は bounded とし、満杯・切断でも Task runner の継続を待たせません。本文生成と receipt 作成、登録、ACK の所有境界は IB H-G / X-H、PR §4.6 に従います。
 
-Client は最終 frame を含む今回の事項を画面に反映してから `Presented` を送ります。一部しか描画できなかった batch は `Unknown` / `Failed` とし、Host は全件を提示済みにしません。Host は current connection・incarnation、receipt、Round、presence generation、選択 ID 集合を照合します。認証後でも未知の receipt は `UnknownRef`、古い receipt は `StalePresentation`、古い connection は `StaleConnection` です。新しい接続へ古い ACK を付け替えてはなりません。receipt が失われた restart 後は新 receipt で再提示します。
+Client は今回の選択事項を含む最終 frame まで受け、その要約本文全体を画面に反映するか音声を最後まで再生した後にだけ `Presented` を送ります。一部しか提示できなかった batch は `Unknown` / `Failed` とし、Host は全件を提示済みにしません。読み上げのみが失敗しても全文テキストが提示されれば `Presented` にできます。Host は current connection・incarnation、receipt、Round、presence generation、選択 ID 集合を照合します。認証後でも未知の receipt は `UnknownRef`、古い receipt は `StalePresentation`、古い connection は `StaleConnection` です。新しい接続へ古い ACK を付け替えてはなりません。receipt が失われた restart 後は新 receipt で再提示します。
 
 ## 14. Observation
 
@@ -690,9 +692,9 @@ enum ManagementOutcome {
 
 Task 一覧は canonical TaskId の byte 順、report の明細は ActionAttempt → TaskResult の種別順と各 canonical ID の byte 順に keyset page を作ります。cursor は query 種別・Task・最後の key に束縛し、SQL の LIMIT と索引で上流の work を制限します。各 page は一つの read transaction の現在値であり、複数 page 全体の snapshot を保証しません。ページ間で変わった lifecycle/revision は更新として明示し、resume の前提は Owner に提示した TaskRef/purpose の組に固定します。opaque ref の登録も返す page の範囲だけに限定します。
 
-会話対象の選択は第一者の `SelectTask { task }` で行い、Host が該当 Task の現在の report と `TaskRef/purpose` を返して既存の会話 projection に保持します。これはメモリ上の表示選択であり、Task/通知への durable mutation や execution 起動をしません。担当 Companion が異なる Task は選択できず、wire ref 欠如は UnknownRef です。restart / reconnect では未選択に戻り、任意の LLM 出力から選択を復元しません。
+Stage 5 の第一者画面には `SelectTask { task }` による一時的な表示選択があります。これは Task/通知への durable mutation や execution 起動をしません。Stage 10 の通常操作ではこれを対象特定の必須入口とせず、個体調整が会話文脈と Task owner の上限付き read query から候補を確かめ、曖昧なら会話で確認します。Task ID や revision を LLM に生成させず、Host が現在の `TaskRef/purpose` を確認して command を作ります。表示選択や再接続前の projection を現在の対象として復活させません。
 
-Task 一覧は保存済み lifecycle と現在の実行登録の有無を分け、未完了で実行登録のない Task には明示 resume を提供します。report は全 revision の Action 事実と sealed/adopted result を paged に読め、会話の一時的な Task 選択がなくても利用できます。会話からの再開も対象を選択した同じ command に写し、LLM の出力だけで対象・前提を最新化しません。第一者管理の resume は presence や dialogue provider の成功を必要とせず、online の serving Host へ届けます。offline DB を開く CLI から runner を直接起動しません。
+Task の read query は保存済み lifecycle と現在の実行登録の有無を分け、report は全 revision の Action 事実と sealed/adopted result を paged に読めます。通常の明示 resume は会話で確かめた対象を既存の command に写し、LLM の出力だけで対象・前提を最新化しません。診断・安全操作の第一者管理経路は presence や dialogue provider の成功を必要とせず、online の serving Host へ届けます。offline DB を開く CLI から runner を直接起動しません。
 
 同じ retry epoch・command ID・fingerprint の再送は、処理中なら `InFlight`、確定後なら初回の outcome と Task/delegation の参照を返し、再度 commit/launch しません。結果保持に失敗した実行済み command は `OutcomeUnavailable` と query への導線を返し、再実行しません。epoch が変わったら旧 command の自動再送は禁止します。ACK/応答を失った Owner は read query で状態を確認でき、同じ古い `expected_revision` を新 command で提出しても、前の受理が commit 済みなら `StalePremise` です。Host restart を跨ぐ専用 resume receipt table は作りません。
 
@@ -996,7 +998,7 @@ struct ManagementViewWire {
 2. ホスト側のマッピング層が入力検証を行い、ドメイン候補型（`SubmitClientInputCandidate`）へ変換します。ホストは現在の在席帰属、現行の接続、実行許可、停止中や保留中のフラグを照合し、問題がなければ `RoundIntakeOutcome::AcceptedForRound` を返します。古いラウンドに対する追加入力であれば `StaleRound` として拒絶し、勝手に新しいラウンドへ付け替えてはなりません。
 3. 確認応答（Ack）がネットワーク上で失われ、同一の送信者エポック内で初回 None のコマンドが同一のフィンガープリントで再送されてきた場合、ホストは保持している同一 `command_id` のマーカーや過去の結果から、前回と同じ `AcceptedForRound { round }` を返し、余計な2つ目のラウンドを発行しません。もし同一のIDでありながら本文や対象、前提条件が異なっていた場合は、ドメイン処理に入る前に通信境界で `CommandIdConflict` として拒絶します。
 4. ホストはクライアントへテキストをストリーミング送信します（`TextStreamOpen` → `Frame(seq, is_final)` → `Close(Completed)`）。モデルによる文章生成の完了、ネットワーク送信、クライアントでの受信完了は、それぞれ別の事実として厳格に区別します。
-5. クライアントは画面への提示が完了した後に `ConfirmPresentation::Presented` をホストへ返送します。送信や受信が成功しただけで提示完了とみなしてはなりません。提示されたかどうかが不明な場合は、状態を `Unknown` として保持します。
+5. クライアントは対象事項の要約本文全体の画面提示または音声再生完了を確認した後に `ConfirmPresentation::Presented` をホストへ返送します。送信や受信が成功しただけで提示完了とみなしてはなりません。提示されたかどうかが不明な場合は、状態を `Unknown` として保持します。
 
 ### V-3 Companion move A → B
 
