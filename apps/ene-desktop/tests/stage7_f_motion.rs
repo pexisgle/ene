@@ -1,10 +1,3 @@
-//! Stage 7 F: the bundled motion pack reaches the overlay child.
-//!
-//! The VRoid pack is an install asset and is not in this repository, so this
-//! test drives generated fixtures. A generated clip is not the official `ene`
-//! asset, not real compositor acceptance, and not a claim about the visible
-//! character.
-
 #![cfg(any(unix, windows))]
 #![allow(
     clippy::expect_used,
@@ -47,9 +40,6 @@ fn the_bundled_motion_pack_is_projected_to_the_body() {
     assert_eq!(plan.clips[0].pose, PoseHint::Idle);
     assert_eq!(plan.set().expect("assignment").clips.len(), 1);
 
-    // The overlay binary is a separate target. When it is not built, the
-    // resolution facts above still hold and the child path is skipped instead
-    // of being reported as a pass.
     let Some(exe) = BodySupervisor::locate_binary() else {
         return;
     };
@@ -59,8 +49,6 @@ fn the_bundled_motion_pack_is_projected_to_the_body() {
         return;
     }
     let mut motion_ready = false;
-    // GPU adapter startup happens before the first health tick, so this waits
-    // far longer than the 4 Hz tick period instead of racing it.
     for _ in 0..200 {
         desktop.tick();
         if desktop.body_motion_ready() {

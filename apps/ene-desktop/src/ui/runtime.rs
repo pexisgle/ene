@@ -1,5 +1,3 @@
-//! Testable desktop runtime. Host I/O never runs inside [`DesktopRuntime::tick`].
-
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -33,7 +31,6 @@ use crate::{BUNDLED_SAMPLE_ASSET, DESKTOP_DESCRIPTOR};
 const LOCALE_FILE: &str = "desktop-locale";
 const DEFAULT_MODEL: &str = "gpt-5.6-luna";
 
-/// Headless first-party desktop: the same state the Slint window projects.
 pub struct DesktopRuntime {
     data_dir: PathBuf,
     locale: Locale,
@@ -130,7 +127,6 @@ impl DesktopRuntime {
         }
     }
 
-    /// GUI event-loop pump. Never waits on connect or provider I/O.
     pub fn tick(&mut self) {
         self.ui_ticks = self.ui_ticks.saturating_add(1);
         self.body_status = self.body.poll();
@@ -288,8 +284,6 @@ impl DesktopRuntime {
         let mut commands = vec![ParentToBody::AssetRef(AssetRef::Path {
             path: asset.to_string_lossy().into_owned(),
         })];
-        // The assignment travels next to the avatar path as asset data. A
-        // missing pack is not an error: the body keeps its staged pose.
         let motion = self.motion_plan();
         if let Some(set) = motion.set() {
             commands.push(ParentToBody::MotionSet(set));
@@ -306,8 +300,6 @@ impl DesktopRuntime {
         self.body_hidden = self.body_status != BodyStatus::Spawned;
     }
 
-    /// Resolves the motion pack for this spawn. Placement is the install
-    /// script's job; nothing placed leaves the body on its staged pose.
     #[must_use]
     pub fn motion_plan(&self) -> MotionPlan {
         motion::resolve(&MotionEnvironment::from_process(&self.data_dir))
@@ -322,8 +314,6 @@ impl DesktopRuntime {
         }
     }
 
-    /// Projects an activity class only; no text, joint data, command, or
-    /// credential crosses the Body IPC.
     pub fn project_body_pose(&mut self, pose: PoseHint) {
         self.body_pose_deadline = matches!(pose, PoseHint::Speaking | PoseHint::Attention)
             .then(|| Instant::now() + Duration::from_secs(2));
@@ -350,8 +340,6 @@ impl DesktopRuntime {
         }
     }
 
-    /// Takes retained compositor presentation evidence for the measurement
-    /// recorder. Health ticks are intentionally not exposed here.
     pub fn take_body_presentations(&mut self) -> Vec<PresentationFeedback> {
         std::mem::take(&mut self.body_presentations)
     }
@@ -379,14 +367,11 @@ impl DesktopRuntime {
         }
     }
 
-    /// Kills the overlay child. Chat, settings, and cancel stay on this process.
     pub fn kill_body(&mut self) {
         self.body.shutdown();
         self.body_status = self.body.poll();
     }
 
-    /// Whether the overlay child reports a validated clip set. This is a fact
-    /// for tests and measurement; the window does not display it.
     #[must_use]
     pub fn body_motion_ready(&mut self) -> bool {
         self.body.motion_ready()
@@ -426,7 +411,6 @@ impl DesktopRuntime {
         data_candidate
     }
 
-    /// Detach `ene-core serve` when the Client listener is down.
     pub fn ensure_host(&mut self, host_bin: Option<&Path>) -> Result<(), DesktopError> {
         if host_launch::host_is_serving(&self.data_dir) {
             return Ok(());
@@ -453,14 +437,6 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    /// Attaches the private confirmation channel the Host handed to this GUI.
-    ///
-    /// Only the Host's own child receives this channel, so attaching it is the
-    /// GUI's entire claim to the seat; no public endpoint can take one.
-    ///
-    /// # Errors
-    ///
-    /// [`DesktopError::Transport`] when the channel's reader cannot start.
     pub fn attach_confirmation(
         &mut self,
         channel: ene_local_control::GuiChannel,
@@ -469,12 +445,6 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    /// Connects as a Client, or opens a first-run pairing.
-    ///
-    /// A stored device authenticates and the GUI keeps that connection. Only a
-    /// genuinely unpaired Client starts a pairing; the two paths never share a
-    /// result, so a restart of an already-paired GUI cannot be reported as a
-    /// pending pairing.
     pub async fn connect_or_begin_pairing(&mut self) -> Result<(), DesktopError> {
         self.require_confirmation()?;
         self.connection = i18n::label(self.locale, Label::Connecting);
@@ -496,8 +466,6 @@ impl DesktopRuntime {
         }
     }
 
-    /// The private confirmation channel, present exactly when the Host
-    /// spawned this process as its GUI.
     fn require_confirmation(&self) -> Result<(), DesktopError> {
         match self.control {
             Some(_) => Ok(()),
@@ -518,8 +486,6 @@ impl DesktopRuntime {
     pub async fn begin_credential_put(&mut self) -> Result<(), DesktopError> {
         self.require_confirmation()?;
         self.ensure_client()?;
-        // Wire intent stages the pending pair. Control put+approve then
-        // makes it usable. Approve without a pending does not create the ref.
         let staged = self.register_credential_intent().await?;
         match staged {
             ManagementOutcome::HeldByOperation | ManagementOutcome::AppliedAsOneTime => {}
@@ -546,7 +512,6 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    /// Owner gesture on the confirmation surface.
     pub async fn confirm_owner(&mut self) -> Result<FromConfirmation, DesktopError> {
         let challenge = self
             .control
@@ -907,13 +872,11 @@ impl DesktopRuntime {
         &self.memory
     }
 
-    /// First Host page of current memories. The Host applies the page bound.
     pub async fn refresh_memory(&mut self) -> Result<(), DesktopError> {
         self.fetch_memory(MemoryPage::list_request(None), false)
             .await
     }
 
-    /// Next Host list page using the `next:` cursor from the last list page.
     pub async fn page_older_memories(&mut self) -> Result<(), DesktopError> {
         let Some(after) = self.memory.next_after().map(str::to_owned) else {
             return Ok(());
@@ -922,13 +885,11 @@ impl DesktopRuntime {
             .await
     }
 
-    /// First Host revision page for one Memory named by the list.
     pub async fn open_memory_revisions(&mut self, memory_id: &str) -> Result<(), DesktopError> {
         self.fetch_memory(MemoryPage::revisions_request(memory_id, None), false)
             .await
     }
 
-    /// Next Host revision page using the `next-revision:` cursor.
     pub async fn page_later_revisions(&mut self) -> Result<(), DesktopError> {
         let Some(memory_id) = self.memory.revisions_of().map(str::to_owned) else {
             return Ok(());
@@ -1062,7 +1023,6 @@ impl DesktopRuntime {
         self.tasks.has_presented_receipt()
     }
 
-    /// Resume premise currently shown. List refresh must not rewrite this.
     #[must_use]
     pub fn displayed_task_revision(&self) -> Option<u64> {
         self.tasks.displayed().map(|shown| shown.revision)
@@ -1130,8 +1090,6 @@ impl DesktopRuntime {
         self.deletion.set_purpose(purpose);
     }
 
-    /// Cap mutation uses the last-read mark. Remaining on the panel is
-    /// display-only and is not consulted.
     pub async fn apply_usage_cap(&mut self) -> Result<ManagementOutcome, DesktopError> {
         self.ensure_client()?;
         let outcome = {
@@ -1223,10 +1181,6 @@ impl DesktopRuntime {
                 ))
             })?;
             let (operation, sweep) = deletion.resume_target()?;
-            // The Host drives fan-out on resume, and a Client-incarnation
-            // demand must be answered while the Owner waits: this Client keeps
-            // pumping its own frames, exactly as it does for a confirmed
-            // deletion.
             let resume = seat.request_deletion_resume(&operation, sweep);
             tokio::pin!(resume);
             match client.as_mut() {
@@ -1246,9 +1200,6 @@ impl DesktopRuntime {
                         tokio::select! {
                             outcome = &mut resume => break outcome?,
                             () = tokio::time::sleep(Duration::from_millis(20)) => {
-                                // A read drives this Client's frame pump, so
-                                // the bounded local-erasure demand the Host
-                                // raises during fan-out is answered inline.
                                 match copies.deletion.refresh(client).await {
                                     Ok(()) | Err(_) => {}
                                 }
@@ -1311,12 +1262,6 @@ impl DesktopRuntime {
         self.pull_presence();
     }
 
-    /// Presents the Host's current state after an established connection.
-    ///
-    /// Each refresh is best effort: a management or history read that fails
-    /// still leaves a connected GUI with its own failure text, never a GUI
-    /// that silently looks disconnected. An unpaired Host answers the setup
-    /// view, so the wizard continues from Host facts rather than a local flag.
     async fn refresh_after_connect(&mut self) {
         if self.refresh_setup().await.is_ok() && self.facts.setup_ready() {
             self.setup_completed = true;
@@ -1458,7 +1403,6 @@ fn persist_locale(data_dir: &Path, locale: Locale) {
 }
 
 impl DesktopRuntime {
-    /// Attach all live surfaces before accepting Host deletion demands.
     pub fn attach_surface_erasure(&mut self, erase: super::presentation::SurfaceErasure) {
         self.surface_erasure = Some(erase);
     }

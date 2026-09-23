@@ -218,22 +218,12 @@ pub fn run() -> Result<(), DesktopError> {
     let config = Config::load(None).map_err(|e| DesktopError::Protocol(e.to_string()))?;
     let data_dir = resolve_data_dir(&config)
         .ok_or_else(|| DesktopError::HostLaunch("no data directory resolved".into()))?;
-    // Two roles, one binary. The Host sets the marker while spawning the
-    // process it hands the private confirmation channel to; without it this
-    // process is the user-started launcher, which opens the Host's GUI and
-    // exits. A user or requester cannot aim this switch: it is an environment
-    // value only the Host writes.
     match std::env::var(ene_local_control::CONFIRMATION_MODE_ENV) {
         Ok(value) if value == ene_local_control::CONFIRMATION_MODE_STDIO => run_gui(data_dir),
         _ => run_launcher(data_dir),
     }
 }
 
-/// The short-lived launcher: ask the serving Host to open its GUI, then exit.
-///
-/// The launcher never holds a seat: it only requests. If no Host is serving it
-/// starts one first, which is what keeps a manual `ene-core serve` out of the
-/// normal setup path.
 fn run_launcher(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -274,12 +264,7 @@ fn run_launcher(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
     })
 }
 
-/// The Host-spawned GUI: adopt the inherited confirmation channel and run the
-/// windows.
 fn run_gui(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
-    // Desktop text rendering must remain CPU-only so ene-body is the only
-    // process that owns a GPU device. Slint's software renderer also avoids
-    // the blank Windows Skia surface observed before the first native damage.
     slint::BackendSelector::new()
         .backend_name(String::from("winit"))
         .renderer_name(String::from("software"))
@@ -345,10 +330,6 @@ fn install_interaction_notifier(chat: &ChatWindow, surfaces: &Surfaces) -> bool 
                 let trace_path = trace_path.clone();
                 let scheduled_for_completion = Arc::clone(&completion_scheduled);
                 let queued = slint::invoke_from_event_loop(move || {
-                    // The winit event filter runs before Slint handles
-                    // RedrawRequested. A queued event-loop callback therefore
-                    // runs only after that draw call returned, and records the
-                    // first paint containing the already-applied Host outcome.
                     let paints = drain_painted_interactions(&pending, monotonic_ns());
                     for sample in paints {
                         append_interaction_trace(&trace_path, sample);
@@ -412,10 +393,6 @@ fn show<C: ComponentHandle + 'static>(window: &C) {
     }
     window.window().set_minimized(false);
     window.window().with_winit_window(|w| w.focus_window());
-    // The Windows skia-software surface can retain its white pre-show buffer
-    // when visibility changes before Slint has a damage event. Moving the
-    // native window happens to create damage, but first-party content must be
-    // painted without requiring that unrelated user gesture.
     request_post_show_redraw(window);
 }
 
@@ -675,7 +652,6 @@ fn bind(s: &Surfaces, c: &ChatWindow, m: &ManagementWindow) {
             s.dismiss();
         }
     });
-    // The opaque confirmation key never appears as a visible label.
     m.on_confirm_owner({
         let s = s.clone();
         move || {
@@ -745,8 +721,6 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
             continue;
         }
         let result = execute(&mut desktop, request.command).await;
-        // The Host outcome is a conservative upper bound on intake: the Host
-        // necessarily accepted or refused the operation before this point.
         let measured = if s.interaction_paint_evidence && result.is_ok() {
             request.interaction.map(|start| PendingPaint {
                 start,

@@ -354,10 +354,6 @@ fn device_auth_same_device_rotations_leave_one_current_secret() {
     );
 }
 
-/// The mutation lock is a real cross-handle exclusion: a second writer waits
-/// until the holder releases, and dropping the holder recovers the file for
-/// the next approval (the kernel owns release-on-exit, so a crash behaves
-/// like a drop).
 #[test]
 fn device_auth_mutation_lock_serializes_writers() {
     use std::sync::mpsc;
@@ -402,9 +398,6 @@ fn device_auth_mutation_lock_serializes_writers() {
     writer.join().expect("writer must not panic");
 }
 
-/// A failed approval leaves the previous custody document intact, and the
-/// next approval recovers once the cause (here: a malformed file) is
-/// removed.
 #[test]
 fn device_auth_write_failure_recovers_on_the_next_approval() {
     let temp = fresh_tempdir();

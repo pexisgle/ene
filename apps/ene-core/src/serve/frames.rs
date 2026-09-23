@@ -1,8 +1,3 @@
-//! Outgoing envelope and frame builders shared by every dispatch path.
-//!
-//! The `message_type` always comes from [`WirePayload::message_type`]; no
-//! caller passes it separately, so envelope and body cannot disagree.
-
 use super::LiveInput;
 use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender, new_outgoing_envelope};
 use ene_api::v1::handshake::DisconnectNotice;
@@ -12,13 +7,6 @@ use ene_api::v1::reject::{RejectKind, RejectNotice};
 use ene_plugin_ipc::WireFrame;
 use uuid::Uuid;
 
-/// Builds the terminal gate frame dropping unauthenticated domain service.
-///
-/// The connection closes after this frame is written. The `"unpaired"` reason
-/// names the gate trip only; a disconnect (rather than a `Reject` denial,
-/// which exists for post-auth declines) is the explicit decision, so an
-/// unauthenticated peer gets no oracle. The frame hides the connection id: a
-/// peer that never completed the challenge must not learn it from the drop.
 pub(crate) fn unpaired_close(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     outgoing_frame_pre_auth(
         frame,
@@ -29,18 +17,6 @@ pub(crate) fn unpaired_close(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     )
 }
 
-/// Builds the Host sender for one response to `frame` under `live`.
-///
-/// Host-to-Client addressing always echoes the inbound incarnation (so the
-/// Client pairs the response with its connection state) and names the paired
-/// device target when this connection paired one (the opaque projection the
-/// table holds, passed through verbatim; an unparsable entry — never
-/// written by this Host — maps to [`None`]); pre-pairing responses carry
-/// device [`None`]. The connection id travels only when `reveal_connection`
-/// holds: acceptance and later domain responses reveal this connection's
-/// table id, while every pre-accept response hides it ([`None`]), so a peer
-/// that never completed the challenge never learns the id the gate requires
-/// it to echo.
 fn response_sender(frame: &WireFrame, live: &LiveInput, reveal_connection: bool) -> WireSender {
     WireSender {
         device_id: live
@@ -53,11 +29,6 @@ fn response_sender(frame: &WireFrame, live: &LiveInput, reveal_connection: bool)
     }
 }
 
-/// Builds an outgoing envelope for a `Stage 2` message.
-///
-/// `reply_to` links the response to its request for transport pairing; domain
-/// correspondence travels in the payloads, never here. The sender follows
-/// [`response_sender`].
 pub(crate) fn outgoing_envelope(
     frame: &WireFrame,
     live: &LiveInput,
@@ -83,12 +54,6 @@ fn outgoing_envelope_inner(
     envelope
 }
 
-/// Builds one response frame answering `frame` with `payload`.
-///
-/// Use only on and after
-/// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted): the acceptance
-/// itself, the piggybacked presence fact, and every domain response reveal
-/// the connection id.
 pub(crate) fn outgoing_frame(
     frame: &WireFrame,
     live: &LiveInput,
@@ -98,20 +63,10 @@ pub(crate) fn outgoing_frame(
     WireFrame { envelope, payload }
 }
 
-/// Builds one typed `StaleConnection` rejection answering `frame`.
-///
-/// A superseded connection keeps its socket (IPC §11.3): the frame's
-/// attribution was verifiable, so the honest typed outcome is sent instead of
-/// a drop. The rejection never reveals the connection id (the connection is no
-/// longer authenticated), and it is never a retry signal.
 pub(crate) fn stale_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
     reject_frame(frame, live, RejectKind::StaleConnection, detail.to_string())
 }
 
-/// Builds one typed `InvalidHandshakePhase` rejection answering `frame`.
-///
-/// The offending handshake frame had no effect: the pending nonce and the
-/// negotiated terms are unchanged (IPC §9.3).
 pub(crate) fn invalid_phase_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
     reject_frame(
         frame,
@@ -121,10 +76,6 @@ pub(crate) fn invalid_phase_reject(frame: &WireFrame, live: &LiveInput, detail: 
     )
 }
 
-/// Builds one unsolicited fact frame (auto-present summaries, presence
-/// facts): it names no `reply_to`, so a Client waiting on a request/response
-/// pair defers it instead of mistaking it for the answer. The connection id
-/// still travels: facts only flow on authenticated connections.
 pub(crate) fn outgoing_fact(
     frame: &WireFrame,
     live: &LiveInput,
@@ -135,10 +86,6 @@ pub(crate) fn outgoing_fact(
     WireFrame { envelope, payload }
 }
 
-/// Builds one typed wire rejection answering `frame`.
-///
-/// Per IPC §5, a rejection on an authenticated connection (`live.authed`)
-/// carries this connection's table id; a pre-auth rejection hides it.
 pub(crate) fn reject_frame(
     frame: &WireFrame,
     live: &LiveInput,

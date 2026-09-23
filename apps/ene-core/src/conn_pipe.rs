@@ -1,23 +1,3 @@
-//! Windows named-pipe transport (IPC §10.1).
-//!
-//! Same-machine Clients dial [`pipe_name`] (one pipe per Host data
-//! directory). The listener in [`crate::conn`] creates the exclusive first
-//! server instance with `FILE_FLAG_FIRST_PIPE_INSTANCE` (a second Host for
-//! the same directory fails to create, like the Unix singleton probe),
-//! `PIPE_REJECT_REMOTE_CLIENTS` (remote machines cannot connect at the OS
-//! layer), and an explicit DACL limited to this process's logon SID (see
-//! `LogonSidAttrs`). Every accepted connection additionally passes
-//! [`peer_same_user`] — the OS peer token check — before a single frame is
-//! read: an unprovable peer is dropped without a byte, exactly like the Unix
-//! uid-mismatch path. Frames, the `ConnectionTable`,
-//! and [`HostHandle::handle_frame`](crate::serve::HostHandle::handle_frame)
-//! are shared with the Unix socket path, so authentication, currentness, and
-//! the connection phase machine are identical on both transports.
-//!
-//! Shared listener regressions exercise this transport on Windows and Unix
-//! sockets on Unix. [`CoreError::Bind`]
-//! reports every creation failure; nothing silently falls back.
-
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::RawHandle;
@@ -40,16 +20,8 @@ use windows_sys::core::{PCWSTR, PWSTR};
 
 use crate::serve::CoreError;
 
-/// `SE_GROUP_LOGON_ID` (`WinNT.h`): marks the logon SID inside a token's
-/// group list. windows-sys 0.61 exposes no named constant for it.
 const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
 
-/// Pipe name for one Host data directory.
-///
-/// Named pipes live in a flat per-machine namespace, so the data directory
-/// is folded into the name: FNV-1a (64-bit, fixed offsets, so the name is
-/// stable across processes) over its string form, rendered as hex. Backslash
-/// can never appear in the hex tag.
 #[must_use]
 pub fn pipe_name(data_dir: &Path) -> String {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -69,12 +41,6 @@ fn wide_null(text: &str) -> Vec<u16> {
         .collect::<Vec<u16>>()
 }
 
-/// Explicit DACL limited to this process's logon SID, plus the
-/// `SECURITY_ATTRIBUTES` wrapper tokio's builder consumes.
-///
-/// The SDDL is `D:P(A;;GA;;;{logon-sid})`: protected (no inherited ACEs),
-/// generic-all for the logon session only. Anyone outside this logon session
-/// fails to open the pipe before any protocol bytes move.
 struct LogonSidAttrs {
     sd: PSECURITY_DESCRIPTOR,
     attrs: SECURITY_ATTRIBUTES,
@@ -124,8 +90,6 @@ impl Drop for LogonSidAttrs {
     }
 }
 
-/// Handle wrapper that closes on drop. Never constructed for the
-/// `GetCurrentProcess` pseudo-handle.
 struct OwnedHandle(HANDLE);
 
 impl Drop for OwnedHandle {
@@ -148,7 +112,6 @@ fn open_process_token(process: HANDLE) -> Option<OwnedHandle> {
     Some(OwnedHandle(token))
 }
 
-/// Reads `class` from `token` into an owned byte buffer (two-call sizing).
 fn token_info_bytes(token: HANDLE, class: i32) -> Option<Vec<u8>> {
     let mut needed = 0u32;
     // SAFETY: sizing call; the null buffer with zero length always fails with
@@ -196,8 +159,6 @@ fn sid_to_string(sid: PSID) -> Option<String> {
     Some(text)
 }
 
-/// The `S-...` text of this process's logon SID (the group entry flagged
-/// `SE_GROUP_LOGON_ID`), for the pipe DACL.
 fn logon_sid_text() -> Option<String> {
     // SAFETY: `GetCurrentProcess` needs no cleanup (pseudo-handle, never closed).
     let process = unsafe { GetCurrentProcess() };
@@ -221,7 +182,6 @@ fn logon_sid_text() -> Option<String> {
     None
 }
 
-/// The `S-...` text of the user owning `process`.
 fn process_user_sid_text(process: HANDLE) -> Option<String> {
     let token = open_process_token(process)?;
     let bytes = token_info_bytes(token.0, TokenUser)?;
@@ -237,13 +197,6 @@ fn process_user_sid_text(process: HANDLE) -> Option<String> {
     sid_to_string(sid)
 }
 
-/// OS peer token check for one connected pipe instance.
-///
-/// Resolves the client's process id from the pipe handle, opens that process
-/// read-only, and requires its user SID text to equal this process's user SID
-/// text. Anything unprovable (unknown pid, unopenable process or token,
-/// unreadable SID) is a mismatch: the caller drops the connection before any
-/// frame is read. `GetCurrentProcess`'s pseudo-handle is never closed.
 pub fn peer_same_user(pipe: RawHandle) -> bool {
     let mut pid = 0u32;
     // SAFETY: `pipe` is a live server instance owned by the listener loop;
@@ -255,10 +208,6 @@ pub fn peer_same_user(pipe: RawHandle) -> bool {
     peer_same_user_pid(pid)
 }
 
-/// OS peer process id for one connected pipe instance.
-///
-/// [`None`] when the client pid cannot be proven; the caller drops the
-/// connection rather than minting a seat against an unprovable peer.
 #[must_use]
 pub fn peer_process_id(pipe: RawHandle) -> Option<u32> {
     let mut pid = 0u32;
@@ -291,23 +240,10 @@ fn peer_same_user_pid(pid: u32) -> bool {
     }
 }
 
-/// Creates the exclusive first server instance for `pipe`.
-///
-/// Fails when another Host already owns the name (a live peer, like the Unix
-/// singleton probe — pipe instances vanish with their process, so there is no
-/// stale path to unlink).
-///
-/// # Errors
-///
-/// Returns [`CoreError::Bind`] when the logon
-/// SID cannot be read or the pipe cannot be created.
 pub fn create_first_server(pipe: &str) -> Result<NamedPipeServer, CoreError> {
     create_server(pipe, true)
 }
 
-/// Creates a follow-up server instance that accepts the next client while a
-/// previous connection is being served. Only the first instance carries
-/// `FILE_FLAG_FIRST_PIPE_INSTANCE`; later ones must not.
 pub fn create_next_server(pipe: &str) -> Result<NamedPipeServer, CoreError> {
     create_server(pipe, false)
 }

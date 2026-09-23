@@ -42,7 +42,6 @@ fn fixture_clock() -> WallClockWithTz {
     }
 }
 
-/// Builds the durable fingerprint for one credential-registration intent.
 fn registration_fingerprint(
     intent_id: &str,
     provider: &str,
@@ -58,9 +57,6 @@ fn registration_fingerprint(
     }
 }
 
-/// Registers one pair through the production register-then-approve path: the
-/// registration intent records the pending row and the approval write creates
-/// the usable ref with the sweep.
 async fn approve_pair(store: &Store, provider: &str, label: &str, bearer: &str, intent_id: &str) {
     let applied = store
         .request_registration_with_intent(
@@ -129,13 +125,6 @@ async fn running_companion(store: &Store) -> Option<(CompanionId, PresenceGenera
     Some((companion, attribution.generation))
 }
 
-/// A reply naming a superseded Owner message is refused inside the same
-/// transaction that would insert it: the newer accepted Owner input wins
-/// by commit order, even inside one round, and the refused reply registers
-/// nothing.
-/// The supersession probe is an index seek, not a History scan: it stops
-/// at the first newer Owner row, so proving recency costs one index step
-/// in the common current case no matter how long the timeline grows.
 #[tokio::test]
 async fn supersession_probe_is_index_backed_not_a_scan() {
     let store = open_memory().await.unwrap();
@@ -172,8 +161,6 @@ async fn supersession_probe_is_index_backed_not_a_scan() {
     );
 }
 
-/// Commits one consent row through the intent-atomic write path, minting a
-/// fresh intent id per call so nothing replays.
 async fn save_consent(
     store: &Store,
     expected: Option<(String, ConsentRevision)>,
@@ -227,8 +214,6 @@ async fn load_message_reads_one_row_by_primary_key_and_fails_closed() {
         "an absent identity is reported, never fabricated"
     );
 
-    // The implemented query is a primary-key point lookup, not a scan: the
-    // plan proves the read stays bounded to the addressed row.
     {
         let guard = match store.conn.lock() {
             Ok(locked) => locked,
@@ -254,8 +239,6 @@ async fn load_message_reads_one_row_by_primary_key_and_fails_closed() {
         );
     }
 
-    // A malformed durable row is a technical error, never a composed
-    // substitute.
     {
         let guard = match store.conn.lock() {
             Ok(locked) => locked,
@@ -285,10 +268,6 @@ async fn concurrent_same_id_assigns_fork_nothing() {
     };
 
     let store = open_memory().await.unwrap();
-    // Two sends of one logical intent race through the same store: the
-    // shared-connection mutex serializes whole transactions, so exactly one
-    // decides and the loser replays — the answer never forks and the row is
-    // never rewritten.
     let attempt = |model: &'static str| {
         let store = &store;
         let fingerprint = IntentFingerprint {
@@ -346,8 +325,6 @@ async fn concurrent_same_id_assigns_fork_nothing() {
     }
 }
 
-// --- Learning: Memory / Summary / revision persistence ---
-
 fn learning_summary(companion: RawId, content: &str) -> SummaryRecord {
     SummaryRecord {
         id: SummaryId::generate(),
@@ -390,9 +367,6 @@ fn commit(summary: Option<SummaryRecord>, change: MemoryChange) -> MemoryChangeC
     }
 }
 
-/// Revision pages bound the rows read and still cover every revision exactly
-/// once; a shared Summary is one row in the batch read, and a missing id
-/// stays absent instead of being fabricated.
 #[tokio::test]
 async fn memory_revision_pages_and_summary_batches_are_bounded() {
     let store = open_memory().await.unwrap();
@@ -478,9 +452,6 @@ async fn memory_revision_pages_and_summary_batches_are_bounded() {
     assert!(store.load_summaries(&[]).await.unwrap().is_empty());
 }
 
-/// Recall candidate retrieval is a bounded multi-arm query: an old relevant
-/// memory is reachable past any newest window, suppressed rows never become
-/// candidates, and each arm caps the rows read.
 #[tokio::test]
 async fn recall_candidates_are_bounded_and_reach_old_relevant_rows() {
     let store = open_memory().await.unwrap();
@@ -558,12 +529,6 @@ async fn recall_candidates_are_bounded_and_reach_old_relevant_rows() {
     );
 }
 
-/// The approval sweep also covers the Task and activity bodies that the Task
-/// report, management view, and undelivered excerpts read back: a value
-/// recorded as ordinary text before it became a registered credential must
-/// be redacted in the current Task revision, the revision history, the
-/// recorded final result, and the first-party resume instruction, or those
-/// readers would keep serving the raw value out of the owner row.
 #[tokio::test]
 async fn startup_sweep_fails_closed_when_a_registered_value_is_unreadable() {
     let store = open_memory().await.unwrap();
@@ -572,8 +537,6 @@ async fn startup_sweep_fails_closed_when_a_registered_value_is_unreadable() {
     };
     let readable = CredentialRef::new("openai", "main").unwrap();
     let unreadable = CredentialRef::new("openai", "other").unwrap();
-    // Register both refs first, then store raw content: the boundary under
-    // test is the startup sweep below.
     approve_pair(
         &store,
         "openai",
@@ -600,9 +563,6 @@ async fn startup_sweep_fails_closed_when_a_registered_value_is_unreadable() {
         .unwrap();
     let premise = store.current_set_revision().await.unwrap();
 
-    // `readable` sweeps first inside the transaction, then `unreadable`
-    // fails: the whole boundary must roll back, not keep a partial sweep or
-    // a revision advance.
     let values = MemoryCredentialStore::new();
     values.insert(readable.clone(), "sk-legacy");
     assert!(
@@ -622,7 +582,6 @@ async fn startup_sweep_fails_closed_when_a_registered_value_is_unreadable() {
         "a failed sweep must leave the earlier replacement rolled back"
     );
 
-    // With every value readable the same boundary sweeps and advances.
     store
         .sweep_registered_values(&[readable], &values)
         .expect("a readable boundary must complete");
@@ -634,10 +593,6 @@ async fn startup_sweep_fails_closed_when_a_registered_value_is_unreadable() {
     assert_eq!(timeline[0].text, "the old key is [credential]");
 }
 
-/// The provider claim is the send boundary of the credential premise: a proof
-/// produced by the real scrub boundary before a rotation must be refused with
-/// zero provider bytes, and only a re-scrub under the new revision may claim.
-/// The refusal itself carries no secret material.
 #[tokio::test]
 async fn rotation_between_scrub_and_provider_claim_refuses_and_a_rescrub_claims() {
     use ene_credential::{CredentialScrubber, SecretScrubber as _};
@@ -682,8 +637,6 @@ async fn rotation_between_scrub_and_provider_claim_refuses_and_a_rescrub_claims(
         "a value that is not registered yet stays ordinary text"
     );
 
-    // The value changes between the scrub and the claim: the request builder
-    // now carries the rotated bearer while the old proof names the old set.
     assert!(matches!(
         store.approve_credential_with_sweep("openai", "main", "sk-b"),
         Ok(true)
@@ -721,8 +674,6 @@ async fn rotation_between_scrub_and_provider_claim_refuses_and_a_rescrub_claims(
         "a refused claim starts no attempt"
     );
 
-    // Only the re-scrubbed proof claims: its text has the newly registered
-    // value redacted and its premise names the current set.
     let fresh_proof = scrubber
         .scrub("my key is sk-b")
         .await
@@ -755,10 +706,6 @@ async fn rotation_between_scrub_and_provider_claim_refuses_and_a_rescrub_claims(
     );
 }
 
-// --- Task: AU2 creation / reload ---
-
-/// Counts rows of one test-probed table. The table name is a literal from
-/// this test module, never caller input.
 fn task_table_count(store: &Store, table: &str) -> i64 {
     let guard = match store.conn.lock() {
         Ok(locked) => locked,
@@ -804,8 +751,6 @@ fn task_premise(workspace: Option<WorkspaceAssociationPremise>) -> TaskCreationP
     }
 }
 
-// --- Delegation: AU3 creation / reload ---
-
 fn delegation_scope(workspace: Option<DelegatedWorkspace>) -> DelegationScope {
     DelegationScope { workspace }
 }
@@ -840,7 +785,6 @@ fn delegation_premise(
     }
 }
 
-/// A readable credential registry with no refs, pinned at one revision.
 struct EmptyRevisionRegistry(CredentialSetRevision);
 
 impl CredentialRefRepository for EmptyRevisionRegistry {
@@ -859,8 +803,6 @@ impl CredentialSetRepository for EmptyRevisionRegistry {
     }
 }
 
-/// Scrubs `text` through the credential-owned boundary under `revision`; the
-/// returned premise is the only way a test can name a Task result body.
 async fn scrubbed_result_at(revision: CredentialSetRevision, text: &str) -> TaskResultScrubPremise {
     use ene_credential::SecretScrubber as _;
 
@@ -877,7 +819,6 @@ async fn scrubbed_result_at(revision: CredentialSetRevision, text: &str) -> Task
     )
 }
 
-/// Scrubs `text` under the store's current credential-set revision.
 async fn scrubbed_result(store: &Store, text: &str) -> TaskResultScrubPremise {
     let revision = store
         .current_set_revision()
@@ -886,9 +827,6 @@ async fn scrubbed_result(store: &Store, text: &str) -> TaskResultScrubPremise {
     scrubbed_result_at(revision, text).await
 }
 
-/// Records one result through the production arrival boundary and returns the
-/// recorded result. Fixtures scrub at the current revision, so a stale
-/// refusal here would be a fixture error.
 async fn record_result(store: &Store, delegation: DelegationId, text: &str) -> TaskResultRecord {
     match orchestrate_result_arrival(store, delegation, scrubbed_result(store, text).await)
         .await

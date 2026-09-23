@@ -1,11 +1,5 @@
-//! C1 secret intake: not chat, not undo, not a draft, not Targeted Deletion.
-//!
-//! The buffer is zeroized on take, cancel, and drop. It is never cloned into
-//! GUI snapshots, logs, or saved state.
-
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// Owner-typed secret held only while the credential field is open.
 #[derive(Zeroize, ZeroizeOnDrop, Default)]
 pub struct SecretIntake {
     buffer: String,
@@ -35,7 +29,6 @@ impl SecretIntake {
         self.buffer.is_empty()
     }
 
-    /// Moves the buffer out for control intake and zeroizes this slot.
     #[must_use]
     pub fn take(&mut self) -> String {
         let mut value = String::new();

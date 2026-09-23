@@ -1,12 +1,3 @@
-//! Task progress lifecycle, final result arrival/seal (AU15a), adoption
-//! (AU15b), and the Task-wide completion barrier.
-//!
-//! The durable checks here reproduce the V-10 contract: progress is
-//! orthogonal to revisions and terminal is absorbing, the result row's
-//! existence is the execution seal, the authoritative Action attempt set is
-//! enumerated from the delegation and compared to the claim exactly, and
-//! `Completed` is only reachable through the barrier-checked CAS.
-
 use super::*;
 
 use ene_action::{
@@ -29,8 +20,6 @@ async fn open_store() -> Store {
     open_memory().await.unwrap()
 }
 
-/// Seeds one Task with a confirmed workspace association and one delegation
-/// whose copied scope relies on exactly that association.
 pub(super) async fn seed_workspace_execution(
     store: &Store,
 ) -> (TaskRef, DelegationId, WorkspaceAssocId) {
@@ -85,7 +74,6 @@ pub(super) fn attempt_premise(
     }
 }
 
-/// Starts one Action attempt (AU5), requiring `Started`.
 pub(super) async fn start_attempt(
     store: &Store,
     delegation: DelegationId,
@@ -115,7 +103,6 @@ pub(super) async fn settle(
     assert_eq!(outcome, CertaintyUpdateOutcome::Updated);
 }
 
-/// Records one final result through the explicit finalization boundary.
 pub(super) async fn finalize(
     store: &Store,
     delegation: DelegationId,
@@ -130,8 +117,6 @@ pub(super) fn claim(result: TaskResultId, attempts: &[ActionAttemptId]) -> TaskR
         attempt_refs: attempts.iter().map(|attempt| attempt.as_raw()).collect(),
     }
 }
-
-// --- lifecycle ---
 
 #[tokio::test]
 async fn fresh_task_starts_started_and_delegation_advances_to_in_progress() {
@@ -200,7 +185,6 @@ async fn completed_task_refuses_delegation_and_steering_without_writes() {
     let completed = store.load_task(task.task).await.unwrap().unwrap();
     assert_eq!(completed.task.progress, TaskProgress::Completed);
 
-    // A terminal Task refuses a new delegation and never advances or writes.
     let refused = store
         .create_delegation(delegation_premise(
             DelegationId::generate(),
@@ -219,7 +203,6 @@ async fn completed_task_refuses_delegation_and_steering_without_writes() {
     );
     assert_eq!(task_table_count(&store, "delegation"), 1);
 
-    // A terminal Task refuses steering: no revision, no context entry.
     let revisions_before = task_table_count(&store, "task_revision");
     let entries_before = task_table_count(&store, "task_context_entry");
     let refused = store
@@ -254,8 +237,6 @@ async fn completed_task_refuses_delegation_and_steering_without_writes() {
         task
     );
 }
-
-// --- AU15a arrival / seal ---
 
 #[tokio::test]
 async fn arrival_is_durable_before_adoption_and_reopen_preserves_the_body() {
@@ -312,7 +293,6 @@ async fn arrival_is_durable_before_adoption_and_reopen_preserves_the_body() {
         TaskProgress::InProgress,
         "reopen does not auto-adopt or auto-complete"
     );
-    // The seal survives restart: a new Action under the execution is refused.
     let refused = reopened
         .insert_attempt_if_current(attempt_premise(
             ActionAttemptId::generate(),
@@ -332,7 +312,6 @@ async fn result_retry_is_idempotent_and_identity_reuse_fails_closed() {
     let (task, delegation, _assoc) = seed_workspace_execution(&store).await;
     let result = finalize(&store, delegation, "body one").await;
 
-    // Exact retry: no second row, same durable identity.
     let retried = store
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation,
@@ -344,8 +323,6 @@ async fn result_retry_is_idempotent_and_identity_reuse_fails_closed() {
     assert_eq!(retried, TaskResultArrivalOutcome::Recorded(result.clone()));
     assert_eq!(task_table_count(&store, "task_result"), 1);
 
-    // Same identity with a different body is a technical error, never an
-    // overwrite.
     let error = store
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation,
@@ -359,8 +336,6 @@ async fn result_retry_is_idempotent_and_identity_reuse_fails_closed() {
         "the technical error must not carry the body"
     );
 
-    // A different final result for the same delegation is the second final
-    // result that the durable invariant refuses.
     let second = store
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation,
@@ -374,7 +349,6 @@ async fn result_retry_is_idempotent_and_identity_reuse_fails_closed() {
     );
     assert_eq!(task_table_count(&store, "task_result"), 1);
 
-    // An arrival whose delegation has no correspondence fails closed.
     let orphan = store
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation: DelegationId::generate(),
@@ -397,8 +371,6 @@ async fn result_retry_is_idempotent_and_identity_reuse_fails_closed() {
         TaskProgress::InProgress
     );
 }
-
-// --- authoritative set and adoption outcomes ---
 
 #[tokio::test]
 async fn confirmed_success_attempts_adopt_as_completion() {
@@ -484,7 +456,6 @@ async fn unknown_and_failure_attempts_withhold_completion() {
                 .adopted_revision,
             None
         );
-        // The result-local verified correlation is stamped even when withheld.
         let stamped = store
             .load_task_result(result.result)
             .await
@@ -494,17 +465,3 @@ async fn unknown_and_failure_attempts_withhold_completion() {
         assert_eq!(stamped, vec![attempt.as_raw()]);
     }
 }
-
-// --- stale and idempotency ---
-
-// --- Task-wide completion barrier ---
-
-// --- load / restart invariants ---
-
-// --- corruption fail-closed (review #5190132687) ---
-
-// --- adopted current-unit bounded-read corruption (review #5190282818) ---
-
-// --- adopted current-unit snapshot / purpose identity corruption (review #5190349125) ---
-
-// --- debug / leakage ---

@@ -1,8 +1,3 @@
-//! Canonical Group J admission and unfinished lifecycle. All mutations share
-//! SQLite's Immediate writer boundary with AU14 and Task resume; no I/O or
-//! participant erase runs under the transaction. Reads are SELECT-only and
-//! bound their validation to the rows they actually return.
-
 use std::sync::Arc;
 
 use ene_preservation::*;
@@ -23,17 +18,6 @@ fn corrupt() -> PreservationTechnicalError {
     PreservationTechnicalError::CorruptState
 }
 
-/// Whether `condition` is the operation's current, unfinished condition
-/// (lifecycle §6-§7).
-///
-/// A participant-local erasure pass must run this check inside the same
-/// transaction as its mutation: a sweep the operation has moved past or a
-/// completed operation must never erase local state. Completion ends the
-/// text's meaning as a deletion target (§7: a completed operation is not a
-/// permanent keyword ban), so a late duplicate from a superseded run must be
-/// refused instead of erasing text the Owner provided afterwards. A condition
-/// that cannot be encoded, or that has no matching operation row, is not
-/// current.
 pub(crate) fn condition_is_current(
     conn: &Connection,
     condition: ErasureConditionRef,
@@ -49,12 +33,6 @@ pub(crate) fn condition_is_current(
     )
 }
 
-/// Indexed `(operation, sweep, source)` membership in the current sweep's
-/// covered-source set.
-///
-/// Semantic owners match a candidate pin against this primary key instead of
-/// receiving every covered identity in the demand command. One probe is one
-/// indexed EXISTS; the caller never materializes the whole set.
 pub(crate) fn source_is_covered(
     conn: &Connection,
     condition: ErasureConditionRef,
@@ -75,20 +53,6 @@ pub(crate) fn source_is_covered(
     )
 }
 
-/// One bounded, keyset-paged candidate page for both owner queries.
-///
-/// Candidates are unfinished operations plus torn orphan conditions with no
-/// operation row at all: the union keeps the page bounded while an orphan
-/// condition can never be omitted from a query result as a silent
-/// authoritative empty set — it fails closed through `validate`.
-///
-/// Participant rows add no candidate class: they are read only for an
-/// operation the caller already has (and their operation-side integrity is
-/// enforced by `validate` on that operation), so an orphan participant row is
-/// inert for the current-condition set rather than a silently missing
-/// participant. `include_completed` widens the same union to terminal
-/// operations for the status view; the orphan-condition half is unchanged, so
-/// a torn condition still fails closed instead of dropping out of the page.
 fn candidate_page(
     tx: &rusqlite::Transaction<'_>,
     after: &str,
@@ -118,53 +82,6 @@ fn candidate_page(
         .map_err(storage)
 }
 
-/// Structural integrity of one operation's canonical rows, scoped to the
-/// operation a query actually touches: an inner join must never silently hide
-/// an orphan correlation, an unfinished operation whose condition was closed
-/// early, or a completed operation that still holds protected material.
-///
-/// Source-correlation invariant (current-sweep canonical): an unfinished
-/// operation keeps `erasure_condition_source` rows only in its current sweep
-/// (`NextSweep` copies forward then deletes the old sweep atomically);
-/// historical `erasure_condition` rows remain but carry no source rows; a
-/// completed operation keeps zero source rows (the A5 completion boundary
-/// must delete them — A1 exposes no completion authority — and any remaining
-/// row fails closed). No second copy exists for audit/history.
-///
-/// Participant invariant: every operation carries a non-empty required
-/// participant snapshot from admission; every row tracks the operation's
-/// current sweep (`NextSweep` resets all progress to pending atomically); a
-/// `Finalizing` operation has every row `verified` (verification is terminal
-/// for its sweep) and a completed operation has every row `verified` for that
-/// sweep. A participant row for an unknown owner, a foreign sweep, or a
-/// missing snapshot is torn canonical state and fails closed, never a silently
-/// incomplete set.
-///
-/// Completion invariant: the audit row exists exactly when the operation is
-/// `completed`, matches the operation's purpose, start time, and final sweep,
-/// names every required participant exactly once with `verified` as its final
-/// status and the participant row's erased count, and a completed request's
-/// staged `exact_text` is wiped. Because the wipe, the audit, the condition
-/// closure, and the phase change share one commit, no partial shape (closed
-/// condition without completion, audit without closure, wiped material without
-/// audit) is ever readable.
-///
-/// Request provenance (A1b): an operation admitted from a staged request keeps
-/// that request's purpose for its whole life, and — while its protected
-/// material exists — the same exact mechanical text. A completed operation's
-/// material is gone by design, so only the purpose link is checked there.
-/// Bounded by the touching query's page, never a whole-store scan.
-/// Structural integrity of one operation's reconciliation cursor rows,
-/// scoped to the operation a query actually touches.
-///
-/// Invariant: an unfinished operation carries exactly one row per known
-/// identity table for its current sweep; a `Finalizing` operation has every
-/// row complete (the completion premise was re-read before the marker was
-/// taken); a completed operation keeps zero rows. Any other shape — a missing
-/// table, a foreign sweep, an unknown table name, or leftover rows after
-/// completion — is torn canonical state that fails closed, never a silently
-/// incomplete walk. Rows for an operation that does not exist are torn state
-/// for the same reason a condition without its operation is.
 fn validate_reconciliation(
     conn: &Connection,
     operation: &str,
@@ -296,42 +213,15 @@ fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechni
     if broken {
         return Err(corrupt());
     }
-    // The reconciliation cursor shape is part of the same structural
-    // invariant: the SQL above keeps the operation/source/condition history
-    // honest, and this keeps the exhaustive-walk premise from being torn.
     validate_reconciliation(conn, operation)
 }
 
-/// Bounded covering-candidate read for [`covering_condition`]: the single
-/// current-sweep source correlation reachable through the existing
-/// `idx_erasure_condition_source_source` index on `(source)`. Only an open
-/// current condition of an unfinished operation qualifies, and unfinished
-/// source rows exist only in the current sweep (old sweeps are deleted by
-/// `NextSweep`, completed operations keep zero source rows), so completed
-/// historical operations never match this join and the row count for one
-/// source never grows with history. Exposed so tests can `EXPLAIN QUERY PLAN`
-/// the exact production statement; boundedness itself is pinned by the
-/// durable row invariant (source-row counts), not by the plan alone.
 pub(crate) const COVERING_CANDIDATE_SQL: &str = "SELECT s.operation_id,c.sweep,c.opened_at
      FROM erasure_condition_source s
      JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
      JOIN deletion_operation o ON o.operation_id=c.operation_id AND o.sweep=c.sweep
      WHERE s.source=?1 AND c.closed_at IS NULL AND o.phase!='completed' LIMIT 1";
 
-/// Bounded torn-state probe for [`covering_condition`], scoped to the queried
-/// source (`WHERE s.source=?1` in every branch, served by the same source
-/// index). Each branch mirrors one way `validate` refuses torn current state
-/// that the candidate join above would otherwise read as "not covering":
-/// a source row with no parent condition, a source row with no operation row,
-/// an unfinished operation whose current condition was closed early, a
-/// completed operation with any source row still present, an unfinished
-/// source row outside the operation's current sweep (old-sweep leftover that
-/// was not inherited, or a future sweep), and an unfinished operation missing
-/// its current condition row. Completed operations that follow the lifecycle
-/// rules (closed current condition, protected material, hints, and all source
-/// rows removed) match no branch. Every branch starts from the source index,
-/// so the probe input is the source rows naming this source — never a scan
-/// of historical operations.
 pub(crate) const COVERING_TORN_PROBE_SQL: &str = "SELECT
      EXISTS(SELECT 1 FROM erasure_condition_source s
          LEFT JOIN erasure_condition c ON c.operation_id=s.operation_id AND c.sweep=s.sweep
@@ -355,22 +245,10 @@ pub(crate) const COVERING_TORN_PROBE_SQL: &str = "SELECT
          AND NOT EXISTS(SELECT 1 FROM erasure_condition c
              WHERE c.operation_id=o.operation_id AND c.sweep=o.sweep))";
 
-/// Direct mechanical coverage of one source identity by an operation whose
-/// current-sweep reconciliation is still walking.
-///
-/// The published current-sweep correlation is the fast path; while a sweep is
-/// incomplete, a covered identity may legitimately not be published yet. The
-/// identity's own stored body is durable evidence independent of any page
-/// bound, so it is compared directly against each unreconciled operation's
-/// protected target. This keeps a new send or adoption from starting on a
-/// covered source between the condition commit and the end of the walk; after
-/// the walk the published correlation answers the same way.
 fn directly_covered_source(
     conn: &Connection,
     source: &str,
 ) -> Result<Option<ErasureConditionRef>, PreservationTechnicalError> {
-    // Fast skip: with no active/held operation mid-reconciliation, the
-    // published correlation set is already the exhaustive one.
     let pending: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM deletion_reconciliation r
@@ -408,8 +286,6 @@ fn directly_covered_source(
             )
             .optional()
             .map_err(storage)?;
-        // Active/held operations always keep protected material (`validate`);
-        // a missing row is torn state, never a "checked everything" default.
         let target = target.ok_or_else(corrupt)?;
         if source_identity_carries(conn, source, &target)? {
             return Ok(Some(decode_ref(&id, sweep)?.condition()));
@@ -418,28 +294,6 @@ fn directly_covered_source(
     Ok(None)
 }
 
-/// One shared closure-aware coverage read for inference and Task resume.
-/// Historical `erasure_condition` rows stay inside the operation interval as
-/// lifecycle/history, but only the current sweep carries source rows and
-/// participates in current coverage; a generation advance copies the current
-/// sweep's cumulative sources forward and then deletes the old sweep's source
-/// rows in the same transaction, never closing the interval.
-///
-/// Bounded by construction: SQL narrows to the single current-sweep
-/// candidate through the source index before any Rust-side validation, so
-/// completed historical operations (zero source rows by invariant) are never
-/// enumerated or validated — validation runs only on the one candidate, if
-/// any, and the per-operation check never walks other operations' history.
-/// When there is no candidate, the torn-state probe above still fails
-/// closed on torn current state relevant to this source instead of reading
-/// it as "not covering". A genuine absence of coverage is the authoritative
-/// empty set (`Ok(None)`): there is no second registry and no cached
-/// NoDeletion sentinel.
-///
-/// The bounded publication is never the correctness set: while an operation's
-/// current sweep is still being reconciled, an unpublished source identity is
-/// checked directly ([`directly_covered_source`]), so a covered source cannot
-/// escape enforcement just because it fell past a reconciliation page.
 pub(crate) fn covering_condition(
     conn: &Connection,
     source: &str,
@@ -464,42 +318,12 @@ pub(crate) fn covering_condition(
     directly_covered_source(conn, source)
 }
 
-/// One mechanical text verdict against the canonical current conditions
-/// (lifecycle §7/§11).
-///
-/// [`Self::Target`] carries the protected exact target that matched; it is
-/// compared in place by the owning boundary and never rendered into a log, an
-/// outcome, a completion fact, or an audit row. [`Self::Unreadable`] is a
-/// current condition whose protected material was already wiped at finalizing:
-/// the condition still covers, but no target remains to redact mechanically,
-/// so callers fail closed (refuse; a collecting owner stores a body-free
-/// marker) rather than treating an unreadable target as "not covering".
 pub(crate) enum TextCoverage {
     Target(String),
     Unreadable,
 }
 
-/// The exact-target premise of one bounded read pass (lifecycle §7/§11).
-///
-/// This is the page-shaped companion of [`covering_text`]: one canonical read
-/// of the unfinished operations' protected mechanical targets, reused for
-/// every row of one read. The premise is read from the canonical store inside
-/// the caller's transaction, so an empty target set across every current
-/// condition is the authoritative "not covered" (no sentinel, no cached
-/// verdict). A completed operation is excluded by the canonical
-/// `phase`/`closed_at` invariant: its condition stopped covering text (§7:
-/// completion is not a permanent keyword ban). Unfinished operations are the
-/// bounded candidate set: they are Owner-confirmed and validated here, so an
-/// operation whose structural rows are torn fails the read closed instead of
-/// being read as "not covering".
-///
-/// [`Self::covers`] is the same mechanical predicate the A3 owner sweeps apply
-/// — an exact substring match of a protected target. A current condition whose
-/// protected material was already wiped (finalizing, §12 steps 2-3) leaves no
-/// readable target at all, so the premise is unreadable and every body is
-/// covered (fail closed) rather than served as uncovered.
 pub(crate) struct TextCoveragePremise {
-    /// `None` when a current condition's protected material is unreadable.
     targets: Option<Vec<String>>,
 }
 
@@ -540,10 +364,6 @@ impl TextCoveragePremise {
                 )
                 .optional()
                 .map_err(storage)?;
-            // The material row exists for every unfinished operation except a
-            // finalizing one whose protected wipe already ran (§12 steps 2-3);
-            // that operation's condition is still current, so no readable
-            // comparison exists and the premise must cover every body.
             let Some(target) = exact else {
                 return Ok(Self { targets: None });
             };
@@ -556,8 +376,6 @@ impl TextCoveragePremise {
         })
     }
 
-    /// Whether `text` carries a current condition's exact target. An
-    /// unreadable premise covers every body.
     pub(crate) fn covers(&self, text: &str) -> bool {
         let Some(targets) = self.targets.as_ref() else {
             return true;
@@ -566,14 +384,6 @@ impl TextCoveragePremise {
     }
 }
 
-/// Mechanical coverage of one incoming body by the canonical current erasure
-/// conditions (lifecycle §7/§11).
-///
-/// This is the same predicate the A3 owner sweeps apply — an exact substring
-/// match of each unfinished operation's protected mechanical target — read
-/// from the canonical store inside the caller's transaction, so an empty
-/// result across every current condition is the authoritative "not covered"
-/// (no sentinel, no cached verdict).
 pub(crate) fn covering_text(
     conn: &Connection,
     text: &str,
@@ -589,12 +399,6 @@ pub(crate) fn covering_text(
         .map(TextCoverage::Target))
 }
 
-/// The closure-aware mechanical text coverage with the covering condition
-/// identity (lifecycle §7/§11).
-///
-/// Same predicate and bounds as [`covering_text`]; the identity is what the
-/// observation receiving boundary needs to publish the covered occurrence as
-/// a durable source correlation without copying the target.
 pub(crate) fn covering_text_condition(
     conn: &Connection,
     text: &str,
@@ -634,10 +438,6 @@ pub(crate) fn covering_text_condition(
             .optional()
             .map_err(storage)?;
         let condition = decode_ref(&id, sweep)?.condition();
-        // The material row exists for every unfinished operation except a
-        // finalizing one whose protected wipe already ran (§12 steps 2-3);
-        // that operation's condition is still current, so the body is
-        // covered with no readable target.
         match exact {
             None => return Ok(Some((condition, TextCoverage::Unreadable))),
             Some(target) if !target.is_empty() && text.contains(&target) => {
@@ -649,9 +449,6 @@ pub(crate) fn covering_text_condition(
     Ok(None)
 }
 
-/// Source-correlation coverage of one logical input (lifecycle §7/§11): the
-/// same closure-aware canonical read the inference claim and Task resume use,
-/// applied across every source of one arrival.
 pub(crate) fn covering_sources(
     conn: &Connection,
     sources: &[RawId],
@@ -664,17 +461,6 @@ pub(crate) fn covering_sources(
     Ok(None)
 }
 
-/// Collects one covered body instead of persisting it: redacts every current
-/// condition's mechanical target out of the text and returns the body-free
-/// result, or [`crate::erasure::ERASED_MARKER`] when a current condition's
-/// protected target is no longer readable (a finalizing wipe) so no
-/// mechanical comparison is possible at all.
-///
-/// This is the "erase collection" side of the A4 boundary contract for bodies
-/// whose objective fact must survive (a Task result arrival seals its
-/// delegation): the fact is committed, the body is not. The loop is bounded by
-/// the number of current conditions — every pass removes at least one
-/// condition's target, and a condition without material returns immediately.
 pub(crate) fn redact_covered_text(
     conn: &Connection,
     text: &str,
@@ -692,25 +478,11 @@ pub(crate) fn redact_covered_text(
         };
         match crate::erasure::redact_exact(&current, &target) {
             Some((redacted, _)) => current = redacted,
-            // `covering_text` matched the target, so a missing occurrence
-            // would be an inconsistent mechanical predicate; fail closed
-            // rather than storing a body that is still covered.
             None => return Err(corrupt()),
         }
     }
 }
 
-/// Whether one undelivered item's canonical source is under a current
-/// erasure condition (lifecycle §7/§11), read inside the caller's
-/// transaction.
-///
-/// The item's source identity is checked as a canonical source correlation,
-/// and — when the source still carries a body — the body itself is compared
-/// mechanically against every current condition's exact target. A source row
-/// that no longer exists has no body left to re-materialize: it is not
-/// covered here (the owner sweep removes the dangling reference). A malformed
-/// stored source is unreadable canonical state and fails closed, never a
-/// silent "not covered".
 pub(crate) fn covered_undelivered_source(
     conn: &Connection,
     kind: &str,
@@ -777,7 +549,6 @@ pub(crate) fn covered_undelivered_source(
             )
             .optional()
             .map_err(storage)?,
-        // Body-free notification sources: there is no content to collect.
         UndeliveredSource::TaskRecord {
             fact: TaskFact::Delegation(_) | TaskFact::Terminal { .. },
             ..
@@ -862,10 +633,6 @@ fn raw_participant(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawParticipant> 
     ))
 }
 
-/// One participant row is composed only when it is internally consistent: a
-/// known owner and state name, a positive sweep, a hold class exactly when
-/// held, non-negative counts, and a parseable report time. Anything else is
-/// an unreadable row, never a guessed progress.
 fn decode_participant(
     operation: DeletionOperationId,
     raw: RawParticipant,
@@ -899,8 +666,6 @@ fn decode_participant(
     })
 }
 
-/// Storage vocabulary for one deletion purpose; unknown stored text fails
-/// closed on decode.
 fn decode_purpose(raw: &str) -> Result<DeletionPurpose, PreservationTechnicalError> {
     DeletionPurpose::from_name(raw).ok_or_else(corrupt)
 }
@@ -911,14 +676,6 @@ fn raw_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRequest> {
     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
 }
 
-/// The staged journal holds the mechanical target only: semantic exploration
-/// hints have no wire grammar in this slice, so a decoded request never
-/// carries them and no Client can widen the confirmed search through staging.
-///
-/// A NULL `exact_text` is the A5 completion wipe: it is unreachable for a
-/// request still awaiting a decision (only a completed operation's request is
-/// wiped), so reading one as a pending request is unreadable stored state and
-/// fails closed rather than fabricating an empty target.
 fn decode_request(raw: RawRequest) -> Result<TargetedDeletionRequest, PreservationTechnicalError> {
     let Some(exact_text) = raw.2 else {
         return Err(corrupt());
@@ -945,9 +702,6 @@ fn decode_request_id(raw: &str) -> Result<DeletionRequestId, PreservationTechnic
     ))
 }
 
-/// One unfinished operation already holding the exact mechanical text, if
-/// any. Completed operations never match: lifecycle §7 forbids treating a
-/// finished deletion as a permanent keyword ban.
 fn unfinished_by_exact_text(
     tx: &rusqlite::Transaction<'_>,
     text: &str,
@@ -974,13 +728,6 @@ fn unfinished_by_exact_text(
     }
 }
 
-/// Whether one unfinished operation already covers the whole scope of a
-/// duplicate request: every known source correlation, every semantic hint, and
-/// every required participant owner must already belong to it. Same mechanical
-/// target is an idempotent request only if its scope is covered; a duplicate
-/// never silently widens a confirmed operation. The participant snapshot is
-/// part of the operation's scope, so a duplicate whose set needs an owner
-/// outside the snapshot is a live-operation conflict, not a silent widening.
 fn scope_covered(
     tx: &rusqlite::Transaction<'_>,
     current: DeletionOperationRef,
@@ -1032,8 +779,6 @@ fn scope_covered(
     Ok(covered)
 }
 
-/// One durable identity table whose primary key can be named as a canonical
-/// source correlation, with the column that can carry the exact target text.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KnownSourceIdentity {
     pub(crate) table: &'static str,
@@ -1041,20 +786,6 @@ pub(crate) struct KnownSourceIdentity {
     body: &'static str,
 }
 
-/// The exact bounded page statement one reconciliation step runs for one
-/// identity table.
-///
-/// Exposed so tests can `EXPLAIN QUERY PLAN` the production SQL. Table, key,
-/// and body names are compile-time constants and never caller input; the
-/// cursor, target text, and page size only ever travel as bound parameters.
-///
-/// The keyset predicate starts the scan at the durable cursor and `ORDER BY`
-/// the primary key lets SQLite walk the key index (never a temp sort), so the
-/// page reads at most `LIMIT` matching identities past the cursor; a page with
-/// fewer matches than the limit means the ordered scan reached the table's
-/// end. The substring predicate itself has no index, exactly like the A3
-/// owner sweeps, so the walk is one table traversal in bounded pages — never
-/// an unbounded single statement.
 pub(crate) fn known_source_page_sql(identity: KnownSourceIdentity) -> String {
     format!(
         "SELECT {} FROM {} WHERE {} > ?1 AND instr({}, ?2) > 0 ORDER BY {} LIMIT ?3",
@@ -1062,29 +793,6 @@ pub(crate) fn known_source_page_sql(identity: KnownSourceIdentity) -> String {
     )
 }
 
-/// The identity tables a first-party admission enumerates (lifecycle §4.1
-/// point 4), each paired with the body column that can carry the exact target:
-///
-/// - `history_message.message_id`: the Owner-conversation origin of a
-///   `task_context_entry` (a Task Agent `data_use` source), the accepted input
-///   a dialogue reply derives from, the resume purpose source, an undelivered
-///   source, and the History pin a `learning_summary` records.
-/// - `activity_record.activity_id`: the Owner-management origin of a
-///   `task_context_entry` and a resume instruction source.
-/// - `learning_summary.summary_id` / `learning_memory.memory_id`: the derived
-///   Learning identities (critical-areas §3.3). No inference producer claims
-///   them in `data_use` yet (dialogue / learning sends carry no correlation in
-///   this slice), but they are the canonical identities of derived rows whose
-///   stored text carries the target, and the design keeps a known covered
-///   source correlation durable from admission for the sends and writes that
-///   derive from them.
-/// - `action_attempt.attempt_id` / `task_result.result_id`: the Task Agent's
-///   past-executed fact sources.
-///
-/// `task` / `task_revision` purpose bodies and `learning_memory_revision`
-/// bodies are not identity tables here: no source correlation names them (a
-/// Memory correlation names the Memory identity, not one revision), and their
-/// redaction is the mechanical sweep's job.
 pub(crate) const KNOWN_SOURCE_IDENTITIES: &[KnownSourceIdentity] = &[
     KnownSourceIdentity {
         table: "history_message",
@@ -1118,14 +826,6 @@ pub(crate) const KNOWN_SOURCE_IDENTITIES: &[KnownSourceIdentity] = &[
     },
 ];
 
-/// Initializes the durable reconciliation cursors for one operation + sweep:
-/// exactly one row per known identity table.
-///
-/// The first-party path starts incomplete and publishes its first bounded
-/// pages in the same admission transaction; the direct path names its whole
-/// source scope itself, so its cursors commit already complete. A row set that
-/// does not match the known table set is torn state and fails closed through
-/// [`validate`].
 fn insert_reconciliation_rows(
     tx: &rusqlite::Transaction<'_>,
     operation: &str,
@@ -1143,8 +843,6 @@ fn insert_reconciliation_rows(
     Ok(())
 }
 
-/// The next incomplete identity table for one operation + sweep, in the
-/// canonical identity-table order, if any.
 fn next_incomplete_identity(
     conn: &Connection,
     operation: &str,
@@ -1167,12 +865,6 @@ fn next_incomplete_identity(
         .find(|identity| incomplete.iter().any(|table| table == identity.table)))
 }
 
-/// Whether every known identity table has been walked to its end for one
-/// operation's current sweep.
-///
-/// The answer is a read of the durable cursor rows, never a caller boolean.
-/// A row set that names another table, another sweep, or a missing table is
-/// not complete here and fails closed through [`validate`] on the operation.
 fn reconciliation_is_complete(
     conn: &Connection,
     operation: &str,
@@ -1200,19 +892,6 @@ fn reconciliation_is_complete(
     }))
 }
 
-/// One bounded reconciliation page for one identity table.
-///
-/// The page is read from the durable cursor, its covered identities are
-/// published as current-sweep source correlations, the already-claimed uses
-/// the page covers are associated, and the cursor (and, when the ordered scan
-/// reached the table's end, the complete marker) advance — all in the caller's
-/// transaction. Every write is a keyed `INSERT OR IGNORE` / idempotent
-/// `UPDATE`, so re-running the same page after a rollback or on a retried
-/// driver pass has no second semantic effect.
-///
-/// A page that found fewer identities than `page_size` proves the ordered scan
-/// reached the table's end; a full page does not, so the next call reads the
-/// next keyset range instead of assuming completion.
 fn reconcile_table_page(
     tx: &rusqlite::Transaction<'_>,
     operation: &str,
@@ -1273,14 +952,6 @@ fn reconcile_table_page(
     Ok(table_complete)
 }
 
-/// Publishes the first bounded page of every known identity table inside the
-/// admission transaction (lifecycle §4.1 point 4).
-///
-/// This is the same bounded work shape as one owner sweep pass — one page per
-/// table, in canonical order — not an exhaustive enumeration: the durable
-/// cursors carry the continuation to
-/// [`PreservationRepository::reconcile_deletion_sources`], and completion
-/// refuses until they all report complete.
 fn reconcile_admission_pages(
     tx: &rusqlite::Transaction<'_>,
     operation: &str,
@@ -1294,21 +965,6 @@ fn reconcile_admission_pages(
     Ok(())
 }
 
-/// Associates the already-claimed uses one reconciliation page covers
-/// (lifecycle §11 R2).
-///
-/// The page's new sources drive the join through the correlation index:
-///
-/// - an inference attempt whose ordered `data_use` names a page source;
-/// - an unsealed task delegation under such an attempt;
-/// - an unsealed task delegation whose business context source is a page
-///   source (served by `idx_task_context_entry_origin_source`).
-///
-/// The target text is not needed here: the page has already decided which
-/// identities carry it. Writes are `INSERT OR IGNORE` keyed by
-/// `(use_kind, use_id, operation_id)`, so a retried page adds no second
-/// association for the same operation while a second operation still gets
-/// its own row.
 fn associate_reconciled_page(
     tx: &rusqlite::Transaction<'_>,
     operation: &str,
@@ -1318,15 +974,10 @@ fn associate_reconciled_page(
     if sources.is_empty() {
         return Ok(());
     }
-    // Explicit positional numbering: `?1`/`?2` carry the operation and hold
-    // time and the page sources take `?3..`; SQLite assigns a bare `?` the
-    // next *unused* index after any explicit `?N`, so mixing forms would
-    // silently shift the parameter count.
     let placeholders = (0..sources.len())
         .map(|index| format!("?{}", index + 3))
         .collect::<Vec<_>>()
         .join(",");
-    // Operation and hold time are bound first, then the page sources.
     let bind = || {
         [operation, held_at]
             .into_iter()
@@ -1383,22 +1034,10 @@ fn associate_reconciled_page(
     Ok(())
 }
 
-/// Closed work-kind vocabulary of [`erasure_use_hold`]: one claimed inference
-/// attempt, one task delegation, or one in-flight Learning formation
-/// associated with an operation. A single use may correspond to several
-/// operations; [`held_use`] is the boolean "any operation" read, and
-/// operation-specific queries name one `operation_id`.
 pub(crate) const USE_KIND_INFERENCE_ATTEMPT: &str = "inference_attempt";
 pub(crate) const USE_KIND_TASK_DELEGATION: &str = "task_delegation";
 pub(crate) const USE_KIND_LEARNING_FORMATION: &str = "learning_formation";
 
-/// Whether one source identity's stored body carries `target`.
-///
-/// This is the direct mechanical check the bounded publication must never
-/// replace: the identity's primary key is an indexed lookup, and the body
-/// comparison is the same exact-substring predicate the owner sweeps and the
-/// acceptance boundaries use. It is how a source that has not reached a
-/// reconciliation page yet is still recognized as covered.
 fn source_identity_carries(
     conn: &Connection,
     source: &str,
@@ -1419,8 +1058,6 @@ fn source_identity_carries(
     Ok(false)
 }
 
-/// Whether one inference attempt's ordered `data_use` names an identity whose
-/// stored body carries `target`.
 fn claimed_attempt_covers(
     conn: &Connection,
     ticket: &str,
@@ -1442,14 +1079,6 @@ fn claimed_attempt_covers(
     Ok(false)
 }
 
-/// Whether one unsealed task delegation's durable premise carries `target`.
-///
-/// Mirrors the admission association mechanically, but without the published
-/// source set: the relied revision / in-force purpose body, the delegated
-/// workspace scope, the business context origin identities, and any attempt
-/// already claimed under the delegation are each checked directly. A sealed
-/// execution is excluded exactly like the admission association: its recorded
-/// result cannot be produced again, and its stored body is the sweep's.
 fn claimed_delegation_covers(
     conn: &Connection,
     delegation: &str,
@@ -1532,7 +1161,6 @@ fn claimed_delegation_covers(
     Ok(false)
 }
 
-/// Whether one identity exists in a known source table, regardless of body.
 fn source_identity_exists(
     conn: &Connection,
     source: &str,
@@ -1552,11 +1180,6 @@ fn source_identity_exists(
     Ok(false)
 }
 
-/// Whether one in-flight Learning formation's source identities carry `target`.
-///
-/// Empty provenance cannot prove the queued transcript unrelated to the
-/// target, so it fails closed. A source identity that has already disappeared
-/// from every known table was swept; that is also covered.
 fn claimed_formation_covers(
     conn: &Connection,
     formation: &str,
@@ -1584,27 +1207,11 @@ fn claimed_formation_covers(
     Ok(false)
 }
 
-/// Direct mechanical correspondence of one already-claimed use with the
-/// unfinished operations whose current-sweep reconciliation is still walking
-/// (lifecycle §11 R2).
-///
-/// While a reconciliation sweep is incomplete, a covered source may not be
-/// published yet, so the durable `erasure_use_hold` association may not exist
-/// either. The claim's own premise is durable and indexed, so it is compared
-/// directly against each unreconciled operation's protected target instead of
-/// reading the bounded publication as the whole covered set. Finalizing
-/// operations cannot be unreconciled (`validate` enforces the marker
-/// invariant), so every candidate here has readable protected material.
-///
-/// Returns every matching unfinished operation: one use can belong to several
-/// concurrent Targeted Deletion intervals.
 fn directly_covered_uses(
     conn: &Connection,
     use_kind: &str,
     use_id: RawId,
 ) -> Result<Vec<String>, PreservationTechnicalError> {
-    // Fast skip: with no active/held operation mid-reconciliation, every
-    // covered use was already associated when its page committed.
     let pending: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM deletion_reconciliation r
@@ -1643,8 +1250,6 @@ fn directly_covered_uses(
             )
             .optional()
             .map_err(storage)?;
-        // Active/held operations always keep protected material (`validate`);
-        // a missing row is torn state, never a "checked everything" default.
         let target = target.ok_or_else(corrupt)?;
         let covered = match use_kind {
             USE_KIND_INFERENCE_ATTEMPT => {
@@ -1665,26 +1270,6 @@ fn directly_covered_uses(
     Ok(matched)
 }
 
-/// Whether one already-claimed use was associated with any deletion operation
-/// whose condition committed before the claim settles (lifecycle §11 R2).
-///
-/// The hold is the durable correspondence that a current-condition check
-/// cannot provide after the operation completed: it names the claim, not the
-/// target, so it refuses only that claim's delayed target-bearing body and
-/// never becomes a keyword ban. Read inside the adopting boundary's own
-/// transaction; a claim without a row is a genuine "not held" answer (no
-/// sentinel, no cached verdict). This boolean is "any operation": a use may
-/// have several `erasure_use_hold` rows, one per operation.
-///
-/// A missing row is not yet the answer while a sweep is still being
-/// reconciled: the claim's own correlation is then checked directly against
-/// the unreconciled operations' targets, and every match is written as the
-/// same keyed `erasure_use_hold` row in the caller's transaction. That closes
-/// the window between the condition commit and the end of the bounded
-/// enumeration without ever consulting a page bound for correctness. The
-/// direct check only considers unfinished operations, so a fresh origin after
-/// completion is never held by a closed operation. An already-held use still
-/// runs the direct check so a second unreconciled operation is not dropped.
 pub(crate) fn held_use(
     conn: &Connection,
     use_kind: &str,
@@ -1709,11 +1294,6 @@ pub(crate) fn held_use(
     Ok(held || !operations.is_empty())
 }
 
-/// Publishes one body-free Learning formation identity and associates it with
-/// every unfinished operation whose covered sources intersect the pinned
-/// identities. Empty provenance cannot prove the queued transcript unrelated
-/// to any in-flight target, so it is associated with every unfinished
-/// operation.
 fn publish_learning_formation(
     tx: &rusqlite::Transaction<'_>,
     companion: RawId,
@@ -1758,8 +1338,6 @@ fn publish_learning_formation(
         )
         .map_err(storage)?;
     }
-    // Unreconciled operations may not have published sources yet; the same
-    // direct-correlation fallback [`held_use`] uses fills those rows.
     let _ = held_use(tx, USE_KIND_LEARNING_FORMATION, formation)?;
     Ok(formation)
 }
@@ -1812,11 +1390,6 @@ fn learning_formation_must_refuse_sync(
     formation_sources_missing(conn, formation)
 }
 
-/// Whether any in-flight Learning formation intersecting `sources` is held.
-///
-/// Used at the inference claim gate so a popped candidate cannot start a
-/// provider attempt after its formation was associated with a deletion
-/// interval, including after that operation completed.
 pub(crate) fn inflight_learning_formation_held(
     conn: &Connection,
     sources: &[String],
@@ -1842,20 +1415,6 @@ pub(crate) fn inflight_learning_formation_held(
 }
 
 impl Store {
-    /// Whether one claimed inference attempt was associated with a deletion
-    /// interval (lifecycle §11 R2).
-    ///
-    /// This is the durable-correspondence read the late-arrival boundaries use
-    /// when no current condition can decide: the hold deliberately outlives
-    /// completion, so a reply from a pre-deletion claim is still recognized as
-    /// stale for erasure after `closed_at` is set. A read failure is a
-    /// technical error; the caller refuses the delayed body (fail closed)
-    /// rather than reading it as unheld.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError::StorageUnavailable`] when the hold table
-    /// cannot be read.
     pub async fn inference_claim_held(
         &self,
         claim: RawId,
@@ -1868,15 +1427,6 @@ impl Store {
         .await
     }
 
-    /// Synchronous [`Self::inference_claim_held`] for a publication predicate
-    /// that must decide without awaiting (CCT §10.4). It reads the same
-    /// statement; a read failure is a technical error the caller must fail
-    /// closed on.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError::StorageUnavailable`] when the hold table
-    /// cannot be read.
     pub fn inference_claim_held_sync(
         &self,
         claim: RawId,
@@ -1885,18 +1435,6 @@ impl Store {
         held_use(&guard, USE_KIND_INFERENCE_ATTEMPT, claim)
     }
 
-    /// Whether one task delegation was associated with a deletion interval
-    /// (lifecycle §11 R2).
-    ///
-    /// Same durable-correspondence read as [`Self::inference_claim_held`]: the
-    /// hold outlives completion so a delayed observation body or result from a
-    /// pre-deletion execution stays old-origin after `closed_at`. A read
-    /// failure is a technical error the caller must fail closed on.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError::StorageUnavailable`] when the hold table
-    /// cannot be read.
     pub async fn task_delegation_held(
         &self,
         delegation: RawId,
@@ -1909,17 +1447,6 @@ impl Store {
         .await
     }
 
-    /// Whether `condition` is the operation's current unfinished condition.
-    ///
-    /// Host-transient mutation is process memory, not this connection, so it
-    /// cannot share the Immediate writer with the canonical row. This read is
-    /// the same predicate durable participants re-check inside their erase
-    /// transaction; a stale or unreadable answer must not mutate.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError::StorageUnavailable`] when the operation
-    /// row cannot be read.
     pub async fn erasure_condition_is_current(
         &self,
         condition: ErasureConditionRef,
@@ -1932,13 +1459,6 @@ impl Store {
         .await
     }
 
-    /// Indexed membership of `candidates` in the current sweep's covered
-    /// source set.
-    ///
-    /// Returns one flag per candidate, in candidate order. The statement is
-    /// the `(operation, sweep, source)` primary key; this never loads the
-    /// rest of the sweep. An unreadable condition is a technical error, not
-    /// an empty set.
     pub async fn erasure_sources_covered(
         &self,
         condition: ErasureConditionRef,
@@ -1956,18 +1476,6 @@ impl Store {
         .await
     }
 
-    /// Publishes a body-free Learning formation identity for one candidate
-    /// taken off the Host-transient queue.
-    ///
-    /// The Immediate writer serializes this against admission and completion:
-    /// a formation that commits first is visible to `mark_inflight_uses`, and
-    /// unfinished operations whose covered sources intersect the pinned
-    /// identities are associated here. The transcript itself is never stored.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError::StorageUnavailable`] when the identity
-    /// cannot be written.
     pub async fn begin_learning_formation(
         &self,
         companion: RawId,
@@ -1986,16 +1494,6 @@ impl Store {
         .await
     }
 
-    /// Drops the in-flight Learning formation identity after the pass settles.
-    ///
-    /// Correspondence rows in `erasure_use_hold` are left in place so a
-    /// delayed retry of the same identity stays old-origin. The transcript
-    /// was never stored.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError::StorageUnavailable`] when the identity
-    /// cannot be deleted.
     pub async fn settle_learning_formation(
         &self,
         formation: RawId,
@@ -2013,17 +1511,6 @@ impl Store {
         .await
     }
 
-    /// Whether one in-flight Learning formation is old-origin for erasure.
-    ///
-    /// True when the formation is associated with any deletion interval, or
-    /// when one of its pinned source identities has already disappeared
-    /// (History swept while the transcript was still in process memory). A
-    /// read failure is a technical error the caller must fail closed on.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError::StorageUnavailable`] when the hold or
-    /// source tables cannot be read.
     pub async fn learning_formation_must_refuse(
         &self,
         formation: RawId,
@@ -2036,20 +1523,6 @@ impl Store {
         .await
     }
 
-    /// Publishes a body-free HostTransient Learning arrival for the named
-    /// operations only.
-    ///
-    /// This is not a second deletion registry and stores no target body,
-    /// hash, or fingerprint. When HostTransient is already `verified` for one
-    /// of those unfinished operations, or that operation is `finalizing`, the
-    /// current sweep is closed and a new generation is opened so the arrival
-    /// is collected before global completion (lifecycle §6/§11/§12). A
-    /// `completed` operation is left untouched: post-completion origin is a
-    /// genuine fresh Owner input, never a keyword ban. Operations not in
-    /// `operations` are not examined.
-    ///
-    /// `operations` is a bounded page (`<= HOST_TRANSIENT_ARRIVAL_PAGE`). An
-    /// empty list is a no-op [`HostTransientArrivalOutcome::Unchanged`].
     pub async fn note_host_transient_learning_arrival(
         &self,
         operations: Vec<DeletionOperationId>,
@@ -2091,29 +1564,14 @@ impl Store {
     }
 }
 
-/// Bounded operation page for one HostTransient Learning-arrival publication.
-///
-/// One producer or retry examines at most this many unfinished operations.
-/// Remaining operations continue on a later bounded call. This is a work
-/// bound, never a correctness limit.
 pub const HOST_TRANSIENT_ARRIVAL_PAGE: u32 = 32;
 
-/// Outcome of publishing a body-free HostTransient Learning arrival into the
-/// canonical deletion lifecycle (lifecycle §6/§11/§12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostTransientArrivalOutcome {
-    /// None of the named operations had a verified HostTransient row or a
-    /// Finalizing phase that needed a new sweep.
     Unchanged,
-    /// At least one named operation opened a new sweep and reset
-    /// participants, so a stale HostTransient verification cannot complete.
     SweepOpened,
 }
 
-/// Invalidates HostTransient verification (and `Finalizing`) for the named
-/// operations only, by opening the next sweep when that participant is
-/// already verified or the operation is Finalizing. Completed operations and
-/// operations not in the list are not examined.
 fn note_host_transient_learning_arrival_sync(
     tx: &rusqlite::Transaction<'_>,
     operations: &[DeletionOperationId],
@@ -2161,12 +1619,6 @@ fn note_host_transient_learning_arrival_sync(
     })
 }
 
-/// The attempt-side hold enumeration of [`mark_inflight_uses`].
-///
-/// Exposed so tests can `EXPLAIN QUERY PLAN` the exact production statement:
-/// the join must be driven from the operation's (bounded) covered sources
-/// through `idx_inference_attempt_data_use_source`, never by scanning every
-/// attempt's correlation rows.
 pub(crate) const ASSOCIATE_ATTEMPTS_SQL: &str =
     "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
      SELECT ?3, a.ticket, ?1, ?4
@@ -2176,12 +1628,6 @@ pub(crate) const ASSOCIATE_ATTEMPTS_SQL: &str =
      WHERE s.operation_id = ?1 AND s.sweep = ?2
      GROUP BY a.ticket";
 
-/// The Learning-formation hold enumeration of [`mark_inflight_uses`].
-///
-/// Driven from the operation's bounded covered sources through
-/// `idx_learning_formation_source_source`. The formation identity is
-/// body-free: only History (or other source) identities, never transcript
-/// text.
 pub(crate) const ASSOCIATE_FORMATIONS_SQL: &str =
     "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
      SELECT ?3, fs.formation_id, ?1, ?4
@@ -2190,40 +1636,6 @@ pub(crate) const ASSOCIATE_FORMATIONS_SQL: &str =
      WHERE s.operation_id = ?1 AND s.sweep = ?2
      GROUP BY fs.formation_id";
 
-/// Associates every already-claimed use whose durable provenance intersects
-/// the operation's published source correlations with the operation
-/// (lifecycle §11 R2).
-///
-/// Runs inside the admission transaction, after the operation's
-/// `erasure_condition_source` rows exist. The same Immediate writer domain
-/// serializes this against the claim transactions: a claim that committed
-/// first is seen here and held; a claim that commits after sees the current
-/// condition at its own gate instead (the `data_use` compare) and never
-/// starts. The enumeration is mechanical:
-///
-/// - an inference attempt whose ordered `data_use` names a covered source
-///   (driven from the bounded covered-source set through the correlation
-///   index);
-/// - an unsealed task delegation under an attempt held above, whose relied
-///   revision or in-force purpose body still carries the target, whose
-///   business context source is covered, or whose delegated workspace scope
-///   carries the target. Purpose/context association still excludes sealed
-///   executions: a recorded final result cannot be produced again;
-/// - a task delegation that owns a covered observation occurrence, sealed or
-///   not. The occurrence identity is the durable name of a discarded
-///   observed body, so the already-stored result of a sealed execution is
-///   still the sweep's derived personal data;
-/// - an unsealed task delegation whose body-observing (`read`/`list`) Action
-///   has started while the occurrence row is not yet durable. The in-memory
-///   observation body is not a canonical source; associating the execution
-///   here is what keeps that work "old origin" if Targeted Deletion runs
-///   before the occurrence write;
-/// - an in-flight Learning formation whose pinned History (or other source)
-///   identities intersect the covered set. The formation identity is what
-///   keeps a popped, not-yet-claimed ExperienceCandidate old-origin.
-///
-/// The target text travels only as a bound parameter and is never copied into
-/// a hold row.
 fn mark_inflight_uses(
     tx: &rusqlite::Transaction<'_>,
     operation: &str,
@@ -2292,18 +1704,6 @@ fn mark_inflight_uses(
     Ok(())
 }
 
-/// The observation-side delegation association of [`mark_inflight_uses`].
-///
-/// A body-observed occurrence whose source the admission survey found covered
-/// was published into `erasure_condition_source` under its occurrence
-/// identity; this statement turns that publication into the durable
-/// `task_delegation` hold of the execution that replayed the occurrence.
-/// Driven from the operation's bounded covered-source set through the
-/// observation primary key, never by scanning the ledger. Sealed executions
-/// are included: a recorded paraphrase of a discarded observation body is
-/// still derived personal data, and the hold is the observation→delegation
-/// correspondence the Task owner sweep uses to collect that already-stored
-/// body without rewriting the execution seal.
 pub(crate) const ASSOCIATE_OBSERVATION_DELEGATIONS_SQL: &str =
     "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
      SELECT ?3, o.delegation_id, ?1, ?4
@@ -2312,16 +1712,6 @@ pub(crate) const ASSOCIATE_OBSERVATION_DELEGATIONS_SQL: &str =
      WHERE s.operation_id = ?1 AND s.sweep = ?2
      GROUP BY o.delegation_id";
 
-/// Associates unsealed executions whose body-observing Action has started
-/// but whose observation occurrence is not durable yet.
-///
-/// A `read`/`list` attempt is the producing work of a workspace-body
-/// observation. Until the occurrence row exists, admission cannot survey that
-/// discarded body, and a later write after the current condition closes would
-/// otherwise look like a fresh origin. The hold names the execution, not the
-/// text, and is the same correspondence the Task owner sweep and the
-/// observation replay path already consult. Write confirmations are excluded:
-/// they reproduce no workspace body.
 pub(crate) const ASSOCIATE_INFLIGHT_BODY_OBSERVING_DELEGATIONS_SQL: &str =
     "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
      SELECT ?2, d.delegation_id, ?1, ?3
@@ -2336,14 +1726,6 @@ pub(crate) const ASSOCIATE_INFLIGHT_BODY_OBSERVING_DELEGATIONS_SQL: &str =
                 (SELECT 1 FROM task_agent_observation o
                  WHERE o.action_attempt_id = a.attempt_id))";
 
-/// Holds every delegation that owns at least one observation occurrence (the
-/// fail-closed overflow fallback of [`survey_task_observation_sources`]).
-///
-/// When the bounded survey page cannot cover every occurrence, no occurrence
-/// may be assumed clean: every execution that owns one is associated instead
-/// of letting an unsurveyed delayed or already-sealed body through. The
-/// statement scans the delegation table only on that overflow path; the
-/// bounded path never runs it.
 pub(crate) const HOLD_OBSERVING_DELEGATIONS_SQL: &str =
     "INSERT OR IGNORE INTO erasure_use_hold (use_kind,use_id,operation_id,held_at)
      SELECT ?3, d.delegation_id, ?1, ?4
@@ -2351,15 +1733,8 @@ pub(crate) const HOLD_OBSERVING_DELEGATIONS_SQL: &str =
      WHERE EXISTS
          (SELECT 1 FROM task_agent_observation o WHERE o.delegation_id = d.delegation_id)";
 
-/// The per-sweep bound on the observed occurrences one admission surveys.
-///
-/// The page bounds the SQL and the per-occurrence correlation checks one
-/// admission performs. Overflow (more occurrences than the bound) fails
-/// closed: every delegation that owns an occurrence is associated with the
-/// operation instead of allowing an unsurveyed body through.
 pub(crate) const TASK_OBSERVATION_SURVEY_LIMIT: u32 = 256;
 
-/// One observation row read by the admission survey.
 struct SurveyedObservation {
     observation: RawId,
     delegation: String,
@@ -2371,8 +1746,6 @@ struct SurveyedObservation {
     body_observed: bool,
 }
 
-/// The SQL row columns of one surveyed observation, in select order, with the
-/// joined delegation identity last so a torn ledger row is detectable.
 type RawSurveyedObservation = (
     String,
     String,
@@ -2385,14 +1758,6 @@ type RawSurveyedObservation = (
     Option<String>,
 );
 
-/// The bounded survey page of one admission.
-///
-/// `rows` re-reads the operation's observation occurrences in canonical
-/// identity order, including sealed executions: a recorded paraphrase of a
-/// discarded observation body is still derived personal data. `overflow`
-/// means more occurrences exist than [`TASK_OBSERVATION_SURVEY_LIMIT`] and
-/// the caller must hold every delegation that owns one. An occurrence whose
-/// delegation row is gone is torn ledger state and fails closed.
 fn survey_task_observation_sources(
     tx: &rusqlite::Transaction<'_>,
     target: &str,
@@ -2466,40 +1831,12 @@ fn survey_task_observation_sources(
     Ok((covered, false))
 }
 
-/// Whether one surveyed occurrence's source can carry the target.
-///
-/// The determination is mechanical and body-free on the ledger side:
-///
-/// - a refusal occurrence has no producing attempt and no source body
-///   (the Action never started), so it carries nothing to survey;
-/// - a producing attempt is resolved by identity from `action_attempt` and
-///   its copied `(delegation, task, revision, workspace)` correlation must
-///   agree with the occurrence row — a missing attempt or a disagreement is
-///   unsurveyable and fails closed (covered);
-/// - the attempt's resolved target is compared mechanically (the same
-///   `instr`-style exact-text predicate the owner sweeps use);
-/// - a body-observed occurrence reproduced workspace content at observation
-///   time. The ledger stores no body and no content-version identity, and a
-///   mutable workspace path is not that observed version: a later clean
-///   read of the current path cannot prove the discarded body was unrelated
-///   to the target, so the occurrence fails closed (covered).
-///
-/// A covered determination publishes the occurrence identity, never the
-/// source body.
 fn observation_source_covered(
     tx: &rusqlite::Transaction<'_>,
     observation: &SurveyedObservation,
     target: &str,
 ) -> Result<bool, PreservationTechnicalError> {
     let Some(attempt_text) = &observation.attempt else {
-        // A refusal occurrence names no producing attempt: the Action never
-        // started, so the occurrence's source is the fixed refusal class
-        // itself and carries no workspace or internal body to survey. This is
-        // the deliberately narrow edge of the fail-closed rule: only
-        // occurrences whose source *can* carry a body (a producing attempt and
-        // its workspace source) fail closed when they cannot be surveyed; a
-        // fixed-class refusal has no such source. A body-observed occurrence
-        // without a producing attempt is torn state and fails closed.
         return Ok(observation.body_observed);
     };
     let attempt: Option<(String, String, i64, String, String)> = tx
@@ -2520,8 +1857,6 @@ fn observation_source_covered(
         .optional()
         .map_err(storage)?;
     let Some((delegation, task, task_revision, workspace, real_target)) = attempt else {
-        // The occurrence names an attempt that is gone: the source cannot be
-        // surveyed, so the occurrence is treated as covered (fail closed).
         return Ok(true);
     };
     if delegation != observation.delegation
@@ -2530,37 +1865,17 @@ fn observation_source_covered(
         || Some(workspace) != observation.workspace
         || Some(real_target.clone()) != observation.path
     {
-        // A correlation disagreement means the ledger row and the producing
-        // attempt do not describe one source; fail closed rather than survey
-        // the wrong source.
         return Ok(true);
     }
     if real_target.contains(target) {
         return Ok(true);
     }
     if !observation.body_observed {
-        // A write confirmation or a refusal-class observation reproduces no
-        // workspace content; the attempt target above is its only stored
-        // source correlation.
         return Ok(false);
     }
-    // A body-observed occurrence reproduced workspace content (`read` bytes
-    // or a `list` listing). The current path contents are not a witness of
-    // that observed version, and the ledger has no content-version identity
-    // that could prove the discarded body was unrelated to the target. Fail
-    // closed. A body-observed occurrence that names a write attempt is torn
-    // ledger state and is covered by the same rule.
     Ok(true)
 }
 
-/// Publishes one covered occurrence identity as a durable source correlation
-/// of the condition's current sweep.
-///
-/// The occurrence identity is not a body: it is the opaque name of the
-/// observation occurrence, so a later claim that consumed it is held by the
-/// existing AU14 source-coverage compare without any target text, hash, or
-/// matcher being stored. The condition must still be current; a stale
-/// condition is refused instead of being written.
 pub(crate) fn publish_observation_source(
     tx: &rusqlite::Transaction<'_>,
     condition: ErasureConditionRef,
@@ -2581,13 +1896,6 @@ pub(crate) fn publish_observation_source(
     Ok(())
 }
 
-/// Associates one delegation with the condition's operation durably
-/// (`erasure_use_hold`, `task_delegation`).
-///
-/// The hold is objective metadata — the claim identity and the operation
-/// identity only — and deliberately outlives completion so a delayed
-/// target-bearing result from the execution is still collected after the
-/// current condition closes. The condition must still be current.
 pub(crate) fn hold_delegation(
     tx: &rusqlite::Transaction<'_>,
     condition: ErasureConditionRef,
@@ -2610,22 +1918,6 @@ pub(crate) fn hold_delegation(
     Ok(())
 }
 
-/// Associates one body-observing execution with every unfinished operation.
-///
-/// AU5 has already inserted the `read`/`list` attempt: the Action started, so
-/// refusing it would rewrite an objective start fact. While a current
-/// condition exists the yet-unread (or already-read, not-yet-recorded) body
-/// cannot be proven unrelated to the protected text without I/O this
-/// transaction forbids, so the execution is held by identity. Lifecycle §11
-/// collects delayed arrival onto the current operation for the whole
-/// Active / Held / Finalizing interval: skipping `finalizing` would let a
-/// read that started under a still-open condition look like a fresh origin
-/// once the completion commit lands. This statement shares the Immediate
-/// writer with the completion commit, so the two orders are exclusive: a
-/// completion that commits first leaves no unfinished row and the start is
-/// a post-closure origin; a start that commits first inserts the hold and
-/// the delayed body stays old-origin. A store with no unfinished operation
-/// is a no-op.
 pub(crate) fn hold_body_observing_delegation(
     tx: &rusqlite::Transaction<'_>,
     delegation: RawId,
@@ -2642,14 +1934,6 @@ pub(crate) fn hold_body_observing_delegation(
     Ok(())
 }
 
-/// Every Client incarnation with durable uncleared body-delivery evidence,
-/// read inside the admission transaction.
-///
-/// This is the authoritative required-incarnation read: the caller's snapshot
-/// is a convenience, and the admission transaction must union the evidence it
-/// can see itself so a delivery that committed between the caller's read and
-/// this transaction is never omitted. A corrupt stored identity fails closed
-/// instead of dropping an incarnation from the snapshot.
 fn durable_client_incarnations(
     tx: &rusqlite::Transaction<'_>,
 ) -> Result<Vec<RawId>, PreservationTechnicalError> {
@@ -2666,21 +1950,6 @@ fn durable_client_incarnations(
         .collect()
 }
 
-/// The canonical admission body: duplicate detection plus the
-/// durable-before-enforce insert of operation, protected material, initial
-/// condition, and source correlations (lifecycle §4.1).
-///
-/// `request` records Host-local request provenance. It is [`None`] for the
-/// sealed-confirmation path and `Some` for a durably confirmed staged request;
-/// `deletion_operation.request_id` is `UNIQUE`, so one request can never start
-/// two operations. Both public admission entries share this body: there is one
-/// set of insert, duplicate, and validation rules, never a second producer.
-///
-/// The first-party path (`request` is `Some`) additionally enumerates the
-/// covered source correlations already durable in this store and publishes
-/// them with the operation (§4.1 point 4). The sealed direct path keeps its
-/// caller-provided `known_sources` unchanged, so a test seam that names its
-/// sources explicitly is never widened behind its back.
 fn admit_deletion(
     tx: &rusqlite::Transaction<'_>,
     command: &StartTargetedDeletionCommand,
@@ -2696,14 +1965,6 @@ fn admit_deletion(
     {
         return Err(PreservationTechnicalError::InvalidParticipantSet);
     }
-    // The caller's Client-incarnation list is a pre-transaction evidence read
-    // and is therefore not authoritative: a body handed over between that read
-    // and this transaction would be omitted from the durable snapshot, and its
-    // local copy could later read as erased. The admission transaction reads
-    // the same durable evidence itself and unions it here, so a delivery that
-    // committed first is always snapshotted; one that commits after the
-    // admission serialization sees the now-current condition at its own
-    // boundary instead (lifecycle §8/§8.1).
     let mut participants = command.required_participants().to_vec();
     for incarnation in durable_client_incarnations(tx)? {
         let owner = ParticipantOwnerRef::ClientIncarnation(incarnation);
@@ -2726,13 +1987,6 @@ fn admit_deletion(
             StartTargetedDeletionOutcome::HeldByOperation(record.current)
         });
     }
-    // Stage 6 A4: every pre-condition observation occurrence is surveyed
-    // mechanically against the exact target in this same transaction,
-    // including sealed executions. A covered occurrence is published under
-    // its own identity and associates its execution with the operation; a
-    // body-observed mutable workspace source, a missing attempt, or a
-    // bounded-overflow page fails closed by producing a hold instead of
-    // allowing a delayed or already-sealed derived body through.
     let (covered_observations, observation_overflow) =
         survey_task_observation_sources(tx, material.expose_for_erasure())?;
     let current = DeletionOperationRef {
@@ -2765,14 +2019,6 @@ fn admit_deletion(
         params![id, at],
     )
     .map_err(storage)?;
-    // §4.1 point 4: the first-party path initializes the durable reconciliation
-    // cursors and publishes the first bounded page of every known identity
-    // table in this same transaction as the operation, the protected material,
-    // and the initial condition. The page is a work bound, not a correctness
-    // bound: the durable cursors carry the continuation, and completion
-    // refuses while any table is still incomplete. The direct path has no
-    // enumeration to do — its caller-provided sources are its whole scope — so
-    // its cursors commit already complete.
     let enumerates = request.is_some();
     insert_reconciliation_rows(tx, &id, 1, !enumerates)?;
     if enumerates {
@@ -2791,9 +2037,6 @@ fn admit_deletion(
         )
         .map_err(storage)?;
     }
-    // The surveyed covered occurrence identities are published in the same
-    // transaction: the occurrence identity is the durable name of the
-    // observed source, never its body.
     for observation in &covered_observations {
         tx.execute(
             "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
@@ -2801,15 +2044,7 @@ fn admit_deletion(
         )
         .map_err(storage)?;
     }
-    // Already-claimed uses whose provenance this operation covers are
-    // associated with the operation in the same transaction that publishes
-    // the condition (§4.1/§11 R2): the correspondence is durable before the
-    // condition enforces, and it outlives completion so a delayed result can
-    // still be recognized as stale for erasure.
     mark_inflight_uses(tx, &id, 1, material.expose_for_erasure(), &at)?;
-    // The bounded survey page could not cover every occurrence: no
-    // unsurveyed occurrence is assumed clean, and every delegation that owns
-    // one is associated instead.
     if observation_overflow {
         tx.execute(
             HOLD_OBSERVING_DELEGATIONS_SQL,
@@ -2817,9 +2052,6 @@ fn admit_deletion(
         )
         .map_err(storage)?;
     }
-    // The required participant snapshot commits with the operation and the
-    // condition: no participant effect can start before the operation that
-    // needs it is durable (durable-before-enforce §4.1).
     for owner in &participants {
         tx.execute(
             "INSERT INTO deletion_participant (operation_id,participant_owner,state,sweep,erased_count,remainder_count) VALUES (?1,?2,'pending',1,0,0)",
@@ -2827,18 +2059,10 @@ fn admit_deletion(
         )
         .map_err(storage)?;
     }
-    // The admission commit may not publish a structurally impossible
-    // operation; the post-insert check keeps the producer honest even against
-    // future code that assembles rows differently.
     validate(tx, &id)?;
     Ok(StartTargetedDeletionOutcome::Started(current))
 }
 
-/// Reads the durable participant aggregate of one operation (§10).
-///
-/// Bounded by the operation's own snapshot rows; the operation's current
-/// sweep joins the aggregate so a summary can never be returned for a
-/// generation the operation has already left.
 fn completion_summary(
     conn: &Connection,
     operation: &str,
@@ -2880,25 +2104,6 @@ fn completion_summary(
     })
 }
 
-/// Opens the next sweep generation for one unfinished operation in place (§6).
-///
-/// The closing sweep's erased counts are accumulated into the operation's
-/// lifetime total first, the current condition's cumulative source
-/// correlations are copied forward and the old sweep's source rows deleted in
-/// the same transaction (a crash cannot publish a current sweep that silently
-/// drops coverage), and every required participant resets to `Pending` for the
-/// new generation — erasure or verification done for the old sweep never
-/// counts for the new one.
-///
-/// The reconciliation cursors reset with the generation: the delayed arrivals
-/// that opened this sweep can carry identities the previous walk had already
-/// passed, so the exhaustive walk starts over for the current sweep. Deleting
-/// the old rows and inserting the fresh incomplete ones shares this
-/// transaction, so a crash can never leave a completeness marker attached to
-/// an unwalked generation.
-///
-/// Returns [`None`] when the generation space is exhausted, after marking the
-/// operation `Held(GenerationExhausted)`: an old generation is never reused.
 fn open_next_sweep(
     tx: &rusqlite::Transaction<'_>,
     id: &str,
@@ -2960,11 +2165,6 @@ fn open_next_sweep(
     }))
 }
 
-/// The system-wide mechanical remainder verification (§12/§18).
-///
-/// Wraps the closed canonical content-surface probe: `0` means a complete walk
-/// found no stored value carrying the target; any other value is collected
-/// target data the completion boundary must not destroy material for.
 fn system_remainder(
     tx: &rusqlite::Transaction<'_>,
     target: &str,
@@ -2972,10 +2172,6 @@ fn system_remainder(
     crate::erasure::system_remainder(tx, target).map_err(storage)
 }
 
-/// The §12 step-1 look: a `Finalizing` operation whose current generation
-/// collected new target data must return to `Active` on a new sweep *before*
-/// any protected material is destroyed, so a later verification always has the
-/// material it needs.
 fn return_to_active_for_remainder(
     tx: &rusqlite::Transaction<'_>,
     id: &str,
@@ -3052,9 +2248,6 @@ impl PreservationRepository for Store {
                     StageTargetedDeletionRequestOutcome::HeldByOperation(record.current)
                 });
             }
-            // The same scope (mechanical text plus declared purpose) reuses its
-            // staged row: a duplicate intent never mints a second request, and
-            // a confirmed one reports that the canonical admission is owed.
             let existing: Option<(String, Option<String>)> = tx
                 .query_row(
                     "SELECT r.request_id,(SELECT c.confirmed_at FROM deletion_confirmation c
@@ -3098,8 +2291,6 @@ impl PreservationRepository for Store {
     ) -> Result<ConfirmTargetedDeletionOutcome, PreservationTechnicalError> {
         let id = encode_id(request.as_raw());
         let conn = Arc::clone(&self.conn);
-        // One durable determination: the confirmation row is written (or
-        // observed) under the single-writer boundary before any admission runs.
         let request_exists = run_blocking(move || {
             let mut guard = lock_shared(&conn);
             let tx = guard
@@ -3143,9 +2334,6 @@ impl PreservationRepository for Store {
             StartTargetedDeletionOutcome::NeedsClarification => {
                 Ok(ConfirmTargetedDeletionOutcome::NeedsClarification)
             }
-            // The confirmation row was just written (or observed) for this
-            // request, so its absence in the admission transaction is canonical
-            // corruption, never a retryable state.
             StartTargetedDeletionOutcome::ConfirmationRequired => Err(corrupt()),
         }
     }
@@ -3162,8 +2350,6 @@ impl PreservationRepository for Store {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage)?;
             let id = encode_id(request.as_raw());
-            // Single use: a request that already produced an operation never
-            // produces a second one, whatever the operation's phase.
             let started: Option<RawOperation> = tx
                 .query_row(
                     "SELECT operation_id,sweep,phase,purpose,started_at,hold_reason
@@ -3178,9 +2364,6 @@ impl PreservationRepository for Store {
                 validate(&tx, &encode_id(record.current.operation.as_raw()))?;
                 return Ok(StartTargetedDeletionOutcome::AlreadyCoveredBy(record.current));
             }
-            // Durable premises, re-read in the admission transaction: the
-            // Owner confirmation row and the staged scope row. Neither is a
-            // caller input, so no wire payload can start an operation.
             let confirmed_at: Option<String> = tx
                 .query_row(
                     "SELECT confirmed_at FROM deletion_confirmation WHERE request_id=?1",
@@ -3288,8 +2471,6 @@ impl PreservationRepository for Store {
         run_blocking(move || {
             let guard = lock_shared(&conn);
             let tx = guard.unchecked_transaction().map_err(storage)?;
-            // A confirmation row without its request is torn canonical state:
-            // fail closed instead of publishing a surface mark over it.
             let torn: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM deletion_confirmation c
@@ -3302,9 +2483,6 @@ impl PreservationRepository for Store {
             if torn {
                 return Err(corrupt());
             }
-            // Durable row ids use random UUIDs, so "newest" is insertion order
-            // (`rowid`), never a lexical maximum. The newest operation carries
-            // its phase and sweep so a lifecycle advance moves the mark.
             let (requests, newest_request): (i64, Option<String>) = tx
                 .query_row(
                     "SELECT COUNT(*), (SELECT request_id FROM deletion_request ORDER BY rowid DESC LIMIT 1)
@@ -3370,7 +2548,6 @@ impl PreservationRepository for Store {
             let mut current = expected;
             match change {
                 DeletionLifecycleChange::Hold => {
-                    // Do not erase finalizing markers/authority with a generic hold.
                     if record.phase == DeletionOperationPhase::Finalizing {
                         return Ok(DeletionLifecycleOutcome::Finalizing);
                     }
@@ -3391,14 +2568,6 @@ impl PreservationRepository for Store {
                     .map_err(storage)?;
                 }
                 DeletionLifecycleChange::NextSweep => {
-                    // A Held(Unavailable) operation keeps its current condition
-                    // active (§5.1) until an explicit Resume decides recovery:
-                    // advancing the generation underneath the hold would publish
-                    // a new current condition without a recovery decision and
-                    // silently flip the phase that A4/A5 participant sweep
-                    // tracking observes. Reject like the GenerationExhausted
-                    // hold below — no writes, no generation advance — so an
-                    // explicit Resume stays the only path back to Active.
                     if record.phase == DeletionOperationPhase::Held
                         && record.hold == Some(DeletionHoldReason::Unavailable)
                     {
@@ -3408,8 +2577,6 @@ impl PreservationRepository for Store {
                     }
                     let sweep =
                         i64::try_from(expected.sweep.as_u64()).map_err(|_| corrupt())?;
-                    // A finalizing operation whose material has already been
-                    // destroyed cannot be restarted by a generic lifecycle call.
                     let material: bool = tx
                         .query_row(
                             "SELECT EXISTS(SELECT 1 FROM deletion_search_material WHERE operation_id=?1)",
@@ -3420,18 +2587,6 @@ impl PreservationRepository for Store {
                     if !material {
                         return Ok(DeletionLifecycleOutcome::Finalizing);
                     }
-                    // Cumulative source coverage is inherited by copying the
-                    // current sweep forward; the old sweep's source rows are
-                    // then deleted in the same transaction so an unfinished
-                    // operation keeps source correlations only in its current
-                    // sweep. Historical erasure_condition rows remain as
-                    // lifecycle/history. The copy-then-delete order with a
-                    // single commit keeps a crash from publishing a current
-                    // sweep that silently drops coverage. A new generation
-                    // re-opens every participant: erasure or verification done
-                    // for the old sweep never counts for the new one (§6). The
-                    // owner set is unchanged — the snapshot is fixed at
-                    // admission — and only progress resets.
                     let Some(next) = open_next_sweep(&tx, &id, sweep)? else {
                         tx.commit().map_err(storage)?;
                         return Ok(DeletionLifecycleOutcome::Held(
@@ -3459,7 +2614,6 @@ impl PreservationRepository for Store {
         let conn = Arc::clone(&self.conn);
         run_deletion_blocking(self, move || {
             let guard = lock_shared(&conn);
-            // A read transaction gives validation and the bounded page the same snapshot.
             let tx = guard.unchecked_transaction().map_err(storage)?;
             let after = after.map(|id| encode_id(id.as_raw())).unwrap_or_default();
             let ids = candidate_page(&tx, &after, limit, false)?;
@@ -3474,8 +2628,6 @@ impl PreservationRepository for Store {
                         )
                         .optional()
                         .map_err(storage)?
-                        // An orphan condition candidate has no operation row:
-                        // that is exactly the torn state `validate` refuses.
                         .ok_or_else(corrupt)?;
                     decode_operation(raw)
                 })
@@ -3498,17 +2650,9 @@ impl PreservationRepository for Store {
             let tx = guard.unchecked_transaction().map_err(storage)?;
             let after = after.map(|id| encode_id(id.as_raw())).unwrap_or_default();
             let ids = candidate_page(&tx, &after, limit, false)?;
-            // Paging over unfinished operations (not over open conditions)
-            // keeps validation total for the page: an unfinished operation
-            // whose current condition was closed early never silently drops
-            // out of the result; it fails closed through `validate`.
             ids.iter()
                 .map(|id| {
                     validate(&tx, id)?;
-                    // Only the current sweep is the current condition (§7):
-                    // the operation's stated sweep joins the condition, so a
-                    // historical sweep row can never be returned after a
-                    // generation advance.
                     let (sweep, opened): (i64, String) = tx
                         .query_row(
                             "SELECT c.sweep,c.opened_at FROM erasure_condition c
@@ -3544,7 +2688,6 @@ impl PreservationRepository for Store {
         let conn = Arc::clone(&self.conn);
         run_deletion_blocking(self, move || {
             let guard = lock_shared(&conn);
-            // A read transaction gives validation and the bounded page the same snapshot.
             let tx = guard.unchecked_transaction().map_err(storage)?;
             let id = encode_id(operation.as_raw());
             let exists: bool = tx
@@ -3600,8 +2743,6 @@ impl PreservationRepository for Store {
             };
             validate(&tx, &id)?;
             if phase == "completed" {
-                // Completion wipes the material before the completed commit
-                // (§3.1); a protected read cannot resurrect it.
                 return Ok(DeletionMaterialOutcome::Destroyed);
             }
             let material_exists: bool = tx
@@ -3612,9 +2753,6 @@ impl PreservationRepository for Store {
                 )
                 .map_err(storage)?;
             if !material_exists {
-                // `validate` refuses an active or held operation without
-                // material, so only a finalizing operation that already ran its
-                // wipe reaches this branch (§12); a read must not resurrect it.
                 return Ok(DeletionMaterialOutcome::Destroyed);
             }
             let exact: Option<String> = tx
@@ -3639,12 +2777,6 @@ impl PreservationRepository for Store {
                 .into_iter()
                 .map(DeletionSearchMaterial::new)
                 .collect();
-            // Covered-source identities stay in the canonical
-            // `(operation, sweep, source)` primary key. Materializing them
-            // here would allocate in proportion to the whole sweep before
-            // any participant ran, which is the work the page-sized
-            // reconciliation walk already bounded (§9). Semantic owners
-            // probe membership per candidate instead.
             Ok(DeletionMaterialOutcome::Material(
                 DeletionOperationMaterial::new(
                     TargetedDeletionTarget {
@@ -3687,8 +2819,6 @@ impl PreservationRepository for Store {
             if phase == "completed" {
                 return Ok(ParticipantDemandOutcome::Completed);
             }
-            // Only the current generation accepts a demand. An older command
-            // must not reopen a participant the new sweep already reset.
             if sweep <= 0 || u64::try_from(sweep).ok() != Some(condition.sweep.as_u64()) {
                 return Ok(ParticipantDemandOutcome::StaleSweep);
             }
@@ -3748,8 +2878,6 @@ impl PreservationRepository for Store {
             if phase == "completed" {
                 return Ok(ParticipantCompletionOutcome::Completed);
             }
-            // Stale generations never update current state (§6/§9.1), and the
-            // fact's own condition is the generation it was minted against.
             if sweep <= 0 || u64::try_from(sweep).ok() != Some(condition.sweep.as_u64()) {
                 return Ok(ParticipantCompletionOutcome::StaleSweep);
             }
@@ -3765,8 +2893,6 @@ impl PreservationRepository for Store {
                 return Ok(ParticipantCompletionOutcome::NotRequired);
             };
             if state == "verified" {
-                // Verification is terminal for the sweep: an idempotent repeat
-                // is recorded, a later downgrading report cannot reopen it.
                 return Ok(
                     if fact.status() == ParticipantCompletionStatus::Verified {
                         ParticipantCompletionOutcome::Recorded(ParticipantProgress::Verified {
@@ -3809,8 +2935,6 @@ impl PreservationRepository for Store {
                 ),
             };
             if let ParticipantCompletionStatus::Held(_) = fact.status() {
-                // A held report carries no usable counts, so the last reported
-                // counts stay durable instead of being erased to zero.
                 tx.execute(
                     "UPDATE deletion_participant SET state=?3,hold_class=?4,reported_at=?5 WHERE operation_id=?1 AND participant_owner=?2",
                     params![
@@ -3910,8 +3034,6 @@ impl PreservationRepository for Store {
             }
             match phase.as_str() {
                 "completed" => return Ok(DeletionReconciliationOutcome::Completed),
-                // The finalizing marker implies a complete walk by invariant;
-                // a step on it has nothing to publish.
                 "finalizing" => return Ok(DeletionReconciliationOutcome::Finalizing),
                 "active" | "held" => {}
                 _ => return Err(corrupt()),
@@ -3927,17 +3049,10 @@ impl PreservationRepository for Store {
                 )
                 .optional()
                 .map_err(storage)?;
-            // `validate` refuses an active/held operation without protected
-            // material, so the exact target is readable while the walk runs:
-            // reconciliation happens before completion destroys it.
             let exact = exact.ok_or_else(corrupt)?;
             let Some(identity) = next_incomplete_identity(&tx, &id, sweep)? else {
                 return Err(corrupt());
             };
-            // A page was published: report the work, not a completion inferred
-            // from the page shape. The next call observes `Complete` (or the
-            // next page) from the durable cursors, so a caller never reads
-            // "one full page" as "the walk is over".
             let _table_complete =
                 reconcile_table_page(&tx, &id, sweep, &exact, identity, page_size)?;
             validate(&tx, &id)?;
@@ -3976,11 +3091,7 @@ impl PreservationRepository for Store {
             }
             match phase.as_str() {
                 "completed" => return Ok(DeletionFinalizationOutcome::CompletedAlready),
-                // The durable finalizing marker: the completion commit is
-                // owed, and repeating the begin step changes nothing.
                 "finalizing" => return Ok(DeletionFinalizationOutcome::Finalizing),
-                // A hold is a retryable-incomplete decision that is never
-                // turned into a completion: the explicit resume decides.
                 "held" => {
                     let reason = match hold.as_deref() {
                         Some("unavailable") => DeletionHoldReason::Unavailable,
@@ -3992,26 +3103,13 @@ impl PreservationRepository for Store {
                 "active" => {}
                 _ => return Err(corrupt()),
             }
-            // The completion premise is the durable aggregate of the required
-            // snapshot for *this* sweep. A caller cannot substitute one local
-            // completion, one successful transaction, a Client ACK, or an LLM
-            // self-report for it (§10).
             let summary = completion_summary(&tx, &id, sweep)?;
             if !summary.all_verified() {
                 return Ok(DeletionFinalizationOutcome::NotVerified(summary));
             }
-            // The second completion premise is the current sweep's exhaustive
-            // covered-source reconciliation: while any known identity table is
-            // still being walked, the already-claimed in-flight uses are not
-            // all durably associated, so no completion candidate may be
-            // entered (§4.1 point 4, §18). Fail closed with the explicit
-            // outcome; a page bound never decides completion.
             if !reconciliation_is_complete(&tx, &id, sweep)? {
                 return Ok(DeletionFinalizationOutcome::ReconciliationIncomplete);
             }
-            // `validate` refuses an active operation without protected
-            // material, so the exact target is present while the sweep is
-            // being verified.
             let exact: String = tx
                 .query_row(
                     "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
@@ -4021,10 +3119,6 @@ impl PreservationRepository for Store {
                 .optional()
                 .map_err(storage)?
                 .ok_or_else(corrupt)?;
-            // §12 step 1 before entering Finalizing: a generation that still
-            // has collected target data never finalizes. Returning to Active
-            // happens before any material is destroyed, so the new sweep keeps
-            // the material its participants need (§12).
             if system_remainder(&tx, &exact)? > 0 {
                 let outcome = return_to_active_for_remainder(&tx, &id, sweep)?;
                 tx.commit().map_err(storage)?;
@@ -4081,9 +3175,6 @@ impl PreservationRepository for Store {
             match phase.as_str() {
                 "completed" => return Ok(DeletionFinalizationOutcome::CompletedAlready),
                 "finalizing" => {}
-                // Only the durable Finalizing marker allows the completion
-                // commit; an active or held operation has unfinished
-                // participant work or an explicit recovery decision owed.
                 "active" | "held" => return Ok(DeletionFinalizationOutcome::NotFinalizing),
                 _ => return Err(corrupt()),
             }
@@ -4099,32 +3190,16 @@ impl PreservationRepository for Store {
                 .optional()
                 .map_err(storage)?;
             let Some(exact) = exact_row else {
-                // No readable target: the system-wide mechanical probe cannot
-                // run, so completion fails closed instead of guessing the
-                // target away (§12).
                 return Ok(DeletionFinalizationOutcome::UnverifiableMaterial);
             };
-            // The completion commit re-reads the exhaustive-walk premise even
-            // though the finalizing marker implies it: the completion premise
-            // is never taken from the marker alone.
             if !reconciliation_is_complete(&tx, &id, sweep)? {
                 return Ok(DeletionFinalizationOutcome::ReconciliationIncomplete);
             }
-            // §12 step 1, inside the commit transaction: the current
-            // generation must not have grown a delayed arrival or remainder
-            // after verification. A remainder returns the operation to
-            // Active on a new sweep *without* destroying material, so a later
-            // verification can never lack what it needs.
             if system_remainder(&tx, &exact)? > 0 {
                 let outcome = return_to_active_for_remainder(&tx, &id, sweep)?;
                 tx.commit().map_err(storage)?;
                 return Ok(outcome);
             }
-            // §12 step 2: destroy the operation-lifetime target/search
-            // material, its semantic hints, its staged request's exact text,
-            // and every source correlation. Every store connection raises
-            // `secure_delete` at open, so deleted cells are zeroed instead of
-            // being left recoverable in freed pages.
             tx.execute(
                 "DELETE FROM deletion_search_material WHERE operation_id=?1",
                 [&id],
@@ -4147,16 +3222,11 @@ impl PreservationRepository for Store {
                 [&id],
             )
             .map_err(storage)?;
-            // The reconciliation cursors are operation-lifetime correlation
-            // state and share the completion wipe; the completed-operation
-            // invariant keeps zero rows.
             tx.execute(
                 "DELETE FROM deletion_reconciliation WHERE operation_id=?1",
                 [&id],
             )
             .map_err(storage)?;
-            // §12 step 3: the canonical rows must no longer be able to
-            // reconstruct the target.
             let recoverable: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM deletion_search_material WHERE operation_id=?1)
@@ -4171,9 +3241,6 @@ impl PreservationRepository for Store {
             if recoverable {
                 return Err(corrupt());
             }
-            // §12 step 4: the body-free audit. `validate` already refused a
-            // finalizing operation with a non-verified participant, so the
-            // snapshot copied here is verified-only by invariant.
             let at = WallClockWithTz::now();
             let summary = completion_summary(&tx, &id, sweep)?;
             let final_erased: i64 = tx
@@ -4206,15 +3273,11 @@ impl PreservationRepository for Store {
                 [&id],
             )
             .map_err(storage)?;
-            // §12 step 5: close the current condition. Steps 2-6 share this
-            // one commit, so a crash can never observe a closed condition with
-            // an unfinished operation.
             tx.execute(
                 "UPDATE erasure_condition SET closed_at=?2 WHERE operation_id=?1 AND sweep=?3",
                 params![id, at.to_rfc3339(), sweep],
             )
             .map_err(storage)?;
-            // §12 step 6: the terminal commit.
             tx.execute(
                 "UPDATE deletion_operation SET phase='completed',hold_reason=NULL WHERE operation_id=?1",
                 [&id],
@@ -4306,20 +3369,6 @@ impl PreservationRepository for Store {
 
 #[cfg(feature = "test-support")]
 impl Store {
-    /// Test-support only: advances one operation to a `finalizing` state with
-    /// every participant verified and its protected material wiped, so a test
-    /// can exercise the unreadable-target fail-closed path of the acceptance
-    /// boundaries and of the presentation coverage premise.
-    ///
-    /// Production never reaches this shape: the completion commit wipes
-    /// material, writes the audit, closes the condition, and commits
-    /// `completed` in one transaction, so a readable condition always has its
-    /// material while it is unfinished. A5 completion on this seam fails
-    /// closed with `UnverifiableMaterial` instead of guessing.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError`] when the operation is unknown or torn.
     #[doc(hidden)]
     pub async fn wipe_protected_material_for_tests(
         &self,
@@ -4348,8 +3397,6 @@ impl Store {
                 [&id],
             )
             .map_err(storage)?;
-            // The post-write check keeps the seam from publishing a shape the
-            // production validation would refuse.
             validate(&tx, &id)?;
             tx.commit().map_err(storage)?;
             Ok(())
@@ -4357,20 +3404,6 @@ impl Store {
         .await
     }
 
-    /// Test-support only: forces one unfinished operation into the durable
-    /// `Held(GenerationExhausted)` shape.
-    ///
-    /// Production reaches this shape exactly when the sweep counter cannot
-    /// advance (`sweep.checked_add(1)` overflows), so the fixture moves the
-    /// operation, its current condition, its source correlations, its
-    /// reconciliation cursors, and its participant rows to the maximum sweep
-    /// together and records the hold class. The canonical store then refuses
-    /// every lifecycle change for it (`Resume` included), which is what
-    /// fail-closed recovery must observe.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError`] when the operation is unknown or torn.
     #[doc(hidden)]
     pub async fn hold_generation_exhausted_for_tests(
         &self,

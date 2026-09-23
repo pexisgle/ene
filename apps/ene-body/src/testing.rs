@@ -1,21 +1,7 @@
-//! Generated VRM / VRMA fixtures for cross-crate tests.
-//!
-//! Compiled only for this crate's tests or with the `test-support` feature,
-//! which `ene-desktop` enables in its dev-dependencies.
-//!
-//! The fixtures are synthetic structures, never product characters: a fixture
-//! passing says the loader and runtime accepted a generated asset. It is not
-//! acceptance of the official bundled `ene` (GitHub issue #1651) and not
-//! evidence that a compositor displayed anything.
-
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
-/// Humanoid bones the generated fixtures map, in node-index order.
-///
-/// The VRMA loader requires all of these; a generated clip that animated any
-/// other bone would not be retargeted onto the generated avatar.
 pub const FIXTURE_BONES: [&str; 15] = [
     "hips",
     "spine",
@@ -34,46 +20,27 @@ pub const FIXTURE_BONES: [&str; 15] = [
     "rightHand",
 ];
 
-/// Fixture construction failure.
 #[derive(Debug, thiserror::Error)]
 pub enum FixtureError {
-    /// The requested clip bone is not part of [`FIXTURE_BONES`].
     #[error("fixture bone `{0}` is not part of the generated humanoid")]
     UnknownBone(String),
-    /// The glTF document could not be encoded.
     #[error("fixture document could not be encoded: {0}")]
     Encode(#[from] serde_json::Error),
-    /// The fixture exceeds the 32-bit GLB container size field.
     #[error("fixture is too large for a GLB container")]
     TooLarge,
-    /// The generated PNG image could not be encoded.
     #[error("fixture image could not be encoded: {0}")]
     Image(#[from] image::ImageError),
-    /// The fixture file could not be written.
     #[error("fixture file could not be written: {0}")]
     Io(#[from] std::io::Error),
 }
 
-/// One generated `.vrma` clip: a linear rotation of a single humanoid bone.
-///
-/// The clip carries no expression or LookAt tracks, matching the bundled
-/// VRoid motion pack, so expression staging stays body-local.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MotionFixture {
-    /// Humanoid bone name as written in `VRMC_vrm_animation.humanoid`.
     pub bone: &'static str,
-    /// Rotation applied at the end of the clip, in degrees around +Y.
     pub yaw_degrees: f32,
-    /// Clip length in seconds.
     pub duration_secs: f32,
 }
 
-/// A generated VRM 1.0 avatar with one triangle, expressions, LookAt, and a
-/// SpringBone chain.
-///
-/// # Errors
-///
-/// JSON or PNG encoding failure.
 pub fn generated_vrm_glb() -> Result<Vec<u8>, FixtureError> {
     let mut encoded_png = std::io::Cursor::new(Vec::new());
     image::RgbaImage::from_pixel(1, 1, image::Rgba([80, 160, 240, 255]))
@@ -157,8 +124,8 @@ pub fn generated_vrm_glb() -> Result<Vec<u8>, FixtureError> {
     });
 
     let positions_and_target = [
-        -0.5_f32, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, // triangle
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, // expression delta
+        -0.5_f32, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05, 0.0,
+        0.0,
     ];
     let binary = positions_and_target
         .iter()
@@ -173,12 +140,6 @@ pub fn generated_vrm_glb() -> Result<Vec<u8>, FixtureError> {
     glb(&document, &binary)
 }
 
-/// A generated `.vrma` clip rotating one humanoid bone around +Y.
-///
-/// # Errors
-///
-/// [`FixtureError::UnknownBone`] for a bone outside [`FIXTURE_BONES`], or JSON
-/// encoding failure.
 pub fn generated_vrma_glb(motion: MotionFixture) -> Result<Vec<u8>, FixtureError> {
     let animated = bone_index(motion.bone)?;
     let nodes = FIXTURE_BONES
@@ -231,30 +192,18 @@ pub fn generated_vrma_glb(motion: MotionFixture) -> Result<Vec<u8>, FixtureError
     glb(&document, &binary)
 }
 
-/// Writes [`generated_vrm_glb`] to `path`.
-///
-/// # Errors
-///
-/// Fixture construction or file write failure.
 pub fn write_generated_vrm(path: &Path) -> Result<(), FixtureError> {
     create_parent(path)?;
     std::fs::write(path, generated_vrm_glb()?)?;
     Ok(())
 }
 
-/// Writes [`generated_vrma_glb`] to `path`.
-///
-/// # Errors
-///
-/// Fixture construction or file write failure.
 pub fn write_generated_vrma(path: &Path, motion: MotionFixture) -> Result<(), FixtureError> {
     create_parent(path)?;
     std::fs::write(path, generated_vrma_glb(motion)?)?;
     Ok(())
 }
 
-/// Fixture writers place their output, so a caller can mirror the real install
-/// layout without preparing directories first.
 fn create_parent(path: &Path) -> Result<(), FixtureError> {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => std::fs::create_dir_all(parent)?,
@@ -263,7 +212,6 @@ fn create_parent(path: &Path) -> Result<(), FixtureError> {
     Ok(())
 }
 
-/// Node index of a fixture bone.
 fn bone_index(bone: &str) -> Result<usize, FixtureError> {
     FIXTURE_BONES
         .iter()
@@ -271,7 +219,6 @@ fn bone_index(bone: &str) -> Result<usize, FixtureError> {
         .ok_or_else(|| FixtureError::UnknownBone(bone.to_string()))
 }
 
-/// Children of each fixture bone, so the hierarchy matches VRM 1.0 ancestry.
 fn bone_children(index: usize) -> Vec<usize> {
     match FIXTURE_BONES.get(index) {
         Some(&"hips") => vec![1, 3, 6],
@@ -313,7 +260,6 @@ fn human_bones() -> Map<String, Value> {
         .collect()
 }
 
-/// Wraps a glTF JSON document and its binary buffer in a GLB container.
 fn glb(document: &Value, binary: &[u8]) -> Result<Vec<u8>, FixtureError> {
     let mut json = serde_json::to_vec(document)?;
     while !json.len().is_multiple_of(4) {

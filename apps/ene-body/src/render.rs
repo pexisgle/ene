@@ -1,9 +1,3 @@
-//! wgpu surface ownership for this process only.
-//!
-//! Host and `ene-desktop` must not open a GPU device. A successful adapter and
-//! surface creation are still not real-compositor acceptance; display evidence
-//! comes from Wayland presentation feedback or correlated Windows timing.
-
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -18,9 +12,6 @@ use crate::vrm::{RenderMesh, RenderTexture};
 const HIT_TEST_CELL_PIXELS: u32 = 4;
 const VISIBLE_ALPHA_THRESHOLD: f32 = 0.001;
 
-/// A transparent real-surface renderer. VRM deformation stays in
-/// `vrm-runtime`; this deliberately small unlit path is the design-approved
-/// fallback while MToon is not implemented.
 pub struct SurfaceRenderer {
     _instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
@@ -51,12 +42,6 @@ struct DrawRange {
     texture_id: Option<u64>,
 }
 
-/// Coarse alpha-aware ownership mask for native pointer hit-testing.
-///
-/// Four-pixel cells keep per-frame CPU work bounded while following the
-/// deformed mesh closely enough that transparent desktop space remains owned
-/// by the underlying application. One-cell dilation avoids tiny ungrabbable
-/// gaps around thin geometry and texture-filtered edges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HitTestMask {
     width: u32,
@@ -158,11 +143,6 @@ impl HitTestMask {
             return false;
         }
 
-        // A character's rightmost and bottommost pixels commonly belong to
-        // different limbs. Requiring their bounding-box corner to be opaque
-        // can therefore leave no resize target at all. Anchor the grip to the
-        // rightmost visible cell in the bottom band instead; the target stays
-        // on rendered character pixels without claiming transparent desktop.
         let first_row = grip_top / HIT_TEST_CELL_PIXELS;
         let last_row = bottom
             .saturating_sub(1)
@@ -181,11 +161,6 @@ impl HitTestMask {
         band_right != 0 && x >= band_right.saturating_sub(grip)
     }
 
-    /// Returns horizontal runs of owned cells in physical window coordinates.
-    ///
-    /// Windows uses these rectangles to make transparent cells absent from the
-    /// HWND region. Returning row runs instead of one rectangle per cell keeps
-    /// the native region bounded without weakening the alpha-aware mask.
     pub(crate) fn opaque_rectangles(&self) -> Vec<[u32; 4]> {
         let mut rectangles = Vec::new();
         for row in 0..self.rows {
@@ -263,8 +238,6 @@ impl HitTestMask {
                 }
             }
         }
-        // Geometry smaller than one mask cell may not contain a cell center.
-        // Retain its visible vertices before dilation so it remains draggable.
         for (vertex, point) in [(a, points[0]), (b, points[1]), (c, points[2])] {
             if vertex_alpha(vertex, texture) > VISIBLE_ALPHA_THRESHOLD {
                 let column =
@@ -332,10 +305,6 @@ impl HitTestMask {
     }
 }
 
-/// Pixel extent of the alpha-aware cells.
-///
-/// The Wayland overlay sets its input region from [`HitTestMask::opaque_rectangles`]
-/// and does not need the raw dimensions; the Windows DWM hit-test path does.
 #[cfg(target_os = "windows")]
 impl HitTestMask {
     pub(crate) fn width(&self) -> u32 {
@@ -414,8 +383,6 @@ fn texture_alpha(texture: Option<&RenderTexture>, uv: [f32; 2]) -> f32 {
         .map_or(0.0, |alpha| f32::from(*alpha) / 255.0)
 }
 
-/// Surface rendering failure. The platform thread reports this to the parent
-/// and exits; it never takes the desktop or Host with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderFailure {
     Surface,
@@ -425,7 +392,6 @@ pub enum RenderFailure {
     OutOfMemory,
 }
 
-/// Whether this call actually submitted a surface texture for presentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderOutcome {
     Presented,
@@ -433,8 +399,6 @@ pub enum RenderOutcome {
 }
 
 impl SurfaceRenderer {
-    /// Creates wgpu against an already-created native overlay surface.
-    ///
     /// # Safety
     ///
     /// The caller must keep both native display and window objects alive until
@@ -446,8 +410,6 @@ impl SurfaceRenderer {
         width: u32,
         height: u32,
     ) -> Result<Self, RenderFailure> {
-        // HWND swap chains expose only opaque alpha on DX12. The native
-        // Windows overlay needs a DirectComposition visual for per-pixel alpha.
         #[cfg(target_os = "windows")]
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::DX12,
@@ -704,8 +666,6 @@ struct VertexOut {
             create_depth(&self.device, self.config.width, self.config.height);
     }
 
-    /// Submits and presents one frame. Success means submitted to the
-    /// compositor, not displayed; presentation feedback remains the FPS owner.
     pub fn render(&mut self, meshes: &[RenderMesh]) -> Result<RenderOutcome, RenderFailure> {
         if self.lost.load(Ordering::Acquire) {
             return Err(RenderFailure::DeviceLost);

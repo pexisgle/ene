@@ -1,119 +1,43 @@
-//! Opaque wire identifiers and references.
-//!
-//! Every ID-like value on the wire is a dedicated newtype, even when several
-//! share [`uuid::Uuid`] or [`String`] underneath. Roles, lifetimes, and
-//! issuers differ (IPC §6.1), so sharing one primitive would let a round be
-//! passed where a stream is expected. No `From` conversions or cross-type
-//! comparisons exist between these types; the Host maps each to its own
-//! domain newtype at ingress.
-//!
-//! Clients echo references back; they never parse, synthesize, or store them
-//! as primary keys.
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 macro_rules! uuid_wire_id {
-    ($name:ident, $doc:literal) => {
-        #[doc = $doc]
+    ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         pub struct $name(pub Uuid);
     };
 }
 
 macro_rules! string_wire_ref {
-    ($name:ident, $doc:literal) => {
-        #[doc = $doc]
+    ($name:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
         pub struct $name(pub String);
     };
 }
 
-uuid_wire_id!(
-    WireMessageId,
-    "Per-send transport ID, minted fresh by the sender. Duplicate suppression only; never a domain identity."
-);
-uuid_wire_id!(
-    RequestWireId,
-    "Request/response pair key, minted by the request sender."
-);
-uuid_wire_id!(
-    CommandWireId,
-    "Command/ack saga key and domain idempotency key. Transport retry reuses it with a new message ID."
-);
-uuid_wire_id!(
-    StreamWireId,
-    "Stream key, issued by the Host by default. Frames of one stream never move to another."
-);
-uuid_wire_id!(
-    ConnectionWireId,
-    "Connection key, issued by the Host on authentication success. Reconnect mints a new one."
-);
-uuid_wire_id!(
-    DeviceWireId,
-    "Device key, issued by the Host after Owner-confirmed pairing. See the bootstrap rule on `super::envelope::WireSender`."
-);
+uuid_wire_id!(WireMessageId);
+uuid_wire_id!(RequestWireId);
+uuid_wire_id!(CommandWireId);
+uuid_wire_id!(StreamWireId);
+uuid_wire_id!(ConnectionWireId);
+uuid_wire_id!(DeviceWireId);
 
-/// Client process incarnation: a different dimension from connection
-/// identity, Client instance, and presence generation (IPC §6.3, §11).
-/// The three must never collapse into one session ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClientIncarnationId {
-    /// Sender-side sequence, disambiguating restarts of one device.
     pub counter: u64,
-    /// Sender-side randomness, disambiguating colliding counters.
     pub random: u64,
 }
 
-string_wire_ref!(
-    CompanionWireRef,
-    "Opaque Companion reference, Host-issued. Echo only."
-);
-string_wire_ref!(
-    ClientWireRef,
-    "Opaque Client reference, Host-issued. Echo only."
-);
-string_wire_ref!(
-    RoundWireId,
-    "Opaque round reference, Host-issued. Old rounds are never rebound to new ones."
-);
-string_wire_ref!(
-    ClientLocalId,
-    "Client-local correspondence ID (e.g. matching an input to its ack). Fresh and unique within the Client; never Host-canonical."
-);
-string_wire_ref!(
-    TextLangWire,
-    "Opaque language tag (e.g. BCP-47) for a text body. Display/routing hint only."
-);
-string_wire_ref!(
-    RevalidationReasonWire,
-    "Opaque revalidation reason. The Host matches it against a known set at ingress (Stage 2); unknown values are rejected, never defaulted."
-);
-string_wire_ref!(
-    ViewMarkWire,
-    "Opaque display-revision mark for a management view."
-);
-string_wire_ref!(
-    WireMessageType,
-    "Payload discriminator for routing. The Host rejects unknown values as `UnsupportedMessage` (Stage 2); senders never guess."
-);
-string_wire_ref!(
-    ManagementTargetWire,
-    "Opaque management target reference: wire refs only, never control state."
-);
-string_wire_ref!(
-    DeletionOperationWireRef,
-    "Opaque Targeted Deletion operation reference, rendered for display. Echo only; it names no mutation."
-);
-string_wire_ref!(
-    DeletionStatusCursorWire,
-    "Opaque Targeted Deletion status page cursor, Host-issued and bound to the deletion-status query. Echo only."
-);
-string_wire_ref!(
-    BaseViewMark,
-    "Opaque display-revision mark an intent was built on. Comparison material, never authority."
-);
-string_wire_ref!(
-    UsageCursorWire,
-    "Opaque usage summary cursor, Host-issued and bound to one connection and query. Echo only."
-);
+string_wire_ref!(CompanionWireRef);
+string_wire_ref!(ClientWireRef);
+string_wire_ref!(RoundWireId);
+string_wire_ref!(ClientLocalId);
+string_wire_ref!(TextLangWire);
+string_wire_ref!(RevalidationReasonWire);
+string_wire_ref!(ViewMarkWire);
+string_wire_ref!(WireMessageType);
+string_wire_ref!(ManagementTargetWire);
+string_wire_ref!(DeletionOperationWireRef);
+string_wire_ref!(DeletionStatusCursorWire);
+string_wire_ref!(BaseViewMark);
+string_wire_ref!(UsageCursorWire);

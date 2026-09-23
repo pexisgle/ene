@@ -1,87 +1,22 @@
-//! Setup management inlet: intent in, filtered view out (IPC §18).
-//!
-//! The Client expresses intent and reads filtered views; every acceptance,
-//! confirmation, and high-privilege final check happens Host-side.
-//! High-privilege final confirmation additionally never travels this wire:
-//! it stays on the Host-local trusted first-party surface (IPC §18.1).
-//!
-//! Setup target grammar: the single shared contract for Setup management
-//! targets. The Host and the CLI must both use it; neither side re-invents
-//! the mini-language.
-//!
-//! ```text
-//! credential-target = "credential:" provider ":" label
-//! capability        = "dialogue" | "learning"
-//! consent-target    = "consent:" capability ":" provider ":" model ":" credential-id
-//! setup-show        = "setup:show"
-//! setup-complete    = "setup:complete"
-//! ```
-//!
-//! Builders ([`credential_target`], [`consent_target`]) and parsers
-//! ([`parse_credential_target`], [`parse_consent_target`]) are two sides of
-//! this one contract. The Host parse is authoritative: builders are plain
-//! constructors that never bypass validation, and every part must be
-//! non-empty at parse time. The consent `credential-id` and the credential
-//! `label` keep further `':'` characters verbatim. The two Setup command
-//! targets are fixed strings ([`SETUP_SHOW_TARGET`],
-//! [`SETUP_COMPLETE_TARGET`]).
-
 use serde::{Deserialize, Serialize};
 
 use super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, ViewMarkWire};
 
-/// Fixed Setup command target requesting the current Setup view.
 pub const SETUP_SHOW_TARGET: &str = "setup:show";
-
-/// Fixed Setup command target marking Setup complete.
 pub const SETUP_COMPLETE_TARGET: &str = "setup:complete";
-
-/// Fixed prefix of one Task-targeting management intent: `task:` plus the
-/// Task identity. The grammar is shared Host-side so a Client or CLI builds
-/// exactly what the Host parses.
 pub const TASK_TARGET_PREFIX: &str = "task:";
-
-/// Fixed prefix of one Workspace-targeting first-party management intent:
-/// `workspace:` plus the Owner-selected absolute folder path. The remainder is
-/// kept verbatim (paths may contain `:`), and the Host validates it
-/// canonically before it becomes a trusted premise.
 pub const WORKSPACE_TARGET_PREFIX: &str = "workspace:";
-
-/// Fixed prefix of one usage-cap management intent
-/// (`usage-cost-cap` §13/§17):
-///
-/// ```text
-/// usage-cap = "cap:" ( "system:" window ":" currency ":" limit-micros
-///                    | "provider:" provider ":" window ":" currency ":" limit-micros )
-/// window    = "daily_utc" | "monthly_utc"
-/// currency  = currency code (the owner vocabulary, e.g. "USD")
-/// ```
-///
-/// The target carries the intended limit only; it is never authority. The
-/// intent's `base_view` is the opaque cap mark the reader saw, and the Host
-/// re-checks it against the current revision before the permission-owned
-/// command runs.
 pub const USAGE_CAP_TARGET_PREFIX: &str = "cap:";
 
-/// Parsed usage-cap target: exactly the assignment parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageCapTarget {
-    /// `"system"` or `"provider"`.
     pub scope: String,
-    /// Provider name for the provider scope, `None` for the system scope.
     pub provider: Option<String>,
-    /// `"daily_utc"` or `"monthly_utc"`.
     pub window: String,
-    /// Currency code, as the owner's closed vocabulary spells it.
     pub currency: String,
-    /// Exact limit in micro-currency units. Zero is a representable target
-    /// that the owner refuses as `InvalidLimit`; the grammar never decides.
     pub limit_micros: u64,
 }
 
-/// Plain constructor: it does not validate. Non-empty parts and the closed
-/// scope/window vocabularies are enforced at Host parse, which stays
-/// authoritative.
 #[must_use]
 pub fn usage_cap_target(
     scope: &str,
@@ -100,11 +35,6 @@ pub fn usage_cap_target(
     }
 }
 
-/// Exact rule: strip the `cap:` prefix and parse the two shapes of
-/// [`USAGE_CAP_TARGET_PREFIX`]. Every part must be non-empty and the limit
-/// must be a plain decimal `u64`; anything else is `None`, never a guessed
-/// cap. The closed scope/window/currency vocabularies are validated by the
-/// owner at command time, so the grammar stays vocabulary-neutral.
 #[must_use]
 pub fn parse_usage_cap_target(target: &ManagementTargetWire) -> Option<UsageCapTarget> {
     let rest = target.0.strip_prefix(USAGE_CAP_TARGET_PREFIX)?;
@@ -153,16 +83,11 @@ fn non_empty(part: &str) -> Option<String> {
     Some(part.to_owned())
 }
 
-/// Plain constructor: it does not validate. The Host parse and validation
-/// stay authoritative.
 #[must_use]
 pub fn workspace_target(path: &str) -> ManagementTargetWire {
     ManagementTargetWire(format!("{WORKSPACE_TARGET_PREFIX}{path}"))
 }
 
-/// Exact rule: strip the `workspace:` prefix and require a non-empty
-/// remainder, else [`None`]. The remainder is the Owner-authored path
-/// verbatim; validation happens Host-side.
 #[must_use]
 pub fn parse_workspace_target(target: &ManagementTargetWire) -> Option<&str> {
     let rest = target.0.strip_prefix(WORKSPACE_TARGET_PREFIX)?;
@@ -172,31 +97,22 @@ pub fn parse_workspace_target(target: &ManagementTargetWire) -> Option<&str> {
     Some(rest)
 }
 
-/// Plain constructor: it does not validate. The Host parse stays
-/// authoritative.
 #[must_use]
 pub fn task_target(task: uuid::Uuid) -> ManagementTargetWire {
     ManagementTargetWire(format!("{TASK_TARGET_PREFIX}{}", task.as_hyphenated()))
 }
 
-/// Exact rule: strip the `task:` prefix and require the remainder to parse as
-/// a UUID, else [`None`]. No other text is a Task target.
 #[must_use]
 pub fn parse_task_target(target: &ManagementTargetWire) -> Option<uuid::Uuid> {
     let rest = target.0.strip_prefix(TASK_TARGET_PREFIX)?;
     uuid::Uuid::parse_str(rest).ok()
 }
 
-/// Plain constructor: it does not validate. Non-empty `provider` and
-/// `label` are enforced at Host parse, which stays authoritative.
 #[must_use]
 pub fn credential_target(provider: &str, label: &str) -> ManagementTargetWire {
     ManagementTargetWire(format!("credential:{provider}:{label}"))
 }
 
-/// Plain constructor: it does not validate. Non-empty `capability`,
-/// `provider`, `model`, and `credential-id` are enforced at Host parse, which
-/// stays authoritative.
 #[must_use]
 pub fn consent_target(
     capability: &str,
@@ -209,9 +125,6 @@ pub fn consent_target(
     ))
 }
 
-/// Exact rule: strip the `credential:` prefix, split the remainder once on
-/// `':'`, and require both parts non-empty, else [`None`]. The label keeps
-/// any further `':'` verbatim.
 #[must_use]
 pub fn parse_credential_target(target: &ManagementTargetWire) -> Option<(String, String)> {
     let rest = target.0.strip_prefix("credential:")?;
@@ -222,10 +135,6 @@ pub fn parse_credential_target(target: &ManagementTargetWire) -> Option<(String,
     Some((provider.to_owned(), label.to_owned()))
 }
 
-/// Exact rule: strip the `consent:` prefix, split the remainder with
-/// `splitn(4, ':')`, and require all four parts non-empty, else [`None`].
-/// The `credential-id` keeps its remainder verbatim, so it may itself
-/// contain `':'`.
 #[must_use]
 pub fn parse_consent_target(
     target: &ManagementTargetWire,
@@ -248,77 +157,35 @@ pub fn parse_consent_target(
     ))
 }
 
-/// Management intent kinds (IPC §18.2). Stage 1 exercises the Setup range;
-/// the remaining kinds arrive with their owners, which alone may accept
-/// them. The kind name never decides the trust class: the Host classifies
-/// by operation, target, and impact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManagementIntentKind {
     StopCompanion,
     DeleteCompanion,
     CancelTask,
-    /// Resume one interrupted Task explicitly (H-A.1 / AU17). The target is
-    /// `task:{task-id}` and the rationale quote carries the Owner's resume
-    /// instruction body; the Host records the first-party activity, composes
-    /// the premise from durable state, and runs the same owner gate as the
-    /// conversation path. No presence or provider success is required, and
-    /// an offline opener never starts a runner.
     ResumeTask,
-    /// Select the Owner-confirmed Workspace folder for Task work. This is the
-    /// trusted first-party premise a Task association may use; provider
-    /// output never carries one.
     SelectWorkspace,
     ManageSchedule,
-    /// Deny or refuse rule/consent handling.
     DenyOrRefuse,
-    /// Rule / consent / cap management. The consent grammar
-    /// (`consent:{capability}:...`) assigns a route; the cap grammar
-    /// (`cap:{scope}:{window}:{currency}:{limit}`, `usage-cost-cap` §13)
-    /// sets a usage cap, whose currentness is the intent `base_view` mark.
     ManageRuleConsentCap,
     ManageDevice,
-    /// Credential configuration intent (values travel the protected
-    /// Host-local path only, never this payload).
     ConfigureCredentialIntent,
-    /// Targeted Deletion request inlet (Stage 6 A1b; lifecycle §4, §15). The
-    /// target grammar is `deletion:{purpose}:{exact-text}` (see
-    /// [`super::deletion`]), the exact text is the Owner body, and the intent
-    /// only ever stages a request: the destructive final confirmation is
-    /// established on the Host-local trusted first-party surface (IPC §18.1)
-    /// and never travels this payload. The same kind also names the deferred
-    /// backup / restore / reset families, which have no producer yet and
-    /// clarify instead of borrowing this one's authority.
     RequestDeletionBackupRestoreReset,
 }
 
 impl ManagementIntentKind {
-    /// Whether this kind's target grammar may carry an Owner body.
-    ///
-    /// Only the Targeted Deletion target does (`deletion:{purpose}:{exact
-    /// text}`): [`ManagementIntent`]'s `Debug` redacts that target so no log
-    /// or panic message reproduces the Owner's text. The kind names the
-    /// grammar, never a trust class.
     #[must_use]
     pub fn target_carries_owner_body(self) -> bool {
         matches!(self, Self::RequestDeletionBackupRestoreReset)
     }
 }
 
-/// One management intent: idempotent by key, advisory by nature. The Host
-/// maps it to a domain premise and answers with [`ManagementOutcome`];
-/// the Client never self-declares the result.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManagementIntent {
     pub intent_id: CommandWireId,
     pub kind: ManagementIntentKind,
     pub target: ManagementTargetWire,
-    /// Display-revision mark the intent was built on. Staleness is checked,
-    /// never defaulted to unconstrained.
     pub base_view: BaseViewMark,
     pub rationale: IntentRationaleWire,
-    /// Self-declared confirmation is never Host confirmation (IPC §18).
-    /// `true` is [`ManagementOutcome::DeniedByBoundary`] and does not complete
-    /// a `ConfirmationSession`.
     #[serde(default)]
     pub confirmed: bool,
 }
@@ -342,9 +209,6 @@ impl core::fmt::Debug for ManagementIntent {
     }
 }
 
-/// Owner intent record: where the intent came from plus the quoted
-/// correspondence. The quote may reproduce managed content, so it is
-/// redacted from [`core::fmt::Debug`].
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IntentRationaleWire {
     pub origin: RationaleOrigin,
@@ -367,59 +231,31 @@ pub enum RationaleOrigin {
     ManagementSurface,
 }
 
-/// Management outcome: an Ok-side domain outcome, never an error (IPC
-/// §18.2, §24).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManagementOutcome {
-    /// Applied as a one-time approval. Never a standing rule.
     AppliedAsOneTime,
-    /// Stored as a rule or similar, with its revision view.
     StoredAsRuleView { revision: ViewMarkWire },
-    /// Too ambiguous, contradictory, excessive, or grave to decide.
     NeedsClarification,
-    /// Silent control-boundary overwrite or trusted-surface violation.
     DeniedByBoundary,
-    /// The base view moved underneath the intent.
-    StaleBaseView {
-        /// Current mark the sender should build on next time.
-        current: ViewMarkWire,
-    },
-    /// Held by deletion, restore, stop, or similar prohibitions.
+    StaleBaseView { current: ViewMarkWire },
     HeldByOperation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManagementViewRequest {
     pub sections: Vec<String>,
-    /// Current Memory id the `memory` section continues after, exclusive.
-    ///
-    /// The Host renders at most one page of the memory section and ends it
-    /// with a `next: <id>` line while older memories remain; passing that id
-    /// back here reads the next page. `None` starts at the newest. The field
-    /// is the typed read query for the one paged section, never a query
-    /// syntax embedded in a section name.
     #[serde(default)]
     pub memory_after: Option<String>,
-    /// When set, the `memory` section renders one Memory's revision history
-    /// (with grounds) instead of the current list. The value is the Memory id
-    /// from the list. The revision history is paged independently, so it is
-    /// never inflated into the list page.
     #[serde(default)]
     pub memory_revisions_of: Option<String>,
-    /// Revision number the revision page continues after, exclusive, oldest
-    /// first. Semantics mirror [`memory_after`](Self::memory_after); the Host
-    /// ends the page with a `next-revision: <n>` line while newer revisions
-    /// remain. `None` or zero starts at the first revision.
     #[serde(default)]
     pub memory_revisions_after: Option<u64>,
 }
 
-/// Short labels stay visible; bodies redact.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ViewSection {
     pub kind: String,
     pub title: String,
-    /// May quote managed content; redacted from [`core::fmt::Debug`].
     pub body: String,
 }
 
@@ -434,7 +270,6 @@ impl core::fmt::Debug for ViewSection {
     }
 }
 
-/// Secrets, judgment copies, and full internal conditions are never included.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagementView {
     pub mark: ViewMarkWire,
@@ -470,22 +305,10 @@ mod tests {
     #[test]
     fn intent_debug_redacts_rationale() {
         let rendered = format!("{:?}", intent());
-        assert!(
-            !rendered.contains("quoted private words"),
-            "rationale redacted: {rendered}"
-        );
-        assert!(
-            rendered.contains("schedule-1"),
-            "refs stay visible: {rendered}"
-        );
-        assert!(
-            rendered.contains("mark-1"),
-            "marks stay visible: {rendered}"
-        );
-        assert!(
-            rendered.contains("confirmed"),
-            "self-declared confirmation stays visible: {rendered}"
-        );
+        assert!(!rendered.contains("quoted private words"));
+        assert!(rendered.contains("schedule-1"));
+        assert!(rendered.contains("mark-1"));
+        assert!(rendered.contains("confirmed"));
     }
 
     #[test]
@@ -498,19 +321,13 @@ mod tests {
         map.remove("confirmed");
         let omitted: ManagementIntent =
             serde_json::from_value(serde_json::Value::Object(map)).expect("omitted confirmed");
-        assert!(
-            !omitted.confirmed,
-            "missing confirmed must default to false"
-        );
+        assert!(!omitted.confirmed);
         let mut declared = intent();
         declared.confirmed = true;
         let back: ManagementIntent =
             serde_json::from_str(&serde_json::to_string(&declared).expect("serializes"))
                 .expect("roundtrip");
-        assert!(
-            back.confirmed,
-            "the flag is a Client self-declaration the Host must refuse"
-        );
+        assert!(back.confirmed);
     }
 
     #[test]
@@ -519,23 +336,15 @@ mod tests {
         intent.kind = ManagementIntentKind::RequestDeletionBackupRestoreReset;
         intent.target = ManagementTargetWire(String::from("deletion:privacy:raw secret body"));
         let rendered = format!("{intent:?}");
-        assert!(
-            !rendered.contains("raw secret body"),
-            "the deletion target body is redacted: {rendered}"
-        );
+        assert!(!rendered.contains("raw secret body"));
         assert!(
             rendered.contains("deletion-backup-restore-reset")
-                || rendered.contains("RequestDeletion"),
-            "the kind stays visible: {rendered}"
+                || rendered.contains("RequestDeletion")
         );
         assert!(
-            ManagementIntentKind::RequestDeletionBackupRestoreReset.target_carries_owner_body(),
-            "the deletion grammar carries an Owner body"
+            ManagementIntentKind::RequestDeletionBackupRestoreReset.target_carries_owner_body()
         );
-        assert!(
-            !ManagementIntentKind::ManageSchedule.target_carries_owner_body(),
-            "other kinds keep their readable targets"
-        );
+        assert!(!ManagementIntentKind::ManageSchedule.target_carries_owner_body());
     }
 
     #[test]
@@ -546,14 +355,8 @@ mod tests {
             body: String::from("quoted managed content"),
         };
         let rendered = format!("{section:?}");
-        assert!(
-            !rendered.contains("quoted managed content"),
-            "body redacted: {rendered}"
-        );
-        assert!(
-            rendered.contains("Setup status"),
-            "labels stay visible: {rendered}"
-        );
+        assert!(!rendered.contains("quoted managed content"));
+        assert!(rendered.contains("Setup status"));
     }
 
     #[test]
@@ -590,10 +393,7 @@ mod tests {
             "consent:dialogue:openai:gpt-x:cred-1",
         ] {
             let target = ManagementTargetWire(String::from(raw));
-            assert!(
-                parse_credential_target(&target).is_none(),
-                "credential parse rejects {raw:?}"
-            );
+            assert!(parse_credential_target(&target).is_none());
         }
     }
 
@@ -609,10 +409,7 @@ mod tests {
             "credential:openai:personal",
         ] {
             let target = ManagementTargetWire(String::from(raw));
-            assert!(
-                parse_consent_target(&target).is_none(),
-                "consent parse rejects {raw:?}"
-            );
+            assert!(parse_consent_target(&target).is_none());
         }
     }
 
@@ -630,8 +427,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse_task_target(&ManagementTargetWire(String::from(raw))),
-                None,
-                "the task grammar rejects {raw:?}"
+                None
             );
         }
     }
@@ -643,14 +439,12 @@ mod tests {
         let windows = workspace_target("C:\\Users\\ene\\workspace");
         assert_eq!(
             parse_workspace_target(&windows),
-            Some("C:\\Users\\ene\\workspace"),
-            "the Owner-authored path stays verbatim, colons included"
+            Some("C:\\Users\\ene\\workspace")
         );
         for raw in ["workspace:", "task:abc", "setup:show", ""] {
             assert_eq!(
                 parse_workspace_target(&ManagementTargetWire(String::from(raw))),
-                None,
-                "the workspace grammar rejects {raw:?}"
+                None
             );
         }
     }
@@ -707,12 +501,9 @@ mod tests {
         ] {
             assert_eq!(
                 parse_usage_cap_target(&ManagementTargetWire(String::from(raw))),
-                None,
-                "the cap grammar rejects {raw:?} without guessing"
+                None
             );
         }
-        // Zero is representable text; the owner refuses it as a limit, so the
-        // grammar does not pre-decide that domain outcome.
         assert!(
             parse_usage_cap_target(&usage_cap_target("system", None, "daily_utc", "USD", 0))
                 .is_some()

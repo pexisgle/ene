@@ -1,12 +1,6 @@
-//! Japanese / English UI labels and deny-reason text.
-//!
-//! Switching locale rewrites labels only. Conversation bodies, history, and
-//! Host domain state are not rewritten.
-
 use ene_api::v1::management::ManagementOutcome;
 use ene_local_control::{ControlOutcome, FromConfirmation};
 
-/// UI locale. Persisted as a GUI preference, never as setup-complete consent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Locale {
     Ja,
@@ -32,7 +26,6 @@ impl Locale {
     }
 }
 
-/// Stable label keys so tests can switch locale without depending on prose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Label {
     Chat,
@@ -186,8 +179,6 @@ pub fn management_deny(locale: Locale, outcome: &ManagementOutcome) -> String {
 }
 
 #[must_use]
-/// Renders one confirmation-channel answer. The requester listener's own
-/// answers are rendered where they are read.
 pub fn control_deny(locale: Locale, from: &FromConfirmation) -> String {
     match (locale, from) {
         (Locale::Ja, FromConfirmation::DeniedByBoundary) => {

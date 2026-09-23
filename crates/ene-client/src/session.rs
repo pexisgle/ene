@@ -1,8 +1,3 @@
-//! Session state and pure frame-decision rules.
-//!
-//! Kept transport-free: the socket loop feeds decoded frames in and acts on
-//! these decisions.
-
 use std::collections::VecDeque;
 
 use ene_api::v1::deletion::{ClientTempClass, DeletionDemand};
@@ -15,47 +10,16 @@ use ene_plugin_ipc::WireFrame;
 
 use super::frames::auth_rejected_guidance;
 
-/// Beyond this cap the oldest queued frame is discarded to make room, never
-/// the newest, so a chatty or hostile Host cannot grow the session without
-/// bound.
 pub const DEFERRED_CAP: usize = 32;
 
-/// Observed session: latest presence generation, companion projection,
-/// authenticated connection key, pairing secret, and the deferred
-/// out-of-order answer queue.
-///
-/// Latest value supersedes: each new fact or stale answer overwrites. A
-/// missing generation is never read as current — a [`None`]-stamped input
-/// answered with `NeedsRevalidation` is the correct outcome; defaulting it
-/// (zero) would claim a generation the client never observed, and the Host
-/// would treat that stale claim as currentness evidence it is not.
-///
-/// The pairing secret lives here for the session lifetime only (loaded from
-/// the device file or the one-shot bootstrap at connect time) and is never
-/// logged; the custom [`core::fmt::Debug`] below renders it as `[redacted]`
-/// so a debug dump cannot leak key material.
-///
-/// The deferred queue holds whole [`WireFrame`]s (payload plus envelope, so
-/// the `reply_to` link survives for later correlation), never facts (absorbed
-/// on arrival); it is session-lifetime only, never persisted, and capped at
-/// [`DEFERRED_CAP`] with oldest-drop.
-///
-/// `Eq` is deliberately absent: [`WireFrame`] is `PartialEq`-only, and
-/// whole-session equality beyond tests is meaningless; callers compare
-/// dimensions.
 #[derive(Clone, PartialEq, Default)]
 pub struct SessionState {
     generation: Option<u64>,
     presence: Option<PresenceStateWire>,
-    /// Companion projection to echo on submits and history requests so the
-    /// Host resolves them through its mapping.
     companion: Option<String>,
     connection_id: Option<ConnectionWireId>,
     pairing_secret: Option<PairingProvisionSecret>,
     deferred: VecDeque<WireFrame>,
-    /// When true, a Host [`DeletionDemand`] is stashed for the GUI erasure
-    /// participant instead of auto-answering `wiped`. CLI keeps the default
-    /// false auto-answer.
     defer_erasure: bool,
     pending_erasure: VecDeque<DeletionDemand>,
 }
@@ -84,7 +48,6 @@ impl SessionState {
         self.generation
     }
 
-    /// Latest Host presence state, if a fact has been absorbed.
     #[must_use]
     pub fn presence_state(&self) -> Option<PresenceStateWire> {
         self.presence
@@ -100,33 +63,22 @@ impl SessionState {
             .map(PairingProvisionSecret::expose_secret)
     }
 
-    /// Session-lifetime only, used for proof derivation on demand: never
-    /// written anywhere from here (persistence is the device file's job at
-    /// connect time).
     pub fn set_pairing_secret(&mut self, secret: PairingProvisionSecret) {
         self.pairing_secret = Some(secret);
     }
 
-    /// Applies an authoritative presence fact: its generation and companion
-    /// projection supersede what the session held, so later sends echo the
-    /// Host's current mapping instead of guessing.
     pub fn observe_presence(&mut self, fact: &PresenceAttributionWire) {
         self.generation = Some(fact.generation);
         self.presence = Some(fact.state);
         self.companion = Some(fact.companion.0.clone());
     }
 
-    /// Falls back to [`crate::DEFAULT_COMPANION_REF`] until the first
-    /// presence fact arrives; the Host revalidates that fallback rather than
-    /// attributing through it.
     pub fn companion_ref(&self) -> String {
         self.companion
             .clone()
             .unwrap_or_else(|| String::from(crate::DEFAULT_COMPANION_REF))
     }
 
-    /// Normal-operation refresh from a stale-round answer, distinct from the
-    /// handshake bootstrap: the next send carries what the Host just reported.
     pub fn note_stale_generation(&mut self, current: u64) {
         self.generation = Some(current);
     }
@@ -138,24 +90,10 @@ impl SessionState {
         self.deferred.push_back(frame);
     }
 
-    /// Drops the deferred presentation queue without claiming GUI classes.
     pub fn clear_deferred_frames(&mut self) {
         self.deferred.clear();
     }
 
-    /// Wipes the Client-local transient classes one Host demand names and
-    /// reports what this process held (IPC §17.2, Stage 6 A3c).
-    ///
-    /// The deferred queue is the only Ene-managed body-bearing local copy this
-    /// process keeps — undelivered summaries, excerpts, and history pages
-    /// received but not yet consumed — so it is dropped whole. Terminal
-    /// scrollback and shell history sit outside this process's management
-    /// boundary and are neither claimed wiped nor reported as an unverified
-    /// Ene-managed range; the Host's system-wide remainder verification never
-    /// treats this local report as its proof.
-    ///
-    /// CLI auto-answer uses this. First-party GUI sets [`Self::set_defer_erasure`]
-    /// and reports only after it actually erases its own copies.
     pub fn wipe_transient(&mut self) -> Vec<ClientTempClass> {
         self.clear_deferred_frames();
         vec![
@@ -173,8 +111,6 @@ impl SessionState {
         self.defer_erasure
     }
 
-    /// Stashes one Host demand so a GUI participant can wipe its copies
-    /// before answering. The demand carries class names only, never a body.
     pub fn push_pending_erasure(&mut self, demand: DeletionDemand) {
         self.pending_erasure.push_back(demand);
     }
@@ -183,16 +119,11 @@ impl SessionState {
         self.pending_erasure.pop_front()
     }
 
-    /// Facts never sit in the queue, so a hit is always an answer the caller
-    /// can return without socket I/O.
     pub fn take_deferred_reply(&mut self, own: WireMessageId) -> Option<WirePayload> {
         let position = find_deferred_reply(&self.deferred, own)?;
         self.deferred.remove(position).map(|frame| frame.payload)
     }
 
-    /// Drains deferred auto-presented summaries (unsolicited facts the Host
-    /// pushed without `reply_to`). The caller paints them and ACKs each
-    /// receipt it fully painted; unpainted ones stay Unknown Host-side.
     pub fn take_undelivered(&mut self) -> Vec<WireFrame> {
         let mut summaries = Vec::new();
         let mut rest = VecDeque::with_capacity(self.deferred.len());
@@ -220,20 +151,14 @@ pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {
     }
 }
 
-/// One ruling shared by [`super::Client::request`]'s socket loop; queue-cap
-/// handling stays with the caller.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameDecision {
     AbsorbPresence(PresenceAttributionWire),
-    /// Host → Client activity hint (IPC M-21). Never an answer.
     AbsorbBodyHint(BodyStateHint),
     Answer(WirePayload),
     Defer,
 }
 
-/// Total and pure: no I/O, no session access, so tests rule on the same
-/// function the socket loop uses. Presence facts and Body activity hints
-/// absorb; other unsolicited frames defer instead of surfacing as answers.
 #[must_use]
 pub fn decide_frame(own_message_id: WireMessageId, frame: &WireFrame) -> FrameDecision {
     match &frame.payload {
@@ -246,28 +171,16 @@ pub fn decide_frame(own_message_id: WireMessageId, frame: &WireFrame) -> FrameDe
     }
 }
 
-/// Finds the frame the session pop ([`SessionState::take_deferred_reply`])
-/// correlates to `own`.
 fn find_deferred_reply(deferred: &VecDeque<WireFrame>, own: WireMessageId) -> Option<usize> {
     deferred
         .iter()
         .position(|frame| frame.envelope.correlation.reply_to == Some(own))
 }
 
-/// [`AuthResult::Rejected`] maps to [`AuthDecision::Guidance`] (exit code 2:
-/// re-provision a fresh secret and retry) while an unexpected payload kind
-/// maps to [`AuthDecision::Unexpected`] (a wire-shape violation, exit code 1).
-/// The Host's rejection reason is operational by DTO contract (never a secret
-/// or body copy), so carrying it into the guidance is safe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthDecision {
-    /// Authenticated: this connection key governs later messages.
     Accepted { connection_id: ConnectionWireId },
-    /// Rejected: operator guidance carrying the Host reason, never secrets
-    /// (exit code 2 at the crate root).
     Guidance { message: String },
-    /// Wrong payload kind entirely (exit code 1 at the crate root); names the
-    /// received and expected kinds, never bodies.
     Unexpected { message: String },
 }
 

@@ -1,7 +1,3 @@
-//! Client-channel session: pairing, chat, history, setup views.
-//!
-//! Uses [`ene_client`] and [`ene_api`] only. No DB schema.
-
 use std::path::Path;
 use std::time::Duration;
 
@@ -27,8 +23,6 @@ use crate::ui::DesktopError;
 
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
-/// The Windows Client pipe name of one data directory: the same FNV-1a fold
-/// the Host uses, so the GUI's requester listener derivation matches.
 #[cfg(any(windows, test))]
 #[must_use]
 pub fn client_pipe_name(data_dir: &Path) -> String {
@@ -85,7 +79,6 @@ impl SetupFacts {
         }
     }
 
-    /// Setup completion is derived from Host facts, never a local wizard flag.
     #[must_use]
     pub fn setup_ready(&self) -> bool {
         self.credential_present && self.consent_assigned
@@ -96,25 +89,11 @@ pub async fn connect(data_dir: &Path, descriptor: &str) -> Result<Client, Client
     Client::connect(data_dir, descriptor, &ene_client::platform_display()).await
 }
 
-/// One GUI connect attempt: an established session, or a pairing that is
-/// still waiting for the Owner.
-///
-/// A stored device authenticates and returns [`Paired`](Self::Paired); only a
-/// first run (or a run whose device file is gone) pends. The two are never
-/// conflated: a successful connect is not an error, and a pending pairing owns
-/// the connection the GUI must retain until confirmation completes.
 pub enum DesktopConnect {
     Paired(Box<Client>),
     PendingOwnerConfirmation(PendingPairingClient),
 }
 
-/// Connects the GUI as a Client, or reports the pending pairing that still
-/// needs the Owner.
-///
-/// The Host may be starting, so transport failures retry with a bounded
-/// budget before surfacing. A degraded device file, a denied pairing, or a
-/// rejected proof stays an explicit error: the first-run provisioning path is
-/// never taken for state the Host already refused.
 pub async fn connect_or_pending(
     data_dir: &Path,
     descriptor: &str,
@@ -273,10 +252,6 @@ pub async fn submit_and_collect(
     })
 }
 
-/// Presentation ACK for one collected chat turn. Call only from the path
-/// that actually presented that receipt. Mere receive is not
-/// [`PresentationStatus::Presented`]. `send_text` ACKs
-/// PresentationStatus::Presented only after the timeline shows the turn.
 pub async fn confirm_chat_presentation(
     client: &mut Client,
     turn: &ChatTurn,

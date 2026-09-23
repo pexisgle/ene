@@ -1,25 +1,3 @@
-//! `ene-ctl` subcommands: wire-payload builders and rendering.
-//!
-//! Pure: builds `ene-api` DTOs and renders views to display strings; no I/O,
-//! sockets, or environment. Argument syntax lives in the `clap` command at
-//! the crate root; transport lives in [`crate::client`]; exit-code mapping
-//! lives at the crate root.
-//!
-//! Wire-mapping decisions (all within the existing DTO shapes):
-//!
-//! * Setup intents use the shared setup-target grammar ([`credential_target`]
-//!   and [`consent_target`], never a CLI-local mini-language). The credential
-//!   key comes from the Host process environment over the Host-local path,
-//!   never this wire; assignment parameters travel in the consent target,
-//!   never in the rationale quote, and both rationales are provenance-only.
-//! * Both setup intents carry the display-revision mark of a freshly fetched
-//!   setup view as `base_view`, so staleness is checked against something the
-//!   CLI actually saw, never defaulted to unconstrained.
-//! * `watch --round ROUND` prints that round's items from a [`HistoryRequest`]
-//!   (same fetch as `history`, filtered by round); true stream-following needs
-//!   a live `send` in the same process because streams cannot resume, so that
-//!   follow mode is deferred (see [`Command::Watch`]).
-
 use ene_api::v1::deletion::{
     DeletionParticipantReportWire, DeletionPurposeWire, DeletionStatusResponse, deletion_target,
 };
@@ -46,32 +24,17 @@ use ene_api::v1::usage::{
     UsageSummaryResponse,
 };
 
-/// Fallback companion reference sent until the first presence fact arrives.
-/// The Host only resolves projections it issued itself, so this fallback
-/// revalidates (rather than silently attributing) until the session learns
-/// the current projection from presence and echoes it back.
 pub const DEFAULT_COMPANION_REF: &str = "default";
 
 pub const DEFAULT_HISTORY_LIMIT: u64 = 50;
 
-/// The Host registers refs as `"<provider>:<label>"` and falls back to the
-/// `"<provider>:main"` ref before any consent exists, so the setup flow
-/// always uses this label: the consent step can then name the credential id
-/// it just created (see [`credential_id_for`]).
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
-/// Mirrors the Host setup section set: `HostHandle::build_view` in
-/// `apps/ene-core/src/setup.rs` renders exactly these for a setup or status
-/// request (an empty request selects the same set). The contract test below
-/// asserts these names against that documented Host set, so a Host rename
-/// fails the test instead of silently fetching nothing.
 pub const HOST_SETUP_SECTIONS: &[&str] =
     &["provider", "model", "consent", "credential", "learning"];
 
-/// The read-only Memory section rendered by the same Host view builder.
 pub const HOST_MEMORY_SECTION: &str = "memory";
 
-/// Only provider the setup flow knows how to assign yet.
 pub const SETUP_PROVIDER_OPENAI: &str = "openai";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,86 +42,54 @@ pub enum Command {
     Setup(SetupMode),
     Status,
     Send(SendArgs),
-    /// A round-scoped history print, not a live stream follow: streams cannot
-    /// resume across processes, so following a stream needs a live `send` in
-    /// the same process (deferred). Viewing restored facts is not presenting a
-    /// stream, so `watch` never sends a presentation confirmation.
     Watch {
         round: String,
     },
     History {
         limit: u64,
     },
-    /// Read-only Memory view: current recognition, scope, temporal meaning,
-    /// and importance. `after` continues the current list from the `next:` id
-    /// of the previous page; `revisions` selects one Memory's paged revision
-    /// history (with `after_revision` continuing it).
     Memory {
         after: Option<String>,
         revisions: Option<String>,
         after_revision: Option<u64>,
     },
-    /// First-party Task list (stored lifecycle + execution flag, paged).
-    /// `cursor` continues from a previous page's `next:` line.
     Tasks {
         cursor: Option<String>,
         limit: Option<u32>,
     },
-    /// One Task's paged report (attempt rows before result rows, no bodies).
     Report {
         task: String,
         cursor: Option<String>,
         limit: Option<u32>,
     },
-    /// One bounded body page of a report source named by a report page.
     Source {
         source: String,
         cursor: Option<u64>,
         limit_bytes: Option<u32>,
     },
-    /// Select the Owner-confirmed Task for this conversation (in-memory
-    /// display selection; no execution starts).
     SelectTask {
         task: String,
     },
-    /// Explicitly resume one interrupted Task (new revision + delegation on
-    /// acceptance; refusals stay Ok-side with zero writes).
     ResumeTask {
         task: String,
         revision: u64,
         purpose: String,
         instruction: String,
     },
-    /// Fetch the undelivered backlog, paint it, and ACK what was painted.
-    /// `redisplay` forces an explicit head pass including failed rows.
     Undelivered {
         cursor: Option<String>,
         limit: Option<u32>,
         redisplay: bool,
     },
-    /// Request one Targeted Deletion (`Stage 6` A1b, lifecycle §15). Advisory:
-    /// the Host re-validates the typed target against its live deletion
-    /// surface, stages the request, and the Owner confirms it on the Host PC
-    /// (IPC §18.1).
     Deletion {
         text: String,
         purpose: DeletionPurposeWire,
     },
-    /// Read the bounded Targeted Deletion operation status page (no target
-    /// body, no search material).
     DeletionStatus {
         cursor: Option<String>,
         limit: Option<u32>,
     },
-    /// Read one bounded page of the first-party usage / cost summary plus
-    /// the current cap slots (`usage-cost-cap` §16). No body text, prompt,
-    /// output, or credential value crosses this path.
     Usage(UsageArgs),
-    /// Set or update one provider/system daily/monthly usage cap
-    /// (`usage-cost-cap` §13/§17). The Client only proposes: the Host
-    /// re-checks the current authenticated connection, the base-view mark
-    /// from a read, and the cap revision before the permission-owned command
-    /// commits.
     UsageCap {
         scope: String,
         provider: Option<String>,
@@ -168,8 +99,6 @@ pub enum Command {
     },
 }
 
-/// Filters of one bounded usage summary read. Every field is a display
-/// filter; the Host clamps the period and the row count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageArgs {
     pub from: Option<String>,
@@ -188,21 +117,14 @@ pub enum SetupMode {
     Show,
     Assign {
         provider: String,
-        /// Passed through to the assignment record verbatim.
         model: String,
-        /// Assign the route to the learning capability instead of the
-        /// dialogue capability. Consent is per capability, so the Owner makes
-        /// this choice explicitly.
         learning: bool,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendArgs {
-    /// Target round wire ref, or [`None`] to join-or-mint; never combined
-    /// with [`fresh`](Self::fresh) (the parser rejects `--new --round`).
     pub round: Option<String>,
-    /// Force a fresh round: the Host mints instead of joining any open round.
     pub fresh: bool,
     pub text: String,
 }
@@ -219,9 +141,6 @@ pub fn setup_view_request() -> ManagementViewRequest {
     }
 }
 
-/// Requests only the read-only Memory section. `after` continues the current
-/// list from a previous page; `revisions_of` selects one Memory's paged
-/// revision history, continued by `after_revision`.
 pub fn memory_view_request(
     after: Option<&str>,
     revisions_of: Option<&str>,
@@ -244,9 +163,6 @@ pub fn history_request(companion: &str, limit: u64) -> HistoryRequest {
     }
 }
 
-/// Round-scoped history: the Host filters by the stored round projection, so
-/// the round is addressable even after a Host restart dropped its transient
-/// wire map, and the result does not depend on the overall recent window.
 pub fn round_history_request(companion: &str, round: &str, limit: u64) -> HistoryRequest {
     HistoryRequest {
         companion: CompanionWireRef(companion.to_string()),
@@ -256,8 +172,6 @@ pub fn round_history_request(companion: &str, round: &str, limit: u64) -> Histor
     }
 }
 
-/// `companion` is the caller-learned projection echoed from presence
-/// ([`DEFAULT_COMPANION_REF`] until the first fact).
 pub fn submit_input(
     companion: &str,
     round: Option<String>,
@@ -277,15 +191,10 @@ pub fn submit_input(
     }
 }
 
-/// Mints a client-local correspondence ID from a v4 UUID: unique per
-/// connection for this process, which is all `local_id` needs (it matches
-/// acks to sends within one Client and is never Host-canonical).
 pub fn new_local_id() -> ClientLocalId {
     ClientLocalId(uuid::Uuid::new_v4().to_string())
 }
 
-/// Subscription / paging request for the undelivered backlog. [`None`]
-/// cursor catches up (arrivals first, else an explicit head pass).
 pub fn undelivered_request(
     cursor: Option<String>,
     limit: Option<u32>,
@@ -299,9 +208,6 @@ pub fn undelivered_request(
     }
 }
 
-/// Presentation observation for one receipt: only ever `Presented` after the
-/// batch fully painted. A partial batch sends nothing, so the Host keeps it
-/// `Unknown` instead of recording a presentation the operator never saw.
 pub fn undelivered_ack(receipt: &str, status: PresentationStatus) -> UndeliveredAck {
     UndeliveredAck {
         receipt: ene_api::v1::undelivered::PresentationReceiptWireRef(receipt.to_string()),
@@ -360,8 +266,6 @@ pub fn resume_task_request(
     }
 }
 
-/// One `kind subject: excerpt` line per item (truncation marked), then one
-/// headline line per Task. Excerpts are Host-scrubbed display facts.
 pub fn render_summary(summary: &UndeliveredSummary) -> String {
     let mut lines = Vec::new();
     for item in &summary.items {
@@ -386,8 +290,6 @@ pub fn render_summary(summary: &UndeliveredSummary) -> String {
     lines.join("\n")
 }
 
-/// One `task rev progress` line per entry (`running` marked), plus the
-/// `next:` continuation while a page remains.
 pub fn render_task_list(page: &TaskListPage) -> String {
     let mut lines: Vec<String> = page
         .tasks
@@ -406,8 +308,6 @@ pub fn render_task_list(page: &TaskListPage) -> String {
     lines.join("\n")
 }
 
-/// Headline plus one `kind id` line per detail row, plus the `next:`
-/// continuation while rows remain. Bodies page through `source`.
 pub fn render_report_page(page: &TaskReportPage) -> String {
     let mut lines = vec![format!(
         "{} rev {} {}",
@@ -422,8 +322,6 @@ pub fn render_report_page(page: &TaskReportPage) -> String {
     lines.join("\n")
 }
 
-/// The body page text verbatim (Host-bounded, UTF-8 cut), plus the `next:`
-/// byte cursor while the body continues.
 pub fn render_source_page(page: &ReportSourcePageView) -> String {
     if let Some(next) = page.next {
         format!("{}\nnext: {next}", page.text)
@@ -432,34 +330,22 @@ pub fn render_source_page(page: &ReportSourcePageView) -> String {
     }
 }
 
-/// `"credential:<provider>:main"` via the shared [`credential_target`]
-/// grammar (validation and remainder rules are never re-invented here); see
-/// [`SETUP_CREDENTIAL_LABEL`].
 pub fn credential_target_for(provider: &str) -> ManagementTargetWire {
     credential_target(provider, SETUP_CREDENTIAL_LABEL)
 }
 
-/// `"<provider>:main"`, matching the Host registry naming
-/// (`"<provider>:<label>"`) and its pre-consent default ref.
 pub fn credential_id_for(provider: &str) -> String {
     format!("{provider}:{SETUP_CREDENTIAL_LABEL}")
 }
 
-/// Wire name of the dialogue capability in the shared consent grammar.
 pub const CAPABILITY_DIALOGUE: &str = "dialogue";
 
-/// Wire name of the learning capability in the shared consent grammar.
 pub const CAPABILITY_LEARNING: &str = "learning";
 
-/// `"consent:<capability>:<provider>:<model>:<credential-id>"` via the shared
-/// [`consent_target`] grammar (never re-invented here).
 pub fn consent_target_for(capability: &str, provider: &str, model: &str) -> ManagementTargetWire {
     consent_target(capability, provider, model, &credential_id_for(provider))
 }
 
-/// The Host sources the key from its own environment over the Host-local
-/// path, so this payload carries no secret; the rationale is provenance-only
-/// (origin, no quote).
 pub fn credential_intent(
     intent_id: CommandWireId,
     base: &BaseViewMark,
@@ -478,9 +364,6 @@ pub fn credential_intent(
     }
 }
 
-/// Provenance-only rationale (origin, no quote): assignment parameters travel
-/// in the consent target, never in the quote. The capability is explicit so a
-/// dialogue assignment can never stand in for learning.
 pub fn assignment_intent(
     intent_id: CommandWireId,
     base: &BaseViewMark,
@@ -501,13 +384,6 @@ pub fn assignment_intent(
     }
 }
 
-/// One Targeted Deletion request intent (`Stage 6` A1b, lifecycle §15).
-///
-/// Advisory by construction: the target grammar is the shared one from
-/// `ene-api`, the rationale is provenance-only (the exact text travels in the
-/// target, never in the quote, so the Host's intent journal can redact it),
-/// and nothing here can confirm the destructive operation. `base` must be the
-/// current deletion surface mark the status page returned.
 #[must_use]
 pub fn deletion_intent(
     intent_id: CommandWireId,
@@ -528,15 +404,11 @@ pub fn deletion_intent(
     }
 }
 
-/// Parses one `--purpose` token from the closed wire set.
 #[must_use]
 pub fn deletion_purpose(token: &str) -> Option<DeletionPurposeWire> {
     DeletionPurposeWire::from_name(token)
 }
 
-/// Renders the bounded deletion status page: the surface mark an intent builds
-/// on, one line per operation, and the `next:` cursor while a later page
-/// exists. No target body, search material, or credential is in this page.
 #[must_use]
 pub fn render_deletion_status(response: &DeletionStatusResponse) -> String {
     let DeletionStatusResponse::Page(page) = response else {
@@ -568,9 +440,6 @@ pub fn render_deletion_status(response: &DeletionStatusResponse) -> String {
     lines.join("\n")
 }
 
-/// Builds one bounded usage summary request from the CLI filters. Absent
-/// fields stay absent: the Host applies its own period default and clamps the
-/// limit, so the CLI never widens the read beyond the owner boundary.
 #[must_use]
 pub fn usage_request(args: &UsageArgs) -> UsageSummaryRequest {
     UsageSummaryRequest {
@@ -586,11 +455,6 @@ pub fn usage_request(args: &UsageArgs) -> UsageSummaryRequest {
     }
 }
 
-/// Builds one cap set/update intent. The target grammar is shared with the
-/// Host (`usage_cap_target`, never a CLI-local mini-language); the base mark
-/// comes from a just-read [`UsageSummaryPage`], so the Host re-checks a
-/// revision the Owner actually saw. `quote` is never populated: the cap value
-/// travels in the typed target.
 #[must_use]
 pub fn usage_cap_intent(
     intent_id: CommandWireId,
@@ -614,9 +478,6 @@ pub fn usage_cap_intent(
     }
 }
 
-/// Finds the opaque currentness mark of exactly one cap slot in a freshly
-/// read page. `None` means the page did not name the slot: the CLI must not
-/// invent a mark or guess a revision.
 #[must_use]
 pub fn usage_cap_mark_for<'a>(
     page: &'a UsageSummaryPage,
@@ -632,9 +493,6 @@ pub fn usage_cap_mark_for<'a>(
         .map(|cap| cap.mark.as_str())
 }
 
-/// Renders one bounded usage page: one line per row, one line per cap slot,
-/// and the `next:` cursor while a later page exists. Unavailable and stale
-/// answers keep their distinct meaning instead of an empty page.
 #[must_use]
 pub fn render_usage_page(response: &UsageSummaryResponse) -> String {
     match response {
@@ -740,12 +598,6 @@ fn render_money(money: &UsageMoneyView) -> String {
     format!("{}:{}", money.currency, money.micros)
 }
 
-/// Renders one `kind: title – body` line per section, in Host order.
-///
-/// Prints exactly what the Host-filtered view contains and nothing else: no
-/// revision marks, no envelope IDs, no `Debug` dumps. Body text is
-/// Host-filtered display fact; secrecy is a Host property, and this adds no
-/// secret-bearing surface of its own.
 pub fn render_view(view: &ManagementView) -> String {
     view.sections
         .iter()
@@ -761,7 +613,6 @@ pub fn role_label(role: HistoryRole) -> &'static str {
     }
 }
 
-/// One `[role] text` line per item, oldest first.
 pub fn render_history(items: &[HistoryItem]) -> String {
     items
         .iter()
@@ -770,8 +621,6 @@ pub fn render_history(items: &[HistoryItem]) -> String {
         .join("\n")
 }
 
-/// Intake-routing decision for a [`RoundIntakeOutcomeWire`]; decline messages
-/// carry refs and generations only, never body text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntakeAction {
     Accepted { round: String },
@@ -807,8 +656,6 @@ pub fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> IntakeAction {
     }
 }
 
-/// ACK-routing decision for an [`UndeliveredAckOutcome`]; retryable answers
-/// keep their meaning instead of being shown as presented.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AckAction {
     Confirmed { detail: String },
@@ -844,9 +691,6 @@ pub fn describe_ack(outcome: &UndeliveredAckOutcome) -> AckAction {
     }
 }
 
-/// Resume-routing decision for a [`ResumeTaskOutcomeWire`]; only `Resumed`
-/// is applied, refusals stay Ok-side with zero Task writes, and `InFlight`
-/// / `Unavailable` are retryable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeAction {
     Resumed { detail: String },
@@ -905,7 +749,6 @@ pub fn describe_resume(outcome: &ResumeTaskOutcomeWire) -> ResumeAction {
     }
 }
 
-/// Undelivered-fetch routing for an [`UndeliveredResponse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchAction {
     Paint,
@@ -930,7 +773,6 @@ pub fn describe_fetch(response: &UndeliveredResponse) -> FetchAction {
     }
 }
 
-/// Report-fetch routing for a [`TaskReportResponse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReportAction {
     Show,
@@ -948,8 +790,6 @@ pub fn describe_report(response: &TaskReportResponse) -> ReportAction {
         },
     }
 }
-/// Management-routing decision for a [`ManagementOutcome`]; `detail`/`message`
-/// lines carry operational facts only, never bodies or secrets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagementAction {
     Applied { detail: String },

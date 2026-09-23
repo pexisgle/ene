@@ -1,10 +1,3 @@
-//! Targeted Deletion management projection.
-//!
-//! Distinct from conversational forget. Client intent only stages a request;
-//! Host-local seated control confirms. Status is the bounded
-//! `DeletionStatusRequest`. Exact target text is Owner body and stays out of
-//! snapshots and Debug.
-
 use std::time::Duration;
 
 use ene_api::v1::deletion::{
@@ -24,7 +17,6 @@ use zeroize::Zeroize as _;
 use crate::control::ConfirmationClient;
 use crate::ui::DesktopError;
 
-/// Targeted Deletion page. Exact text is never part of the projection.
 pub struct DeletionPanel {
     exact_text: String,
     purpose: DeletionPurposeWire,
@@ -159,7 +151,6 @@ impl DeletionPanel {
         self.exact_text.is_empty()
     }
 
-    /// Status body: phases, holds, participants. No target text.
     #[must_use]
     pub fn render(&self) -> String {
         let mut lines = Vec::new();
@@ -205,7 +196,6 @@ impl DeletionPanel {
             .is_some_and(|page| !page.operations.is_empty())
     }
 
-    /// Advisory Client request. Destructive confirmation is Host-local.
     pub async fn request(
         &mut self,
         client: &mut Client,
@@ -240,7 +230,6 @@ impl DeletionPanel {
         }
     }
 
-    /// Client `confirmed=true` is DeniedByBoundary and does not complete.
     pub async fn request_confirmed_true(
         &mut self,
         client: &mut Client,
@@ -295,8 +284,6 @@ impl DeletionPanel {
         }
     }
 
-    /// Lists staged request identities on the seated control channel, then
-    /// mints a confirmation session. Exact text does not travel this path.
     pub async fn begin_confirm(
         &mut self,
         seat: &mut ConfirmationClient,
@@ -321,13 +308,6 @@ impl DeletionPanel {
         seat.request_deletion_confirm(&preview.request_id).await
     }
 
-    /// Resolves the Held operation the Owner selected, as the identity the
-    /// resume request names. Borrowing nothing keeps the request future free
-    /// to run while this panel keeps serving its own erasure demand.
-    ///
-    /// # Errors
-    ///
-    /// [`DesktopError::Protocol`] when no Held operation is selected.
     pub(crate) fn resume_target(&self) -> Result<(String, u64), DesktopError> {
         let operation = self.page.as_ref().and_then(|page| {
             page.operations
@@ -354,7 +334,6 @@ impl DeletionPanel {
         Ok((operation.operation.0.clone(), operation.sweep))
     }
 
-    /// Records the resume outcome as this panel's notice.
     pub(crate) fn note_resume(&mut self, reply: &FromConfirmation) {
         self.notice = match reply {
             FromConfirmation::Outcome(ControlOutcome::Deletion(DeletionOutcome::Resumed {

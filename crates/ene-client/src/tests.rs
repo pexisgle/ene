@@ -1,6 +1,3 @@
-//! In-memory only: no sockets are opened and the environment is never
-//! mutated; frames go through the in-memory codec or plain in-memory scripts.
-
 use ene_api::v1::envelope::WireSender;
 use ene_api::v1::handshake::PairingProvisionSecret;
 use ene_api::v1::payload::{BodyStateHint, WirePayload};
@@ -15,7 +12,6 @@ use ene_plugin_ipc::WireFrame;
 use super::frames::{PreparedRequest, frame_for, proof_frame, retry_frame};
 use super::session::SessionState;
 
-/// Deterministic stand-in for a process incarnation.
 fn incarnation() -> ClientIncarnationId {
     ClientIncarnationId {
         counter: 0,
@@ -94,9 +90,6 @@ fn session_starts_unobserved_and_tracks_latest() {
     );
 }
 
-/// One Host local-erasure demand wipes the deferred presentation buffer and
-/// reports exactly the classes this process manages; the wire reply carries
-/// no body and no system-wide completion claim (Stage 6 A3c).
 #[test]
 fn local_erasure_demand_wipes_the_deferred_buffer_and_reports_classes() {
     use ene_api::v1::deletion::{
@@ -152,10 +145,6 @@ fn local_erasure_demand_wipes_the_deferred_buffer_and_reports_classes() {
     );
 }
 
-/// The boot cache is process-global; this serializes the boot tests so a
-/// reset in one never clears another's cached boot mid-assertion (nextest
-/// already isolates tests per process, this covers the shared-process runner
-/// too).
 static BOOT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
@@ -176,7 +165,6 @@ fn boot_incarnation_is_one_per_process_and_advances_per_boot() {
         }
     }
 
-    // Fresh directory: the first published counter is 1.
     let dir = scratch("boot");
     if std::fs::remove_dir_all(&dir).is_err() {
         // Absent is the expected case; leftovers from a failed run clear here.
@@ -195,7 +183,6 @@ fn boot_incarnation_is_one_per_process_and_advances_per_boot() {
         first.random <= i64::MAX as u64,
         "random stays in the non-negative SQLite INTEGER range history stores, got {first:?}"
     );
-    // Same-process reconnect reuses the one boot identity without advancing.
     let second = boot_incarnation(&dir);
     assert!(second.is_ok(), "second boot must succeed: {second:?}");
     assert!(
@@ -207,7 +194,6 @@ fn boot_incarnation_is_one_per_process_and_advances_per_boot() {
         stored.trim() == "1",
         "reconnect must not advance the counter file, got {stored:?}"
     );
-    // A restart (cache forgotten) advances exactly once with fresh randomness.
     reset_for_tests();
     let third = boot_incarnation(&dir);
     assert!(third.is_ok(), "post-restart boot must succeed");
@@ -220,7 +206,6 @@ fn boot_incarnation_is_one_per_process_and_advances_per_boot() {
         third.random != first.random || third.counter != first.counter,
         "restart must not repeat the boot identity: {first:?} vs {third:?}"
     );
-    // The uncached advance is the same file update the boot path uses.
     reset_for_tests();
     let advanced = advance_counter(&dir);
     assert!(
@@ -299,7 +284,6 @@ fn message_id(value: u128) -> WireMessageId {
     WireMessageId(uuid::Uuid::from_u128(value))
 }
 
-/// The payload kind never matters to correlation.
 fn answer_payload() -> WirePayload {
     WirePayload::HistoryRequest(history_request("companion-1", 1))
 }
@@ -344,7 +328,6 @@ fn prepared_retry_reuses_command_with_fresh_transport_ids() {
         second.envelope.observed.presence_generation_view,
         "retries preserve the observed premise"
     );
-    // The raw builder keeps the same contract for a caller-minted command.
     let raw = retry_frame(input(), sender, Some(3), command);
     assert_eq!(
         raw.envelope.correlation.command_id,

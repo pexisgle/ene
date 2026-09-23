@@ -1,12 +1,3 @@
-//! Host adapter from the Task-owned Task Agent inference port to the
-//! inference boundary.
-//!
-//! Composition only: the task layer keeps the port and never sees permission,
-//! credential, or provider internals. This adapter maps the opaque delegation
-//! correlation into the inference-owned premise and mirrors the inference
-//! outcomes without adding behavior. The provider output is handed back as a
-//! Task Agent output, never as Task completion.
-
 use ene_companion::{
     ActivityId, ActivityRepository, HistoryMessage, HistoryRepository, HistoryRole,
     ManagementActivity,
@@ -23,13 +14,6 @@ use ene_task::{
     TaskInstructionSourceRecord,
 };
 
-/// Adapts one [`InferenceExecutor`] to the Task Agent port.
-///
-/// `abort` is the running execution's local cooperative stop token, when the
-/// caller runs under one: the adapter forwards it into the dispatch boundary,
-/// which owns the post-claim accounting, so an abort stops the provider wait
-/// without losing the attempt's usage fact. A bare turn outside an execution
-/// passes `None`.
 pub struct TaskAgentInferenceAdapter<'a, I> {
     executor: &'a I,
     abort: Option<&'a DispatchAbort>,
@@ -85,17 +69,6 @@ impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, 
     }
 }
 
-/// Adapts the companion-owned canonical sources to the Task-owned
-/// instruction-source port.
-///
-/// The adapter resolves the origin kind to its table — Owner conversation
-/// messages by History primary key, first-party management activities by
-/// activity primary key — with one bounded single-record read each, and
-/// maps the row into the Task-owned record. It adds no behavior: no body is
-/// cached or copied into Task state, an absent row is `Ok(None)`, and a
-/// malformed row or read failure becomes a fixed-class technical error
-/// without the row or the body. Timeline loads, recent windows, and command
-/// lookups are never a substitute for either read.
 pub struct OwnerInstructionSource<'a, H, A> {
     history: &'a H,
     activity: &'a A,
@@ -136,8 +109,6 @@ impl<H: HistoryRepository + Sync, A: ActivityRepository + Sync> TaskInstructionS
                     })?;
                 Ok(activity.map(map_activity_record))
             }
-            // No body producer exists for these kinds: the turn fails
-            // closed on the origin kind before any read is attempted.
             TaskContextOriginKind::Spontaneous | TaskContextOriginKind::ScheduleOccurrence => {
                 Err(TaskInstructionSourceError::SourceUnavailable {
                     reason: String::from("unsupported instruction origin kind"),
@@ -147,8 +118,6 @@ impl<H: HistoryRepository + Sync, A: ActivityRepository + Sync> TaskInstructionS
     }
 }
 
-/// The whole mapping is one direction: no `HistoryMessage` crosses into
-/// `ene-task`, and only the fields the turn needs are carried.
 fn map_history_message(message: HistoryMessage) -> TaskInstructionSourceRecord {
     TaskInstructionSourceRecord {
         kind: TaskContextOriginKind::OwnerConversation,
@@ -162,9 +131,6 @@ fn map_history_message(message: HistoryMessage) -> TaskInstructionSourceRecord {
     }
 }
 
-/// A first-party management activity is an Owner input by construction: it
-/// records an Owner-authored instruction the Host accepted on the trusted
-/// inlet, so it maps to the Owner role with its recorded companion.
 fn map_activity_record(activity: ManagementActivity) -> TaskInstructionSourceRecord {
     TaskInstructionSourceRecord {
         kind: TaskContextOriginKind::OwnerManagement,
@@ -175,9 +141,6 @@ fn map_activity_record(activity: ManagementActivity) -> TaskInstructionSourceRec
     }
 }
 
-/// Mirrors the inference not-sent vocabulary one-for-one. A moved Task
-/// premise stays [`TaskAgentInferenceOutcome::StaleTaskPremise`] and is never
-/// folded into consent staleness.
 fn mirror_not_sent(reason: NotSentReason) -> TaskAgentInferenceOutcome {
     use TaskAgentInferenceOutcome as Outcome;
     use TaskAgentNotSent as NotSent;
@@ -195,7 +158,6 @@ fn mirror_not_sent(reason: NotSentReason) -> TaskAgentInferenceOutcome {
     }
 }
 
-/// Short technical class; never a body or transport payload.
 fn inference_unavailable(error: InferenceTechnicalError) -> TaskAgentInferenceError {
     let reason = match error {
         InferenceTechnicalError::ProviderTransportFailed(_) => "provider transport failed",

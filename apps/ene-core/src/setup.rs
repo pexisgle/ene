@@ -1,101 +1,3 @@
-//! Host management inlet: setup intents, the setup view, and the read-only
-//! Memory view.
-//!
-//! The Client expresses setup intent and reads filtered views; every
-//! acceptance happens Host-side here. Memory has no write path: corrections
-//! and changes arrive as Experience through Learning, never by editing a
-//! canonical row.
-//!
-//! Setup targets are matched on `(intent kind, target string)`; anything else
-//! — every non-setup kind included — answers
-//! [`NeedsClarification`](ene_api::v1::management::ManagementOutcome::NeedsClarification)
-//! as "not in `Stage 2` scope":
-//!
-//! - `(ConfigureCredentialIntent, "credential:{provider}:{label}")` records a
-//!   pending credential approval through the credential owner and answers
-//!   [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation);
-//!   once the Owner approves the pair on the Host-local trusted inlet, a fresh
-//!   intent observing the now-usable pair answers
-//!   [`AppliedAsOneTime`](ene_api::v1::management::ManagementOutcome::AppliedAsOneTime).
-//!   The bearer itself travels the Host-local protected path only: with the
-//!   environment store that means the process environment, which the view
-//!   below notes as env-sourced.
-//! - `(ManageRuleConsentCap, "consent:{provider}:{model}:{credential-id}")`
-//!   assigns the route after verifying the credential is present (the
-//!   registry knows that id under the same provider and the store holds its
-//!   bearer), then commits consent through the consent owner at
-//!   previous-plus-one and answers
-//!   [`StoredAsRuleView`](ene_api::v1::management::ManagementOutcome::StoredAsRuleView)
-//!   carrying the new revision mark. Revision exhaustion clarifies; it never
-//!   reuses the maximum revision with new content.
-//! - `(ManageRuleConsentCap, "setup:complete")` verifies consent plus
-//!   credential presence and answers `AppliedAsOneTime`. Setup completion is
-//!   derived thereafter (consent stored and credential present), never written
-//!   as a flag.
-//! - `(ManageRuleConsentCap, "setup:show")` answers a [`ManagementView`]
-//!   instead of an outcome.
-//! - `(CancelTask, "task:{task-id}")` reaches the Task owner's cancel
-//!   admission ([`HostHandle::cancel_task`], AU16) without waiting for the
-//!   main LLM or a Task Agent. An accepted or already-cancelled Task answers
-//!   [`AppliedAsOneTime`](ene_api::v1::management::ManagementOutcome::AppliedAsOneTime);
-//!   a Task terminal for another reason or an unknown Task clarifies; an
-//!   unreadable store holds. The intent only requests admission: acceptance
-//!   never means running provider I/O or an external effect stopped, and the
-//!   already-started facts stay untouched.
-//! - `(SelectWorkspace, "workspace:{path}")` records the Owner-confirmed
-//!   Workspace for Task work. The Owner-authored path must canonicalize to an
-//!   existing directory; a valid path becomes the trusted first-party premise
-//!   (never provider output) that a conversation Task proposal may use, and
-//!   an invalid path clarifies with zero premise change.
-//! - `(ManageRuleConsentCap, "cap:{scope}:{window}:{currency}:{limit}")` sets
-//!   one provider/system daily/monthly usage cap through the permission-owned
-//!   command (`usage-cost-cap` §13/§17). The intent `base_view` is the opaque
-//!   mark a usage read issued for exactly that cap slot; a stale or
-//!   face-stale mark answers
-//!   [`StaleBaseView`](ene_api::v1::management::ManagementOutcome::StaleBaseView)
-//!   with the rebuilt current mark and stores nothing, an invalid limit
-//!   clarifies, and only the authenticated first-party connection reaches the
-//!   handler. See [`crate::usage`].
-//! - `(RequestDeletionBackupRestoreReset, "deletion:{purpose}:{exact-text}")`
-//!   is the Targeted Deletion request inlet (`Stage 6` A1b; see
-//!   [`crate::deletion`]): it can only stage a durable request awaiting the
-//!   Host-local trusted confirmation, never start an operation. Every other
-//!   target under this kind (backup / restore / reset families) clarifies.
-//!   The management journal never keeps the exact text: the deletion
-//!   fingerprint is body-redacted.
-//!
-//! Target parsing uses the shared `ene-api` setup grammar
-//! ([`parse_credential_target`],
-//! [`parse_consent_target`]):
-//! the Host parse is authoritative and builders never bypass validation. The
-//! `NeedsClarification` DTO carries no detail string, so the "not in
-//! `Stage 2` scope" note lives here in documentation, not on the wire.
-//! Consent writes compare-and-save against the expectation parsed from the
-//! intent `base_view`; mismatch answers
-//! [`StaleBaseView`](ene_api::v1::management::ManagementOutcome::StaleBaseView)
-//! with the rebuilt current mark. Registration takes no mark (no revision is
-//! involved) and views are reads.
-//!
-//! Views never carry secrets: sections report provider, model, consent
-//! revision, and credential presence only. A store failure behind a view
-//! answers zero sections under the `"unavailable"` mark (documented gap: there
-//! is no error DTO on the view path). A request that names only `memory` reads
-//! no setup state, so it still renders while consent or credential state is
-//! unreadable; its mark stays `"unavailable"` because it named no management
-//! revision to build on.
-//!
-//! The Memory section is body-bearing, so it is also a Targeted Deletion
-//! boundary: bodies are checked against the current erasure conditions and a
-//! covered one is withheld at read time, and a non-empty body handed to the
-//! calling incarnation is recorded as a possible target-bearing local copy
-//! (lifecycle §8.1; critical-areas §5.2).
-//!
-//! Rationale is fingerprint material only: the inlet never acts on the
-//! intent `rationale`, but its origin and quote ride the replay fingerprint
-//! so a reused id with a new rationale counts as different content.
-//! Assignment parameters come from the parsed consent target; the Host never
-//! sends intents, so no `quote` handling exists Host-side beyond carrying it.
-
 use ene_action::WorkspaceRoot;
 use ene_api::v1::management::{
     ManagementIntent, ManagementIntentKind, ManagementOutcome, ManagementView,
@@ -131,8 +33,6 @@ use ene_task::{
 use crate::presentation::CurrentCoverage;
 use crate::serve::{CredStore, HostHandle, LiveInput, outgoing_envelope, outgoing_frame};
 
-/// The outcome is the ack of the intent saga, so the envelope carries the
-/// intent id as `command_id` alongside the `reply_to` link.
 pub(crate) fn outcome_frame(
     frame: &WireFrame,
     live: &LiveInput,
@@ -149,10 +49,6 @@ fn view_frame(frame: &WireFrame, live: &LiveInput, view: ManagementView) -> Wire
     outgoing_frame(frame, live, WirePayload::ManagementView(view))
 }
 
-/// One parsed consent assignment target: capability plus route.
-///
-/// Keeps the assignment parameters grouped so the capability can never be
-/// separated from the route it authorizes at the call boundary.
 struct ConsentTarget {
     capability: CapabilityKind,
     provider: String,
@@ -161,10 +57,6 @@ struct ConsentTarget {
 }
 
 impl HostHandle {
-    /// Every other kind answers `NeedsClarification` (deferred scope, never a
-    /// silent accept). Store failures behind a write answer
-    /// [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation):
-    /// nothing was decided, so a later retry is safe.
     pub(crate) async fn apply_intent(
         &self,
         frame: &WireFrame,
@@ -172,8 +64,6 @@ impl HostHandle {
         live: &LiveInput,
     ) -> Vec<WireFrame> {
         if intent.confirmed {
-            // Self-declared confirmation is never Host confirmation (IPC §18).
-            // This is a protocol denial, not a decided intent snapshot.
             return vec![outcome_frame(
                 frame,
                 live,
@@ -193,14 +83,9 @@ impl HostHandle {
             ManagementIntentKind::SelectWorkspace => {
                 self.select_workspace_intent(frame, intent, live).await
             }
-            // Targeted Deletion request inlet (Stage 6 A1b): the intent is
-            // advisory and can only stage a request; the destructive final
-            // confirmation is Host-local (IPC §18.1). See [`crate::deletion`].
             ManagementIntentKind::RequestDeletionBackupRestoreReset => {
                 self.targeted_deletion_intent(frame, intent, live).await
             }
-            // Deferred scope answers clarify, recorded like any other decided
-            // outcome so a retried id observes one answer.
             _ => {
                 return vec![outcome_frame(
                     frame,
@@ -216,8 +101,6 @@ impl HostHandle {
         }
     }
 
-    /// Explicit match, never derived: the stored text must stay stable
-    /// across refactors that do not change the wire.
     fn intent_kind_name(kind: ManagementIntentKind) -> &'static str {
         match kind {
             ManagementIntentKind::StopCompanion => "stop-companion",
@@ -236,18 +119,6 @@ impl HostHandle {
         }
     }
 
-    /// Reaches the Task owner's cancel admission from the first-party
-    /// management path.
-    ///
-    /// The Host composes the request only: [`HostHandle::cancel_task`] is the
-    /// one admission boundary and its durable `progress` CAS is the only
-    /// authority. The wire outcome loses no meaning that the management
-    /// vocabulary can carry: an accepted or already-`Cancelled` Task answers
-    /// `AppliedAsOneTime`, a Task terminal for another reason
-    /// (`Completed` / `Failed`) and an unknown Task clarify, and an
-    /// unreadable store holds. The intent never claims that running provider
-    /// I/O or an external effect stopped, and it never rewrites already
-    /// started activity facts.
     async fn cancel_task_intent(
         &self,
         frame: &WireFrame,
@@ -281,9 +152,6 @@ impl HostHandle {
             )];
         };
         match self.cancel_task(CancelTaskCommand { task }).await {
-            // The admission happened exactly once; an already-cancelled Task
-            // means the same accepted fact, so both answer the one-time
-            // application and an exact retry replays this snapshot.
             Ok(TaskCancelOutcome::CancelAccepted | TaskCancelOutcome::AlreadyCancelled) => {
                 vec![outcome_frame(
                     frame,
@@ -296,12 +164,6 @@ impl HostHandle {
                     .await,
                 )]
             }
-            // Another terminal state won or there is no Task to cancel: the
-            // admission cannot happen, and the management vocabulary has no
-            // more specific refusal, so clarify rather than reporting an
-            // admission that did not occur. The first-party admission has no
-            // Owner-message premise, so `Superseded` is unreachable and maps
-            // the same safe way.
             Ok(
                 TaskCancelOutcome::TaskTerminal { .. }
                 | TaskCancelOutcome::MissingTask { .. }
@@ -318,7 +180,6 @@ impl HostHandle {
                     .await,
                 )]
             }
-            // Nothing was decided, so a retry is safe.
             Err(_) => vec![outcome_frame(
                 frame,
                 live,
@@ -328,22 +189,6 @@ impl HostHandle {
         }
     }
 
-    /// Reaches the Task owner's explicit resume admission from the
-    /// first-party management path (H-A.1 / AU17).
-    ///
-    /// The target is `task:{task-id}` and the rationale quote carries the
-    /// Owner's resume instruction body; both are required, anything else
-    /// clarifies. The Host records the first-party activity (idempotent by
-    /// intent id: a retry observes the same activity, never a second one),
-    /// composes the premise from the Task's durable current revision and
-    /// purpose, and runs the same owner gate as the conversation path
-    /// ([`HostHandle::resume_task`]). No presence check and no provider call
-    /// are involved; an accepted resume answers
-    /// [`AppliedAsOneTime`](ene_api::v1::management::ManagementOutcome::AppliedAsOneTime),
-    /// every owner refusal clarifies, and an unreadable store holds. The
-    /// intent never starts a runner itself: the resume commit launches
-    /// through the installed launcher, and an offline opener with no
-    /// launcher observes the owner's `ExecutionUnavailable` hold.
     async fn resume_task_intent(
         &self,
         frame: &WireFrame,
@@ -416,9 +261,6 @@ impl HostHandle {
             }
             Ok(Some(record)) => record,
         };
-        // The activity is the first-party instruction record the resume
-        // commit resolves: the Task it names is the Task it resumes, so the
-        // command carries the activity's own recorded premise.
         let activity = match self
             .store
             .record_resume_activity(RecordResumeActivityCommand {
@@ -438,9 +280,6 @@ impl HostHandle {
                     ManagementOutcome::HeldByOperation,
                 )];
             }
-            // The instruction body is under a current erasure condition: the
-            // activity is not recorded and the resume is held, never answered
-            // as applied.
             Ok(ResumeActivityOutcome::HeldForErasure) => {
                 return vec![outcome_frame(
                     frame,
@@ -463,8 +302,6 @@ impl HostHandle {
             })
             .await
         {
-            // The revision forward and the new delegation committed and the
-            // runner launched; the activity stays as the origin record.
             Ok(TaskResumeOutcome::Resumed { .. }) => vec![outcome_frame(
                 frame,
                 live,
@@ -475,10 +312,6 @@ impl HostHandle {
                 )
                 .await,
             )],
-            // Every owner refusal (stale, terminal, running, held,
-            // available-result, missing, exhausted) clarifies: the
-            // management vocabulary has no narrower refusal, and nothing
-            // committed.
             Ok(_) => vec![outcome_frame(
                 frame,
                 live,
@@ -489,7 +322,6 @@ impl HostHandle {
                 )
                 .await,
             )],
-            // Nothing was decided, so a retry is safe.
             Err(_) => vec![outcome_frame(
                 frame,
                 live,
@@ -499,14 +331,6 @@ impl HostHandle {
         }
     }
 
-    /// Selects the Owner-confirmed Workspace folder for Task work.
-    ///
-    /// This is the trusted first-party premise a Task association may use:
-    /// the path is Owner-authored on this inlet, the Host validates it as an
-    /// existing canonical directory, and provider output never carries one.
-    /// The intent only records the selection; the Task owner confirms the
-    /// association when a Task is created. An invalid or missing path
-    /// clarifies with zero premise change.
     async fn select_workspace_intent(
         &self,
         frame: &WireFrame,
@@ -554,11 +378,6 @@ impl HostHandle {
         )]
     }
 
-    /// The wire intent only PROPOSES: a held snapshot stays held until a NEW
-    /// intent id observes the approval, because a new judgment requires a new
-    /// key (same rule as command keys). Credential registration is
-    /// high-privilege (trusted confirmation required), so the wire never
-    /// creates usable refs directly.
     async fn register_credential(
         &self,
         frame: &WireFrame,
@@ -577,7 +396,6 @@ impl HostHandle {
                 .await,
             )];
         };
-        // Durable replay first: an exact retry replays its stored snapshot.
         if let Some(answer) = self
             .replay_or_hold(
                 frame,
@@ -589,10 +407,6 @@ impl HostHandle {
         {
             return answer;
         }
-        // One durable determination owned by `ene-credential`: the pending
-        // insert (or usable recheck) and the replay row share a transaction,
-        // so snapshot and state can never strand apart. A raced insert is
-        // resolved from the journal below.
         let fingerprint = Self::intent_fingerprint(intent, Self::INTENT_KIND_REGISTER);
         let registration = RegistrationFingerprint {
             intent_id: fingerprint.intent_id.clone(),
@@ -624,7 +438,6 @@ impl HostHandle {
                 )]
             }
             Ok(RegistrationApply::AlreadyDecided) => {
-                // Lost a cross-process race: answer from the journal winner.
                 let intent_key = intent.intent_id.0.as_hyphenated().to_string();
                 match self.store.lookup_intent_outcome(&intent_key).await {
                     Ok(Some(stored)) if stored.fingerprint == fingerprint => vec![outcome_frame(
@@ -656,8 +469,6 @@ impl HostHandle {
         }
     }
 
-    /// Replay-fingerprint discriminators, one per recording path; a reused id
-    /// across kinds is different content by construction.
     const INTENT_KIND_ASSIGN: &str = "assign";
     const INTENT_KIND_REGISTER: &str = "register";
     const INTENT_KIND_COMPLETE: &str = "complete";
@@ -665,7 +476,6 @@ impl HostHandle {
     const INTENT_KIND_RESUME_TASK: &str = "resume-task";
     const INTENT_KIND_SELECT_WORKSPACE: &str = "select-workspace";
 
-    /// One rationale origin token, shared by every fingerprint composition.
     pub(crate) fn rationale_origin_name(origin: RationaleOrigin) -> &'static str {
         match origin {
             RationaleOrigin::Conversation => "conversation",
@@ -684,12 +494,6 @@ impl HostHandle {
         }
     }
 
-    /// Identity is the fingerprint only; the recorded outcome is irrelevant.
-    ///
-    /// The comparison runs on the *computed* fingerprint, never on the raw
-    /// intent: the Targeted Deletion fingerprint is body-redacted (see
-    /// [`crate::deletion`]), so a journal row can never become a place where
-    /// the Owner's exact text is compared — or stored.
     fn fingerprint_matches(stored: &IntentFingerprint, incoming: &IntentFingerprint) -> bool {
         stored.kind == incoming.kind
             && stored.target == incoming.target
@@ -705,9 +509,6 @@ impl HostHandle {
             },
             IntentOutcome::AppliedAsOneTime => ManagementOutcome::AppliedAsOneTime,
             IntentOutcome::HeldByOperation => ManagementOutcome::HeldByOperation,
-            // The wire has no exhaustion outcome: a consent identity that
-            // cannot advance its revision needs Owner intervention, the same
-            // answer class as any other undecidable premise.
             IntentOutcome::NeedsClarification | IntentOutcome::RevisionExhausted => {
                 ManagementOutcome::NeedsClarification
             }
@@ -717,14 +518,6 @@ impl HostHandle {
         }
     }
 
-    /// Durable intent replay first (§18.2): the stored snapshot precedes
-    /// every premise read, so a past-success exact retry reaches its prior
-    /// outcome even after state moved on.
-    ///
-    /// A hit with the same fingerprint answers verbatim (never re-executed);
-    /// a hit with different content clarifies instead of adopting the new
-    /// meaning; an unreadable journal holds. A miss returns [`None`] so the
-    /// caller falls through to the owner-side execution.
     pub(crate) async fn replay_or_hold(
         &self,
         frame: &WireFrame,
@@ -772,19 +565,12 @@ impl HostHandle {
         if target == SETUP_COMPLETE_TARGET {
             return self.complete_setup(frame, intent, live).await;
         }
-        // The usage-cap grammar shares this kind (rule/consent/cap) but not
-        // the consent grammar: a `cap:` target reaches the permission-owned
-        // cap command with its revision compare (`usage-cost-cap` §13/§17).
         if crate::usage::is_usage_cap_target(target) {
             return self.set_usage_cap_intent(frame, intent, live).await;
         }
         let Some((capability, provider, model, credential_id)) =
             parse_consent_target(&intent.target)
         else {
-            // Malformed targets decide Clarify like any other outcome: the
-            // row closes the hole where a retry could otherwise swap in a
-            // valid target under the same id and reach assign. Recorded
-            // under the assign kind so the fingerprint stays comparable.
             return vec![outcome_frame(
                 frame,
                 live,
@@ -797,8 +583,6 @@ impl HostHandle {
             )];
         };
         let Some(capability) = CapabilityKind::from_name(&capability) else {
-            // Unknown capabilities are outside the closed world; a retry
-            // under the same id observes the same clarification.
             return vec![outcome_frame(
                 frame,
                 live,
@@ -819,12 +603,6 @@ impl HostHandle {
         self.assign_consent(frame, intent, &target, live).await
     }
 
-    /// Durable-before-visible: a store failure answers
-    /// [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation)
-    /// rather than the decided outcome, so an id never observes an answer
-    /// its retry cannot reproduce. A lost write race answers the winner
-    /// (replay) or clarifies (conflict) — never the locally decided
-    /// outcome.
     pub(crate) async fn record_decided(
         &self,
         fingerprint: IntentFingerprint,
@@ -843,9 +621,6 @@ impl HostHandle {
         }
     }
 
-    /// The saved record keeps the stored id when one exists and advances its
-    /// revision. A lost compare race answers `StaleBaseView` with the rebuilt
-    /// current mark instead of overwriting: the caller re-reads and retries.
     async fn assign_consent(
         &self,
         frame: &WireFrame,
@@ -859,9 +634,6 @@ impl HostHandle {
             model,
             credential_id,
         } = target;
-        // Durable intent replay first (§18.2): a past-success exact retry
-        // reaches its prior outcome; a miss falls through to the owner-side
-        // assignment.
         if let Some(answer) = self
             .replay_or_hold(
                 frame,
@@ -873,8 +645,6 @@ impl HostHandle {
         {
             return answer;
         }
-        // Credential availability is a credential-owned premise: the Host
-        // only crosses owners, it never combines their judgments.
         let credential_present = match available_credential(
             provider,
             credential_id,
@@ -894,9 +664,6 @@ impl HostHandle {
                 )];
             }
         };
-        // The consent owner decides the route: mark parsing, stale faces,
-        // same-route shortcut, revision bump, and the atomic commit, all
-        // scoped to the capability the target names.
         let premises = AssignConsentIntent {
             capability: *capability,
             provider: provider.to_string(),
@@ -937,8 +704,6 @@ impl HostHandle {
         intent: &ManagementIntent,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        // Durable replay first: the stored snapshot precedes any currentness
-        // check, so an exact retry replays its prior outcome.
         if let Some(answer) = self
             .replay_or_hold(
                 frame,
@@ -950,9 +715,6 @@ impl HostHandle {
         {
             return answer;
         }
-        // Bearer premise for the atomic claim below: the credential owner
-        // resolves registered-and-backed availability; the transaction
-        // decides completion. Unreadable stores hold.
         let bearer_present = match self.store.load_current(CapabilityKind::Dialogue).await {
             Err(_) => {
                 return vec![outcome_frame(
@@ -984,9 +746,6 @@ impl HostHandle {
                 }
             }
         };
-        // One durable determination: compare, completability, and
-        // snapshot-save share a transaction; the answer below renders the
-        // decided snapshot verbatim. A raced claim answers from the winner.
         match self
             .store
             .complete_with_intent(
@@ -1019,11 +778,6 @@ impl HostHandle {
         }
     }
 
-    /// An empty section list selects every known section (`provider`,
-    /// `model`, `consent`, `credential`, `memory`); otherwise only requested
-    /// known sections render and unknown names are skipped. `memory_after`
-    /// continues the current-memory list; `memory_revisions_of` (with
-    /// `memory_revisions_after`) renders one Memory's revision page instead.
     pub(crate) async fn answer_view(
         &self,
         frame: &WireFrame,
@@ -1042,19 +796,6 @@ impl HostHandle {
         vec![view_frame(frame, live, view)]
     }
 
-    /// Bodies carry display facts only — provider, model, consent revision,
-    /// credential presence plus the bearer-source note — never secrets. Each
-    /// capability owns its section and consent revision; the mark carries
-    /// both segments so a consent write is checked against the capability it
-    /// names. Setup state is read only for sections that report it; a
-    /// `memory`-only request renders Memory without touching the consent or
-    /// credential stores.
-    ///
-    /// The Memory section is read against the current erasure conditions in
-    /// the same pass that reads the bodies: a covered body is withheld, and a
-    /// non-empty body actually handed to this connection's incarnation is
-    /// recorded as a possible target-bearing local copy (lifecycle §8.1). A
-    /// response that carries no Memory body records nothing.
     pub(crate) async fn build_view(
         &self,
         wanted: &[String],
@@ -1065,9 +806,6 @@ impl HostHandle {
     ) -> ManagementView {
         let wants = |name: &str| wanted.is_empty() || wanted.iter().any(|section| section == name);
         let mut sections = Vec::new();
-        // A request that names only `memory` reads no setup state, so a
-        // consent or credential-store failure cannot hide the Memory section.
-        // Its mark stays unavailable because no management revision was read.
         let wants_setup = wanted.is_empty() || wanted.iter().any(|name| name != "memory");
         let mark = if wants_setup {
             let dialogue = match self.store.load_current(CapabilityKind::Dialogue).await {
@@ -1139,10 +877,6 @@ impl HostHandle {
             String::from("unavailable")
         };
         if wants("memory") {
-            // One coverage premise per rendered section, read in the same pass
-            // as the bodies: a covered body is withheld at the read boundary
-            // (critical-areas §5.2), and a body actually handed over is
-            // recorded as a Client local copy (lifecycle §8.1).
             let coverage = self.current_coverage().await;
             let (mut body, delivered) = self
                 .render_memory_view(
@@ -1153,15 +887,8 @@ impl HostHandle {
                 )
                 .await;
             if delivered && !self.note_client_body_delivery(live).await {
-                // No durable delivery evidence: withhold the rendered bodies
-                // rather than hand over a copy the Host cannot account for.
                 body.clear();
             } else if delivered {
-                // The premise above was read before the evidence write and the
-                // handoff: a condition that committed in between is either
-                // already in the snapshot (evidence committed first) or must
-                // withhold the rendered bodies here
-                // (critical-areas §5.2/§6.1).
                 let fresh = self.current_coverage().await;
                 if fresh.covers(&body) {
                     body.clear();
@@ -1179,8 +906,6 @@ impl HostHandle {
         }
     }
 
-    /// Credential presence for one consent route, `None` when the premise
-    /// cannot be resolved (the caller answers an unavailable view).
     async fn credential_present(&self, record: Option<&ConsentRecord>) -> Option<bool> {
         let Some(record) = record else {
             return Some(false);
@@ -1198,27 +923,6 @@ impl HostHandle {
         }
     }
 
-    /// Read-only projection of current Memory and its change history.
-    ///
-    /// With no direction, renders one page of [`MEMORY_PAGE_SIZE`] current
-    /// memories, newest first, continuing strictly after `after` and ending
-    /// with `next: <id>` while more remain. With `revisions_of`, renders one
-    /// page of that Memory's revisions (oldest first) plus their grounds,
-    /// continuing strictly after `after_revision` and ending with
-    /// `next-revision: <n>` while more remain. Both pages stop at a body byte
-    /// budget, so a large corpus never inflates one frame past the IPC cap;
-    /// the cursor is the last rendered item, so stopping early cannot skip or
-    /// duplicate a row.
-    ///
-    /// The list and the revision detail are separate reads on purpose: a
-    /// Memory with hundreds of revisions must not enlarge the list page.
-    /// There is no write path here: corrections and changes arrive as
-    /// Experience through Learning, never by editing a Memory row.
-    ///
-    /// Every rendered body is checked against the pass's [`CurrentCoverage`]:
-    /// a covered body is withheld (the row keeps its identity and cursor
-    /// position), and the returned flag reports whether at least one
-    /// non-empty, uncovered body actually reached this section.
     async fn render_memory_view(
         &self,
         after: Option<&str>,
@@ -1280,8 +984,6 @@ impl HostHandle {
             rendered += 1;
         }
         if rendered < memories.len() {
-            // The cursor is the last rendered id, so the next page starts at
-            // the first unrendered memory and cannot skip or repeat a row.
             body.push_str(&format!("next: {}\n", last_id.as_raw().as_uuid()));
         }
         (body.trim_end().to_owned(), delivered)
@@ -1314,9 +1016,6 @@ impl HostHandle {
                 (String::from("unknown memory"), false)
             };
         }
-        // One batch lookup for the page's grounds: a shared Summary is read
-        // once, and a Summary id with no stored row is rendered as its own
-        // unavailable state rather than silently omitted.
         let summary_ids: Vec<SummaryId> = revisions.iter().filter_map(|r| r.summary).collect();
         let loaded = self.store.load_summaries(&summary_ids).await;
         let summaries_unavailable = loaded.is_err();
@@ -1332,8 +1031,6 @@ impl HostHandle {
                 let short = short_id(summary_id.as_raw());
                 match loaded.iter().find(|summary| summary.id == summary_id) {
                     Some(summary) => {
-                        // Shared grounds are a body too: a covered one is
-                        // withheld exactly like the revision content.
                         let covered = coverage.covers(&summary.content);
                         piece_delivered |= !covered && !summary.content.is_empty();
                         let grounds = if covered {
@@ -1372,18 +1069,10 @@ fn presence_text(present: bool, source: &str) -> String {
     }
 }
 
-/// Current memories rendered by one management view page.
 const MEMORY_PAGE_SIZE: u64 = 20;
 
-/// Revisions rendered by one revision-history page.
 const MEMORY_REVISION_PAGE_SIZE: u64 = 20;
 
-/// Soft cap on one memory section body before frame encoding.
-///
-/// The IPC frame cap is 256 KiB including the envelope and every other
-/// section; this leaves headroom. Both pages stop at the last item that
-/// fits, so the cursor continues without skips and a large corpus can never
-/// inflate one frame without bound.
 const MEMORY_BODY_BUDGET: usize = 192 * 1024;
 
 fn parse_memory_id(raw: &str) -> Option<MemoryId> {
@@ -1402,10 +1091,6 @@ fn short_id(id: RawId) -> String {
         .collect()
 }
 
-/// One current Memory row, with a covered body withheld the same way an
-/// undelivered excerpt is: the row keeps its identity and pagination
-/// position, the body text never reaches the caller. The flag reports
-/// whether a non-empty, uncovered body was handed over.
 fn render_memory(memory: &Memory, coverage: &CurrentCoverage) -> (String, bool) {
     let covered = coverage.covers(&memory.content);
     let content = if covered { "" } else { memory.content.as_str() };
@@ -1427,7 +1112,6 @@ fn render_memory(memory: &Memory, coverage: &CurrentCoverage) -> (String, bool) 
     )
 }
 
-/// One revision row, with a covered body withheld like [`render_memory`].
 fn render_revision(revision: &MemoryRevisionRecord, coverage: &CurrentCoverage) -> (String, bool) {
     let covered = coverage.covers(&revision.content);
     let content = if covered {

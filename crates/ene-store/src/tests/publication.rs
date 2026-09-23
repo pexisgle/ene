@@ -1,5 +1,3 @@
-//! Credential publication regressions (Stage 7 A1c).
-
 use ene_credential::{
     ActivationOutcome, CredentialPublicationRepository as _, MutationKind, MutationOutcome,
     MutationPhase, SecretVersionId,
@@ -37,8 +35,6 @@ async fn staged(store: &Store, mutation_id: &str, version: u64) -> SecretVersion
     candidate
 }
 
-/// Activation commits the reference, the version pointer, the revision, and
-/// the outcome together, and answers with the version it retired.
 #[tokio::test]
 async fn activation_commits_the_reference_version_and_revision_together() {
     let store = Store::open_in_memory().await.unwrap();
@@ -75,8 +71,6 @@ async fn activation_commits_the_reference_version_and_revision_together() {
     assert_eq!(stored.decided_revision, Some(revision));
 }
 
-/// A rotation retires the previous version and leaves its item addressable
-/// until the cleanup records that it was removed.
 #[tokio::test]
 async fn a_rotation_retires_the_previous_version_for_cleanup() {
     let store = Store::open_in_memory().await.unwrap();
@@ -123,8 +117,6 @@ async fn a_rotation_retires_the_previous_version_for_cleanup() {
     );
 }
 
-/// A stale premise abandons the candidate without adopting it, and the refused
-/// attempt is durable: a retry observes the same decision.
 #[tokio::test]
 async fn a_stale_premise_abandons_the_candidate_and_stays_decided() {
     let store = Store::open_in_memory().await.unwrap();
@@ -160,7 +152,6 @@ async fn a_stale_premise_abandons_the_candidate_and_stays_decided() {
     let stored = store.credential_mutation("m-stale").await.unwrap().unwrap();
     assert_eq!(stored.phase, MutationPhase::Abandoned);
     assert_eq!(stored.outcome, Some(MutationOutcome::Stale));
-    // A retry answers from the stored decision and never re-applies it.
     let retried = store
         .activate_credential("m-stale", "sk-late", None)
         .await
@@ -171,8 +162,6 @@ async fn a_stale_premise_abandons_the_candidate_and_stays_decided() {
     );
 }
 
-/// A repeated mutation id observes the original attempt instead of starting a
-/// second one, and an unknown id is never adopted.
 #[tokio::test]
 async fn mutation_ids_are_write_once_and_unknown_ids_are_refused() {
     let store = Store::open_in_memory().await.unwrap();

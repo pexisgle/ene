@@ -1,17 +1,8 @@
-//! Test-only deterministic parks for production mutation boundaries.
-//!
-//! Each park is first-waiter-only: the first armed caller pauses after
-//! signalling entry and before any SQLite lock is taken; later callers pass
-//! through. That lets a test hold one in-flight production path while another
-//! driver finishes the operation, then release the parked caller to observe
-//! a stale no-op. Production builds never compile this module.
-
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use tokio::sync::Semaphore;
 
-/// One first-waiter park used by a production async mutation entry.
 #[derive(Debug)]
 pub(crate) struct TestPark {
     armed: AtomicBool,
@@ -34,7 +25,6 @@ impl TestPark {
         self.armed.store(true, Ordering::SeqCst);
     }
 
-    /// Pauses only if this park was armed and this is the first waiter.
     pub(crate) async fn pause_if_armed(&self) {
         if !self.armed.swap(false, Ordering::SeqCst) {
             return;
@@ -58,10 +48,6 @@ impl TestPark {
     }
 }
 
-/// Parks a started Targeted Deletion `spawn_blocking` section.
-///
-/// Unlike [`TestPark`], this waits on the blocking thread: aborting the
-/// awaiting async task cannot skip past a started SQLite closure.
 #[derive(Debug)]
 pub(crate) struct BlockingPark {
     armed: AtomicBool,
@@ -92,7 +78,6 @@ impl BlockingPark {
         self.armed.store(true, Ordering::SeqCst);
     }
 
-    /// Pauses only if this park was armed and this is the first waiter.
     pub(crate) fn pause_blocking_if_armed(&self) {
         if !self.armed.swap(false, Ordering::SeqCst) {
             return;
@@ -125,7 +110,6 @@ impl BlockingPark {
     }
 }
 
-/// Parks for the mutation windows the Stage 6 race regressions fix.
 #[derive(Debug, Default)]
 pub(crate) struct TestParks {
     pub(crate) observation_write: TestPark,
@@ -143,7 +127,6 @@ pub(crate) struct TestParks {
     pub(crate) fail_host_transient_arrival_sticky: AtomicBool,
     pub(crate) fail_deletion_material: Mutex<Option<ene_preservation::DeletionOperationId>>,
     pub(crate) host_transient_arrival_attempts: AtomicU64,
-    /// Started Targeted Deletion `spawn_blocking` sections. Observation only.
     pub(crate) deletion_blocking_live: AtomicUsize,
     pub(crate) deletion_blocking: BlockingPark,
 }

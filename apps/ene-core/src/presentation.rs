@@ -1,54 +1,3 @@
-//! Undelivered subscription, presentation receipts, and first-party Task
-//! queries (IPC §13.3, §18.2).
-//!
-//! Composition over existing owner boundaries only: the companion owner's
-//! [`UndeliveredRepository`] (slice C's
-//! `list_unpresented` + pass bounds + excerpts), the Task owner's bounded
-//! report queries, and the Task owner's resume gate (slice E). No lifecycle,
-//! no durable state, no runner: subscriptions, receipts, wire-ref maps,
-//! cursors, and retry-epoch slots are Host-memory only and drop on restart
-//! (unresolvable refs then answer `UnknownRef`, rows re-present under new
-//! receipts).
-//!
-//! Receipt rules (the whole §13.3 contract in one place):
-//!
-//! - One live receipt per Companion. Beginning commits the carried prefix
-//!   Pending→PresentationUnknown and holds the receipt 30 s monotonic. Any
-//!   ACK, expiry, or a newer connection's begin releases it; rows never move
-//!   on send alone.
-//! - A page carries the longest prefix of one bounded fetch that fits the
-//!   agreed frame cap (the fetch bound itself shrinks, so the cursor the
-//!   store returns always resumes exactly). Nothing fits, even one item →
-//!   `FrameTooLarge` with zero mutation of rows, cursors, or receipts.
-//! - `Unknown` / `Failed` re-present only on an explicit head pass or a new
-//!   valid connection/presence. A new-arrival pass serves fresh Pending rows
-//!   only and never auto-resends failed rows.
-//! - ACKs validate connection + incarnation + receipt + Round + generation +
-//!   carried ids. Only carried ids move (all-duplicate answers
-//!   `AlreadyPresented` with no write); unknown receipts → `UnknownRef`,
-//!   superseded/expired → `StalePresentation`, foreign connections →
-//!   `StaleConnection`. ACKs never migrate across connections.
-//!
-//! Send policy (§13.3/§22): every response here is one bounded frame the
-//! caller emits through non-blocking `try_send`; a full buffer ends the send
-//! (the receipt is superseded on the next valid connection, or expires) and
-//! never parks the Task runner behind capacity. The async gate below
-//! serializes begin/ack transitions only (CCT §10.5), never provider I/O.
-//!
-//! Reads are pure: list/report/source/select touch no lifecycle, generation,
-//! revision, or report status, and never start, repair, re-evaluate, or
-//! register a runner (S5-12).
-//!
-//! Replacement lifecycle (CCT §10.4, IPC §9.3): every connection-scoped
-//! entry here — subscription, receipt, Task/source/item ref, cursor, resume
-//! retry slot — is installed under the connection-ownership section
-//! (`HostHandle::with_current_connection` via `with_presentation_state`),
-//! and the Host's single lifecycle boundary sweeps the whole world on
-//! supersession and close. A stale operation therefore either commits before
-//! the sweep (and is swept with its connection) or is refused with a typed
-//! stale rejection; it can never recreate state for a superseded connection
-//! or disturb the replacement's own entries.
-
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -88,31 +37,16 @@ use crate::serve::{
     reject_frame, stale_reject,
 };
 
-/// Keys per-connection presentation maps by the hyphenated wire form of the
-/// id: the same string form the connection layer uses, so keys match across
-/// the Host/connection boundary by construction.
 fn conn_key(id: &ConnectionWireId) -> String {
     connection_key(id)
 }
 
-/// Stale refusal for a Client-dependent operation whose ownership section
-/// found the connection superseded, closed, or replaced (IPC §11.3).
 pub(crate) fn stale_operation(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
     stale_reject(frame, live, detail)
 }
 
-/// How long a receipt waits for its ACK (monotonic; IPC §13.3).
 const RECEIPT_TTL: Duration = Duration::from_secs(30);
 
-/// How one pass was triggered.
-///
-/// `Request` is the ordinary cursor-less Client catch-up (continuation, then
-/// arrivals, then an explicit head re-display). `Redisplay` forces the head
-/// re-display (the Client's `redisplay` flag and a fresh presence/connection
-/// auto-present). `Push` is the connection-owned subscription advance: it
-/// serves only a stored continuation or new arrivals and never re-displays
-/// `Unknown` rows, because a push is not a new presence and not an explicit
-/// Client request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PassTrigger {
     Request,
@@ -120,39 +54,20 @@ enum PassTrigger {
     Push,
 }
 
-/// Agreed presentation frame cap until capability negotiation carries client
-/// limits: mirrors the memory section budget so one summary can never inflate
-/// past the transport frame.
 const PRESENTATION_FRAME_BUDGET: usize = 192 * 1024;
 
-/// Per-item wire overhead added to excerpt bytes when fitting the cap.
 const PER_ITEM_OVERHEAD: usize = 512;
 
-/// Cap on remembered resume commands (epoch + id + fingerprint). Resume
-/// commands are rare; beyond the cap the oldest decided slots drop while
-/// in-flight slots are kept, so a dropped slot at worst replays one decided
-/// outcome through the durable revision compare (never a double execution).
 const RESUME_COMMAND_CAP: usize = 4096;
 
-/// One connection's backlog subscription: how far drained passes consumed.
 #[derive(Debug, Clone)]
 struct Subscription {
     companion: RawId,
-    /// Highest insertion bound a drained pass consumed. New-arrival passes
-    /// start strictly after it; explicit passes rewind to the head.
     scan_floor: u64,
-    /// Whether this subscription ever drained a pass. Only drained
-    /// subscriptions take new-arrival passes: a new valid connection starts
-    /// with an explicit head re-display (Unknown rows included), while a
-    /// drained one serves arrivals only and never auto-resends failures.
     drained_once: bool,
-    /// Undrained pass continuation: cursor, filter, and bound. A cursor-less
-    /// request continues it before looking for arrivals, so an abandoned
-    /// page never resends its head as "new".
     resume: Option<(UndeliveredCursor, bool, u32)>,
 }
 
-/// One live presentation receipt (at most one per Companion).
 #[derive(Debug, Clone)]
 struct Receipt {
     id: String,
@@ -173,7 +88,6 @@ impl Receipt {
     }
 }
 
-/// A stored page cursor: its kind binds it to one query (and Task).
 #[derive(Debug, Clone)]
 pub(crate) enum StoredCursor {
     TaskList {
@@ -189,11 +103,6 @@ pub(crate) enum StoredCursor {
         pending_only: bool,
         limit: u32,
     },
-    /// One usage summary page position, bound to this connection, to the
-    /// exact filter premise that produced it, and to the effective period
-    /// bounds that walk keeps ([`crate::usage`]): changing any filter makes a
-    /// reused cursor stale instead of silently reading a different result
-    /// set, and a cursor page covers the same window as its first page.
     UsageSummary {
         premise: crate::usage::UsageQueryPremise,
         from: ene_primitive::WallClockWithTz,
@@ -202,12 +111,9 @@ pub(crate) enum StoredCursor {
     },
 }
 
-/// One remembered resume command in its sender epoch.
 #[derive(Debug, Clone)]
 struct ResumeSlot {
     epoch: String,
-    /// Issuing connection key (the epoch's connection component), so the
-    /// slot can be dropped with that connection lifetime.
     connection: String,
     fingerprint: String,
     state: ResumeSlotState,
@@ -220,31 +126,18 @@ enum ResumeSlotState {
     Done(ResumeTaskOutcomeWire),
 }
 
-/// Host-memory presentation state. Restart drops all of it; durable rows are
-/// untouched, so nothing here can strand a report.
 pub(crate) struct PresentationState {
     subs: HashMap<String, Subscription>,
-    /// By companion key: at most one live receipt each.
     receipts: HashMap<String, Receipt>,
-    /// Receipt id → companion key.
     receipt_ids: HashMap<String, String>,
-    /// Consumed/superseded receipt ids answering `StalePresentation`
-    /// (bounded; never-known ids still answer `UnknownRef`). The issuing
-    /// connection rides along so a foreign connection still hears
-    /// `StaleConnection` first: ACKs never migrate.
     retired: std::collections::VecDeque<(String, String)>,
     task_refs: HashMap<(String, String), TaskId>,
-    /// Item ref → carried row, plus the Task behind it (when Task-owned).
     carried: HashMap<(String, String), (UndeliveredId, Option<TaskId>)>,
     source_refs: HashMap<(String, String), TaskReportSourceRef>,
     cursors: HashMap<(String, String), StoredCursor>,
     resume: HashMap<Uuid, ResumeSlot>,
     resume_seq: u64,
-    /// Agreed frame cap override (tests pin small caps to exercise splits;
-    /// production keeps the default until negotiation carries limits).
     frame_budget: usize,
-    /// Receipt ACK deadline override (tests pin short TTLs so expiry-driven
-    /// advance is deterministic; production keeps [`RECEIPT_TTL`]).
     receipt_ttl: Duration,
 }
 
@@ -267,15 +160,9 @@ impl Default for PresentationState {
     }
 }
 
-/// Bound on remembered retired receipt ids: old receipts stay answerable as
-/// stale without growing memory with the connection count.
 const RETIRED_RECEIPT_CAP: usize = 64;
 
 impl PresentationState {
-    /// Retires one receipt id with its issuing connection: it stays
-    /// answerable as `StalePresentation` (or `StaleConnection` from a
-    /// foreign connection) instead of decaying into `UnknownRef`. Bounded;
-    /// never-known ids are unaffected.
     pub(crate) fn retire(&mut self, id: &str, connection: &str) {
         if self.retired.iter().any(|(known, _)| known == id) {
             return;
@@ -287,7 +174,6 @@ impl PresentationState {
         }
     }
 
-    /// Removes one live receipt, retiring its id.
     pub(crate) fn remove_receipt(&mut self, companion_key: &str) {
         if let Some(receipt) = self.receipts.remove(companion_key) {
             self.receipt_ids.remove(&receipt.id);
@@ -295,18 +181,6 @@ impl PresentationState {
         }
     }
 
-    /// Invalidates the whole Host-memory presentation world for one Targeted
-    /// Deletion condition (Stage 6 A3c).
-    ///
-    /// Receipts, carried item refs, cursors, subscriptions, and resume slots
-    /// are reconstructible from canonical rows and none is provably body-free,
-    /// so all of it is dropped together: a stale receipt can no longer
-    /// re-emit, an ACK can no longer drive a covered row to `Presented`, and
-    /// the next presentation pass re-reads the canonical source under the
-    /// deletion condition. Live receipt ids still retire, so a late ACK is
-    /// answered as stale instead of unknown.
-    ///
-    /// Returns the number of live receipts and carried item refs dropped.
     pub(crate) fn invalidate_for_erasure(&mut self) -> u64 {
         let dropped = (self.receipts.len() + self.carried.len()) as u64;
         let receipts: Vec<(String, String)> = self
@@ -328,13 +202,6 @@ impl PresentationState {
         dropped
     }
 
-    /// The stored page of one usage-summary cursor issued on this connection
-    /// for exactly `premise`: the effective period bounds that walk keeps and
-    /// the keyset position, if any.
-    ///
-    /// `None` means the cursor is unknown, was issued on another connection,
-    /// or was issued for a different filter premise: the caller answers
-    /// `StaleBaseView` and the Client restarts from the head.
     pub(crate) fn usage_cursor_page(
         &self,
         conn: &str,
@@ -356,11 +223,6 @@ impl PresentationState {
         }
     }
 }
-/// Opaque purpose identity echoed by the Client: `{task}:{adopted_revision}`.
-///
-/// Takes the stored [`TaskPurposeRef`] itself, never a bare revision: the
-/// identity names the revision that adopted the purpose, which is not the
-/// Task's current revision after a purpose-preserving steering or resume.
 fn encode_purpose(purpose: TaskPurposeRef) -> String {
     format!(
         "{}:{}",
@@ -426,7 +288,6 @@ fn source_view(source: &UndeliveredSource) -> UndeliveredSourceView {
     }
 }
 
-/// The Task behind one undelivered source, when the fact is Task-owned.
 fn task_behind_source(source: &UndeliveredSource) -> Option<TaskId> {
     match source {
         UndeliveredSource::TaskRecord { task, .. } => Some(TaskId::from_raw(*task)),
@@ -462,11 +323,6 @@ pub(crate) fn checked_limit(limit: Option<u32>) -> Option<u32> {
     }
 }
 
-/// The mechanical coverage premise of one read pass (lifecycle §7).
-///
-/// [`Self::covers`] answers whether one body about to be materialized is
-/// mechanically covered by a current erasure condition. An unreadable premise
-/// is fail closed: every body is withheld rather than presented as uncovered.
 pub(crate) struct CurrentCoverage {
     targets: Vec<String>,
     readable: bool,
@@ -491,20 +347,10 @@ impl CurrentCoverage {
 }
 
 impl HostHandle {
-    /// Serializes begin/ack transitions (CCT §10.5). Held only across short
-    /// store roundtrips, never across provider I/O.
     pub(crate) async fn presentation_gate(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.presentation_lock.lock().await
     }
 
-    /// The mechanical coverage premise of one read pass (lifecycle §7).
-    ///
-    /// Reads the canonical current conditions and their protected exact
-    /// targets through the existing bounded canonical API — never a cached
-    /// "no deletion" verdict. The read is per pass and dropped afterwards: the
-    /// target text is compared in place and never cached, logged, or copied
-    /// into a response. A failed read is not an empty coverage set: the caller
-    /// withholds the body instead of lying.
     pub(crate) async fn current_coverage(&self) -> CurrentCoverage {
         let mut targets = Vec::new();
         let mut after = None;
@@ -532,14 +378,6 @@ impl HostHandle {
                             targets.push(text.to_string());
                         }
                     }
-                    // A current condition whose protected material was already
-                    // wiped (finalizing, §12 steps 2-3) has no readable target
-                    // left to compare against: the premise cannot prove any
-                    // body uncovered, so the pass fails closed and withholds
-                    // instead of presenting as if deletion had ended. A missing
-                    // operation cannot be returned as a current condition by
-                    // the canonical read; treating it the same way is the
-                    // conservative answer.
                     Ok(DeletionMaterialOutcome::Destroyed | DeletionMaterialOutcome::Missing) => {
                         return CurrentCoverage::unreadable();
                     }
@@ -556,15 +394,6 @@ impl HostHandle {
         }
     }
 
-    /// Runs one short presentation-state mutation under the connection
-    /// ownership section (CCT §10.4).
-    ///
-    /// The lock order is connection table → presentation memory lock; the
-    /// closure is synchronous (no await while either lock is held) and returns
-    /// [`None`] — mutating nothing — when the connection is no longer current.
-    /// Every connection-scoped ref, cursor, carried item, subscription,
-    /// receipt, and retry-slot install goes through here, so a superseded or
-    /// closed connection cannot recreate state after the lifecycle sweep.
     pub(crate) fn with_presentation_state<R>(
         &self,
         live: &LiveInput,
@@ -576,9 +405,6 @@ impl HostHandle {
         })
     }
 
-    /// Sender epoch binding one retry namespace (IPC §6.2): device,
-    /// incarnation, and connection. A new connection or process is a new
-    /// epoch; old commands never auto-resend into it.
     fn epoch_key(live: &LiveInput, frame: &WireFrame) -> String {
         format!(
             "{}:{}:{}:{}",
@@ -621,24 +447,16 @@ impl HostHandle {
         ReportSourceWireRef(wire)
     }
 
-    /// Drops one connection's carried item refs: every begin re-registers
-    /// its own wires, so a polling connection cannot grow the map. Item refs
-    /// are never echoed back for state changes (ACKs are receipt-scoped),
-    /// so no live reference dies here.
     fn sweep_carried(state: &mut PresentationState, conn: &str) {
         state.carried.retain(|(c, _), _| c != conn);
     }
 
-    /// Consumes one single-use page cursor: forward-only paging never
-    /// rewinds through an old cursor, and the map cannot grow with the page
-    /// count.
     pub(crate) fn take_cursor(state: &mut PresentationState, conn: &str, cursor: Option<&str>) {
         if let Some(wire) = cursor {
             state.cursors.remove(&(conn.to_string(), wire.to_string()));
         }
     }
 
-    /// Dispatch entry: one undelivered subscription/page request.
     pub(crate) async fn request_undelivered(
         &self,
         frame: &WireFrame,
@@ -664,9 +482,6 @@ impl HostHandle {
                 live,
                 WirePayload::UndeliveredResponse(response),
             )],
-            // The ownership section refused the install: this connection was
-            // superseded or closed while the page was prepared, so no
-            // receipt, ref, cursor, or subscription may be created for it.
             None => vec![stale_operation(
                 frame,
                 live,
@@ -675,9 +490,6 @@ impl HostHandle {
         }
     }
 
-    /// Presents one page: presence-checked, receipt-backed, frame-capped.
-    /// Store failures answer drained-empty (rows stay; the next request
-    /// retries the same pass) rather than a lying page.
     async fn present_page(
         &self,
         frame: &WireFrame,
@@ -698,9 +510,6 @@ impl HostHandle {
                 Ok(companion) => companion,
             },
         };
-        // Companion summary presentation needs formal presence: Present for
-        // this connection's client. NoActive reconnects keep management
-        // reads; talk needs a fresh summon.
         let attribution = match self.store.load_attribution(companion.as_raw()).await {
             Ok(Some(attribution)) => attribution,
             _ => return Some(UndeliveredResponse::NoCurrentPresence),
@@ -715,8 +524,6 @@ impl HostHandle {
         {
             return Some(UndeliveredResponse::NoCurrentPresence);
         }
-        // Test-only race gate: pause before the transition lock so a test can
-        // replace the connection and let the replacement run a full pass.
         #[cfg(test)]
         if let Some(gate) = self.fetch_gate() {
             gate.pause().await;
@@ -728,16 +535,11 @@ impl HostHandle {
             frame.envelope.sender.incarnation_id.random,
         );
         let companion_key = companion.as_raw().as_uuid().as_hyphenated().to_string();
-        // A live receipt on this connection re-displays its own selection:
-        // duplicate display without a new commit or cursor move. The
-        // requested limit never shrinks a re-emit: the receipt and the item
-        // set its ACK covers must stay identical (IPC §13.3).
         if cursor.is_none()
             && let Some(receipt) = self.live_receipt(&companion_key, &conn)
         {
             return self.reemit_receipt(live, &conn, &receipt).await;
         }
-        // A foreign cursor is StaleBaseView, never a silent restart.
         if let Some(cursor) = cursor
             && !self.valid_undelivered_cursor(&conn, companion, cursor)
         {
@@ -761,7 +563,6 @@ impl HostHandle {
         .await
     }
 
-    /// The live receipt for this companion + connection, if any.
     fn live_receipt(&self, companion_key: &str, conn: &str) -> Option<Receipt> {
         let state = crate::lock_unpoison(&self.presentations);
         let receipt = state.receipts.get(companion_key)?.clone();
@@ -782,22 +583,6 @@ impl HostHandle {
         )
     }
 
-    /// Re-emits a live receipt's own selection: no new receipt, no commit,
-    /// no cursor move. The item set is rehydrated from the receipt's exact
-    /// selected identities in their original order — never by re-scanning
-    /// the unpresented head, so rows before the selection, later backlog,
-    /// and continuation position cannot shrink or empty it. Over budget now
-    /// (excerpts only shrink) answers `FrameTooLarge` with the receipt
-    /// standing.
-    ///
-    /// A selected id that no longer resolves at all (deleted or foreign)
-    /// means the receipt can no longer cover the set its ACK names: the
-    /// receipt is retired and the request answers `StaleBaseView` so the
-    /// Client re-queries for a fresh page. A store failure fails closed the
-    /// same way. A selected row that is already `Presented` cannot be
-    /// re-painted and its ACK is already satisfied, so it is pruned from the
-    /// receipt's selection as it is omitted from the frame: the receipt then
-    /// covers exactly the delivered items.
     async fn reemit_receipt(
         &self,
         live: &LiveInput,
@@ -813,9 +598,6 @@ impl HostHandle {
             Ok(loaded) => loaded,
             Err(_) => return Some(self.retire_unrehydratable_receipt(receipt)),
         };
-        // Exact one-to-one resolution: every selected identity must resolve,
-        // in the original selection order. Anything else is a receipt whose
-        // ACK would claim rows that no longer exist.
         if loaded.len() != selected.len()
             || loaded
                 .iter()
@@ -824,10 +606,6 @@ impl HostHandle {
         {
             return Some(self.retire_unrehydratable_receipt(receipt));
         }
-        // Already-presented ids are omitted from the frame and pruned from
-        // the live receipt, so its selection stays exactly what the ACK acts
-        // on. The presentation gate is held across this rehydration, so the
-        // receipt cannot be replaced underneath the prune.
         let mut carried = Vec::with_capacity(loaded.len());
         let mut satisfied: Vec<UndeliveredId> = Vec::new();
         for entry in loaded {
@@ -837,10 +615,6 @@ impl HostHandle {
                 carried.push(entry);
             }
         }
-        // Drop the previous attempt's refs, then install this re-emit's refs
-        // under the ownership section: a supersession that wins the section
-        // installs nothing, and a sweep that already ran cannot be undone by
-        // a late re-registration.
         Self::sweep_carried(&mut crate::lock_unpoison(&self.presentations), conn);
         let items = self.carry_items(live, conn, &carried).await?;
         let companion_key = receipt.companion.as_uuid().as_hyphenated().to_string();
@@ -871,12 +645,6 @@ impl HostHandle {
         Some(UndeliveredResponse::Summary(summary))
     }
 
-    /// Retires a receipt whose selection cannot be exactly rehydrated and
-    /// answers the stale base view.
-    ///
-    /// The durable rows are untouched: whatever is still unpresented keeps
-    /// its status and re-presents on the Client's next head pass. Retiring
-    /// the id keeps a late ACK answerable as stale instead of unknown.
     fn retire_unrehydratable_receipt(&self, receipt: &Receipt) -> UndeliveredResponse {
         let mut state = crate::lock_unpoison(&self.presentations);
         let companion_key = receipt.companion.as_uuid().as_hyphenated().to_string();
@@ -890,12 +658,6 @@ impl HostHandle {
         UndeliveredResponse::StaleBaseView { current: None }
     }
 
-    /// Begins or continues one pass: fetches the longest fitting prefix of
-    /// one bounded fetch, commits it, installs the receipt.
-    ///
-    /// Returns `None` when the connection-ownership section refused the
-    /// install: the connection was superseded or closed while the page was
-    /// prepared, so nothing is created for it.
     #[expect(
         clippy::too_many_arguments,
         reason = "pass state is intentionally explicit"
@@ -913,10 +675,6 @@ impl HostHandle {
         trigger: PassTrigger,
     ) -> Option<UndeliveredResponse> {
         let from_cursor = cursor.map(|cursor| cursor.0.as_str());
-        // Resolve the fetch window: continue a stored pass, catch up on new
-        // arrivals, or rewind to the head for an explicit pass. The plan
-        // installs this connection's subscription, so it runs under the
-        // ownership section; a superseded connection plans nothing.
         let start: PlanStart = if let Some(cursor) = cursor {
             let state = crate::lock_unpoison(&self.presentations);
             match state.cursors.get(&(conn.to_string(), cursor.0.clone())) {
@@ -933,8 +691,6 @@ impl HostHandle {
                 _ => return Some(UndeliveredResponse::StaleBaseView { current: None }),
             }
         } else {
-            // A newer connection supersedes a live receipt from a dead one:
-            // old rows stay Unknown and re-present under the new receipt.
             let bound = self.store.undelivered_pass_bound().await.unwrap_or(0);
             let planned = self.with_presentation_state(live, |state| {
                 let ckey = companion.as_raw().as_uuid().as_hyphenated().to_string();
@@ -949,21 +705,11 @@ impl HostHandle {
                     drained_once: false,
                     resume: None,
                 });
-                // A connection retargeted at another companion restarts its
-                // scan: floors and continuations never cross companions.
                 if sub.companion != companion.as_raw() {
                     sub.scan_floor = 0;
                     sub.drained_once = false;
                     sub.resume = None;
                 }
-                // A cursor-less request is the next logical page: an undrained
-                // pass continues first (its rows are bounded to the captured
-                // upper, so mid-pass arrivals wait), then new arrivals, then an
-                // explicit head re-display. `Redisplay` forces the head pass;
-                // `Push` serves only a continuation or new arrivals and stays
-                // silent otherwise (a push is never a new presence). The resume
-                // binding is checked before the subscription is re-pointed at
-                // this companion.
                 let continuation = (trigger != PassTrigger::Redisplay)
                     .then_some(sub.resume)
                     .flatten()
@@ -998,9 +744,6 @@ impl HostHandle {
             };
             plan
         };
-        // Fetch the longest fitting prefix: shrink the fetch bound itself so
-        // the store-returned cursor always resumes exactly. A continued pass
-        // keeps the bound it started with.
         let pass_limit = match start {
             PlanStart::Continued { limit, .. } => limit,
             PlanStart::Arrivals { .. } | PlanStart::Explicit { .. } => limit,
@@ -1045,8 +788,6 @@ impl HostHandle {
                 break (entries, items, page.next, upper, pending_only);
             }
             if fetch_limit <= 1 {
-                // Even one item overflows the cap: withhold without mutating
-                // any row, cursor, subscription, or receipt.
                 self.forget_carried(conn, &items).await;
                 return Some(UndeliveredResponse::FrameTooLarge);
             }
@@ -1055,11 +796,6 @@ impl HostHandle {
         };
         let (entries, items, fetched_next, upper, pending_only) = fitted;
         if entries.is_empty() {
-            // A drained continued pass falls through to an explicit head
-            // re-display in the same response instead of stranding failed
-            // rows behind an empty arrival check. A push never does: it
-            // must not re-display Unknown rows without an explicit request
-            // or a new presence.
             if matches!(start, PlanStart::Continued { .. }) && trigger != PassTrigger::Push {
                 return Box::pin(self.begin_pass(
                     live,
@@ -1078,7 +814,6 @@ impl HostHandle {
                 return None;
             }
             let mut summary = self.empty_attributed(attribution);
-            // A filtered-empty page with more waiting still pages next.
             if let Some(next) = fetched_next {
                 let installed = self
                     .with_presentation_state(live, |state| {
@@ -1123,17 +858,6 @@ impl HostHandle {
         .await
     }
 
-    /// Commits the carried prefix (Pending→PresentationUnknown), installs
-    /// the receipt, advances the cursor past the carried prefix only.
-    ///
-    /// The whole commit — the per-row presentation-start CAS and the
-    /// receipt/cursor/subscription install — runs inside one
-    /// connection-ownership section (CCT §10.4): a replacement that wins the
-    /// table commits no row transition and installs no receipt, and a
-    /// commit that wins the table survives the later lifecycle sweep as a
-    /// durable row (CCT §10.5). Returns `None` when the ownership section
-    /// refused: no receipt, cursor, or subscription entry is created for a
-    /// superseded connection, and the attempt's carried refs are dropped.
     #[expect(
         clippy::too_many_arguments,
         reason = "commit state is intentionally explicit"
@@ -1156,9 +880,6 @@ impl HostHandle {
     ) -> Option<UndeliveredResponse> {
         let companion_key = companion.as_raw().as_uuid().as_hyphenated().to_string();
         let generation = attribution.generation.as_u64();
-        // Test-only: pause after the page plan and before the per-row
-        // presentation-start compares so a test can move a row's durable
-        // status and pin the domain CAS-loss handling.
         #[cfg(test)]
         {
             let gate = crate::lock_unpoison(&self.presentation_commit_gate).clone();
@@ -1186,17 +907,7 @@ impl HostHandle {
                 let mut carried = Vec::with_capacity(items.len());
                 let mut dropped = Vec::new();
                 for (entry, item) in entries.into_iter().zip(items) {
-                    // Only a committed presentation start claims the row. A domain
-                    // `StaleSource` is not an infrastructure error: the row's status
-                    // moved between the page plan and this compare (another
-                    // receipt/pass owns it, it was presented, or it is gone), so the
-                    // row must stay out of the receipt and the frame and be left to
-                    // the next pass. An `Err` is a rolled-back compare (the row was
-                    // not marked) and takes the same drop; any other transition is
-                    // not this call's success either.
                     if entry.status != ReportStatus::Pending {
-                        // Already `PresentationUnknown`: re-displayed under this
-                        // receipt without a status write, so it is claimed.
                         selected.push(entry.id);
                         carried.push(item);
                         continue;
@@ -1210,13 +921,6 @@ impl HostHandle {
                             selected.push(entry.id);
                             carried.push(item);
                         }
-                        // A4: the item's canonical source is under a current
-                        // erasure condition, so the presentation start is not
-                        // claimed (no status write). The correlation stays
-                        // pageable — the same shape the read-time coverage
-                        // check produces — but the excerpt is withheld, so the
-                        // compare and the body hand-off cannot disagree with a
-                        // condition that committed after the read.
                         Ok(ene_companion::ReportStatusTransition::HeldForErasure) => {
                             let mut withheld = item;
                             withheld.excerpt = String::new();
@@ -1228,15 +932,9 @@ impl HostHandle {
                             dropped.push(item);
                         }
                         Ok(_) => {
-                            // expected=Pending + presented=false can only commit
-                            // `MarkedPresentationUnknown`; anything else (for
-                            // example an already-presented row) is not a
-                            // presentation start and is never claimed.
                             dropped.push(item);
                         }
                         Err(_) => {
-                            // One atomic per-row compare: the failure rolled back,
-                            // so the row was not marked and stays for the next pass.
                             dropped.push(item);
                         }
                     }
@@ -1246,11 +944,6 @@ impl HostHandle {
                 }
                 let receipt_id = Uuid::new_v4().as_hyphenated().to_string();
                 let ttl = state.receipt_ttl;
-                // The carried prefix IS the fetched prefix (the fetch bound shrank
-                // instead), so the store cursor resumes exactly: a fetched
-                // continuation pages next, a bound-reaching fetch drains the floor.
-                // The round projection is minted inside the section: a stale
-                // attempt leaves no round wire behind either.
                 let round_wire = RoundWireId(RawId::new().as_uuid().to_string());
                 crate::lock_unpoison(&rounds).insert(round_wire.0.clone(), round);
                 let receipt = Receipt {
@@ -1265,9 +958,7 @@ impl HostHandle {
                     selected,
                     expires_at: Instant::now() + ttl,
                 };
-                // Forward-only paging consumes the cursor it continued from.
                 Self::take_cursor(state, conn, from_cursor);
-                // One receipt per Companion: installing supersedes any leftover.
                 if let Some(old) = state.receipts.insert(companion_key.clone(), receipt) {
                     state.receipt_ids.remove(&old.id);
                     state.retire(&old.id, &old.connection);
@@ -1325,19 +1016,6 @@ impl HostHandle {
         Some(UndeliveredResponse::Summary(summary))
     }
 
-    /// Builds carried items (with bounded excerpts) for entries in order,
-    /// registering per-connection item refs under the ownership section.
-    ///
-    /// Excerpts are read through the canonical source and checked against the
-    /// current erasure conditions in the same pass: a covered excerpt is
-    /// withheld (empty, not truncated), so a receipt created before a
-    /// condition became durable cannot re-materialize the target body and a
-    /// reconnect cannot reconstruct it. An unreadable excerpt or an unreadable
-    /// coverage premise keeps its correlation with an empty excerpt; the body
-    /// stays pageable and nothing is marked presented.
-    ///
-    /// Returns `None` when the connection was superseded before the refs
-    /// were installed: no ref is registered for it.
     async fn carry_items(
         &self,
         live: &LiveInput,
@@ -1345,8 +1023,6 @@ impl HostHandle {
         entries: &[UndeliveredRef],
     ) -> Option<Vec<UndeliveredItemView>> {
         let coverage = self.current_coverage().await;
-        // Load the excerpts first (no state touched), then install every ref
-        // in one ownership section.
         let mut loaded = Vec::with_capacity(entries.len());
         for entry in entries {
             let (excerpt, truncated) = match self
@@ -1369,11 +1045,6 @@ impl HostHandle {
                 truncated,
             ));
         }
-        // Handing the body to a Client creates a local copy outside Host
-        // control: the durable evidence must be committed before the excerpts
-        // can be handed over (lifecycle §8.1). An empty page registers
-        // nothing; a failed evidence commit withholds the bodies instead of
-        // creating an unaccountable copy.
         let serves_body = loaded
             .iter()
             .any(|(_, _, _, excerpt, _)| !excerpt.is_empty());
@@ -1384,10 +1055,6 @@ impl HostHandle {
                     *truncated = false;
                 }
             } else {
-                // The premise above was read before the evidence write and the
-                // handoff: a condition that committed in between is either
-                // already in the snapshot (evidence committed first) or must
-                // withhold the excerpt here (critical-areas §5.2/§6.1).
                 let fresh = self.current_coverage().await;
                 for (_, _, _, excerpt, truncated) in &mut loaded {
                     if !excerpt.is_empty() && fresh.covers(excerpt) {
@@ -1416,8 +1083,6 @@ impl HostHandle {
         })
     }
 
-    /// Drops carried registrations for items that will not be committed
-    /// (shrunk fetch iterations), so refs never outlive their receipt.
     async fn forget_carried(&self, conn: &str, items: &[UndeliveredItemView]) {
         let mut state = crate::lock_unpoison(&self.presentations);
         for item in items {
@@ -1427,11 +1092,6 @@ impl HostHandle {
         }
     }
 
-    /// Attaches one headline per distinct Task behind the carried items.
-    ///
-    /// Returns `false` when the connection was superseded before the Task
-    /// refs were installed: the caller abandons the pass instead of handing
-    /// out refs that no longer exist.
     async fn attach_reports(
         &self,
         live: &LiveInput,
@@ -1497,8 +1157,6 @@ impl HostHandle {
         }
     }
 
-    /// Records one drained scan floor under the ownership section. Returns
-    /// `false` when the connection is no longer current.
     fn mark_drained(
         &self,
         live: &LiveInput,
@@ -1518,18 +1176,10 @@ impl HostHandle {
         .is_some()
     }
 
-    /// Agreed frame cap in force (tests pin small caps; production keeps the
-    /// default until negotiation carries client limits).
     fn frame_budget(&self) -> usize {
         crate::lock_unpoison(&self.presentations).frame_budget
     }
 
-    /// Test-only: pin the receipt ACK deadline so expiry-driven advance is
-    /// deterministic without waiting the production 30 s.
-    ///
-    /// Unix-gated with the socket-loop subscription tests that use it; the
-    /// Windows lib test build would otherwise see it as dead code under the
-    /// warnings-as-errors configuration.
     #[cfg(all(test, unix))]
     #[expect(dead_code, reason = "test observation probe")]
     pub(crate) fn set_receipt_ttl_for_test(&self, ttl: Duration) {
@@ -1553,8 +1203,6 @@ impl HostHandle {
         }
     }
 
-    /// Empty-page shell with a fresh round for correlation. No receipt is
-    /// minted, so there is nothing to ACK; the next request retries.
     fn empty_attributed(&self, attribution: &PresenceAttribution) -> UndeliveredSummary {
         let round = ene_presentation::RoundId::from_raw(RawId::new());
         let round_wire = self.round_wire_or_mint(&round);
@@ -1569,8 +1217,6 @@ impl HostHandle {
         }
     }
 
-    /// Store-failure shell: like [`Self::empty_attributed`] without a known
-    /// generation. Rows stay; the next request retries the same pass.
     fn empty_shell(&self) -> UndeliveredSummary {
         let round = ene_presentation::RoundId::from_raw(RawId::new());
         let round_wire = self.round_wire_or_mint(&round);
@@ -1585,7 +1231,6 @@ impl HostHandle {
         }
     }
 
-    /// Dispatch entry: one receipt ACK, answering its typed outcome.
     pub(crate) async fn ack_undelivered(
         &self,
         frame: &WireFrame,
@@ -1600,17 +1245,6 @@ impl HostHandle {
         )]
     }
 
-    /// Applies one ACK: validates epoch + receipt + Round + generation, then
-    /// moves only the carried ids. Every refusal leaves all rows untouched.
-    ///
-    /// The whole verdict and its durable marks run inside one
-    /// connection-ownership section (CCT §10.4–10.5): the receipt consume is
-    /// the ACK's linearization point, and the bounded per-row store compares
-    /// commit with the same currentness guarantee, so a supersession either
-    /// precedes the whole section (nothing consumed, nothing marked) or
-    /// follows the accepted observation (rows keep the ACK's decision while
-    /// the old connection's memory world is swept). The guard never crosses
-    /// an await: every store call here is the sync primitive.
     async fn apply_ack(
         &self,
         frame: &WireFrame,
@@ -1634,10 +1268,6 @@ impl HostHandle {
             Refuse(UndeliveredAckOutcome),
             Proceed(Receipt),
         }
-        // The whole validation/consumption runs under the ownership section
-        // (CCT §10.4): a connection superseded before the section refuses with
-        // the typed stale outcome and consumes nothing, so an in-flight ACK
-        // cannot release or move rows after the lifecycle sweep.
         let presentations = std::sync::Arc::clone(&self.presentations);
         let store = self.store.clone();
         let paired_client = live.paired_device.as_deref().map(device_client);
@@ -1647,10 +1277,6 @@ impl HostHandle {
                 let verdict = (|| {
                     let mut state = crate::lock_unpoison(&presentations);
                     let Some(companion_key) = state.receipt_ids.get(&ack.receipt.0).cloned() else {
-                        // Consumed or superseded receipts stay stale (never silently
-                        // unknown); never-issued ids are unknown. A foreign
-                        // connection still hears StaleConnection first: ACKs never
-                        // migrate.
                         return match state
                             .retired
                             .iter()
@@ -1670,7 +1296,6 @@ impl HostHandle {
                         state.remove_receipt(&companion_key);
                         Verdict::Refuse(UndeliveredAckOutcome::StalePresentation)
                     } else if receipt.connection != conn || receipt.incarnation != incarnation {
-                        // The ACK never migrates across connections or incarnations.
                         Verdict::Refuse(UndeliveredAckOutcome::StaleConnection)
                     } else if paired_client != Some(receipt.client) {
                         // The connection's client moved under the receipt.
@@ -1678,13 +1303,8 @@ impl HostHandle {
                     } else if round_view.as_deref() != Some(receipt.round_wire.as_str())
                         || generation_view != Some(receipt.generation)
                     {
-                        // Round + generation ride the envelope observed marks: the
-                        // Client echoes what the summary showed, and the Host
-                        // compares.
                         Verdict::Refuse(UndeliveredAckOutcome::StalePresentation)
                     } else {
-                        // Consumed: any ACK releases the receipt; the rows keep
-                        // whatever the status below decided.
                         state.remove_receipt(&companion_key);
                         Verdict::Proceed(receipt)
                     }
@@ -1702,8 +1322,6 @@ impl HostHandle {
                         let mut presented = 0_u32;
                         let mut held = 0_u32;
                         for id in &receipt.selected {
-                            // Bounded to the carried id; later arrivals are never
-                            // touched by this ACK.
                             match store.compare_and_mark_reported_sync(
                                 *id,
                                 ReportStatus::PresentationUnknown,
@@ -1712,9 +1330,6 @@ impl HostHandle {
                                 Ok(ene_companion::ReportStatusTransition::PendingToPresented) => {
                                     presented += 1;
                                 }
-                                // A covered row is never confirmed presented:
-                                // the status stays un-presented and the row is
-                                // re-evaluated after the deletion settles.
                                 Ok(ene_companion::ReportStatusTransition::HeldForErasure) => {
                                     held += 1;
                                 }
@@ -1726,8 +1341,6 @@ impl HostHandle {
                         } else if presented > 0 {
                             UndeliveredAckOutcome::Presented { presented }
                         } else {
-                            // Every carried row was already presented (a parallel
-                            // round observation got there first): no write.
                             UndeliveredAckOutcome::AlreadyPresented
                         }
                     }
@@ -1753,8 +1366,6 @@ impl HostHandle {
         applied.unwrap_or(UndeliveredAckOutcome::StaleConnection)
     }
 
-    /// Dispatch entry: first-party Task list. Pure read: no presence needed,
-    /// no mutation; stored lifecycle and the execution flag stay separate.
     pub(crate) async fn list_tasks_wire(
         &self,
         frame: &WireFrame,
@@ -1788,14 +1399,10 @@ impl HostHandle {
             .list_tasks_after(after, limit)
             .await
             .unwrap_or_default();
-        // Test-only race gate: pause after the durable read and before the
-        // guarded mint.
         #[cfg(test)]
         if let Some(gate) = self.ref_mint_gate() {
             gate.pause().await;
         }
-        // Ref and cursor mint run under the ownership section: a connection
-        // superseded while the page was read creates no refs (IPC §11.3).
         let minted = self.with_presentation_state(live, |state| {
             Self::take_cursor(
                 state,
@@ -1846,8 +1453,6 @@ impl HostHandle {
         )]
     }
 
-    /// Dispatch entry: one Task's paged report. Pure read; attempt rows sort
-    /// before result rows in canonical id order.
     pub(crate) async fn report_wire(
         &self,
         frame: &WireFrame,
@@ -1930,14 +1535,10 @@ impl HostHandle {
                 )];
             }
         };
-        // Test-only race gate: pause after the durable read and before the
-        // guarded mint.
         #[cfg(test)]
         if let Some(gate) = self.ref_mint_gate() {
             gate.pause().await;
         }
-        // Ref and cursor mint run under the ownership section: a connection
-        // superseded while the report was read creates no refs.
         let minted = self.with_presentation_state(live, |state| {
             Self::take_cursor(
                 state,
@@ -2013,8 +1614,6 @@ impl HostHandle {
         )]
     }
 
-    /// Dispatch entry: one bounded source body page. An unbuildable view
-    /// answers `InputUnavailable` and sends no body.
     pub(crate) async fn report_source_wire(
         &self,
         frame: &WireFrame,
@@ -2060,8 +1659,6 @@ impl HostHandle {
         {
             Ok(Some(page)) if !coverage.covers(&page.text) => {
                 if !page.text.is_empty() && !self.note_client_body_delivery(live).await {
-                    // The body cannot leave the Host unaccountably: fail the
-                    // read closed exactly like an unbuildable page.
                     return vec![outgoing_frame(
                         frame,
                         live,
@@ -2069,11 +1666,6 @@ impl HostHandle {
                     )];
                 }
                 if !page.text.is_empty() {
-                    // The premise above was read before the evidence write and
-                    // the handoff: a condition that committed in between is
-                    // either already in the snapshot (evidence committed
-                    // first) or must withhold the body here
-                    // (critical-areas §5.2/§6.1).
                     let fresh = self.current_coverage().await;
                     if fresh.covers(&page.text) {
                         return vec![outgoing_frame(
@@ -2097,8 +1689,6 @@ impl HostHandle {
                     )),
                 )]
             }
-            // A covered source body is withheld exactly like an unbuildable
-            // one: the read is bounded and the Client learns no partial body.
             Ok(Some(_)) | Ok(None) | Err(_) => vec![outgoing_frame(
                 frame,
                 live,
@@ -2107,9 +1697,6 @@ impl HostHandle {
         }
     }
 
-    /// Dispatch entry: first-party Task selection into the conversation
-    /// projection. In-memory only: no durable mutation, no execution start.
-    /// A restart or reconnect resets to unselected.
     pub(crate) async fn select_task_wire(
         &self,
         frame: &WireFrame,
@@ -2144,9 +1731,6 @@ impl HostHandle {
                 )];
             }
         };
-        // A Task owned by another companion is never selected here: the
-        // projection is keyed by companion, and guessing across owners is a
-        // fabrication, not a selection.
         let running = match self.store.ensure_running_companion().await {
             Ok(running) => running,
             Err(_) => {
@@ -2164,14 +1748,10 @@ impl HostHandle {
                 WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef),
             )];
         }
-        // Test-only race gate: pause before the guarded selection commit.
         #[cfg(test)]
         if let Some(gate) = self.ref_mint_gate() {
             gate.pause().await;
         }
-        // The selection commit runs under the ownership section: a
-        // connection superseded while the Task was read selects nothing, and
-        // the new connection must select again (IPC §9.3 replacement).
         let selected = self
             .with_current_connection(live, || {
                 self.conversation_tasks
@@ -2204,9 +1784,6 @@ impl HostHandle {
         )]
     }
 
-    /// Dispatch entry: explicit first-party resume on the wire. Maps onto
-    /// the existing owner gate; the envelope `command_id` keys the retry
-    /// epoch. No presence and no provider success required.
     pub(crate) async fn resume_task_wire(
         &self,
         frame: &WireFrame,
@@ -2236,10 +1813,6 @@ impl HostHandle {
         }
     }
 
-    /// Applies one wire resume: epoch-conflict check, idempotent replay,
-    /// then at most one owner commit per command id per epoch. The durable
-    /// revision compare keeps restarts safe without any resume receipt
-    /// table.
     async fn apply_resume(
         &self,
         frame: &WireFrame,
@@ -2260,7 +1833,6 @@ impl HostHandle {
             let state = crate::lock_unpoison(&self.presentations);
             if let Some(slot) = state.resume.get(&command_id) {
                 if slot.epoch != epoch {
-                    // An old command never auto-resends into a new epoch.
                     return ResumeApply::Outcome(ResumeTaskOutcomeWire::StaleConnection);
                 }
                 if slot.fingerprint != fingerprint {
@@ -2276,9 +1848,6 @@ impl HostHandle {
                 }
             }
         }
-        // Claim the retry slot under the ownership section: a connection
-        // superseded while the command was validated claims nothing, so the
-        // lifecycle sweep cannot be undone by a late slot re-creation.
         let claimed = self.with_presentation_state(live, |state| {
             state.resume_seq += 1;
             let seq = state.resume_seq;
@@ -2293,8 +1862,6 @@ impl HostHandle {
                 },
             );
             if state.resume.len() > RESUME_COMMAND_CAP {
-                // Bounded epoch memory; decided slots drop first,
-                // in-flight slots are never evicted under a live command.
                 let mut decided: Vec<(u64, Uuid)> = state
                     .resume
                     .iter()
@@ -2312,8 +1879,6 @@ impl HostHandle {
             return ResumeApply::Outcome(ResumeTaskOutcomeWire::StaleConnection);
         }
         let outcome = self.commit_resume(frame, live, command).await;
-        // Technical failures free the slot so the same command retries
-        // cleanly; every decided answer persists for replay.
         if matches!(outcome, ResumeTaskOutcomeWire::Unavailable) {
             crate::lock_unpoison(&self.presentations)
                 .resume
@@ -2327,7 +1892,6 @@ impl HostHandle {
         ResumeApply::Outcome(outcome)
     }
 
-    /// Runs the single owner resume commit for one validated wire command.
     async fn commit_resume(
         &self,
         frame: &WireFrame,
@@ -2355,8 +1919,6 @@ impl HostHandle {
             return ResumeTaskOutcomeWire::UnknownRef;
         };
         if purpose.task != task {
-            // The purpose identity names another Task: stale against this
-            // one, never rebound.
             return match self.store.load_task(task).await {
                 Ok(Some(record)) => ResumeTaskOutcomeWire::StalePremise {
                     current_revision: record.task.reference.revision.as_u64(),
@@ -2370,9 +1932,6 @@ impl HostHandle {
             Ok(None) => return ResumeTaskOutcomeWire::MissingTask,
             Err(_) => return ResumeTaskOutcomeWire::Unavailable,
         };
-        // The activity record and the AU17 commit run inside the guarded
-        // connection section, so a connection superseded before the section
-        // leaves no activity row, revision change, delegation, or launch.
         let command_raw = frame
             .envelope
             .correlation
@@ -2400,20 +1959,12 @@ impl HostHandle {
             .await
         {
             Ok(Some(outcome)) => outcome,
-            // The connection was superseded before the commit section: the
-            // typed stale outcome, with nothing written anywhere.
             Ok(None) => return ResumeTaskOutcomeWire::StaleConnection,
             Err(_) => return ResumeTaskOutcomeWire::Unavailable,
         };
         map_resume_outcome(&command.task, outcome)
     }
 
-    /// Best-effort auto-present after presence establishment (recovery or
-    /// summon): no Owner query, one bounded summary, silence when empty.
-    /// At most one summary frame; the caller emits it non-blocking. The
-    /// pass runs through the subscription's ordinary explicit head
-    /// re-display, so continuations, scan floors, and receipts stay
-    /// consistent with the connection-owned push loop.
     pub(crate) async fn auto_present_for(
         &self,
         frame: &WireFrame,
@@ -2437,8 +1988,6 @@ impl HostHandle {
             frame.envelope.sender.incarnation_id.counter,
             frame.envelope.sender.incarnation_id.random,
         );
-        // The reset installs this connection's subscription under the
-        // ownership section: a superseded connection starts no pass.
         let prepared = self
             .with_presentation_state(live, |state| {
                 let sub = state.subs.entry(conn.clone()).or_insert(Subscription {
@@ -2447,9 +1996,6 @@ impl HostHandle {
                     drained_once: false,
                     resume: None,
                 });
-                // A fresh presence starts a new pass: rewind to the head so the
-                // absence backlog (Unknown rows included) presents without an
-                // Owner query.
                 sub.companion = companion.as_raw();
                 sub.scan_floor = 0;
                 sub.drained_once = false;
@@ -2484,17 +2030,6 @@ impl HostHandle {
         }
     }
 
-    /// Drops every memory-only presentation entry owned by one ended
-    /// connection.
-    ///
-    /// Called when the transport closes a connection and when a newer
-    /// authentication supersedes it: subscriptions, query-scoped Task /
-    /// source refs, page cursors, live receipts, carried item refs, and the
-    /// connection's resume retry slots all exist only for that connection
-    /// lifetime. Durable state is untouched: a released receipt leaves its
-    /// rows `Pending` / `PresentationUnknown`, so a new connection
-    /// re-presents them under a fresh receipt, and a retired id keeps a late
-    /// ACK answerable as stale instead of unknown.
     pub(crate) fn drop_presentation_connection_state(&self, connection: &ConnectionWireId) {
         let conn = conn_key(connection);
         let mut state = crate::lock_unpoison(&self.presentations);
@@ -2515,14 +2050,6 @@ impl HostHandle {
         }
     }
 
-    /// Releases this connection's expired receipts (memory-only state
-    /// progression).
-    ///
-    /// The connection loop runs this on every receipt deadline before it
-    /// decides whether an unsolicited write is still possible: a failed push
-    /// write must not leave an expired receipt behind, or the same elapsed
-    /// deadline would keep firing forever. Durable rows are untouched:
-    /// released rows keep their status and re-present on the next pass.
     pub(crate) fn expire_due_receipts(&self, connection: &ConnectionWireId) {
         #[cfg(all(test, unix))]
         self.receipt_expiry_runs
@@ -2540,19 +2067,6 @@ impl HostHandle {
         }
     }
 
-    /// One connection-owned subscription advance, driven without an inbound
-    /// request (CCT §10.5, IPC §13.3).
-    ///
-    /// The connection loop calls this after a registration hint or a
-    /// receipt deadline. It serves only a stored continuation or new
-    /// arrivals — never an explicit head re-display, so `Unknown` rows are
-    /// not auto-resent within one subscription. A live receipt waits for
-    /// its ACK or deadline; an expired one is released first (even when
-    /// presence no longer holds) so the deadline cannot spin immediately.
-    /// Every decision re-reads durable state; the wakeup is only a hint.
-    ///
-    /// Returns at most one unsolicited summary frame, and only when it
-    /// carried items.
     pub(crate) async fn push_undelivered(
         &self,
         template: &WireFrame,
@@ -2560,9 +2074,6 @@ impl HostHandle {
     ) -> Option<WireFrame> {
         let _gate = self.presentation_gate().await;
         let conn = conn_key(&live.connection_id);
-        // Release this connection's expired receipts up front: the caller's
-        // deadline already elapsed, and a lingering expired row would wake
-        // the loop again immediately.
         self.expire_due_receipts(&live.connection_id);
         if !live.authed || live.phase.is_superseded() || !live.connection_live {
             return None;
@@ -2579,8 +2090,6 @@ impl HostHandle {
             return None;
         }
         let companion_key = companion.as_raw().as_uuid().as_hyphenated().to_string();
-        // A live receipt is the page in flight: its ACK or expiry drives the
-        // next step, and pushing it again would only duplicate display.
         if self.live_receipt(&companion_key, &conn).is_some() {
             return None;
         }
@@ -2624,12 +2133,6 @@ impl HostHandle {
         }
     }
 
-    /// Earliest receipt deadline on this connection, expired or not.
-    ///
-    /// The connection loop arms its timer on this value; an already-elapsed
-    /// deadline fires immediately and [`Self::expire_due_receipts`] releases
-    /// the expired receipt. [`None`] means no receipt is outstanding, so
-    /// only a wakeup or inbound frame can advance the subscription.
     pub(crate) fn receipt_deadline_for(&self, connection: &ConnectionWireId) -> Option<Instant> {
         let conn = conn_key(connection);
         let state = crate::lock_unpoison(&self.presentations);
@@ -2641,17 +2144,11 @@ impl HostHandle {
             .min()
     }
 
-    /// Coalesced undelivered-registration hint subscription (CCT §10.5).
-    ///
-    /// The connection loop subscribes before it starts reading so a
-    /// registration committing during the first pass still wakes it.
     #[must_use]
     pub(crate) fn undelivered_wakeup(&self) -> tokio::sync::watch::Receiver<u64> {
         self.store.undelivered_wakeup()
     }
 
-    /// Test-only: force-expire one receipt so ACK-loss advance is
-    /// deterministic without sleeping past the 30 s TTL.
     #[cfg(test)]
     #[expect(dead_code, reason = "test hook for receipt expiry")]
     pub(crate) fn expire_receipt_for_test(&self, receipt: &str) -> bool {
@@ -2669,12 +2166,6 @@ impl HostHandle {
     }
 }
 
-/// Deterministic race gate for one presentation-start commit (test-only).
-///
-/// Pauses `commit_install` after the page plan and before the per-row
-/// presentation-start compares, so a test can change a row's durable status
-/// in between and pin that a domain `StaleSource` (not only an
-/// infrastructure error) drops the row from the frame and the receipt.
 #[cfg(test)]
 pub(crate) struct TestPresentationCommitGate {
     entered: tokio::sync::Semaphore,
@@ -2693,28 +2184,24 @@ impl Default for TestPresentationCommitGate {
 
 #[cfg(test)]
 impl TestPresentationCommitGate {
-    /// Pauses until the test releases the gate, marking entry first.
     pub(crate) async fn pause(&self) {
         self.entered.add_permits(1);
         let permit = self.release.acquire().await.expect("gate stays open");
         permit.forget();
     }
 
-    /// Waits until a paused commit has entered the gate.
     #[expect(dead_code, reason = "test gate hook")]
     pub(crate) async fn wait_entered(&self) {
         let permit = self.entered.acquire().await.expect("gate is entered");
         permit.forget();
     }
 
-    /// Releases one paused commit.
     #[expect(dead_code, reason = "test gate hook")]
     pub(crate) fn release(&self) {
         self.release.add_permits(1);
     }
 }
 
-/// One pass plan for a cursor-less request.
 #[derive(Debug, Clone, Copy)]
 enum PlanStart {
     Continued {
@@ -2731,8 +2218,6 @@ enum PlanStart {
     },
 }
 
-/// One wire resume application: a decided outcome or a content conflict
-/// under a reused id (refused without side effects at dispatch).
 #[derive(Debug, Clone)]
 enum ResumeApply {
     Outcome(ResumeTaskOutcomeWire),

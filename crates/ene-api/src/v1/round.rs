@@ -1,33 +1,12 @@
-//! One-to-one text round trip: input candidate, stream, ack (IPC §13.1).
-//!
-//! Inputs are proposals, never acceptances: the Host issues rounds, keeps
-//! streams ordered per stream, and reports presentation back through
-//! outcomes. Stale, held, and needs-revalidation are Ok-side domain
-//! outcomes, never errors and never retried automatically.
-
 use serde::{Deserialize, Serialize};
 
 use super::refs::RevalidationReasonWire;
 use super::refs::{ClientLocalId, CompanionWireRef, RoundWireId, StreamWireId, TextLangWire};
 
-/// Owner text input candidate. Acceptance, round issuance, and attribution
-/// checks happen Host-side (IB X-B).
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SubmitTextInput {
     pub companion: CompanionWireRef,
-    /// Target round, or [`None`] to join-or-mint. Old rounds are never
-    /// rebound from this field. With [`fresh`](Self::fresh) set this field
-    /// must be [`None`]: a force-new request is the design's round-less
-    /// new-round request (IPC §13.1), so a round premise here makes the
-    /// frame self-contradictory and the Host declines it stale instead of
-    /// interpreting either value.
     pub round: Option<RoundWireId>,
-    /// Force a fresh round: the Host mints instead of joining any open
-    /// round. Defaults to `false` when absent, preserving the join-or-mint
-    /// meaning of a bare `round: None`. A force-new request carries no
-    /// round premise: [`round`](Self::round) and the envelope `round_view`
-    /// must both be absent, and a contradictory frame is declined stale,
-    /// never silently reinterpreted.
     #[serde(default)]
     pub fresh: bool,
     pub local_id: ClientLocalId,
@@ -47,11 +26,8 @@ impl core::fmt::Debug for SubmitTextInput {
     }
 }
 
-/// Message body: bounded text plus language tag. A transient expression:
-/// the Host canonicalizes accepted text into History.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TextBodyWire {
-    /// Redacted from [`core::fmt::Debug`].
     pub text: String,
     pub lang: TextLangWire,
 }
@@ -66,29 +42,21 @@ impl core::fmt::Debug for TextBodyWire {
     }
 }
 
-/// Intake outcome: an Ok-side domain outcome, never an error. An old round
-/// maps back to its own round; nothing is rebound onto a new one, and a
-/// [`None`] request is never auto-resent to work around a rejection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RoundIntakeOutcomeWire {
     AcceptedForRound {
         round: RoundWireId,
     },
-    /// The premise round is not current.
     StaleRound {
         current_round: Option<RoundWireId>,
-        /// Current generation the sender should observe next time.
         current_generation: u64,
     },
-    /// A presence transition holds intake for now.
     HeldForTransition,
     NeedsRevalidation {
-        /// Opaque reason, matched against a known set at Host ingress.
         reason: RevalidationReasonWire,
     },
 }
 
-/// Opening is neither presentation nor achievement.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TextStreamOpen {
     pub stream: StreamWireId,
@@ -96,13 +64,10 @@ pub struct TextStreamOpen {
     pub generation: u64,
 }
 
-/// Per-stream order by `seq`. A frame without `is_final` never completes
-/// anything; gaps are never guessed over.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TextStreamFrameWire {
     pub stream: StreamWireId,
     pub seq: u64,
-    /// Redacted from [`core::fmt::Debug`].
     pub delta: String,
     pub is_final: bool,
 }
@@ -119,14 +84,11 @@ impl core::fmt::Debug for TextStreamFrameWire {
     }
 }
 
-/// Completion, interruption, cancellation, and staleness are different
-/// facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StreamClose {
     Completed,
     Interrupted,
     Cancelled,
-    /// Old streams are never rebound.
     Stale,
 }
 
@@ -136,15 +98,11 @@ pub struct TextStreamClose {
     pub status: StreamClose,
 }
 
-/// Presentation confirmation: an observation, not a report of completion.
-/// Sending never equals reported.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConfirmPresentationWire {
     pub round: RoundWireId,
     pub stream: Option<StreamWireId>,
     pub status: PresentationStatus,
-    /// Display reason. Operational metadata only: never a secret or a body
-    /// copy, and redacted from [`core::fmt::Debug`] in depth.
     pub detail: Option<String>,
 }
 
@@ -163,7 +121,6 @@ impl core::fmt::Debug for ConfirmPresentationWire {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PresentationStatus {
     Presented,
-    /// Sticky: never upgraded by resend.
     Unknown,
     Failed,
 }
@@ -174,16 +131,11 @@ pub enum HistoryRole {
     Companion,
 }
 
-/// One timeline item: Host-filtered display fact for restart restore.
-/// Stage 1 gap-fill (no dedicated restore message in the referenced
-/// design): filtered facts only, never undelivered reporting.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HistoryItem {
     pub round: RoundWireId,
     pub role: HistoryRole,
-    /// Redacted from [`core::fmt::Debug`].
     pub text: String,
-    /// Wall-clock rendering (RFC 3339 with offset), display only.
     pub at: String,
 }
 
@@ -202,41 +154,17 @@ impl core::fmt::Debug for HistoryItem {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HistoryRequest {
     pub companion: CompanionWireRef,
-    /// Items at or after this wall-clock rendering, if bounded. The Host
-    /// parses it as RFC 3339 and compares instants; a different UTC offset is
-    /// therefore respected, never compared as plain text.
     pub since: Option<String>,
-    /// Maximum number of items, oldest first. Zero requests no items; the
-    /// Host applies the bound to the storage query, not after reading.
     pub limit: u64,
-    /// Restrict to one Host-issued round projection, or [`None`] for the
-    /// whole companion timeline. The projection travels opaquely: the Host
-    /// resolves it against stored history, so a round stays addressable
-    /// across restarts even though the transient wire map is gone.
     #[serde(default)]
     pub round: Option<RoundWireId>,
 }
 
-/// Outcome of an explicit History read (owner-requested, never the optional
-/// background retrieval used while assembling a dialogue prompt).
-///
-/// A successful read may be empty: empty is a fact about the timeline, not a
-/// failure. Failure variants are typed and operation-level only and carry no
-/// History body, secret, or raw backend error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HistoryResponse {
-    /// The read succeeded; `items` is oldest first and may be empty.
     Items(Vec<HistoryItem>),
-    /// The request itself is unusable (for example `since` is not an RFC 3339
-    /// instant). Retrying the identical bytes fails identically; the Client
-    /// corrects the request.
     InvalidRequest,
-    /// The Host could not read the requested timeline. The same request may
-    /// succeed later; nothing about the stored timeline is implied.
     Unavailable,
-    /// The companion projection is unknown or rotated. The Client re-reads
-    /// presence/the current projection and retries instead of showing an
-    /// empty timeline.
     StaleCompanion,
 }
 
@@ -263,22 +191,10 @@ mod tests {
     #[test]
     fn input_debug_keeps_refs_and_redacts_body() {
         let rendered = format!("{:?}", input());
-        assert!(
-            rendered.contains("companion-1"),
-            "refs stay visible: {rendered}"
-        );
-        assert!(
-            rendered.contains("round-1"),
-            "refs stay visible: {rendered}"
-        );
-        assert!(
-            rendered.contains("local-1"),
-            "refs stay visible: {rendered}"
-        );
-        assert!(
-            !rendered.contains("hello companion"),
-            "body redacted: {rendered}"
-        );
+        assert!(rendered.contains("companion-1"));
+        assert!(rendered.contains("round-1"));
+        assert!(rendered.contains("local-1"));
+        assert!(!rendered.contains("hello companion"));
     }
 
     #[test]
@@ -290,11 +206,8 @@ mod tests {
             is_final: false,
         };
         let rendered = format!("{frame:?}");
-        assert!(
-            !rendered.contains("partial words"),
-            "delta redacted: {rendered}"
-        );
-        assert!(rendered.contains("seq"), "non-body fields stay: {rendered}");
+        assert!(!rendered.contains("partial words"));
+        assert!(rendered.contains("seq"));
     }
 
     #[test]
@@ -306,14 +219,8 @@ mod tests {
             at: String::from("2026-09-08T12:00:00+09:00"),
         };
         let rendered = format!("{item:?}");
-        assert!(
-            !rendered.contains("private words"),
-            "text redacted: {rendered}"
-        );
-        assert!(
-            rendered.contains("round-9"),
-            "refs stay visible: {rendered}"
-        );
+        assert!(!rendered.contains("private words"));
+        assert!(rendered.contains("round-9"));
     }
 
     #[test]
@@ -325,9 +232,6 @@ mod tests {
             detail: Some(String::from("downstream said why")),
         };
         let rendered = format!("{confirm:?}");
-        assert!(
-            !rendered.contains("downstream said why"),
-            "detail redacted: {rendered}"
-        );
+        assert!(!rendered.contains("downstream said why"));
     }
 }

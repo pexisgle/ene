@@ -1,28 +1,3 @@
-//! `ene-ctl` CLI client entrypoint.
-//!
-//! The client holds no canonical state and establishes no local authority of
-//! its own; round identity stays Host-issued, and every acceptance or outcome
-//! is Host-reported.
-//!
-//! Presentation output avoids the `print!` family (workspace-denied): all
-//! output goes through `writeln!`/`write!` on locked stdio handles with
-//! explicit flushes, so each write site states its destination and its
-//! failure becomes a [`CliError::Transport`].
-//!
-//! Stdout contract: view and history commands print their rendered lines (or
-//! nothing when empty). `send` prints `AcceptedForRound <round>`, then the
-//! stream deltas concatenated as they arrive (flushed per frame), then a
-//! trailing newline on [`TextStreamClose`](ene_api::v1::round::TextStreamClose),
-//! and finally sends one `Presented` observation for the round (no reply is
-//! expected; nothing is sent when stdio failed mid-stream). Deltas on stdout
-//! are the user's own conversation text by design; error paths (stderr, exit
-//! codes) never carry bodies or secrets.
-//!
-//! Exit codes: `0` on success; `1` for usage and technical failures
-//! (transport, codec, terminal server refusals); `2` for retryable
-//! server-side domain outcomes (stale rounds, held transitions, stale base
-//! views, pending confirmations, and similar Ok-side declines).
-
 use ene_ctl::errors::CliError;
 use ene_ctl::{client, cmds};
 
@@ -37,10 +12,6 @@ use ene_api::v1::undelivered::{UndeliveredResponse, UndeliveredSummary};
 use ene_config::paths::resolve_data_dir;
 use ene_config::typed::Config;
 
-/// The declarative CLI surface: argv syntax, subcommands, flags, help, and
-/// version all come from `clap`. Domain judgment (provider allowlist, target
-/// grammar, conflicts, required text) stays in this binary's validation and
-/// in the Host; the library only maps the parsed words onto `cmds` types.
 fn ene_ctl_command() -> clap::Command {
     use clap::{Arg, ArgAction};
 
@@ -302,7 +273,6 @@ fn ene_ctl_command() -> clap::Command {
 }
 
 struct Cli {
-    /// `--config PATH`, accepted before or after the subcommand.
     config: Option<PathBuf>,
     command: cmds::Command,
 }
@@ -320,8 +290,6 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
     let Some((name, sub)) = matches.subcommand() else {
         return Err(usage_error("missing command"));
     };
-    // A global `--config` after the subcommand lands on the subcommand's
-    // matches; either placement selects the same file.
     let config = config.or_else(|| sub.get_one::<String>("config").map(PathBuf::from));
     let command = match name {
         "setup" => cmds::Command::Setup(setup_mode(sub)?),
@@ -544,16 +512,12 @@ fn main() -> ExitCode {
     }
 }
 
-/// Runs on a single-threaded Tokio runtime; the client is Unix-socket only
-/// (no network).
 fn run() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let matches = match ene_ctl_command()
         .try_get_matches_from(std::iter::once(String::from("ene-ctl")).chain(args))
     {
         Ok(matches) => matches,
-        // `--help` / `--version` are standard successful exits, never errors
-        // and never reach configuration or the Host.
         Err(error)
             if matches!(
                 error.kind(),
@@ -695,9 +659,6 @@ async fn run_command(
     }
 }
 
-/// One bounded usage summary read. `Reject` (a malformed filter the Host
-/// refuses) stays distinct from `Unavailable` (the read could not answer) and
-/// from a stale cursor.
 async fn request_usage(
     session: &mut client::Client,
     args: &cmds::UsageArgs,
@@ -718,13 +679,6 @@ async fn request_usage(
     }
 }
 
-/// Sets or updates one usage cap through the permission-owned command.
-///
-/// The Client only proposes: it first reads the bounded usage page so the
-/// intent's base view is the mark the Host issued for exactly this slot, then
-/// sends the shared-grammar cap target. The Host re-checks the current
-/// authenticated connection, the mark, and the cap revision; a stale answer
-/// means the Owner re-reads instead of overwriting.
 async fn run_usage_cap(
     session: &mut client::Client,
     scope: &str,
@@ -783,14 +737,6 @@ async fn run_usage_cap(
     }
 }
 
-/// Sends one advisory Targeted Deletion request.
-///
-/// The Client first reads the live deletion surface (a pure read) so the
-/// intent carries the current mark; the Host re-checks it and stages at most
-/// one durable request. The exact text travels in the typed target, never in
-/// the rationale quote, and the answer is printed through the shared
-/// management description — the command itself never claims a deletion
-/// happened: only the Host PC confirmation and the status page can say that.
 async fn run_deletion(
     session: &mut client::Client,
     text: &str,
@@ -836,7 +782,6 @@ async fn run_deletion(
     }
 }
 
-/// One bounded Targeted Deletion status read; no body crosses this path.
 async fn request_deletion_status(
     session: &mut client::Client,
     cursor: Option<&str>,
@@ -864,7 +809,6 @@ async fn request_deletion_status(
     }
 }
 
-/// Flushes explicitly so piped output is complete on return.
 fn emit(text: &str) -> Result<(), CliError> {
     if text.is_empty() {
         return Ok(());
@@ -894,10 +838,6 @@ async fn request_view(
     }
 }
 
-/// One explicit History read. A successful empty result is distinct from an
-/// invalid request, an unreadable store, and a rotated companion projection;
-/// each failure keeps its own meaning and exit class instead of being shown
-/// as an empty timeline.
 fn history_items(
     response: ene_api::v1::round::HistoryResponse,
 ) -> Result<Vec<ene_api::v1::round::HistoryItem>, CliError> {
@@ -938,8 +878,6 @@ async fn request_history(
     }
 }
 
-/// One explicit Task-list read. Stale cursors and rejections keep their own
-/// exit classes instead of rendering as an empty list.
 async fn request_task_list(
     session: &mut client::Client,
     cursor: Option<&str>,
@@ -966,7 +904,6 @@ async fn request_task_list(
     }
 }
 
-/// One explicit Task-report read (paged identities, never bodies).
 async fn request_task_report(
     session: &mut client::Client,
     task: &str,
@@ -1001,8 +938,6 @@ async fn request_task_report(
     }
 }
 
-/// One bounded source-body page. `InputUnavailable` is retryable (exit 2):
-/// the body exists but cannot be projected safely right now.
 async fn request_report_source(
     session: &mut client::Client,
     source: &str,
@@ -1034,8 +969,6 @@ async fn request_report_source(
     }
 }
 
-/// First-party Task selection: in-memory display selection, never an
-/// execution start.
 async fn request_select_task(
     session: &mut client::Client,
     task: &str,
@@ -1056,8 +989,6 @@ async fn request_select_task(
     }
 }
 
-/// Explicit first-party resume through the wire command (retryable identity:
-/// a lost reply replays through `retry`, never a second command).
 async fn run_resume_task(
     session: &mut client::Client,
     task: &str,
@@ -1087,10 +1018,6 @@ async fn run_resume_task(
     }
 }
 
-/// Fetches one undelivered page, paints it, and ACKs the receipts that fully
-/// painted. Any stdio failure before the flush returns early and sends no
-/// ACK, so the Host keeps the batch `Unknown` instead of recording a
-/// presentation the operator never saw.
 async fn run_undelivered(
     session: &mut client::Client,
     cursor: Option<&str>,
@@ -1129,8 +1056,6 @@ async fn run_undelivered(
     ack_summary(session, &summary).await
 }
 
-/// ACKs one fully painted summary as `Presented`, echoing the round and
-/// generation the summary showed for the Host's receipt comparison.
 async fn ack_summary(
     session: &mut client::Client,
     summary: &ene_api::v1::undelivered::UndeliveredSummary,
@@ -1225,10 +1150,6 @@ async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Resul
     }
 }
 
-/// Any stdio failure before the close frame and the buffered frames are
-/// flushed returns early and sends no presentation observation, so the Host
-/// keeps the stream `Pending`/`Unknown` instead of recording a presentation
-/// the operator never saw.
 async fn run_send(
     session: &mut client::Client,
     language: &str,
@@ -1259,10 +1180,6 @@ async fn run_send(
     let mut stdout = std::io::stdout();
     writeln!(stdout, "AcceptedForRound {round}")
         .map_err(|error| CliError::Transport(format!("stdout write failed: {}", error.kind())))?;
-    // Backlog the Host auto-presented at attach (recovery/summon, no Owner
-    // query): paint it before the new reply and ACK it with the stream's
-    // presentation observation below. A stdio failure here sends no ACK, so
-    // the Host keeps the batch Unknown.
     let mut auto: Vec<UndeliveredSummary> = Vec::new();
     for frame in session.take_undelivered() {
         if let WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)) =
@@ -1285,9 +1202,6 @@ async fn run_send(
     let close_status = loop {
         match session.next_frame().await? {
             WirePayload::TextStreamOpen(open) => {
-                // Routing only (stream key, round, generation); the key is
-                // kept for the presentation observation after close. The
-                // open alone shows nothing, so it never marks `shown`.
                 if stream.is_none() {
                     stream = Some(open.stream);
                 }
@@ -1315,8 +1229,6 @@ async fn run_send(
                 // generation in the frame loop; there is nothing to display.
             }
             WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)) => {
-                // Auto-presented backlog interleaved with the stream: paint
-                // inline and remember the receipt for the end-of-send ACK.
                 let text = cmds::render_summary(&summary);
                 if !text.is_empty() {
                     writeln!(stdout, "{text}").map_err(|error| {
@@ -1354,9 +1266,6 @@ async fn run_send(
             detail: None,
         }))
         .await?;
-    // The backlog painted above (attach-time and in-stream auto-presents)
-    // is ACKed only now, after its final frame painted: a partial batch
-    // would have returned early above with no ACK, keeping it Unknown.
     for summary in &auto {
         ack_summary(session, summary).await?;
     }
@@ -1367,9 +1276,6 @@ async fn run_send(
     }
 }
 
-/// Presentation fact and completion success are separate claims: text the
-/// operator saw stays presented even when the stream did not complete, and
-/// only frames of this live stream count (the opening frame shows nothing).
 fn observe_close(status: StreamClose, frames_shown: bool) -> (PresentationStatus, bool) {
     match status {
         StreamClose::Completed => (PresentationStatus::Presented, true),

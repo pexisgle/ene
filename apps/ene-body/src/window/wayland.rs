@@ -1,9 +1,3 @@
-//! KDE Wayland `zwlr_layer_shell_v1` overlay.
-//!
-//! This backend never falls back to XWayland or an xdg always-on-top window.
-//! `wl_surface.frame` only grants the next present; `wp_presentation` owns
-//! display evidence.
-
 #[cfg(target_os = "linux")]
 mod imp {
     use std::collections::{BTreeSet, VecDeque};
@@ -47,17 +41,9 @@ mod imp {
 
     const LEFT_BUTTON: u32 = 0x110;
     const RIGHT_BUTTON: u32 = 0x111;
-    /// Logical-pixel extent of the resize target, anchored to the rightmost
-    /// visible character pixels in the bottom band (mirrors the Windows
-    /// `WM_NCHITTEST` grip).
     const RESIZE_GRIP_LOGICAL_PX: u32 = 32;
 
     pub struct WaylandOverlay {
-        /// The wgpu surface/swapchain must be destroyed while the Wayland
-        /// connection is still alive: Mesa's Wayland WSI marshals proxy
-        /// destroys on the raw `wl_display` and dereferences freed memory when
-        /// the connection is torn down first (observed as a segfault in
-        /// `wsi_wl_swapchain_destroy`). Field order is the drop order.
         renderer: Option<SurfaceRenderer>,
         connection: Connection,
         event_queue: EventQueue<State>,
@@ -95,11 +81,6 @@ mod imp {
             let compositor =
                 CompositorState::bind(&globals, &qh).map_err(|error| error.to_string())?;
             let layer_shell = LayerShell::bind(&globals, &qh).map_err(|error| error.to_string())?;
-            // Optional protocol: KWin, GNOME and wlroots compositors expose
-            // it. Drag and resize use its unaccelerated deltas so the overlay
-            // never feeds its own surface movement back into the gesture
-            // (surface-local motion coordinates are relative to the moving
-            // surface, which made the overlay travel at half speed).
             let relative_pointer_state = RelativePointerState::bind(&globals, &qh);
             let presentation = globals
                 .bind(&qh, 1..=1, ())
@@ -226,15 +207,6 @@ mod imp {
                 self.state.frame_ready = true;
                 return;
             }
-            // Hide by presenting one transparent frame and keeping the
-            // surface mapped. Unmapping (`attach(None)` + commit) makes KWin
-            // require a new configure before the next buffer attach, and that
-            // configure is not sent for a null-buffer commit, so a later show
-            // would never render again (observed on KWin 6.7.5: protocol
-            // error 0 "a buffer has been attached to a layer surface prior to
-            // the first layer_surface.configure event" and a dead renderer).
-            // The transparent frame also makes the alpha-aware input region
-            // empty, so the hidden overlay claims no input.
             if self.renderer.is_some() {
                 self.render_frame(&[], true);
             } else {
@@ -256,8 +228,6 @@ mod imp {
             self.state.position = (placement.x, placement.y);
             self.state.layer.set_margin(placement.y, 0, 0, placement.x);
             self.state.layer.set_size(placement.width, placement.height);
-            // The alpha-aware region is recomputed from the next presented
-            // frame at the new size; until then the old region is not reused.
             self.state.region_dirty = true;
             if let Some(renderer) = &mut self.renderer {
                 let size = (
@@ -323,8 +293,6 @@ mod imp {
             self.render_frame(meshes, false);
         }
 
-        /// Presents one frame. `force` skips the visible/frame pacing gate so
-        /// the hide path can present the transparent unmapping frame.
         fn render_frame(&mut self, meshes: &[crate::vrm::RenderMesh], force: bool) {
             if self.renderer.is_none() {
                 return;
@@ -398,12 +366,6 @@ mod imp {
             }
         }
 
-        /// Applies the alpha-aware input region from the presented frame.
-        ///
-        /// The region follows the visible pixels instead of the whole
-        /// placement box, so transparent space stays click-through to the
-        /// application below. An empty mask means an empty region: nothing of
-        /// this surface claims input while it renders nothing.
         fn refresh_input_region(
             &mut self,
             meshes: &[crate::vrm::RenderMesh],
@@ -476,8 +438,6 @@ mod imp {
         }
     }
 
-    /// Replaces the surface input region with the given surface-local
-    /// rectangles. Empty input makes the whole surface click-through.
     fn set_input_region(
         compositor: &CompositorState,
         qh: &QueueHandle<State>,
@@ -506,8 +466,6 @@ mod imp {
         ((logical as f64 * f64::from(scale)).round() as u64).clamp(1, u64::from(u32::MAX)) as u32
     }
 
-    /// Output name reported by the compositor, or the proxy identity when the
-    /// output was not announced with a name.
     fn output_name(output_state: &OutputState, output: &wl_output::WlOutput) -> String {
         output_state
             .info(output)
@@ -515,8 +473,6 @@ mod imp {
             .unwrap_or_else(|| format!("wl_output@{}", output.id().protocol_id()))
     }
 
-    /// Surface position after a relative drag. Kept pure so the drag
-    /// arithmetic cannot drift back into surface-local feedback.
     fn dragged_position(origin: (i32, i32), accum: (f64, f64)) -> (i32, i32) {
         (
             origin.0.saturating_add(accum.0.round() as i32),
@@ -524,18 +480,12 @@ mod imp {
         )
     }
 
-    /// Surface size after a relative resize, clamped to the minimum box.
     fn resized_extent(origin: (u32, u32), accum: (f64, f64)) -> (u32, u32) {
         let width = (f64::from(origin.0) + accum.0).max(96.0);
         let height = (f64::from(origin.1) + accum.1).max(128.0);
         (width as u32, height as u32)
     }
 
-    /// Presentation output attribution: `sync_output` when the compositor sent
-    /// it, otherwise the output the surface entered. `sync_output` is optional
-    /// in `wp_presentation_feedback` and KWin 6.7 does not send it, so the
-    /// entered output is the compositor-provided fallback. An empty result is
-    /// kept and fails evidence gating rather than being guessed.
     fn presentation_output(sync_output: &str, entered: Option<&str>) -> String {
         if !sync_output.is_empty() {
             return sync_output.to_string();
@@ -557,18 +507,11 @@ mod imp {
 
     #[derive(Debug)]
     enum Interaction {
-        /// Dragging the whole overlay. `origin` is the surface position at
-        /// press; `accum` is the unaccelerated pointer displacement since
-        /// press. `start_local` is only the fallback anchor for compositors
-        /// without `zwp_relative_pointer_v1`.
         Drag {
             origin: (i32, i32),
             accum: (f64, f64),
             start_local: (f64, f64),
         },
-        /// Resizing from the bottom-band grip. `origin` is the surface size
-        /// at press; `accum` is the unaccelerated pointer displacement since
-        /// press. `start_local` is the fallback anchor.
         Resize {
             origin: (u32, u32),
             accum: (f64, f64),
@@ -591,7 +534,6 @@ mod imp {
         layer: LayerSurface,
         presentation: wp_presentation::WpPresentation,
         pointer: Option<wl_pointer::WlPointer>,
-        /// Optional unaccelerated relative motion source for drag / resize.
         relative_pointer: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
         configured: bool,
         frame_ready: bool,
@@ -603,14 +545,7 @@ mod imp {
         events: VecDeque<Event>,
         clock_id: i32,
         surface_id: String,
-        /// Output the surface entered, as reported by the compositor. It is
-        /// the fallback presentation output: `wp_presentation_feedback`
-        /// `sync_output` is optional and KWin 6.7 does not send it, so the
-        /// entered output is the only compositor-provided attribution.
         surface_output: Option<(u32, String)>,
-        /// Input region of the last presented frame, in physical pixels.
-        /// Transparent desktop space stays absent from `wl_surface`'s input
-        /// region so clicks reach the application below.
         hit_test_mask: Option<HitTestMask>,
         region_dirty: bool,
         pending_feedback: BTreeSet<u64>,
@@ -851,10 +786,6 @@ mod imp {
                         button: LEFT_BUTTON,
                         ..
                     } => {
-                        // The alpha-aware input region already delivered this
-                        // press on a visible pixel. Resize only when that
-                        // pixel is the bottom-band grip, so the transparent
-                        // window corner never claims the desktop.
                         let scale = f64::from(self.scale.max(1));
                         let grip = (f64::from(RESIZE_GRIP_LOGICAL_PX) * scale).round() as u32;
                         let resize = self.hit_test_mask.as_ref().is_some_and(|mask| {
@@ -885,12 +816,6 @@ mod imp {
                         self.events.push_back(Event::LocalUi(LocalUiFact::Hide));
                     }
                     PointerEventKind::Motion { .. } => {
-                        // Fallback for compositors without
-                        // `zwp_relative_pointer_v1`: surface-local motion is
-                        // relative to the moving surface, so this path can
-                        // under-travel during sustained drags. KWin, GNOME and
-                        // wlroots use the unaccelerated relative-motion path
-                        // below instead.
                         if self.relative_pointer.is_none() {
                             match self.interaction {
                                 Some(Interaction::Resize {
@@ -955,11 +880,6 @@ mod imp {
             _pointer: &wl_pointer::WlPointer,
             event: RelativeMotionEvent,
         ) {
-            // Follow the pointer the user sees: the accelerated vector is the
-            // one that moves the cursor, so the overlay stays under the
-            // pointer at any pointer-acceleration setting. The unaccelerated
-            // vector is only a fallback for compositors that leave `dx`/`dy`
-            // empty.
             let (dx, dy) = if event.delta.0 != 0.0 || event.delta.1 != 0.0 {
                 event.delta
             } else {
@@ -990,9 +910,6 @@ mod imp {
                     if (width, height) != self.size {
                         self.size = (width, height);
                         self.layer.set_size(width, height);
-                        // The next presented frame recomputes the alpha-aware
-                        // region at the new size. The pointer stays on this
-                        // surface through the implicit button-down grab.
                         self.region_dirty = true;
                         self.events
                             .push_back(Event::LocalUi(LocalUiFact::Resize { width, height }));
@@ -1122,7 +1039,6 @@ mod imp {
         registry_handlers![OutputState, SeatState];
     }
 
-    // wl_region is created only to set an input region and has no events.
     impl Dispatch<wl_region::WlRegion, ()> for State {
         fn event(
             _state: &mut Self,

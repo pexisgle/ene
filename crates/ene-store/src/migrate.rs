@@ -604,10 +604,6 @@ CREATE TABLE deletion_reconciliation (
 CREATE INDEX idx_task_context_entry_origin_source ON task_context_entry (origin_source);
 ";
 
-/// Initializes only an empty database. Existing databases must have the exact
-/// current version; opening them never repairs or rewrites durable state.
-/// The immediate transaction serializes initializers and publishes the schema,
-/// seed, and version atomically.
 pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -680,7 +676,6 @@ mod tests {
             .unwrap();
         let mut writer = Connection::open(&path).unwrap();
         writer.busy_timeout(std::time::Duration::ZERO).unwrap();
-        // The reader allows DDL under the reserved lock but prevents commit.
         assert!(run(&mut writer).is_err());
         assert_eq!(
             writer

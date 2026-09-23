@@ -1,8 +1,3 @@
-//! Process event loop: IPC + overlay + pose/health + optional wgpu.
-//!
-//! Hide and clean exit do not talk to Host. A broken parent pipe is a
-//! disconnect, not Task cancel.
-
 use std::io::ErrorKind;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -18,7 +13,6 @@ use crate::ipc::{
 use crate::vrm::VrmSession;
 use crate::window::Overlay;
 
-/// How the parent attached the projection channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IpcEndpoint {
     Stdio,
@@ -28,12 +22,9 @@ pub enum IpcEndpoint {
     UnixPath(PathBuf),
 }
 
-/// Run-time switches. Production tries wgpu; IPC unit tests may skip it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunOptions {
     pub try_gpu: bool,
-    /// Production selects the native backend. Tests disable this instead of
-    /// depending on the machine's GUI session.
     pub try_native_overlay: bool,
 }
 
@@ -46,12 +37,6 @@ impl Default for RunOptions {
     }
 }
 
-/// Parse argv. Default endpoint is stdio so tests and a dummy parent can
-/// attach without a desktop supervisor.
-///
-/// # Errors
-///
-/// Unknown flags, combined endpoints, or an unusable fd/path.
 pub fn parse_endpoint<I, S>(args: I) -> Result<IpcEndpoint, BodyError>
 where
     I: IntoIterator<Item = S>,
@@ -120,14 +105,6 @@ where
     }
 }
 
-/// Drive the overlay process on the given endpoint until shutdown or disconnect.
-///
-/// # Errors
-///
-/// Transport or encode failures after the channel is already down are mapped
-/// to [`BodyError::Transport`]. Codec errors on inbound frames are skipped
-/// (unknown payloads are not interpreted) so a confused parent cannot crash
-/// the body with conversation text.
 pub async fn run(endpoint: IpcEndpoint, options: RunOptions) -> Result<(), BodyError> {
     match endpoint {
         IpcEndpoint::Stdio => run_with_io(tokio::io::stdin(), tokio::io::stdout(), options).await,
@@ -165,11 +142,6 @@ fn unix_stream_from_fd(fd: i32) -> Result<tokio::net::UnixStream, BodyError> {
         .map_err(|error| BodyError::Transport(std::format!("ipc-fd tokio: {error}")))
 }
 
-/// In-process entry for tests that supply their own reader/writer.
-///
-/// # Errors
-///
-/// Same as [`run`].
 pub async fn run_with_io<R, W>(reader: R, writer: W, options: RunOptions) -> Result<(), BodyError>
 where
     R: AsyncRead + Unpin + Send,
@@ -220,8 +192,6 @@ where
     let mut tmp = [0u8; 4096];
     let mut health = tokio::time::interval(HEALTH_INTERVAL);
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Run animation at the conventional 60 Hz cadence. Native presentation
-    // pacing still prevents this loop from racing a slower compositor.
     const RUNTIME_HZ: f32 = 60.0;
     let mut runtime_tick = tokio::time::interval(std::time::Duration::from_nanos(16_666_667));
     runtime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -328,9 +298,6 @@ where
             }
             Err(crate::ipc::IpcError::Truncated { .. }) => return Ok(false),
             Err(_) => {
-                // Unknown / corrupt body: drop the claimed frame if we can,
-                // otherwise drop the prefix so we do not spin. Never decode
-                // leftover bytes as conversation text.
                 if buf.len() >= 4 {
                     let claimed = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
                     let need = 4usize.saturating_add(claimed);
@@ -404,8 +371,6 @@ where
     }
 }
 
-/// A rejected set is a fact the parent must see; it never takes the process
-/// down and never clears a working assignment.
 async fn apply_motions<W>(
     set: &MotionSetInfo,
     vrm: &mut VrmSession,

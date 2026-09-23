@@ -26,10 +26,6 @@ fn current_mark(capability: CapabilityKind, current: Option<&ConsentRecord>) -> 
     consent_mark(capability, current.map(|record| record.rev.as_u64()))
 }
 
-/// Used by the intent-atomic assign so the premise check and the write
-/// cannot drift apart. The row is selected and written under the record's
-/// own capability, so a dialogue assignment can never overwrite or borrow
-/// the learning assignment.
 fn compare_and_save_row(
     tx: &Transaction<'_>,
     expected: Option<(&str, &ConsentRevision)>,
@@ -59,7 +55,6 @@ fn compare_and_save_row(
         )
         .map_err(|error| error.to_string())?;
     } else {
-        // One logical row per capability: overwrite it.
         tx.execute(
             SQL_UPDATE_CONSENT,
             params![
@@ -103,7 +98,6 @@ impl IntentOutcomeRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| permission_unavailable(error.to_string()))?;
-            // Write-once claim first: an existing row is never rewritten.
             if let Some(stored) = select_intent_row_tx(&tx, &record.fingerprint.intent_id)
                 .map_err(permission_unavailable)?
             {
@@ -166,9 +160,6 @@ impl IntentOutcomeRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| permission_unavailable(error.to_string()))?;
-            // Write-once claim first: an existing row decides without touching
-            // consent, so a concurrent same-id send can neither fork the answer
-            // nor re-run the compare-and-save.
             if let Some(stored) =
                 select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
             {
@@ -180,10 +171,6 @@ impl IntentOutcomeRepository for Store {
                 &record,
             )
             .map_err(permission_unavailable)?;
-            // The replay row shares the decision transaction: a crash can
-            // neither strand a commit without its marker nor a marker without
-            // its commit. Stale attempts record their stale snapshot here too,
-            // so a retried id always observes the same answer.
             let snapshot = match &outcome {
                 ConsentCommitOutcome::Committed { record } => IntentOutcome::StoredAsRuleView {
                     revision: consent_mark(record.capability, Some(record.rev.as_u64())),
@@ -218,20 +205,11 @@ impl IntentOutcomeRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| permission_unavailable(error.to_string()))?;
-            // Write-once claim first: an existing row decides without
-            // re-reading consent, so a concurrent same-id send can neither
-            // fork the answer nor re-run the mark comparison.
             if let Some(stored) =
                 select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
             {
                 return Ok(replay_or_conflict(stored, &fingerprint));
             }
-            // One transaction: compare the base mark, verify completability,
-            // and record the decided snapshot together. Every decided outcome
-            // is recorded (even stale/clarify), so a retried id always observes
-            // the same answer; only store failures hold unrecorded. Setup
-            // completion is a Stage 2 meaning: it names the dialogue consent
-            // only, so a learning assignment can never complete or block it.
             let current =
                 select_consent(&tx, CapabilityKind::Dialogue).map_err(permission_unavailable)?;
             let expected = parse_consent_mark(&expected_base, CapabilityKind::Dialogue);
@@ -277,16 +255,11 @@ impl IntentOutcomeRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| permission_unavailable(error.to_string()))?;
-            // Write-once claim first: an existing row decides without reading
-            // consent, so a concurrent same-id send can neither fork the answer
-            // nor re-run the route check.
             if let Some(stored) =
                 select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
             {
                 return Ok(replay_or_conflict(stored, &fingerprint));
             }
-            // No consent state changes either way: the only write, on a hit,
-            // records the replay row.
             let current = select_consent(&tx, capability).map_err(permission_unavailable)?;
             let record = match current {
                 Some(record)
@@ -318,18 +291,8 @@ impl IntentOutcomeRepository for Store {
     }
 }
 
-/// Bounded rows mutated per table in one local erasure pass. A pass that hits
-/// the bound reports its remainder and the next demand re-scans from the
-/// start: erased rows no longer match, so re-scanning is progress and needs no
-/// continuation cursor (lifecycle §9).
 const ERASURE_BATCH_ROWS: i64 = 500;
 
-/// Redacts the caller-supplied text columns of the decision journal.
-///
-/// The journal row itself is never deleted: deleting a decided intent would
-/// reopen its identity, so a retried id could re-execute a decision the Owner
-/// already received. The erased span is removed (`''`, never a marker), so no
-/// marker text can itself become a target match or a target-derived value.
 const SQL_REDACT_INTENT_JOURNAL: &str = "UPDATE management_intent
      SET target = replace(target, ?1, ''),
          rationale_quote = replace(rationale_quote, ?1, '')
@@ -340,11 +303,6 @@ const SQL_REDACT_INTENT_JOURNAL: &str = "UPDATE management_intent
          LIMIT ?2
      )";
 
-/// Invalidates a current consent record that carries the target text.
-///
-/// Erasure never rewrites the route in place and never turns a rule removal
-/// into a permission: the required current control outcome is "no consent",
-/// which fails closed until the Owner re-assigns.
 const SQL_INVALIDATE_CONSENT: &str = "DELETE FROM consent_record
      WHERE capability IN (
          SELECT capability FROM consent_record
@@ -384,9 +342,6 @@ impl PermissionErasureRepository for Store {
                 let tx = guard
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|error| permission_unavailable(error.to_string()))?;
-                // Stale-generation rejection and the mutation share one short
-                // transaction: a superseded sweep or a completed operation
-                // mutates nothing (lifecycle §6-§7/§9.1).
                 if !condition_is_current(&tx, condition)
                     .map_err(|error| permission_unavailable(error.to_string()))?
                 {

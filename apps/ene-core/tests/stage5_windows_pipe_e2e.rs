@@ -1,56 +1,3 @@
-//! Stage 5 slice F: Host-integration + first-party Client E2E over the REAL
-//! Windows named-pipe transport.
-//!
-//! Real pipe listener, real `ene-ctl` [`Client`], real Host orchestration;
-//! only the provider transport is a scripted fake. This is the Windows
-//! counterpart of `stage5_e2e.rs` (which stays `#![cfg(unix)]`): the fixture
-//! code is duplicated on purpose instead of being extracted into a shared
-//! module, so neither transport's harness quietly becomes the other's.
-//!
-//! Why the protocol behaviour must be identical on both transports: the
-//! Windows arm of [`ene_core::conn::run`] creates the exclusive first server
-//! instance for the data directory's pipe name, runs the OS peer token check
-//! ([`conn_pipe::peer_same_user`]) before a single frame is read, and then
-//! drives [`conn::serve_connection`] -- the *same* transport-generic function
-//! the Unix listener calls with a `UnixStream`. Frames, transport duplicate
-//! suppression, the [`ConnectionTable`] phase machine (`Accepted -> Paired ->
-//! Challenged -> Authenticated -> Superseded | Closed`), the per-device
-//! current slot, close admission, and the presence fallback all live behind
-//! `HostHandle::handle_frame_to` in `ene-core` with no `cfg` split. The only
-//! Windows-only code is pipe creation plus the peer token check
-//! (`conn_pipe.rs`) and the dial in `ene-ctl`'s `client/transport.rs`; after
-//! that dial the `#[cfg(any(unix, windows))]` client runs the identical
-//! pairing, capability, challenge-auth, request-correlation, and deferred
-//! queue logic. These tests therefore assert the typed outcomes instead of
-//! poking at internals: pairing pending/approval, `AuthResult`,
-//! `RejectKind::StaleConnection` on a superseded pipe connection, the
-//! streaming round contract, and the presence fallback / no-auto-restore /
-//! attach contract all arrive through that shared loop.
-//!
-//! Windows-only by construction, and executed by the existing `Check Windows`
-//! CI job (`cargo test --locked --workspace` on `windows-latest`), so no
-//! workflow change is needed.
-//!
-//! Determinism: bounded timeouts on every await, temp data directories (the
-//! FNV-derived pipe name is therefore never fixed), polling only to observe
-//! asynchronous state (never to order events), and each spawned server task
-//! aborted before the test returns.
-//!
-//! Coverage map:
-//!
-//! - bind + client dial + pairing + challenge auth + current connection in use
-//!   -> `pipe_bind_pair_authenticate_and_serve_the_current_connection` and
-//!   `second_host_cannot_create_the_same_pipe`
-//! - domain request/response and a real text round over the pipe
-//!   -> `pipe_bind_pair_authenticate_and_serve_the_current_connection`
-//! - superseded connection answers typed `StaleConnection`
-//!   -> `superseded_pipe_connection_answers_typed_stale_connection`
-//! - disconnect + reconnect through the connection/presence contract
-//!   -> `reconnect_reauths_without_restoring_presence_and_a_fresh_summon_serves`
-//! - Windows has no separate authentication/currentness implementation
-//!   -> asserted behaviourally throughout (identical typed outcomes and phase
-//!   semantics) and explained in the module and test comments
-
 #![cfg(windows)]
 #![allow(
     clippy::expect_used,
@@ -92,8 +39,6 @@ use tokio::net::windows::named_pipe::ClientOptions;
 
 const DESCRIPTOR: &str = "stage5 pipe e2e";
 const MODEL: &str = "gpt-slice-test";
-/// The one scripted provider reply: every provider call answers this text, so
-/// no assertion depends on provider call ordering.
 const REPLY: &str = "hello back over the real named pipe";
 
 fn memory_store() -> MemoryCredentialStore {
@@ -105,9 +50,6 @@ fn memory_store() -> MemoryCredentialStore {
     store
 }
 
-/// Scripted provider fake: one fixed reply, a send counter, and the recorded
-/// request inputs. Fixed text instead of a FIFO script keeps the rounds
-/// independent of provider call ordering, so nothing here leans on timing.
 struct ScriptedTransport {
     reply: String,
     sends: AtomicUsize,
@@ -166,14 +108,6 @@ async fn open_host(dir: &Path) -> Arc<HostHandle> {
     Arc::new(opened.unwrap())
 }
 
-/// Dials the data directory's pipe until the listener takes the pairing
-/// request, and requires the typed pending outcome: a first pairing answered
-/// with anything but `PendingOwnerConfirmation` would mean the pipe carries
-/// different handshake semantics than the Unix socket.
-///
-/// A pipe instance is listening only between accepts, and exists only once the
-/// Host created it, so a failed dial is retried. The retry loop is a bounded
-/// availability wait, never an ordering device.
 async fn dial_until_pending(dir: &Path) -> Result<PendingPairingClient, String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -201,8 +135,6 @@ async fn dial_until_pending(dir: &Path) -> Result<PendingPairingClient, String> 
     }
 }
 
-/// Connects a stored device over the pipe and requires the whole handshake to
-/// succeed: capability, challenge, ownership proof, and the presence fact.
 async fn connect(dir: &Path) -> Result<Client, String> {
     match tokio::time::timeout(
         Duration::from_secs(15),
@@ -276,9 +208,6 @@ fn setup_complete_intent(target: &str, mark: &str) -> WirePayload {
     })
 }
 
-/// Registers and approves the dialogue credential, assigns the model, and
-/// marks setup complete: the same management sequence the Unix harness drives,
-/// here over pipe frames.
 async fn setup_flow(client: &mut Client, approver: &HostHandle) -> Result<(), String> {
     let mark = view_mark(client).await?;
     let register = ask(
@@ -342,14 +271,6 @@ async fn setup_flow(client: &mut Client, approver: &HostHandle) -> Result<(), St
     Ok(())
 }
 
-/// Serves `dir` over the real named pipe (the `conn::run` Windows arm), pairs
-/// the first device through a real pending -> Owner-approval handshake,
-/// completes setup, and returns a live current connection.
-///
-/// The returned client authenticated over the pipe. Because the domain ingress
-/// gate admits only an authenticated-and-current connection, every later
-/// domain answer in these tests is itself evidence of the authenticated current
-/// slot on this transport.
 async fn serve_and_setup(
     dir: PathBuf,
     transport: Arc<ScriptedTransport>,
@@ -373,14 +294,6 @@ async fn serve_and_setup(
     (handle, server, client)
 }
 
-/// One conversation round over the pipe: submit, require acceptance, drain the
-/// stream to completion, and return the round wire id, stream id, and reply
-/// text.
-///
-/// A mid-stream presence fact is absorbed and skipped: `PresenceAttribution`
-/// is an unsolicited push that the session loop absorbs, but
-/// `Client::next_frame` hands it back, so this drain steps over it. Any other
-/// unexpected payload fails the round.
 async fn send_round(
     client: &mut Client,
     text: &str,
@@ -437,7 +350,6 @@ async fn send_round(
     Ok((round_wire, stream_id, text_out))
 }
 
-/// The Host applies presentation confirmations silently and answers nothing.
 async fn confirm_round(client: &mut Client, round_wire: &str, stream_id: Option<StreamWireId>) {
     let notified = tokio::time::timeout(
         Duration::from_secs(15),
@@ -468,11 +380,6 @@ async fn fetch_summary(client: &mut Client, what: &str) -> Result<UndeliveredSum
     Ok(summary)
 }
 
-/// One domain frame on a superseded pipe connection answers the typed
-/// `StaleConnection` rejection while the pipe stays open (IPC 11.3). The Unix
-/// socket path answers the same typed outcome because the phase snapshot and
-/// the rejection both come from the shared `ConnectionTable` gate, never from
-/// a transport-specific branch.
 async fn expect_stale_connection(client: &mut Client, payload: WirePayload, what: &str) {
     let answer = ask(client, payload, what)
         .await
@@ -487,9 +394,6 @@ async fn expect_stale_connection(client: &mut Client, payload: WirePayload, what
     );
 }
 
-/// One presence attribution row (state, generation), or `None` before the Host
-/// committed one. Read from the Host store because presence has no wire read
-/// query; the Unix harness observes it the same way.
 fn presence_row(dir: &Path) -> Option<(String, i64)> {
     let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
     conn.query_row(
@@ -501,9 +405,6 @@ fn presence_row(dir: &Path) -> Option<(String, i64)> {
     .expect("the presence attribution must read")
 }
 
-/// Observation poll for a committed presence state: the close fallback and the
-/// submit attach are asynchronous, so this waits for the state instead of
-/// assuming a moment. It is never used to order events.
 async fn wait_presence(dir: &Path, wanted: &str) -> (String, i64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -521,11 +422,6 @@ async fn wait_presence(dir: &Path, wanted: &str) -> (String, i64) {
     }
 }
 
-/// (1)(2)(3)(5): the Host binds the data directory's pipe, the first-party
-/// client dials it, pairing plus challenge authentication complete, and the
-/// current connection serves domain frames: a management view, the
-/// undelivered read, and a real text round whose reply streams back from the
-/// scripted provider.
 #[tokio::test]
 async fn pipe_bind_pair_authenticate_and_serve_the_current_connection() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -533,10 +429,6 @@ async fn pipe_bind_pair_authenticate_and_serve_the_current_connection() {
     let transport = Arc::new(ScriptedTransport::new(REPLY));
     let (_handle, server, mut client) = serve_and_setup(dir.clone(), Arc::clone(&transport)).await;
 
-    // A live management view is answered. The domain ingress gate answers it
-    // only for an authenticated-and-current connection; a stale or
-    // unauthenticated one gets a typed rejection instead, so this answer is
-    // the behavioural evidence that the pipe connection became current.
     let view = ask(
         &mut client,
         WirePayload::ManagementViewRequest(cmds::setup_view_request()),
@@ -553,10 +445,6 @@ async fn pipe_bind_pair_authenticate_and_serve_the_current_connection() {
         "the requested setup sections must render"
     );
 
-    // A second normal domain request/response over the pipe, and the presence
-    // gate over it: this connection is authenticated and current, but no
-    // summon attached presence yet, so the client-dependent read answers the
-    // typed `NoCurrentPresence` outcome instead of a summary.
     let before = ask(
         &mut client,
         WirePayload::UndeliveredRequest(cmds::undelivered_request(None, None, false)),
@@ -572,8 +460,6 @@ async fn pipe_bind_pair_authenticate_and_serve_the_current_connection() {
         "no presence backs a summary before the first summon, got {before:?}"
     );
 
-    // A real text round: presence attach plus round intake plus the streamed
-    // reply, all carried by the shared loop over pipe frames.
     let (round, stream, text) = send_round(&mut client, "hello over the pipe")
         .await
         .expect("a round must complete over the pipe");
@@ -581,8 +467,6 @@ async fn pipe_bind_pair_authenticate_and_serve_the_current_connection() {
     assert!(stream.is_some(), "a round opens a stream");
     confirm_round(&mut client, &round, stream).await;
 
-    // With presence attached the same read answers a summary; the round's own
-    // answer was presented in band, so the backlog is empty.
     let summary = fetch_summary(&mut client, "undelivered after summon")
         .await
         .expect("the post-summon undelivered read must answer");
@@ -603,11 +487,6 @@ async fn pipe_bind_pair_authenticate_and_serve_the_current_connection() {
     server.abort();
 }
 
-/// (1): binding is single-instance on Windows too. The exclusive first pipe
-/// instance for the data directory's name makes a second Host fail to create
-/// it with the typed `CoreError::Bind`, the same outcome the Unix listener
-/// produces from its `AddrInUse` probe, instead of letting two Hosts serve
-/// one data directory.
 #[tokio::test]
 async fn second_host_cannot_create_the_same_pipe() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -623,8 +502,6 @@ async fn second_host_cannot_create_the_same_pipe() {
         .await
         .expect("the first Host must bind and serve the pipe");
 
-    // The pipe name is data-directory scoped (FNV-1a over the directory's
-    // string form), never a fixed name every Host would share.
     let name = conn_pipe::pipe_name(&dir);
     assert!(name.contains("pipe"), "the name is a pipe name: {name}");
     assert_ne!(
@@ -645,12 +522,6 @@ async fn second_host_cannot_create_the_same_pipe() {
     server.abort();
 }
 
-/// (4): a second authentication for the same device supersedes the first pipe
-/// connection. The superseded connection answers the typed
-/// `RejectKind::StaleConnection` while its pipe stays open, the newer current
-/// keeps serving, and closing the superseded pipe never clears the newer
-/// current (close admission compares connection identity before clearing the
-/// slot).
 #[tokio::test]
 async fn superseded_pipe_connection_answers_typed_stale_connection() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -663,8 +534,6 @@ async fn superseded_pipe_connection_answers_typed_stale_connection() {
     assert_eq!(text1, REPLY);
     confirm_round(&mut c1, &round1, stream1).await;
 
-    // A second connection for the same device: the accept loop mints a fresh
-    // connection id and its challenge authentication installs it as current.
     let mut c2 = connect(&dir)
         .await
         .expect("c2 must authenticate over the pipe");
@@ -674,8 +543,6 @@ async fn superseded_pipe_connection_answers_typed_stale_connection() {
     assert_eq!(text2, REPLY);
     confirm_round(&mut c2, &round2, stream2).await;
 
-    // The replacement inherits no open round: an Existing premise naming
-    // C1's round answers `StaleRound` instead of joining it.
     let companion = c2.companion_ref();
     let stale_round = ask(
         &mut c2,
@@ -698,8 +565,6 @@ async fn superseded_pipe_connection_answers_typed_stale_connection() {
         "C2 must not inherit C1's open round, got {stale_round:?}"
     );
 
-    // c1 is superseded: its domain frames answer the typed rejection while its
-    // pipe stays open, the same observable contract the Unix socket carries.
     let companion = c1.companion_ref();
     expect_stale_connection(
         &mut c1,
@@ -720,7 +585,6 @@ async fn superseded_pipe_connection_answers_typed_stale_connection() {
     )
     .await;
 
-    // The current connection is untouched by the replays and keeps serving.
     let (round3, stream3, text3) = send_round(&mut c2, "still current")
         .await
         .expect("c2 must stay current");
@@ -732,7 +596,6 @@ async fn superseded_pipe_connection_answers_typed_stale_connection() {
         "one provider call per accepted round: the stale replays sent nothing"
     );
 
-    // Closing the superseded pipe must never clear the newer current.
     drop(c1);
     let (round4, stream4, text4) = send_round(&mut c2, "after the old pipe closed")
         .await
@@ -742,10 +605,6 @@ async fn superseded_pipe_connection_answers_typed_stale_connection() {
     server.abort();
 }
 
-/// (6): disconnect and reconnect through the same connection/presence
-/// contract. Reconnecting re-runs the whole challenge handshake on a new pipe
-/// connection; authentication alone never restores attribution, and only a
-/// fresh summon attaches presence again and serves.
 #[tokio::test]
 async fn reconnect_reauths_without_restoring_presence_and_a_fresh_summon_serves() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -753,7 +612,6 @@ async fn reconnect_reauths_without_restoring_presence_and_a_fresh_summon_serves(
     let transport = Arc::new(ScriptedTransport::new(REPLY));
     let (_handle, server, mut c1) = serve_and_setup(dir.clone(), Arc::clone(&transport)).await;
 
-    // The first submit attaches presence (NoActive -> Present) and serves.
     let (round1, stream1, text1) = send_round(&mut c1, "summon over the pipe")
         .await
         .expect("the summon round must complete");
@@ -761,15 +619,9 @@ async fn reconnect_reauths_without_restoring_presence_and_a_fresh_summon_serves(
     confirm_round(&mut c1, &round1, stream1).await;
     wait_presence(&dir, "present").await;
 
-    // The pipe closes: close admission runs the normal-disconnect fallback. No
-    // other current-authenticated candidate exists, so the commit is NoActive
-    // with a fresh generation.
     drop(c1);
     let (_, fallen_back) = wait_presence(&dir, "no_active").await;
 
-    // The reconnect is a new pipe connection that re-runs capability plus
-    // challenge authentication; the shared handshake pushes the current
-    // presence fact and attaches nothing.
     let mut c2 = connect(&dir)
         .await
         .expect("the reconnect must authenticate");
@@ -779,7 +631,6 @@ async fn reconnect_reauths_without_restoring_presence_and_a_fresh_summon_serves(
         "authentication alone must not restore attribution"
     );
 
-    // A fresh summon round works and attaches presence again.
     let (round2, stream2, text2) = send_round(&mut c2, "summon again over the pipe")
         .await
         .expect("the post-reconnect summon must complete");
@@ -799,15 +650,9 @@ async fn reconnect_reauths_without_restoring_presence_and_a_fresh_summon_serves(
     server.abort();
 }
 
-/// The OS peer token check is the Windows analogue of the Unix uid match: the
-/// listener drops an unprovable peer before a single frame is read. This drives
-/// the same predicate the listener runs, against a real same-user pipe client,
-/// so the E2E above is not passing merely because the check is unreachable.
 #[tokio::test]
 async fn os_peer_token_check_admits_a_same_user_pipe_client() {
     let temp = tempfile::TempDir::new().unwrap();
-    // A name only this test derives: the data-directory hash of a path this
-    // test owns, so no Host and no other test shares the instance.
     let pipe = conn_pipe::pipe_name(&temp.path().join("peer-check"));
     let server = conn_pipe::create_first_server(&pipe).expect("the pipe must create");
     let client = ClientOptions::new()

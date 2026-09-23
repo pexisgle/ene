@@ -1,19 +1,3 @@
-//! Single-writer Host lock (`host.lock`) for one data directory.
-//!
-//! State open and serving startup are separate operations (PR §6.4): a process
-//! that only reads, or that serves management queries, opens the store without
-//! this lock. A process that performs startup mutation or serves the Host
-//! holds the exclusive OS lock on `<data_dir>/host.lock` for its whole
-//! lifetime, and the lock is taken before [`HostHandle::open`] because opening
-//! runs migrations.
-//!
-//! The lock file is opened read/write/create and never truncated, renamed, or
-//! unlinked; the handle owns the OS lock until the process ends. Only the OS
-//! lock decides liveness: file contents, PID text, or socket existence are
-//! never consulted.
-//!
-//! [`HostHandle::open`]: crate::serve::HostHandle::open
-
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 
@@ -22,25 +6,12 @@ use crate::serve::lifecycle::ensure_data_dir;
 
 const LOCK_NAME: &str = "host.lock";
 
-/// Exclusive per-data-directory writer lock.
-///
-/// The OS releases the lock when the handle drops (process exit included);
-/// holding the value is the whole protocol, so there is no explicit unlock.
 #[derive(Debug)]
 pub struct HostLock {
-    /// Never read: the open handle owns the lock. Dropping it releases.
     _file: File,
 }
 
 impl HostLock {
-    /// Ensures the `0700` data directory, then takes the exclusive
-    /// `<data_dir>/host.lock`.
-    ///
-    /// # Errors
-    ///
-    /// [`CoreError::AlreadyRunning`] when another Host holds the lock;
-    /// [`CoreError::Store`] when the directory cannot be prepared, the lock
-    /// file cannot be opened, or locking fails for an operational reason.
     pub fn acquire(data_dir: &Path) -> Result<Self, CoreError> {
         ensure_data_dir(data_dir)?;
         let path = data_dir.join(LOCK_NAME);
@@ -70,8 +41,6 @@ mod tests {
     use ene_presence::PresenceRepository as _;
     use std::path::Path;
 
-    /// One offline mutation command's startup: lock, then open the store (the
-    /// migrations run inside the open), then mutate.
     async fn offline_approve(
         dir: &Path,
         pending_id: &str,
@@ -90,11 +59,6 @@ mod tests {
         handle.expect("the winning handle must open")
     }
 
-    /// The serving startup sequence through the production mutation entry
-    /// point: lock, store open (migrations), then
-    /// [`HostHandle::run_startup_mutations`]. Composing the steps here
-    /// instead would let this fixture drift from what serving actually runs.
-    /// The listener bind is excluded, so the test never serves.
     async fn serve_startup(dir: &Path) -> Result<(HostLock, HostHandle), CoreError> {
         let lock = HostLock::acquire(dir)?;
         let handle =
@@ -141,8 +105,6 @@ mod tests {
         );
     }
 
-    /// The loser must not reach the store open: migrations create `app.db`, so
-    /// its absence proves no startup mutation ran.
     #[tokio::test]
     async fn refused_startup_never_opens_the_store() {
         let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
@@ -168,8 +130,6 @@ mod tests {
         assert!(database.exists(), "the admitted startup opens the store");
     }
 
-    /// A running Host keeps its presence generation and pending approvals
-    /// untouched while an offline mutation command is refused.
     #[tokio::test]
     async fn refused_mutation_does_not_touch_presence_or_pendings() {
         let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
@@ -218,9 +178,6 @@ mod tests {
         );
     }
 
-    /// A second serving startup is refused at the lock before any of the
-    /// explicit startup mutations (sweep, reconciliation) or presence
-    /// initialization can run, and the winner's durable state is unchanged.
     #[tokio::test]
     async fn second_serve_startup_is_refused_before_startup_mutation() {
         let dir = tempfile::tempdir().expect("test scratch directory must be creatable");

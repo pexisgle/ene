@@ -1,23 +1,3 @@
-//! Host composition root (`Stage 2` entrypoint): wiring and lifecycle only.
-//!
-//! It performs no semantic judgment and owns no domain state beyond the
-//! [`ene_core::serve::HostHandle`] it builds in `serve` mode; the domain
-//! pipelines live in the library modules.
-//!
-//! With no subcommand the entrypoint keeps the `Stage 1` behavior: parse
-//! arguments, [`Config::load`] (validation included), and
-//! [`ene_config::resolve_data_dir`] proof without effects. With the `serve`
-//! subcommand it resolves the data directory and blocks on
-//! [`ene_core::serve::serve`]: the Unix socket listener serving the full
-//! orchestration pipeline. With the `approve-device` subcommand it resolves
-//! the data directory and records one Owner pairing approval through
-//! [`HostHandle::approve_device`](ene_core::serve::HostHandle::approve_device):
-//! the Host-local trusted inlet for pending device requests. With the
-//! `confirm-deletion` subcommand it dials the serving Host's Host-local
-//! control inlet ([`ene_core::host_control`]) instead of opening the state
-//! offline: the confirmation must execute where the Client delivery tracking
-//! lives (lifecycle §8.1).
-
 use std::path::{Path, PathBuf};
 
 use ene_config::Config;
@@ -25,10 +5,6 @@ use ene_core::serve::{self, CoreError, HostHandle};
 
 #[derive(Debug, thiserror::Error)]
 enum CliError {
-    /// Argument misuse. The display carries `clap`'s own usage text plus the
-    /// operational detail; domain validation (blank values, unknown
-    /// combinations) adds its message here without re-implementing argv
-    /// syntax.
     #[error("{0}")]
     Usage(String),
     #[error(transparent)]
@@ -37,17 +13,14 @@ enum CliError {
     Serve(#[from] CoreError),
 }
 
-/// Parsed Host command line: exactly one mode plus its flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliCommand {
-    /// No subcommand: Stage 1 config proof without effects.
     ShowConfig {
         config: Option<PathBuf>,
     },
     Serve {
         config: Option<PathBuf>,
     },
-    /// A [`None`] pending id lists pendings instead of approving.
     ApproveDevice {
         config: Option<PathBuf>,
         pending: Option<String>,
@@ -57,23 +30,15 @@ enum CliCommand {
         provider: String,
         label: String,
     },
-    /// Targeted Deletion requests awaiting the Host-local trusted
-    /// confirmation; the exact target is shown here only (IPC §18.1 preview).
     PendingDeletions {
         config: Option<PathBuf>,
         after: Option<String>,
         limit: u32,
     },
-    /// The Owner's final confirmation for one staged Targeted Deletion
-    /// request: it runs inside the serving Host via the Host-local control
-    /// inlet and starts the canonical operation (IPC §18.1, lifecycle
-    /// §8.1). A stopped Host cannot confirm: an offline handle cannot name
-    /// the Clients that may hold a target-bearing copy.
     ConfirmDeletion {
         config: Option<PathBuf>,
         request: String,
     },
-    /// The same bounded deletion status page the wire view renders.
     DeletionStatus {
         config: Option<PathBuf>,
         cursor: Option<String>,
@@ -81,10 +46,6 @@ enum CliCommand {
     },
 }
 
-/// The declarative Host command line: subcommands, flags, help, and version
-/// come from `clap`. The mapping below turns parsed words into [`CliCommand`]
-/// and keeps domain validation (non-blank values, mode combinations) in this
-/// binary.
 fn ene_core_command() -> clap::Command {
     use clap::{Arg, Command as ClapCommand};
 
@@ -190,8 +151,6 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<CliCommand, CliError> {
     let Some((name, sub)) = matches.subcommand() else {
         return Ok(CliCommand::ShowConfig { config });
     };
-    // A global `--config` after the subcommand lands on the subcommand's
-    // matches; either placement selects the same file.
     let config = config.or_else(|| sub.get_one::<String>("config").map(PathBuf::from));
     match name {
         "serve" => Ok(CliCommand::Serve { config }),
@@ -236,34 +195,12 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<CliCommand, CliError> {
     }
 }
 
-/// `Stage 2` Host entrypoint: parse arguments, load configuration, then stop,
-/// serve, or approve.
-///
-/// Without a subcommand this keeps the `Stage 1` behavior: [`Config::load`]
-/// (which validates), and [`ene_config::resolve_data_dir`] proof with no
-/// effects. With `serve` it resolves the data directory (which must exist
-/// as a value: an unresolvable directory is a [`CoreError::Store`] failure,
-/// since serving without durable state is meaningless) and blocks on
-/// [`serve::serve`] under a multi-threaded `Tokio` runtime. With
-/// `approve-device` it resolves the data directory the same way and records
-/// one Owner pairing approval for the exact `--descriptor` value (surrounding
-/// whitespace trimmed, matching wire ingress normalization).
-///
-/// `--help` and `--version` are standard successful exits handled by `clap`
-/// before configuration is loaded, so they have no side effects.
-///
-/// # Errors
-///
-/// Returns [`CliError::Usage`] for argument misuse, [`CliError::Config`] when
-/// [`Config::load`] fails, and [`CliError::Serve`] when `serve` mode fails.
 fn main() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let matches = match ene_core_command()
         .try_get_matches_from(std::iter::once(String::from("ene-core")).chain(args))
     {
         Ok(matches) => matches,
-        // `--help` / `--version` are standard successful exits, never errors
-        // and never reach configuration or the store.
         Err(error)
             if matches!(
                 error.kind(),
@@ -361,12 +298,6 @@ fn main() -> Result<(), CliError> {
     }
 }
 
-/// Builds the multi-threaded `Tokio` runtime the store-backed tasks run on
-/// and blocks on `task`.
-///
-/// A runtime that cannot be built is a [`CoreError::Store`] failure: the
-/// runtime is the async substrate of the store-backed Host, and no narrower
-/// variant names it.
 fn block_on<F>(task: F) -> Result<(), CoreError>
 where
     F: std::future::Future<Output = Result<(), CoreError>>,
@@ -378,15 +309,6 @@ where
         .block_on(task)
 }
 
-/// Prints what `approve-device --pending` would accept, one
-/// `<pending-id> <descriptor>` line per pending (the descriptor is display
-/// only; approval names the id). Empty output (exit 0) means nothing is
-/// pending.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Store`] when the runtime cannot be built or the
-/// state cannot be opened.
 fn list_pending_devices(data_dir: &Path) -> Result<(), CoreError> {
     use std::io::Write as _;
     block_on(async {
@@ -406,36 +328,10 @@ fn list_pending_devices(data_dir: &Path) -> Result<(), CoreError> {
     })
 }
 
-/// `Stage 2` listener entry: binds the Host on the resolved data directory.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Store`] when the runtime cannot be built and the
-/// [`serve::serve`] error otherwise.
 fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
     block_on(serve::serve(data_dir))
 }
 
-/// An unknown pending id fails with the pending id set so the Owner
-/// can retry with the exact value; descriptors are display strings only.
-///
-/// The one-time pairing secret prints once to this Host-local console, the
-/// trusted inlet, and nowhere else; the operator provisions it into the
-/// client's protected device file.
-///
-/// This is an offline mutation when no Host is serving, so it takes the
-/// single-writer [`HostLock`](ene_core::host_lock::HostLock) before opening
-/// the store (PR §6.4). While a Host is serving, the command speaks the
-/// Host-local control inlet instead. An occupied seat fails; the command
-/// never falls through to the Client channel.
-///
-/// # Errors
-///
-/// Returns [`CoreError::AlreadyRunning`] only when the lock is held and the
-/// control inlet is not this path's concern; serving occupancy is
-/// [`CoreError::SeatOccupied`]. [`CoreError::Store`] when the runtime cannot
-/// be built or the state cannot be opened, and [`CoreError::Approve`] when
-/// the pending id is unknown.
 fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError> {
     use ene_core::host_lock::HostLock;
 
@@ -452,11 +348,6 @@ fn run_approve_device(data_dir: &Path, pending_id: &str) -> Result<(), CoreError
     })
 }
 
-/// The requester-only refusal when no Host is serving.
-///
-/// The Owner's confirmation surface lives in the serving process, so an
-/// offline command can never record a confirmation; the old offline mutation
-/// fallback is deliberately gone (first-party-desktop §5.1.5).
 fn host_not_serving() -> CoreError {
     CoreError::Approve(String::from(
         "the Host is not serving; start `ene-core serve` and retry — the Owner's \
@@ -464,8 +355,6 @@ fn host_not_serving() -> CoreError {
     ))
 }
 
-/// Shows one requester request's settled state. Secrets never appear here: the
-/// pairing provision and the credential value belong to their own channels.
 fn show_requester_state(
     what: &str,
     state: &ene_local_control::RequestState,
@@ -521,19 +410,6 @@ fn show_requester_state(
         .map_err(|error| CoreError::Approve(format!("the outcome could not be shown: {error}")))
 }
 
-/// Unknown pairs fail with the pending set so the Owner can retry exactly.
-///
-/// Offline (no serving Host) this takes [`HostLock`] before opening the
-/// store. While serving, the command puts the bearer over the control inlet
-/// (`ENE_OPENAI_API_KEY`); an occupied seat fails and never falls through
-/// to the Client channel.
-///
-/// # Errors
-///
-/// [`CoreError::SeatOccupied`] when the control seat is held,
-/// [`CoreError::Store`] when the runtime cannot be built or the state cannot
-/// be opened, and [`CoreError::Approve`] when the pair is unknown or the
-/// serving-time secret is missing.
 fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
     use ene_core::host_lock::HostLock;
 
@@ -551,19 +427,6 @@ fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Resul
     })
 }
 
-/// Prints the Targeted Deletion requests awaiting the Owner's confirmation,
-/// one `<request-id> <purpose> <exact-text>` line each.
-///
-/// This is the Host-local trusted preview (IPC §18.1): the exact target text is
-/// shown here, on the Owner's own console, and nowhere else. The request
-/// identity is Host-minted and never travels the wire, so no Client can name —
-/// let alone confirm — one.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
-/// cannot be opened, and [`CoreError::Deletion`] for a malformed `--after`
-/// identity.
 fn run_pending_deletions(
     data_dir: &Path,
     after: Option<&str>,
@@ -598,29 +461,6 @@ fn run_pending_deletions(
     })
 }
 
-/// Records one Owner confirmation and starts the canonical Targeted Deletion
-/// operation (IPC §18.1) through the serving Host's Host-local first-party
-/// control inlet, then prints the operation identity the status view reports.
-///
-/// The confirmation must run in the serving process. The required
-/// participant snapshot includes every Client incarnation with durable
-/// body-delivery evidence, and only the serving process can reach those
-/// incarnations through its live connection table (lifecycle §8.1); an
-/// offline state open could name them but could never complete their local
-/// erasure, so this command never admits from an offline handle. It dials
-/// [`ene_core::host_control`] and reports the serving Host's typed outcome;
-/// when no Host is serving it fails with recovery guidance instead of
-/// confirming.
-///
-/// An unknown request id fails with the pending id set (never their target
-/// text, which stays on the `pending-deletions` preview).
-///
-/// # Errors
-///
-/// Returns [`CoreError::Deletion`] when the serving Host is not reachable on
-/// the control inlet (or refuses technically), for an unknown or
-/// inadmissible request, and [`CoreError::Store`] when the pending-id
-/// fallback cannot be read.
 fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError> {
     use std::io::Write as _;
 
@@ -656,8 +496,6 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
                 )));
             }
             ConfirmTargetedDeletionOutcome::Missing => {
-                // A read-only state open is safe while serving; the pending
-                // preview never admits anything.
                 let handle = HostHandle::open(data_dir).await?;
                 let pending = handle.pending_targeted_deletions(None, 100).await?;
                 return Err(CoreError::Deletion(format!(
@@ -680,16 +518,6 @@ fn run_confirm_deletion(data_dir: &Path, request: &str) -> Result<(), CoreError>
     })
 }
 
-/// Prints the same bounded deletion status page the wire view renders: the
-/// surface mark, then one line per operation, then the next cursor while a
-/// later page exists. No target body, search material, or credential appears
-/// here.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
-/// cannot be opened, and [`CoreError::Deletion`] for a malformed cursor or an
-/// unreadable surface.
 fn run_deletion_status(data_dir: &Path, cursor: Option<&str>, limit: u32) -> Result<(), CoreError> {
     use std::io::Write as _;
 
@@ -742,12 +570,6 @@ fn run_deletion_status(data_dir: &Path, cursor: Option<&str>, limit: u32) -> Res
     })
 }
 
-/// Parses one Host-minted deletion request identity from its rendered form.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Deletion`] for anything that is not a canonical UUID
-/// rendering; a request id is never guessed or defaulted.
 fn parse_deletion_request_id(raw: &str) -> Result<ene_preservation::DeletionRequestId, CoreError> {
     uuid::Uuid::parse_str(raw.trim())
         .map(|id| {

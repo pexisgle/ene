@@ -1,9 +1,3 @@
-//! Typed wire payloads carried under [`super::envelope::WireEnvelope`].
-//!
-//! The envelope's `message_type` names one of these variants; unknown names
-//! are rejected, never guessed. Adding a message means adding a variant
-//! here, never smuggling it through an untyped channel.
-
 use serde::{Deserialize, Serialize};
 
 use super::deletion::{
@@ -29,18 +23,12 @@ use super::undelivered::{
 };
 use super::usage::{UsageSummaryRequest, UsageSummaryResponse};
 
-/// Host → Client activity hint for the Body overlay (IPC M-21).
-///
-/// Asset reference and pose hint only. Never chat body, Memory, Task
-/// commands, pairing material, or secrets.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BodyStateHint {
     pub asset_ref: String,
     pub pose_hint: String,
 }
 
-/// Externally tagged; unknown variants are rejected at deserialization,
-/// never defaulted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WirePayload {
     PairingRequest(PairingRequest),
@@ -90,9 +78,6 @@ pub enum WirePayload {
 }
 
 impl WirePayload {
-    /// Canonical name senders put in the envelope; receivers compare the
-    /// envelope string against this (instead of trusting it) and reject
-    /// mismatches without guessing.
     #[must_use]
     pub fn message_type(&self) -> &'static str {
         match self {

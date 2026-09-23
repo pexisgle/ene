@@ -1,8 +1,3 @@
-//! In-process overlay that records visibility and the placement box.
-//!
-//! Used when no OS compositor backend has been probe-adopted. Hide here is
-//! still not Companion stop.
-
 use crate::ipc::{LocalUiFact, PlacementBox};
 
 #[derive(Debug)]

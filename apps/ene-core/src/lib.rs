@@ -1,49 +1,3 @@
-//! Host composition root library surface (`Stage 2`).
-//!
-//! This library is the testable seam of the `ene-core` Host: [`serve::HostHandle`]
-//! owns the durable [`ene_store::Store`], the [`ene_permission::EvaluationTracker`],
-//! and the per-process Host maps (open rounds, issued round refs), while
-//! [`serve::HostHandle::handle_frame`]
-//! runs the full transport-free orchestration pipeline over
-//! [`ene_plugin_ipc::WireFrame`] values. Pairing requests and input replay
-//! keys are durable in the store; presence clients map deterministically from
-//! paired device strings.
-//!
-//! Module layout:
-//!
-//! - [`serve`] holds the frame dispatch, pairing/capability handshake, and
-//!   [`serve::serve`] entry point.
-//! - [`dialogue`] holds the one-to-one text round trip.
-//! - [`setup`] holds the `Stage 2` setup management inlet.
-//! - [`deletion`] holds the Stage 6 Targeted Deletion management surface:
-//!   advisory wire requests, the Host-local trusted confirmation inlet, and
-//!   the bounded body-free status view.
-//! - [`host_control`] holds the Host-local first-party control inlet: the
-//!   exclusive control seat, confirmation sessions bound to mint-time
-//!   connection plus peer PID, and the serving-time path for `approve-*` /
-//!   `confirm-deletion`.
-//! - [`transient_erasure`] holds the Stage 6 A3c Host-transient and
-//!   first-party-Client erasure participants: Host transient payload
-//!   invalidation and the bounded Client local-erasure demand round trip.
-//! - [`task_agent`] adapts the Task-owned Task Agent inference port to the
-//!   Host inference boundary.
-//! - [`action`] adapts the Task-owned delegation/workspace correspondence to
-//!   the Action-owned filesystem boundary.
-//! - [`task_control`] composes conversation / first-party Task control:
-//!   proposal, steering, effect settlement, recovery reconciliation, and
-//!   report composition.
-//! - [`task_run`] runs the bounded autonomous Task Agent ↔ Action loop over
-//!   those boundaries.
-//! - [`conn`] holds the OS listener (Unix socket, or the Windows named pipe in
-//!   `conn_pipe` on Windows). The wire close convention is shared:
-//!   a [`ene_api::v1::handshake::DisconnectNotice`] in the response vector is
-//!   terminal and the connection closes after it is written.
-//!
-//! `message_type` convention (`Stage 2`, Host-side): outgoing envelopes name the
-//! [`ene_api::v1::payload::WirePayload`] variant. The envelope value is a routing
-//! hint only; the `MessagePack` body already carries the same variant name through
-//! its externally-tagged encoding, so the two can never disagree silently.
-
 pub mod action;
 pub mod conn;
 #[cfg(windows)]
@@ -65,11 +19,6 @@ pub mod usage;
 
 use std::sync::{Mutex as StdMutex, MutexGuard};
 
-/// Locks a `std` mutex, recovering from poisoning.
-///
-/// Poisoning only follows a panic inside a critical section; sections here
-/// run plain map and queue operations that never panic while holding the
-/// guard, so recovery preserves the committed state.
 pub(crate) fn lock_unpoison<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()

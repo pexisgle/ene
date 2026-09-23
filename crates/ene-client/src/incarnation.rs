@@ -1,22 +1,3 @@
-//! Client boot incarnation (#1387): one per-process identity from a durable counter.
-//!
-//! At process boot the client exclusively advances a per-data-directory
-//! persistent counter and combines it with fresh randomness into a single
-//! [`ClientIncarnationId`] that is
-//! reused for every connection in the process. A same-process reconnect never
-//! advances the counter; only a new process (after `reset_for_tests` in
-//! tests, a real restart in production) boots again.
-//!
-//! Layout (alongside [`crate::device::DEVICE_FILE_NAME`]): `counter` holds one
-//! decimal `u64` (absent means `0`, the first published value is `1`);
-//! `lock` is the stable separate lock file whose OS exclusivity serializes
-//! concurrent boots. The update is read → checked increment → stage to a temp
-//! file in the same directory + sync + atomic rename, then publish. An
-//! existing-but-unreadable or corrupt counter fails closed, as does any other
-//! failure: connection start aborts with no PID/time fallback. Only a full
-//! connection-metadata wipe removes the counter. Host matching stays
-//! current-slot plus the authenticated pair (no high-water record).
-
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write as _;
@@ -30,8 +11,6 @@ use crate::error::ClientError;
 pub const COUNTER_FILE_NAME: &str = "client-incarnation.counter";
 pub const LOCK_FILE_NAME: &str = "client-incarnation.lock";
 
-/// Per-process staging counter so concurrent renames in this process never
-/// collide on the temp name.
 static STAGE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn cache() -> &'static Mutex<HashMap<PathBuf, ClientIncarnationId>> {
@@ -49,21 +28,8 @@ pub fn lock_path(data_dir: &Path) -> PathBuf {
     data_dir.join(LOCK_FILE_NAME)
 }
 
-/// Boots (or reuses) the process incarnation for `data_dir`.
-///
-/// The first call per directory per process advances the durable counter and
-/// publishes one id; later calls with the same directory return that id
-/// without touching the counter.
-///
-/// # Errors
-///
-/// Returns [`ClientError::Transport`] when the directory cannot be prepared, the
-/// lock cannot be taken, the counter cannot be read/incremented/published, or
-/// randomness cannot be drawn. The caller aborts connection start.
 pub fn boot_incarnation(data_dir: &Path) -> Result<ClientIncarnationId, ClientError> {
     let key = data_dir.to_path_buf();
-    // Held across the file update so concurrent first boots in this process
-    // advance exactly once; later boots hit the cache without I/O.
     let mut cached = cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -73,8 +39,6 @@ pub fn boot_incarnation(data_dir: &Path) -> Result<ClientIncarnationId, ClientEr
     let counter = advance_counter(data_dir)?;
     let incarnation = ClientIncarnationId {
         counter,
-        // 63 bits of OS randomness from the v4 UUID: the counter orders
-        // boots, this disambiguates colliding counters after a wipe/restore.
         // Masked to the non-negative SQLite INTEGER range because history
         // rows store both halves as INTEGER and fail a full-range u64 closed
         // on encode; every other consumer only equality-checks.
@@ -84,16 +48,6 @@ pub fn boot_incarnation(data_dir: &Path) -> Result<ClientIncarnationId, ClientEr
     Ok(incarnation)
 }
 
-/// Advances the durable counter once and returns the published value.
-///
-/// Uncached: each call takes the OS lock and increments. [`boot_incarnation`]
-/// is the cached per-process entry point; tests use this directly for the
-/// concurrent-serialization case.
-///
-/// # Errors
-///
-/// Same as [`boot_incarnation`]; a missing file counts as `0`, while an
-/// existing-but-unreadable or corrupt file fails closed.
 pub fn advance_counter(data_dir: &Path) -> Result<u64, ClientError> {
     ensure_data_dir(data_dir)?;
     let lock_file = OpenOptions::new()
@@ -105,7 +59,6 @@ pub fn advance_counter(data_dir: &Path) -> Result<u64, ClientError> {
         .map_err(|error| {
             ClientError::Transport(format!("client incarnation lock failed: {}", error.kind()))
         })?;
-    // Blocking exclusive: concurrent boots serialize here, never fail.
     lock_file.lock().map_err(|error| {
         ClientError::Transport(format!("client incarnation lock failed: {}", error.kind()))
     })?;
@@ -114,12 +67,9 @@ pub fn advance_counter(data_dir: &Path) -> Result<u64, ClientError> {
         ClientError::Transport(String::from("client incarnation counter exhausted"))
     })?;
     stage_and_replace(data_dir, next)?;
-    // The OS lock releases when `lock_file` drops.
     Ok(next)
 }
 
-/// Test-only: forgets all booted incarnations so the next boot re-reads the
-/// counter, simulating a process restart.
 #[cfg(test)]
 pub fn reset_for_tests() {
     cache()
@@ -166,8 +116,6 @@ fn ensure_data_dir(data_dir: &Path) -> Result<(), ClientError> {
     }
 }
 
-/// Reads the durable counter: absent means `0`; any existing-but-unreadable
-/// or corrupt content fails closed (never re-initialized).
 fn read_counter(data_dir: &Path) -> Result<u64, ClientError> {
     let bytes = match std::fs::read(counter_path(data_dir)) {
         Ok(bytes) => bytes,

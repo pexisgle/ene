@@ -1,16 +1,3 @@
-//! Credential registry contracts: non-secret refs, secret hygiene, and the
-//! request-builder store pattern.
-//!
-//! [`CredentialRef`] is the only credential value that may leave this crate
-//! freely: it names a credential without carrying any secret material; key
-//! material lives solely in [`SecretValue`].
-//!
-//! Secrets enter only through the Host-local protected path: the
-//! registration intent carries no secret field, so registration can never
-//! smuggle key material through the registry. [`CredentialStore::with_bearer`]
-//! exposes the bearer only inside a caller closure; the caller must build an
-//! owned request there and send it after the closure returns.
-
 mod approval;
 mod auth_file;
 mod erasure;
@@ -59,14 +46,7 @@ pub use secret::{
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CredentialTechnicalError {
     #[error("credential storage unavailable: {reason}")]
-    StorageUnavailable {
-        /// Backend-supplied cause, without secret material.
-        reason: String,
-    },
+    StorageUnavailable { reason: String },
 }
 
-/// Display marker replacing one registered credential value.
-///
-/// The Host and the store share this single token so redaction is
-/// recognisable end to end without carrying any part of the value.
 pub const REDACTED_CREDENTIAL: &str = "[credential]";

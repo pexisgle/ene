@@ -1,5 +1,3 @@
-//! Socket transport: connect, handshake, request/response loop.
-
 use std::path::{Path, PathBuf};
 
 use crate::pairing::pairing_proof_hex;
@@ -29,12 +27,6 @@ use super::session::{
 #[cfg(unix)]
 use super::socket_path;
 
-/// Connected, handshaked Host session: the stream, the sender identity
-/// pairing and authentication fill in, and the observed [`SessionState`].
-/// Unix dials `ene.sock`; Windows opens the data directory's named pipe
-/// (see `pipe_name`). Everything after the dial — pairing poll, capability,
-/// provision, capability, challenge authentication, and request/response
-/// correlation — is shared.
 #[cfg(any(unix, windows))]
 pub struct Client {
     stream: Stream,
@@ -42,15 +34,12 @@ pub struct Client {
     state: SessionState,
 }
 
-/// Result of opening and advancing a Client connection as far as current
-/// credentials permit.
 #[cfg(any(unix, windows))]
 pub enum ConnectProgress {
     Connected(Client),
     Pending(PendingPairingClient),
 }
 
-/// Owns the original pairing socket while Owner confirmation is pending.
 #[cfg(any(unix, windows))]
 pub struct PendingPairingClient {
     stream: Stream,
@@ -68,8 +57,6 @@ impl PendingPairingClient {
         &self.pending_id
     }
 
-    /// Waits for the one-shot provision on this original socket, then proves
-    /// ownership and persists the credentials only after acceptance.
     pub async fn complete(self) -> Result<Client, ClientError> {
         let Self {
             mut stream,
@@ -106,16 +93,6 @@ type Stream = tokio::net::UnixStream;
 #[cfg(windows)]
 type Stream = tokio::net::windows::named_pipe::NamedPipeClient;
 
-/// Named-pipe name for one Host data directory, matching the Host listener.
-///
-/// Named pipes live in a flat per-machine namespace, so the data directory is
-/// folded into the name: FNV-1a (64-bit, fixed offsets, so the name is stable
-/// across processes) over its string form, rendered as hex. This duplicates
-/// the Host listener's `pipe_name` (`ene-core/src/conn_pipe.rs`) on purpose:
-/// `ene-ctl` must not depend on `ene-core`, and the algorithm is pinned by
-/// the shared test vector below rather than by shared code. Pure (no OS
-/// calls), so the `test` gate keeps it compiled for the Linux-runnable
-/// vector test; only the dial site is Windows-only.
 #[cfg(any(test, windows))]
 fn pipe_name(data_dir: &Path) -> String {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -130,9 +107,6 @@ fn pipe_name(data_dir: &Path) -> String {
 
 #[cfg(any(unix, windows))]
 impl Client {
-    /// Dials the Host and waits through first-pairing approval when needed.
-    /// Call [`Self::begin_connect`] when the caller must surface the pending
-    /// identity while retaining the live socket.
     pub async fn connect(
         data_dir: &Path,
         descriptor: &str,
@@ -144,8 +118,6 @@ impl Client {
         }
     }
 
-    /// Dials the Host and advances either to an authenticated Client or to an
-    /// owned pending pairing connection.
     pub async fn begin_connect(
         data_dir: &Path,
         descriptor: &str,
@@ -294,19 +266,6 @@ impl Client {
         Ok(session)
     }
 
-    /// Answers one authentication challenge using the session secret, storing
-    /// the accepted connection key into the sender (for all later frames) and
-    /// the session mirror. [`Client::connect`] calls this for the
-    /// post-negotiation challenge; call it only with a Host-minted
-    /// [`AuthChallenge`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
-    /// exchange cannot be moved or framed; [`ClientError::ServerOutcome`] when no
-    /// secret is available or the Host rejects the proof (both require a fresh
-    /// pairing); and [`ClientError::ServerRejected`] when the Host answers
-    /// with an unexpected payload kind.
     pub async fn authenticate(&mut self, challenge: &AuthChallenge) -> Result<(), ClientError> {
         let Some(secret) = self.state.pairing_secret() else {
             return Err(ClientError::ServerOutcome(missing_secret_guidance()));
@@ -338,54 +297,20 @@ impl Client {
         self.state.companion_ref()
     }
 
-    /// Latest absorbed presence state. Missing means no fact yet, not Stopped.
     #[must_use]
     pub fn presence_state(&self) -> Option<ene_api::v1::presence::PresenceStateWire> {
         self.state.presence_state()
     }
 
-    /// Drains deferred auto-presented summaries the Host pushed without
-    /// `reply_to`. The caller paints each and ACKs the receipts it fully
-    /// painted.
     pub fn take_undelivered(&mut self) -> Vec<WireFrame> {
         self.state.take_undelivered()
     }
 
-    /// Prepares one logical send before I/O: the returned handle carries the
-    /// payload and the command identity a transport retry must reuse.
-    ///
-    /// Use this with [`Client::execute`] instead of [`Client::request`]
-    /// whenever a lost reply must be retryable: the prepared
-    /// [`PreparedRequest`] keeps the command identity caller-side, and a
-    /// command payload is prepared with its canonical identity (a
-    /// [`ManagementIntent`](ene_api::v1::management::ManagementIntent) keeps
-    /// its `intent_id`; a pure request carries no command identity at all).
     #[must_use]
     pub fn prepare(&self, payload: WirePayload) -> PreparedRequest {
         PreparedRequest::new(payload)
     }
 
-    /// Sends one prepared request and returns the answer correlated by
-    /// `reply_to`, absorbing pipelined presence facts and deferring other
-    /// out-of-order frames on the way. The deferred queue is consulted first,
-    /// so a queued answer costs no socket I/O; otherwise this loops until the
-    /// correlated answer arrives (the streaming form of
-    /// [`super::session::decide_frame`]). A
-    /// [`StaleRound`](ene_api::v1::round::RoundIntakeOutcomeWire::StaleRound)
-    /// answer refreshes the session generation; mismatches are never returned
-    /// as answers and never silently dropped.
-    ///
-    /// Message and request ids go fresh per attempt while the prepared command
-    /// identity travels unchanged, so calling this again through
-    /// [`Client::retry`] replays one logical command rather than minting a
-    /// second one.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
-    /// exchange cannot be moved or framed. Payload semantics are the caller's
-    /// job: this helper never interprets the answer beyond the generation
-    /// bookkeeping.
     pub async fn execute(
         &mut self,
         prepared: &PreparedRequest,
@@ -394,44 +319,15 @@ impl Client {
             .await
     }
 
-    /// Re-sends one prepared command after a lost reply: the command ID
-    /// travels (durable idempotency key on the Host) while message and request
-    /// ids go fresh for this attempt. Never to change what the command means,
-    /// and only within one sender incarnation — the Host binds the key to its
-    /// sender epoch, so a retry under a new incarnation is a conflict, not a
-    /// replay; re-prepare a fresh command under the new incarnation instead.
-    ///
-    /// A prepared pure request has no command identity; re-executing it is a
-    /// fresh request/response attempt.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Client::execute`].
     pub async fn retry(&mut self, prepared: &PreparedRequest) -> Result<WirePayload, ClientError> {
         self.execute(prepared).await
     }
 
-    /// One-shot convenience for [`Client::prepare`] plus
-    /// [`Client::execute`]. Prefer that pair when the caller must retain the
-    /// command identity to [`Client::retry`] a lost reply; this form mints or
-    /// takes the identity but never exposes it.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Client::execute`].
     pub async fn request(&mut self, payload: WirePayload) -> Result<WirePayload, ClientError> {
         let prepared = self.prepare(payload);
         self.execute(&prepared).await
     }
 
-    /// Request/response carrying presentation observed marks: the caller
-    /// echoes the round and generation a summary showed so the Host can
-    /// compare them against the receipt. Used for `UndeliveredAck`, which
-    /// answers its typed outcome.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Client::execute`].
     pub async fn request_observed(
         &mut self,
         payload: WirePayload,
@@ -485,13 +381,6 @@ impl Client {
         }
     }
 
-    /// Answers one unsolicited Host local-erasure demand inline, returning
-    /// whether an answer was written.
-    ///
-    /// The demand is a control fact, never the reply this session is waiting
-    /// for: it is handled and the read continues. The reply carries only class
-    /// names and correlation — never a target body — and claims nothing beyond
-    /// this process's own local wiping (IPC §17, lifecycle §10).
     async fn answer_deletion_demand_if_any(
         &mut self,
         payload: &WirePayload,
@@ -513,9 +402,6 @@ impl Client {
         Ok(true)
     }
 
-    /// GUI erasure participant: stash Host demands and answer only after
-    /// this process's copies are actually erased. CLI leaves this off so
-    /// `ene-ctl` still auto-answers.
     pub fn defer_erasure(&mut self) {
         self.state.set_defer_erasure(true);
     }
@@ -524,13 +410,6 @@ impl Client {
         self.state.take_pending_erasure()
     }
 
-    /// Writes one local-erasure report. The GUI builds `wiped` only after
-    /// it confirms the named copies are gone.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the
-    /// frame cannot be moved or encoded.
     pub async fn report_local_erasure(
         &mut self,
         result: LocalErasureResult,
@@ -538,7 +417,6 @@ impl Client {
         self.notify(WirePayload::LocalErasureResult(result)).await
     }
 
-    /// Builds this session's local-erasure report for one demand.
     fn local_erasure_result(&mut self, demand: &DeletionDemand) -> LocalErasureResult {
         let wiped = self.state.wipe_transient();
         LocalErasureResult {
@@ -550,27 +428,10 @@ impl Client {
         }
     }
 
-    /// Fire-and-forget: the Host applies presentation confirmations silently
-    /// and answers nothing.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the frame
-    /// cannot be moved or encoded.
     pub async fn notify(&mut self, payload: WirePayload) -> Result<(), ClientError> {
         write_frame(&mut self.stream, &frame_for(payload, self.sender)).await
     }
 
-    /// Stream follower for `send`: an authoritative
-    /// [`PresenceAttribution`](ene_api::v1::payload::WirePayload::PresenceAttribution)
-    /// fact refreshes the session generation and is still returned, so the
-    /// caller decides what to display. A Host local-erasure demand is answered
-    /// inline and never surfaces as a stream frame.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError::Transport`] or [`ClientError::Codec`] when the next
-    /// frame cannot be read or decoded.
     pub async fn next_frame(&mut self) -> Result<WirePayload, ClientError> {
         loop {
             let payload = read_frame(&mut self.stream).await?.payload;
@@ -601,10 +462,6 @@ async fn write_frame(
     Ok(())
 }
 
-/// 4-byte big-endian length prefix, then the body; the cap is checked before
-/// any body-sized allocation, so a hostile prefix cannot drive unbounded
-/// allocation. Shared by the Unix socket and the Windows named pipe: both
-/// transports carry the same length-prefixed frames.
 #[cfg(any(unix, windows))]
 async fn read_frame(
     stream: &mut (impl tokio::io::AsyncRead + Unpin),
@@ -649,9 +506,6 @@ fn require_reply_to(
     }
 }
 
-/// Unsupported-platform placeholder: same surface, always unsupported.
-/// Every method returns [`ClientError::UnsupportedPlatform`]: transport needs a
-/// Unix-domain socket or a Windows named pipe.
 #[cfg(not(any(unix, windows)))]
 pub struct Client {
     _sealed: (),
@@ -727,14 +581,10 @@ impl Client {
         Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
 
-    /// No session ever observes presence on this platform, so every request
-    /// carries the bootstrap fallback; the Host revalidates it rather than
-    /// attributing through it.
     pub fn companion_ref(&self) -> String {
         String::from(crate::DEFAULT_COMPANION_REF)
     }
 
-    /// No session observes presence on this platform.
     #[must_use]
     pub fn presence_state(&self) -> Option<ene_api::v1::presence::PresenceStateWire> {
         None
@@ -745,10 +595,6 @@ impl Client {
 mod pipe_tests {
     use super::pipe_name;
 
-    /// The client and the Host listener must derive the same pipe name from
-    /// one data directory; the vector pins the FNV-1a algorithm they share
-    /// without sharing code (mirrored in `ene-core`'s `conn_pipe` test, which
-    /// only runs on Windows).
     #[test]
     fn pipe_name_is_stable_and_directory_scoped() {
         assert_eq!(

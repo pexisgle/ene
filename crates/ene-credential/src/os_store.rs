@@ -1,30 +1,9 @@
-//! Real OS protected store adapter (Stage 7 A1c).
-//!
-//! The port is [`CredentialStore`](crate::CredentialStore); this adapter is the
-//! provisional backend named in [First-party desktop] §7.4: Windows Credential
-//! Manager and the Linux Secret Service, through the `keyring` crate. The
-//! adapter is deliberately thin: it owns one OS item per
-//! `(installation namespace, provider, label, version)` and never reuses a
-//! published item's slot for a new value, because a published item is the
-//! durable copy of an active or retired version and overwriting it would make
-//! a rotation indistinguishable from a re-write of the same version.
-//!
-//! [First-party desktop]: ../../../../docs/design/concrete/first-party-desktop.md
-
 use crate::CredentialTechnicalError;
 use crate::registry::CredentialRef;
 use crate::secret::{CredentialStore, PreparedCredentialSnapshot, SecretValue};
 
-/// Installation namespace: one prefix for every item this installation owns,
-/// so two data directories or two installations never collide and an unrelated
-/// application's item is never read.
 pub const DEFAULT_NAMESPACE: &str = "ene";
 
-/// The OS service name of one credential version item.
-///
-/// The version is part of the item name, never a value inside it: publishing a
-/// new version writes a new item and leaves the retired one addressable for the
-/// secret-removal leases that still need it.
 #[must_use]
 pub fn service_name(namespace: &str, cred: &CredentialRef, version: u64) -> String {
     format!(
@@ -34,17 +13,8 @@ pub fn service_name(namespace: &str, cred: &CredentialRef, version: u64) -> Stri
     )
 }
 
-/// The OS protected store of one installation.
-///
-/// Secrets are read through [`CredentialStore::with_bearer`] and written
-/// through [`OsCredentialStore::put_version`]. Routine reads use the immutable
-/// active snapshot loaded by the credential owner; they do not re-read the OS
-/// item and silently turn an external change into the same revision.
 pub struct OsCredentialStore {
     namespace: String,
-    /// Immutable value snapshot published for each ref. The credential owner
-    /// replaces it only after the activation transaction commits; routine use
-    /// never re-reads a mutable external OS item as the same revision.
     active: std::sync::Mutex<std::collections::HashMap<CredentialRef, (u64, SecretValue)>>,
 }
 
@@ -63,7 +33,6 @@ impl core::fmt::Debug for OsCredentialStore {
 }
 
 impl OsCredentialStore {
-    /// Opens the adapter for one installation namespace.
     #[must_use]
     pub fn new(namespace: impl Into<String>) -> Self {
         Self {
@@ -72,17 +41,6 @@ impl OsCredentialStore {
         }
     }
 
-    /// Publishes one value as a new version item and returns the version id.
-    ///
-    /// Writing an item that already exists is refused: a version is immutable
-    /// once published, so a repeated write cannot make two different values
-    /// look like the same version.
-    ///
-    /// # Errors
-    ///
-    /// [`CredentialTechnicalError::StorageUnavailable`] when the OS store
-    /// refuses the write or the item already exists. The message never carries
-    /// the value.
     pub fn put_version(
         &self,
         cred: &CredentialRef,
@@ -110,7 +68,6 @@ impl OsCredentialStore {
             })
     }
 
-    /// Loads one version as a candidate snapshot before publication.
     pub fn prepare_snapshot(
         &self,
         cred: &CredentialRef,
@@ -124,7 +81,6 @@ impl OsCredentialStore {
         ))
     }
 
-    /// Publishes an already-loaded snapshot without another OS-store read.
     pub fn activate(&self, snapshot: PreparedCredentialSnapshot) {
         let PreparedCredentialSnapshot {
             credential,
@@ -138,7 +94,6 @@ impl OsCredentialStore {
         active.insert(credential, (version, secret));
     }
 
-    /// Removes a snapshot whose durable active item is unavailable.
     pub fn deactivate(&self, cred: &CredentialRef) {
         let mut active = self
             .active
@@ -147,12 +102,6 @@ impl OsCredentialStore {
         active.remove(cred);
     }
 
-    /// Removes one version item. Used by cleanup for retired versions.
-    ///
-    /// # Errors
-    ///
-    /// [`CredentialTechnicalError::StorageUnavailable`] when the OS store
-    /// refuses the delete. A missing item is success: the goal is absence.
     pub fn delete_version(
         &self,
         cred: &CredentialRef,
@@ -167,13 +116,6 @@ impl OsCredentialStore {
         }
     }
 
-    /// Reads one version's value into the request-builder closure.
-    ///
-    /// # Errors
-    ///
-    /// [`CredentialTechnicalError::StorageUnavailable`] when the version is
-    /// not published, the OS store refuses the read, or the value is not valid
-    /// UTF-8. The error never carries the value.
     pub fn with_version<R>(
         &self,
         cred: &CredentialRef,
@@ -241,12 +183,6 @@ impl CredentialStore for OsCredentialStore {
             .contains_key(cred)
     }
 
-    /// Serving-time intake through the OS store alone is refused: the product
-    /// path publishes a version and activates it in one owner boundary
-    /// ([Credential publication] §3). A bare `put` would write a value nothing
-    /// has activated, so it fails closed instead of looking like registration.
-    ///
-    /// [Credential publication]: ../../../../docs/design/concrete/credential-publication.md
     fn put(&self, cred: &CredentialRef, _secret: &str) -> Result<(), CredentialTechnicalError> {
         Err(CredentialTechnicalError::StorageUnavailable {
             reason: format!(
@@ -262,8 +198,6 @@ mod tests {
     use super::service_name;
     use crate::registry::CredentialRef;
 
-    /// The item name carries the version, so publishing a new version never
-    /// reuses a retired item's slot.
     #[test]
     fn the_item_name_carries_the_version() {
         let cred = CredentialRef::new("openai", "main").expect("valid ref");
@@ -271,7 +205,6 @@ mod tests {
         assert_ne!(service_name("ene", &cred, 1), service_name("ene", &cred, 2));
     }
 
-    /// Two installations never share an item. Or an unrelated application's.
     #[test]
     fn the_namespace_separates_installations() {
         let cred = CredentialRef::new("openai", "main").expect("valid ref");
@@ -281,8 +214,6 @@ mod tests {
         );
     }
 
-    /// A bare `put` never looks like a registration: only the owner's
-    /// publish-then-activate path makes a value usable.
     #[test]
     fn a_bare_put_is_refused_without_touching_the_store() {
         use super::OsCredentialStore;
@@ -300,8 +231,6 @@ mod tests {
         );
     }
 
-    /// Reading without an active version is unavailable, never a guess at
-    /// "the newest item".
     #[test]
     fn a_read_without_an_active_version_is_unavailable() {
         use super::OsCredentialStore;
@@ -313,12 +242,6 @@ mod tests {
         assert!(read.is_err(), "no active version means no bearer");
     }
 
-    /// The real backend probe: publishes one version, reads it back, proves a
-    /// second version is a separate item, and removes both.
-    ///
-    /// The probe records 未実施 instead of failing when the platform store is
-    /// unavailable (a Linux session with no Secret Service, a locked keyring):
-    /// an unrun probe is not a pass, and it is not a product defect either.
     #[test]
     fn the_real_os_store_round_trips_when_available() {
         use super::OsCredentialStore;

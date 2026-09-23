@@ -1,13 +1,3 @@
-//! GUI erasure participant: every copy this process actually holds.
-//!
-//! Inventory (Stage 7 E): timeline, Memory grounds/history, Task report,
-//! search/input draft, IME composition, undo, deferred frames (Client),
-//! usage/deletion panel bodies, and presented chat receipts. Registered
-//! secrets are not user content and are not wiped through this path; C1
-//! secret intake is zeroized by crate-private `SecretIntake`.
-//!
-//! `wiped` is returned only after the named copies are confirmed empty.
-
 use ene_api::v1::deletion::{
     ClientTempClass, DeletionDemand, DeletionTargetWire, LocalErasureResult,
 };
@@ -19,7 +9,6 @@ use crate::ui::tasks::TaskPanel;
 use crate::ui::usage::UsagePanel;
 use crate::ui::{Composer, MemoryPage};
 
-/// Mutable GUI-owned copies one deletion demand may name.
 pub(crate) struct GuiOwned<'a> {
     pub timeline: &'a mut Vec<crate::ui::presentation::Message>,
     pub history: &'a mut Vec<HistoryItem>,
@@ -32,8 +21,6 @@ pub(crate) struct GuiOwned<'a> {
     pub chat_receipt: &'a mut Option<(String, Option<StreamWireId>)>,
 }
 
-/// Wipes GUI copies named by a Host deletion demand. Returns `wiped` only
-/// for copies this process actually cleared and confirmed empty.
 pub(crate) fn apply_demand(
     demand: &DeletionDemand,
     copies: &mut GuiOwned<'_>,

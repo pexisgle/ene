@@ -1,38 +1,3 @@
-//! Durable Client body-delivery evidence (lifecycle §8.1).
-//!
-//! The Host composition's Client delivery tracking used to be process memory
-//! only: a Host crash after the Client received a target-bearing body lost the
-//! knowledge that the incarnation may hold a local copy, and a later admission
-//! could complete without ever demanding that Client's local erasure. These
-//! methods persist the same body-free evidence in the canonical database.
-//!
-//! Evidence contract (enforced here, documented for callers):
-//!
-//! - **Create on delivery.** [`Store::note_client_delivery_evidence`] inserts
-//!   the incarnation row, or advances its `delivery_seq`, in one statement.
-//!   The caller must commit this before handing the body to the transport:
-//!   write-ahead is what makes a crash between "Client received" and "Host
-//!   recorded" impossible. Only a Host-minted incarnation identity that an
-//!   authenticated connection pinned is ever recorded, so the Host never
-//!   invents an owner it cannot name.
-//! - **Clear only on verified full-class erasure.**
-//!   [`Store::clear_client_delivery_evidence`] deletes the row only when the
-//!   caller observed `expected_seq` when the demand went on the wire and no
-//!   later delivery advanced it. That compare-and-delete is the ordering
-//!   guarantee: a body delivered after the wipe leaves a higher sequence and
-//!   the row survives. Disconnect, connection replacement, ACK timeout, and
-//!   Host restart never call this method.
-//! - **Restart retains.** Nothing here expires, sweeps, or rebuilds a row;
-//!   opening a database only migrates the schema.
-//! - **A new incarnation never inherits.** Rows are keyed by the exact
-//!   Host-minted `(counter, random)` identity; the required-participant read
-//!   returns those identities verbatim and a different boot is a different
-//!   row.
-//!
-//! The row is deliberately body-free: no target body, no reversible encoding,
-//! no body hash/fingerprint, no deletion matcher/search token, and no
-//! presentation copy is stored or derivable from it.
-
 use std::sync::Arc;
 
 use ene_preservation::PreservationTechnicalError;
@@ -51,18 +16,6 @@ fn corrupt() -> PreservationTechnicalError {
 }
 
 impl Store {
-    /// Records that body-bearing material is being handed to `incarnation`.
-    ///
-    /// One durable statement; the caller must await it before the body reaches
-    /// the transport. A repeat delivery advances `delivery_seq` instead of
-    /// creating a second row, so the sequence is the currentness premise a
-    /// verified erasure clears with.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError::StorageUnavailable`] when the evidence
-    /// cannot be committed. The caller must then withhold the body: a
-    /// delivery the Host cannot account for must not leave the Host.
     pub async fn note_client_delivery_evidence(
         &self,
         incarnation: RawId,
@@ -89,16 +42,6 @@ impl Store {
         .await
     }
 
-    /// The current durable delivery sequence of one incarnation, `None` when
-    /// the Host holds no uncleared evidence for it.
-    ///
-    /// The caller reads this when a local-erasure demand goes on the wire: the
-    /// value is the compare-and-delete premise the verified answer must match.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError::StorageUnavailable`] when the read fails;
-    /// the caller must then fail closed (deliver no demand and claim nothing).
     pub async fn client_delivery_evidence_seq(
         &self,
         incarnation: RawId,
@@ -123,17 +66,6 @@ impl Store {
         .await
     }
 
-    /// Clears one incarnation's evidence only when no delivery superseded the
-    /// wipe: the delete matches `expected_seq` exactly, so a row advanced by a
-    /// concurrent or later delivery survives.
-    ///
-    /// Returns whether the row was cleared. A `false` answer is not an error:
-    /// it means the evidence was superseded and must stay.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError::StorageUnavailable`] when the delete
-    /// cannot commit. The row then stays, which is the conservative direction.
     pub async fn clear_client_delivery_evidence(
         &self,
         incarnation: RawId,
@@ -159,18 +91,6 @@ impl Store {
         .await
     }
 
-    /// Fixed-size keyset page of incarnations with uncleared evidence, ordered
-    /// by canonical identity text. `limit` is 1..=100.
-    ///
-    /// Admission walks the pages to completion; it must never truncate the set
-    /// (a dropped incarnation would be a missing required participant), so the
-    /// page exists to bound each upstream read, not to cap the result.
-    ///
-    /// # Errors
-    ///
-    /// [`PreservationTechnicalError::InvalidLimit`] for a limit outside the
-    /// contract, and [`PreservationTechnicalError::CorruptState`] when a
-    /// stored identity is not a canonical id.
     pub async fn client_delivery_evidence_incarnations(
         &self,
         after: Option<RawId>,

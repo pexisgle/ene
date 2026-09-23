@@ -1,10 +1,3 @@
-//! Probe-only bottom-layer surface that records real pointer input.
-//!
-//! The Body overlay is an `Overlay` layer surface with an alpha-aware input
-//! region. This underlay is a `Bottom` layer surface covering the whole
-//! output: a click that the overlay does not claim lands here and is written
-//! as raw evidence. It is not a product surface.
-
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -29,8 +22,6 @@ use wayland_client::{Connection, QueueHandle};
 const DEFAULT_WIDTH: u32 = 700;
 const DEFAULT_HEIGHT: u32 = 900;
 
-/// Starts the underlay on its own thread. The thread runs until process exit;
-/// probe evidence is written per event, so a crash cannot rewrite it.
 pub(super) fn spawn(path: PathBuf) {
     let result = std::thread::Builder::new()
         .name(String::from("ene-probe-underlay"))

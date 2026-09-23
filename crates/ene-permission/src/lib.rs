@@ -1,23 +1,3 @@
-//! Live-authorization contracts: evaluation identity, consent order, and the
-//! pure allow/deny policy.
-//!
-//! This crate defines the types one inference use passes through, plus the
-//! closed-world policy that judges it. There is no I/O here: consent records
-//! arrive as values, and the single policy function
-//! [`check_live_authorization`] decides synchronously.
-//!
-//! Single-use flow: an `AllowForThisUse` decision carries a fresh
-//! [`PermissionEvaluationId`] minted from the caller's [`EvaluationTracker`].
-//! The consumer must present that id exactly once (to `ene-inference`
-//! dispatch); any replay, unknown id, or fingerprint mismatch is rejected.
-//! Ask-owner and wait-for-condition revalidation are deferred:
-//! [`LiveAuthorizationDecision::NeedsRevalidation`] only means reload current
-//! consent and retry, never prompt.
-//!
-//! The `(consumer, capability, purpose)` allowlist below is the closed world
-//! for this stage. Future stages may widen it, but only by extending the
-//! explicit match in [`check_live_authorization`], never by default-allow.
-
 mod action;
 mod erasure;
 mod intent;
@@ -43,22 +23,9 @@ pub use usage_cap::{
     usage_cap_mark,
 };
 
-/// Single-use authorization token for one inference use.
-///
-/// Wraps a [`RawId`] rather than a bare UUID so the opaque-identity
-/// discipline of `ene-primitive` applies: no string rendering, no prefix
-/// matching, equality only within this newtype. A value is valid for one
-/// [`EvaluationTracker::consume`] call with the matching [`EvalFingerprint`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PermissionEvaluationId(pub RawId);
 
-/// Monotonic order of one consent identity's revisions.
-///
-/// Follows the [`RevisionInner`] discipline: the inner count travels only
-/// inside its `(consent id, revision)` pair, no bare `u64` revision crosses a
-/// public boundary in this crate, and [`Self::checked_next`] reports
-/// exhaustion instead of aliasing `u64::MAX`, so a new revision can never
-/// silently share the previous one's value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConsentRevision(RevisionInner);
 
@@ -73,33 +40,20 @@ impl ConsentRevision {
         self.0.as_u64()
     }
 
-    /// Callers must treat [`None`] as revision exhaustion and refuse the
-    /// commit rather than writing [`u64::MAX`] again with new content.
     #[must_use]
     pub fn checked_next(&self) -> Option<Self> {
         self.0.checked_next().map(Self)
     }
 }
 
-/// The principal asking to run inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConsumerKind {
-    /// The companion dialogue loop acting for the owner.
     CompanionDialogue,
-    /// The learning formation pass acting for one companion.
     CompanionLearning,
-    /// The temporary Task Agent acting for one delegation.
-    ///
-    /// The agent inherits the delegating companion's assignment; the
-    /// delegation correspondence (not this variant) carries the durable who.
-    /// A Task Agent turn never presents itself as dialogue or learning.
     TaskAgent,
 }
 
 impl ConsumerKind {
-    /// Stable storage name. One owner for the vocabulary: the inference
-    /// attempt correlation and the consent accounting render consumers
-    /// through this function.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -109,7 +63,6 @@ impl ConsumerKind {
         }
     }
 
-    /// Parses the [`Self::as_str`] vocabulary, closed world.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
@@ -121,19 +74,13 @@ impl ConsumerKind {
     }
 }
 
-/// The capability the consumer wants to exercise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapabilityKind {
-    /// General dialogue generation.
     Dialogue,
-    /// Experience Summary and Memory formation judgement.
     Learning,
 }
 
 impl CapabilityKind {
-    /// Stable wire and storage name. One owner for the vocabulary: the
-    /// management grammar, the consent table, and the inference attempt all
-    /// render capabilities through this function.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -142,7 +89,6 @@ impl CapabilityKind {
         }
     }
 
-    /// Parses the [`Self::as_str`] vocabulary, closed world.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
@@ -153,23 +99,14 @@ impl CapabilityKind {
     }
 }
 
-/// The purpose binding one inference use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PurposeKind {
-    /// A normal dialogue response turn.
     DialogueResponse,
-    /// Form one Experience Summary and its Memory changes.
     MemoryFormation,
-    /// One Task Agent inference turn on behalf of a delegation.
-    ///
-    /// It shares the delegating companion's assignment; it is never a
-    /// dialogue response or a learning formation.
     TaskAgentTurn,
 }
 
 impl PurposeKind {
-    /// Stable wire and storage name, same closed-world policy as
-    /// [`CapabilityKind::as_str`].
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -179,7 +116,6 @@ impl PurposeKind {
         }
     }
 
-    /// Parses the [`Self::as_str`] vocabulary, closed world.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
@@ -195,9 +131,7 @@ impl PurposeKind {
 pub struct InferenceUseCandidate {
     pub consumer: ConsumerKind,
     pub capability: CapabilityKind,
-    /// Provider name as configured (exact match against consent).
     pub provider_ref: String,
-    /// Model name as configured (exact match against consent).
     pub model: String,
     pub purpose: PurposeKind,
 }
@@ -215,11 +149,6 @@ impl InferenceUseCandidate {
     }
 }
 
-/// Closed-world fingerprint one evaluation id is bound to.
-///
-/// Tuple order is `(consumer, capability, provider, model, purpose)`.
-/// [`EvaluationTracker`] stores this at mint time and requires an equal
-/// value at consume time.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EvalFingerprint(
     pub ConsumerKind,
@@ -232,117 +161,60 @@ pub struct EvalFingerprint(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckLiveAuthorizationQuery {
     pub candidate: InferenceUseCandidate,
-    /// Consent the caller acted on, as `(consent id, revision)`.
-    ///
-    /// `None` means the caller holds no consent view; the decision then
-    /// depends on whether stored consent exists (see
-    /// [`check_live_authorization`]).
     pub expected_consent: Option<(String, ConsentRevision)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveAuthorizationDecision {
-    /// Allowed for exactly one use under the carried evaluation id.
     AllowForThisUse(PermissionEvaluationId),
     Deny(DenyCode),
-    /// The caller's consent view is stale; reload current consent and retry.
-    ///
-    /// Ask-owner and wait-for-condition variants are deliberately absent:
-    /// revalidation here means reloading current consent, never prompting.
     NeedsRevalidation,
 }
 
-/// Why one live-authorization query was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DenyCode {
-    /// The `(consumer, capability, purpose)` triple is outside the closed world.
     NotInAllowlist,
-    /// Consent is missing or does not cover this provider/model.
     ConsentStale,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentRecord {
-    /// Capability this assignment authorizes. One consent record exists per
-    /// capability, and a record never authorizes another capability even
-    /// when provider, model, and credential coincide.
     pub capability: CapabilityKind,
-    /// Consent identity; revisions order under this id.
     pub id: String,
     pub rev: ConsentRevision,
-    /// Provider name; matched exactly.
     pub provider: String,
-    /// Model name; matched exactly.
     pub model: String,
     pub credential_id: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PermissionTechnicalError {
-    /// Policy gates never produce this; only store adapters map into it.
     #[error("consent storage unavailable: {reason}")]
-    StorageUnavailable {
-        /// Backend-supplied cause, without consent content.
-        reason: String,
-    },
+    StorageUnavailable { reason: String },
 }
 
-/// Outcome of a compare-and-save consent commit.
-///
-/// An `Ok`-side domain outcome, never an error. Stale expectations return
-/// `StaleCurrent` and are never retried automatically; the caller re-reads
-/// and retries with a fresh expectation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsentCommitOutcome {
     Committed { record: ConsentRecord },
     StaleCurrent { current: Option<ConsentRecord> },
 }
 
-/// Read boundary for the current consent record.
-///
-/// This trait loads; writes go through
-/// [`IntentOutcomeRepository::assign_with_intent`], which commits only when
-/// the caller's base-view expectation still matches and records the decision
-/// atomically with the write. That closes the lost-update window where two
-/// intents read the same revision and the second silently overwrites the
-/// first.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait ConsentRepository: Send + Sync {
-    /// Loads the current consent for one capability.
-    ///
-    /// Capabilities never share a record: a dialogue assignment does not
-    /// authorize learning, and vice versa, even when the stored route
-    /// (provider, model, credential) is identical.
     async fn load_current(
         &self,
         capability: CapabilityKind,
     ) -> Result<Option<ConsentRecord>, PermissionTechnicalError>;
 }
 
-/// Durable intent replay for management intents.
-///
-/// Design §18.2 fixes `intent_id` as the idempotency key: a transport retry
-/// carries the same id, and a new judgment mints a new one. The store binds
-/// each decided outcome to the intent fingerprint; a later send with the
-/// same intent id either replays the stored snapshot verbatim — never
-/// re-executed — or conflicts (same id, different content, answered without
-/// side effects). Re-evaluation always means a new id: even a stale or
-/// clarifying answer replays under its own id, so the same key can never
-/// observe two different outcomes.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait IntentOutcomeRepository: Send + Sync {
-    /// Records one intent's outcome snapshot write-once.
-    ///
-    /// The intent row is immutable: a second write under the same id never
-    /// overwrites. Returns how the claim resolved so the caller answers
-    /// from the durable determination, never from a locally decided outcome
-    /// the store did not keep.
     async fn record_intent_outcome(
         &self,
         record: IntentOutcomeRecord,
@@ -353,17 +225,6 @@ pub trait IntentOutcomeRepository: Send + Sync {
         intent_id: &str,
     ) -> Result<Option<IntentOutcomeRecord>, PermissionTechnicalError>;
 
-    /// Assigns the consent route and records the intent outcome atomically.
-    ///
-    /// One transaction: check the intent key first, then compare-and-save
-    /// plus the replay-row insert. An existing row is never rewritten — an
-    /// exact fingerprint replays the stored snapshot, a conflicting one
-    /// clarifies — so concurrent same-id sends cannot fork the answer and a
-    /// crash between commit and marker can neither strand an approval
-    /// without its replay row nor replay a row without its commit. Commits
-    /// record the `Stored` snapshot built from the committed revision;
-    /// stale attempts record the `Stale` snapshot with the current mark.
-    /// Replay answers either verbatim.
     async fn assign_with_intent(
         &self,
         expected: Option<(String, ConsentRevision)>,
@@ -371,19 +232,6 @@ pub trait IntentOutcomeRepository: Send + Sync {
         fingerprint: IntentFingerprint,
     ) -> Result<IntentResolution<ConsentCommitOutcome>, PermissionTechnicalError>;
 
-    /// Claims a setup completion and records its outcome atomically.
-    ///
-    /// One transaction: check the intent key first, then compare the
-    /// expected base mark against current and record the decided snapshot
-    /// together — `Applied` when the base matches, a row exists, and the
-    /// bearer is present; `Clarify` when the premise is empty or the bearer
-    /// is absent; `Stale` (with the current mark) when the base moved. An
-    /// existing row is never rewritten: exact replays and conflicts return
-    /// the stored snapshot instead. Returns the resolution so the caller
-    /// answers from one durable determination. The bearer gate rides in as
-    /// a flag because completion means consent-plus-bearer; it is
-    /// Host-observed just before the call, and the transaction re-verifies
-    /// everything durable around it.
     async fn complete_with_intent(
         &self,
         expected_base: String,
@@ -391,16 +239,6 @@ pub trait IntentOutcomeRepository: Send + Sync {
         fingerprint: IntentFingerprint,
     ) -> Result<IntentResolution<IntentOutcomeRecord>, PermissionTechnicalError>;
 
-    /// Claims a same-route shortcut and records its outcome atomically.
-    ///
-    /// One transaction: check the intent key first, then read current for
-    /// `capability`, and — only when the stored route already equals the
-    /// requested one — insert the `Stored` snapshot for the current revision.
-    /// An existing row is never rewritten. Returns `Decided(Hit)` (recorded,
-    /// answer the current revision without bumping), `Decided(Miss)` (nothing
-    /// recorded; the caller continues through compare-and-save), or the
-    /// stored row on replay/conflict. State-changing assigns still go through
-    /// [`IntentOutcomeRepository::assign_with_intent`].
     async fn shortcut_with_intent(
         &self,
         capability: CapabilityKind,
@@ -411,91 +249,45 @@ pub trait IntentOutcomeRepository: Send + Sync {
     ) -> Result<IntentResolution<ShortcutIntentOutcome>, PermissionTechnicalError>;
 }
 
-/// Result of a write-once intent claim: either this call decided, or an
-/// earlier row already did.
-///
-/// The row is immutable: a second write under the same id — same content or
-/// not — never overwrites.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntentResolution<T> {
-    /// No row existed; the fresh decision `T` was stored write-once.
     Decided(T),
-    /// Exact fingerprint replay; nothing changed.
     Replay(IntentOutcomeRecord),
-    /// Same id, different fingerprint; nothing changed.
     Conflict(IntentOutcomeRecord),
 }
 
-/// Durable fingerprint of one management intent: the intent key plus the
-/// content it decides on. The base premise and the semantically effective
-/// rationale ride along, so a refreshed premise under a reused id counts
-/// as different content (new premise, new id — same rule as command keys).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IntentFingerprint {
-    /// Intent key, as hyphenated UUID text.
     pub intent_id: String,
-    /// Intent kind discriminator (`assign`, `register`, or `complete`).
     pub kind: String,
     pub target: String,
-    /// Base-view mark text the intent was built on.
     pub base: String,
-    /// Rationale origin text (`conversation` or `management-surface`).
     pub rationale_origin: String,
     pub rationale_quote: Option<String>,
 }
 
-/// Durable terminal outcome snapshot of one management intent: its
-/// fingerprint plus the outcome that content produced. An exact retry
-/// (same id, same fingerprint) replays the snapshot verbatim — never
-/// re-executed, never rebound; the same id with different content is a
-/// conflict the caller clarifies.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IntentOutcomeRecord {
     pub fingerprint: IntentFingerprint,
     pub outcome: IntentOutcome,
 }
 
-/// Management outcome snapshot worth replaying.
-///
-/// Every decided outcome is recorded — including stale and clarifying
-/// answers. A retried id must observe the same answer it observed before;
-/// only a fresh id earns a fresh evaluation. (Infrastructure failures are
-/// not decisions: an unreadable store holds without recording.)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IntentOutcome {
-    /// Stored as a rule at this revision view.
     StoredAsRuleView { revision: String },
-    /// Applied as a one-time approval.
     AppliedAsOneTime,
-    /// Held for a pending Owner decision.
     HeldByOperation,
-    /// Too ambiguous or contradictory to decide.
     NeedsClarification,
-    /// The consent identity ran out of distinct revisions: committing again
-    /// would reuse `u64::MAX` with new content, so nothing was written.
     RevisionExhausted,
-    /// The base view had moved underneath the intent.
-    StaleBaseView {
-        /// Current mark the sender should build on next time.
-        current: String,
-    },
+    StaleBaseView { current: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShortcutIntentOutcome {
-    /// Route already holds: snapshot recorded, answer the current record.
     Hit { current: ConsentRecord },
-    /// Route differs: answer through the normal path. Nothing recorded.
     Miss,
 }
 
-/// Renders one capability's consent state as a mark segment:
-/// `consent-{capability}-none` when absent, `consent-{capability}-rev-N`
-/// otherwise.
-///
-/// Single grammar owner for capability marks: the store renders replay
-/// snapshots with it and the Host renders live answers with it, so the two
-/// can never disagree on what a mark names.
 #[must_use]
 pub fn consent_mark(capability: CapabilityKind, rev: Option<u64>) -> String {
     let name = capability.as_str();
@@ -505,11 +297,6 @@ pub fn consent_mark(capability: CapabilityKind, rev: Option<u64>) -> String {
     }
 }
 
-/// Renders the combined management view mark for both capabilities:
-/// `consent-dialogue-...;consent-learning-...`.
-///
-/// The mark stays opaque to the Client; clients echo it and the Host parses
-/// the segment for the capability the intent names.
 #[must_use]
 pub fn consent_view_mark(dialogue_rev: Option<u64>, learning_rev: Option<u64>) -> String {
     format!(
@@ -519,13 +306,6 @@ pub fn consent_view_mark(dialogue_rev: Option<u64>, learning_rev: Option<u64>) -
     )
 }
 
-/// Parses the state one base-view mark names for `capability`.
-///
-/// Accepts the combined view mark and a single-capability segment. Stage 2
-/// marks (`consent-none`, `consent-rev-N`) name the dialogue capability
-/// implicitly and stay parseable for stored journals and in-flight clients;
-/// they never authorize learning. Returns `None` when no segment for
-/// `capability` parses.
 #[must_use]
 pub fn parse_consent_mark(mark: &str, capability: CapabilityKind) -> Option<Option<u64>> {
     let qualified = format!("consent-{}-", capability.as_str());
@@ -533,9 +313,6 @@ pub fn parse_consent_mark(mark: &str, capability: CapabilityKind) -> Option<Opti
         if let Some(state) = segment.strip_prefix(&qualified) {
             return parse_consent_state(state);
         }
-        // Stage 2 marks name the dialogue capability implicitly. An
-        // unparseable legacy-shaped segment is skipped, not treated as the
-        // answer, so a later well-formed segment can still match.
         if capability == CapabilityKind::Dialogue
             && let Some(state) = segment.strip_prefix("consent-")
             && let Some(parsed) = parse_consent_state(state)
@@ -553,13 +330,6 @@ fn parse_consent_state(state: &str) -> Option<Option<u64>> {
     let revision = state.strip_prefix("rev-")?.parse::<u64>().ok()?;
     Some(Some(revision))
 }
-/// Tracks minted evaluation ids and enforces single use.
-///
-/// Holds the issued `RawId -> EvalFingerprint` map only: a successful
-/// consume removes the entry, so presence means unused and absence means
-/// unknown or already consumed. Minting binds an id to a candidate
-/// fingerprint; consuming requires the same fingerprint and succeeds at
-/// most once per id.
 #[derive(Debug, Default)]
 pub struct EvaluationTracker {
     issued: HashMap<RawId, EvalFingerprint>,
@@ -579,12 +349,6 @@ impl EvaluationTracker {
         id
     }
 
-    /// Consumes an id iff it is known, unused, and bound to `expected`.
-    ///
-    /// Returns `false` for unknown ids, replays, and fingerprint mismatches.
-    /// Only a matching presentation burns the id — removing it, so a second
-    /// consume finds nothing — while a fingerprint mismatch leaves the entry
-    /// so the caller can retry with the correct fingerprint.
     pub fn consume(&mut self, id: &PermissionEvaluationId, expected: &EvalFingerprint) -> bool {
         match self.issued.get(&id.0) {
             Some(bound) if bound == expected => {
@@ -596,28 +360,6 @@ impl EvaluationTracker {
     }
 }
 
-/// Pure closed-world policy for one live authorization query.
-///
-/// Gates, in order:
-///
-/// 1. A `(consumer, capability, purpose)` triple outside the closed world
-///    denies with [`DenyCode::NotInAllowlist`]. The current world is
-///    `(CompanionDialogue, Dialogue, DialogueResponse)`,
-///    `(CompanionLearning, Learning, MemoryFormation)`, and
-///    `(TaskAgent, Dialogue, TaskAgentTurn)`.
-/// 2. Consent comparison: when stored consent exists and differs from
-///    `expected_consent`, the caller's view is stale and the decision is
-///    [`LiveAuthorizationDecision::NeedsRevalidation`].
-/// 3. With no stored consent, a stored record for a different capability, or
-///    a provider/model mismatch against the stored record, the decision
-///    denies with [`DenyCode::ConsentStale`]. A record authorizes only the
-///    capability it names.
-/// 4. Otherwise the candidate is allowed for exactly one use: a fresh id is
-///    minted from `tracker` and returned in
-///    [`LiveAuthorizationDecision::AllowForThisUse`].
-///
-/// Setup completeness is not checked here: only the caller that resolved a
-/// registered credential ref and confirmed its bearer exists builds a query.
 pub fn check_live_authorization(
     query: &CheckLiveAuthorizationQuery,
     current: Option<&ConsentRecord>,
@@ -854,9 +596,6 @@ mod tests {
 
     #[test]
     fn dialogue_consent_never_authorizes_learning() {
-        // Same provider, model, credential, and revision view: only the
-        // capability differs. The stored dialogue record must not cover the
-        // learning candidate.
         let stored = record();
         let query = CheckLiveAuthorizationQuery {
             candidate: learning_candidate(),
@@ -1055,7 +794,6 @@ mod tests {
                 ConsentRevision::from_u64(1)
             )
         );
-        // Stage 2 marks name the dialogue capability implicitly.
         assert_eq!(
             base_view_expectation(CapabilityKind::Dialogue, "consent-none", None),
             BaseViewExpectation::ExpectEmpty
@@ -1114,8 +852,6 @@ mod tests {
             parse_consent_mark("consent-none", CapabilityKind::Learning),
             None
         );
-        // A learning segment before the dialogue segment must not short
-        // circuit the search for the dialogue segment.
         let reordered = "consent-learning-rev-4;consent-dialogue-rev-3";
         assert_eq!(
             parse_consent_mark(reordered, CapabilityKind::Dialogue),

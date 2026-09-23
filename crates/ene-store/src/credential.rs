@@ -56,30 +56,11 @@ const SQL_DELETE_CREDENTIAL_PENDING: &str =
 const SQL_LIST_CREDENTIAL_PENDING: &str =
     "SELECT provider, label, requested_at FROM credential_pending ORDER BY rowid ASC";
 
-/// Secrets are never stored in SQLite and remain zeroizing in memory.
 fn fresh_pairing_secret() -> PairingSecretMaterial {
     PairingSecretMaterial::new(RawId::new().as_uuid().to_string())
 }
 
 impl Store {
-    /// Approves one credential pair atomically: sweeps existing content,
-    /// rebuilds the derived recall tokens from the swept text, makes the ref
-    /// usable, and bumps the credential-set revision.
-    ///
-    /// One `Immediate` transaction owns all four effects, so a scrub premise
-    /// taken before the commit is either covered by the sweep (content lands
-    /// before) or refused by the revision (content lands after). The caller
-    /// runs this while the bearer is borrowed inside
-    /// [`ene_credential::CredentialStore::with_bearer`], so the value never
-    /// leaves that scope. Returns `true` when the pair is usable after the
-    /// call. Unknown pairs return `false` (the sweep still ran); a blank pair
-    /// returns `false` without touching state.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
-    /// transaction cannot run or commit; the caller must then not make the
-    /// credential usable.
     pub fn approve_credential_with_sweep(
         &self,
         provider: &str,
@@ -119,10 +100,6 @@ impl Store {
                 .is_some()
         };
         if approved {
-            // A re-approval may accompany a value change (after a restart or
-            // an explicit update), so every successful approval advances the
-            // revision. The sweep above and this bump are one transaction, so
-            // premises taken before the approval are refused.
             advance_credential_set(&tx)?;
         }
         tx.commit()
@@ -131,19 +108,6 @@ impl Store {
     }
 }
 
-/// Table and column pairs holding quarantined plaintext content.
-///
-/// The derived recall token index is deliberately absent: a registered value
-/// is replaced as a whole string, while tokens hold its fragments, so a
-/// replace would leave credential-derived pieces behind. Token rows are
-/// rebuilt from the swept canonical text instead (see below).
-///
-/// Task and activity bodies are included because they are canonical sources
-/// for the Task report, the management view, and undelivered excerpts: a
-/// purpose, instruction activity, or final result recorded while the value
-/// was still ordinary text must be redacted by the same boundary, or the
-/// report/presentation would keep reading the raw value out of the owner row
-/// after the value became a registered credential.
 const SWEEP_TARGETS: &[(&str, &str)] = &[
     ("activity_record", "body"),
     ("history_message", "body"),
@@ -156,13 +120,6 @@ const SWEEP_TARGETS: &[(&str, &str)] = &[
     ("task_result", "body"),
 ];
 
-/// Sweeps `bearer` out of durable content inside the caller's transaction.
-///
-/// Canonical text is swept first then the derived recall tokens are rebuilt
-/// from the swept text in the same transaction, so the index can never keep
-/// credential-derived fragments the replace cannot see. Only memories whose
-/// pre-sweep content held the bearer are rebuilt; the common case stays one
-/// cheap probe select.
 pub(crate) fn sweep_registered_secret(
     tx: &rusqlite::Transaction<'_>,
     bearer: &str,
@@ -170,8 +127,6 @@ pub(crate) fn sweep_registered_secret(
     if bearer.is_empty() {
         return Ok(());
     }
-    // Memories holding the bearer, collected before the sweep redacts them:
-    // the rebuild below needs exactly this set, and nothing else changes.
     let affected: Vec<(String, String)> = {
         let mut select = tx
             .prepare(
@@ -184,8 +139,6 @@ pub(crate) fn sweep_registered_secret(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| credential_unavailable(error.to_string()))?
     };
-    // Table and column names are compile-time constants; the bearer travels
-    // only as a bound parameter.
     for (table, column) in SWEEP_TARGETS {
         let sql = format!(
             "UPDATE {table} SET {column} = replace({column}, ?1, ?2) \
@@ -208,7 +161,6 @@ pub(crate) fn sweep_registered_secret(
     Ok(())
 }
 
-/// Advances the credential-set revision inside the caller's transaction.
 fn advance_credential_set(tx: &rusqlite::Transaction<'_>) -> Result<(), CredentialTechnicalError> {
     let current: i64 = tx
         .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
@@ -216,8 +168,6 @@ fn advance_credential_set(tx: &rusqlite::Transaction<'_>) -> Result<(), Credenti
     let next = current
         .checked_add(1)
         .ok_or_else(|| credential_unavailable("credential set revision exhausted"))?;
-    // Refuse a stored count that cannot be a revision (a corrupt negative
-    // value) before it can persist; the converted value itself is unused.
     u64::try_from(next)
         .map_err(|_| credential_unavailable("credential set revision out of range"))?;
     tx.execute(
@@ -228,12 +178,6 @@ fn advance_credential_set(tx: &rusqlite::Transaction<'_>) -> Result<(), Credenti
     Ok(())
 }
 
-/// Reads the durable credential-set revision inside a caller transaction.
-///
-/// The read shares the caller's transaction, so a writer can compare the
-/// revision against a scrub premise in the same short window as the write it
-/// admits: a set advanced between the premise's revision read and the commit
-/// is observed here and refuses the write.
 pub(crate) fn current_set_revision(
     conn: &rusqlite::Connection,
 ) -> Result<CredentialSetRevision, CredentialTechnicalError> {
@@ -259,23 +203,6 @@ impl CredentialSetRepository for Store {
 }
 
 impl Store {
-    /// Sweeps every registered value and advances the revision once.
-    ///
-    /// The Host startup and explicit update boundaries call this before any
-    /// use: one short `Immediate` transaction replaces plaintext occurrences
-    /// of the pinned values in durable content and advances the revision
-    /// together, so a crash cannot leave the sweep and the generation apart.
-    /// Every registered value must be readable: one unreadable value fails the
-    /// whole boundary and rolls the transaction back, because replacing an
-    /// unverifiable value cannot be proven and advancing past it would serve
-    /// content prepared under an unknown set. An empty registry changes
-    /// nothing.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when a
-    /// registered value cannot be read, the replacement cannot run, or the
-    /// transaction cannot commit.
     pub fn sweep_registered_values<S: CredentialStore>(
         &self,
         refs: &[CredentialRef],
@@ -289,9 +216,6 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| credential_unavailable(error.to_string()))?;
         for cred in refs {
-            // Fail closed before the revision advance: a value that cannot be
-            // read cannot be swept, and `?` drops `tx` without committing, so
-            // earlier replacements in this boundary roll back too.
             values.with_bearer(cred, |bearer| sweep_registered_secret(&tx, bearer))??;
         }
         advance_credential_set(&tx)?;
@@ -346,9 +270,6 @@ impl DevicePairingRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            // Every new request mints its own opaque identity, even for an
-            // identical descriptor: same-descriptor requests never share a
-            // pending or a device (#1389).
             let fresh = RawId::new().as_uuid().to_string();
             tx.execute(
                 SQL_INSERT_PENDING,
@@ -410,11 +331,6 @@ impl DevicePairingRepository for Store {
             if stored_origin != origin_connection {
                 return Ok(None);
             }
-            // The pending delete and the paired insert share one transaction
-            // keyed on both columns (compare-and-swap), so an approval never
-            // strands a pending in both tables or neither. The wire projection
-            // is minted fresh here, unrelated to the device identity bytes: it
-            // is the only device string that ever crosses the wire. The
             let wire = RawId::new().as_uuid().to_string();
             let deleted = tx
                 .execute(SQL_DELETE_PENDING, params![stored_id, stored_origin])
@@ -581,8 +497,6 @@ impl CredentialIntentRepository for Store {
                     "blank credential pair",
                 )));
             }
-            // Journal columns stay shared with the consent intents; the
-            // registration decision is credential-owned and maps onto them.
             let journal = IntentFingerprint {
                 intent_id: fingerprint.intent_id,
                 kind: fingerprint.kind,
@@ -596,18 +510,12 @@ impl CredentialIntentRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            // Write-once claim first: an existing row decides without
-            // touching credential state; the caller answers from the
-            // journal.
             if select_intent_row_tx(&tx, &journal.intent_id)
                 .map_err(credential_unavailable)?
                 .is_some()
             {
                 return Ok(RegistrationApply::AlreadyDecided);
             }
-            // One transaction: the pending insert (or usable recheck) plus
-            // the replay row, so the decided state and the row that
-            // describes it can never strand apart.
             let usable: Option<(String, String, String)> = tx
                 .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -636,8 +544,6 @@ impl CredentialIntentRepository for Store {
                         .map_err(|error| credential_unavailable(error.to_string()))?;
                     Ok(RegistrationApply::Decided(state))
                 }
-                // Loser of a cross-process race: roll back (never commit) and
-                // let the caller answer from the journal.
                 Some(_winner) => Ok(RegistrationApply::AlreadyDecided),
             }
         })
@@ -645,15 +551,8 @@ impl CredentialIntentRepository for Store {
     }
 }
 
-/// Bounded rows deleted per table in one local erasure pass (lifecycle §9).
 const ERASURE_BATCH_ROWS: i64 = 500;
 
-/// Deletes usable refs whose derived identity, provider, or label carries the
-/// target. Deleting the ref is the local erasure: the derived
-/// `provider:label` identity can never be redacted without breaking the ref
-/// grammar, and the pair must not stay usable under a textless identity. The
-/// protected bearer value is not touched here (K-C); the pair simply stops
-/// being resolvable, and the set revision advances below.
 const SQL_ERASE_CREDENTIAL_REF: &str = "DELETE FROM credential_ref
      WHERE id IN (
          SELECT id FROM credential_ref
@@ -668,9 +567,6 @@ const SQL_ERASE_CREDENTIAL_PENDING: &str = "DELETE FROM credential_pending
          LIMIT ?2
      )";
 
-/// Device keys, display descriptors, and the opaque wire tokens are
-/// the pairing rows' text surface. Host-stamped times are not caller text and
-/// are never matched.
 const SQL_ERASE_PAIRED_DEVICE: &str = "DELETE FROM paired_device
      WHERE rowid IN (
          SELECT rowid FROM paired_device
@@ -723,9 +619,6 @@ impl CredentialErasureRepository for Store {
                 let tx = guard
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|error| credential_unavailable(error.to_string()))?;
-                // Stale-generation rejection and the mutation share one short
-                // transaction: a superseded sweep or a completed operation
-                // mutates nothing (lifecycle §6-§7/§9.1).
                 if !condition_is_current(&tx, condition)
                     .map_err(|error| credential_unavailable(error.to_string()))?
                 {
@@ -753,10 +646,6 @@ impl CredentialErasureRepository for Store {
                     )
                     .map_err(|error| credential_unavailable(error.to_string()))?;
                 if refs > 0 {
-                    // The usable set changed: stale scrub premises must be
-                    // refused, so the revision advances once in this same
-                    // transaction. A duplicate pass deletes nothing and never
-                    // advances it again.
                     advance_credential_set(&tx)?;
                 }
                 let remainder: i64 = tx

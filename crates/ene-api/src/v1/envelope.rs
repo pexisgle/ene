@@ -1,25 +1,13 @@
-//! Routing envelope and protocol version (IPC §5, §7.2).
-//!
-//! The envelope routes; it never authorizes. Envelope validation success is
-//! not payload acceptance: the Host maps the envelope, validates the payload,
-//! and hands domain premises to owner checks. There is deliberately no
-//! payload field here: payload framing is the transport's job and arrives in
-//! Stage 2, when [`super::payload::WirePayload`] becomes the typed body.
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::refs::{
-    ClientIncarnationId, ConnectionWireId, DeviceWireId, RoundWireId, WireMessageId,
-    WireMessageType,
+    ClientIncarnationId, CommandWireId, ConnectionWireId, DeviceWireId, RequestWireId, RoundWireId,
+    WireMessageId, WireMessageType,
 };
-use super::refs::{CommandWireId, RequestWireId};
 
-/// Major marks the semantic-compatibility boundary; minor covers
-/// backwards-compatible additions (IPC §7.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProtocolVersion {
-    /// Different majors do not interoperate.
     pub major: u16,
     pub minor: u16,
 }
@@ -27,60 +15,32 @@ pub struct ProtocolVersion {
 impl ProtocolVersion {
     pub const V1: Self = Self { major: 1, minor: 0 };
 
-    /// A narrow predicate, not a compatibility verdict: sharing a major only
-    /// admits the pair to negotiation. The negotiated version is fixed per
-    /// connection (older minor's understood range, never silent upgrade) in
-    /// Stage 2.
     #[must_use]
     pub fn shares_major_with(&self, other: &Self) -> bool {
         self.major == other.major
     }
 }
 
-/// Request/response and command/ack correspondence (IPC §6). Every slot is
-/// optional because different patterns use different slots: a fact carries
-/// none at all.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WireCorrelation {
     pub request_id: Option<RequestWireId>,
     pub command_id: Option<CommandWireId>,
-    /// Message this message answers, for transport pairing.
     pub reply_to: Option<WireMessageId>,
 }
 
-/// Who sent the message: device, incarnation, connection (IPC §11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WireSender {
-    /// Pairing link. [`None`] only for the pre-pairing [`super::handshake::PairingRequest`]:
-    /// an unpaired Client has no device key yet because the Host issues it
-    /// after Owner confirmation (IPC §9.2). Every other Client→Host message
-    /// must carry it; absence is rejection, never an unconstrained sender.
     pub device_id: Option<DeviceWireId>,
-    /// Client process incarnation, sender-minted per boot.
     pub incarnation_id: ClientIncarnationId,
-    /// Host-issued connection key. [`None`] before authentication; later
-    /// messages without it are rejected, never treated as pre-auth.
     pub connection_id: Option<ConnectionWireId>,
 }
 
-/// What the Client saw when it sent the message: comparison material for
-/// the Host, never a claim of currentness (IPC §5).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObservedMarks {
     pub presence_generation_view: Option<u64>,
-    /// Round the Client believes it belongs to. It must be [`None`]
-    /// whenever the input does not join a round — a bare round-less
-    /// request or a force-new one — and once a sender populates it on a
-    /// submit it must equal the payload
-    /// [`round`](crate::v1::round::SubmitTextInput::round) premise: the two
-    /// fields carry one premise, and a disagreement is rejected, never
-    /// adopted one side over the other. The Host never rebinds an old
-    /// round from this field.
     pub round_view: Option<RoundWireId>,
 }
 
-/// `message_type` names the payload shape for routing; an unknown value is
-/// rejected, never guessed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireEnvelope {
     pub protocol: ProtocolVersion,

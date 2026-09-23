@@ -1,9 +1,3 @@
-//! Optional Body child. Chat and settings do not wait for this process.
-//!
-//! Projection IPC matches `apps/ene-body/README.md`: length-prefixed
-//! MessagePack on `--ipc-stdio`. Commands are [`ene_body::ParentToBody`]
-//! only — secrets, chat text, and Task commands have no variant.
-
 use std::collections::VecDeque;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -15,7 +9,6 @@ use ene_body::ipc::{
     BodyToParent, LocalUiFact, ParentToBody, PresentationFeedback, decode_body, encode_parent,
 };
 
-/// Health of the overlay child as observed by desktop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyStatus {
     Absent,
@@ -23,7 +16,6 @@ pub enum BodyStatus {
     Exited,
 }
 
-/// Supervises at most one `ene-body` child by executable path.
 #[derive(Default)]
 pub struct BodySupervisor {
     child: Option<Child>,
@@ -51,8 +43,6 @@ impl BodySupervisor {
         Self::default()
     }
 
-    /// Resolves `ene-body` from `ENE_BODY_PATH`, `CARGO_TARGET_DIR`, or a
-    /// sibling of this process. Missing official VRM is still [`BodyStatus::Absent`].
     #[must_use]
     pub fn locate_binary() -> Option<PathBuf> {
         if let Ok(path) = std::env::var("ENE_BODY_PATH") {
@@ -80,9 +70,6 @@ impl BodySupervisor {
         debug.is_file().then_some(debug)
     }
 
-    /// Spawns `exe --ipc-stdio` if the path exists. Does not wait for Ready.
-    /// Missing official VRM / missing binary is [`BodyStatus::Absent`], not a
-    /// fake overlay.
     pub fn spawn_if_present(&mut self, exe: &Path) -> BodyStatus {
         if !exe.is_file() {
             self.exe = Some(exe.to_path_buf());
@@ -138,11 +125,6 @@ impl BodySupervisor {
         }
     }
 
-    /// Sends one projection command. Chat is not blocked on Ready.
-    ///
-    /// # Errors
-    ///
-    /// Missing child or encode/write failure. Errors never include frame bytes.
     pub fn send_projection(&mut self, message: &ParentToBody) -> Result<(), BodySuperviseError> {
         let stdin = self.stdin.as_mut().ok_or(BodySuperviseError::NotRunning)?;
         let bytes = encode_parent(message).map_err(|_| BodySuperviseError::Encode)?;
@@ -172,32 +154,26 @@ impl BodySupervisor {
         }
     }
 
-    /// Kind of the last Body→parent event, for tests. Never a secret or chat body.
     #[must_use]
     pub fn last_event_kind(&self) -> Option<&str> {
         self.last_event.as_deref()
     }
 
-    /// Takes an overlay-local settings candidate.
     pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
         self.drain_events();
         self.local_ui.pop_front()
     }
 
-    /// Takes compositor/display timing evidence from Body.
     pub fn take_presentation(&mut self) -> Option<PresentationFeedback> {
         self.drain_events();
         self.presentations.pop_front()
     }
 
-    /// True only after native overlay/GPU readiness and a strict asset load.
     #[must_use]
     pub fn available(&self) -> bool {
         self.native_ready && self.asset_ready && self.child.is_some()
     }
 
-    /// Whether the body reports a validated clip set. A missing motion pack
-    /// leaves this false and the body keeps its staged pose.
     #[must_use]
     pub fn motion_ready(&mut self) -> bool {
         self.drain_events();
@@ -300,7 +276,6 @@ fn body_binary_name() -> &'static str {
     }
 }
 
-/// Projection IPC failures. Reasons never include frame bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BodySuperviseError {
     #[error("body is not running")]

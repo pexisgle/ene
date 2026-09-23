@@ -1,41 +1,17 @@
-//! Integer money arithmetic and reproducible cost projection.
-//!
-//! `usage-cost-cap` §4/§5: a cost fact is derived from the reported token
-//! counts and the immutable pricing snapshot the provider call ran under.
-//! Floating point is never the canonical value: [`Money`] is an exact count of
-//! micro-currency units and [`TokenRate`] is an exact count of micro-currency
-//! units per 1,000,000 tokens.
-//!
-//! Each component rounds *up* to the next micro-currency unit, so a fractional
-//! micro-unit is never silently dropped (which would understate the billed
-//! amount) and the rule is deterministic and recomputable. The total is the
-//! exact sum of the three rounded components. An amount that does not fit the
-//! money representation is [`CostProjectionError::AmountOverflow`]: it is
-//! never wrapped, saturated, or replaced by zero.
-//!
-//! The projection never applies another model's rate: a snapshot that does
-//! not match the usage attribution is a hard error. Missing token counts or a
-//! missing reviewed rate produce [`UsageCostFact::Unknown`], never a zero
-//! amount.
-
 use thiserror::Error;
 
 use crate::UsageFact;
 use crate::pricing::{PricingSnapshot, PricingSnapshotRef};
 pub use ene_primitive::money::{CurrencyCode, Money};
 
-/// Rates are stated per this many tokens, so the stored ratio is exact
-/// integer arithmetic with no intermediate decimal expansion.
 const RATE_DENOMINATOR: u128 = 1_000_000;
 
-/// Exact price of one token class: micro-currency units per 1,000,000 tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TokenRate {
     micros_per_million_tokens: u64,
 }
 
 impl TokenRate {
-    /// Builds a rate from an exact micro-currency count per 1,000,000 tokens.
     #[must_use]
     pub const fn from_micros_per_million(micros_per_million_tokens: u64) -> Self {
         Self {
@@ -43,19 +19,13 @@ impl TokenRate {
         }
     }
 
-    /// The exact micro-currency count per 1,000,000 tokens.
     #[must_use]
     pub const fn micros_per_million(self) -> u64 {
         self.micros_per_million_tokens
     }
 
-    /// Charges `tokens` at this rate, rounding up to the next micro-currency
-    /// unit. `None` when the amount does not fit [`Money`]: the caller must
-    /// fail closed instead of truncating or saturating.
     #[must_use]
     pub fn checked_cost(self, currency: CurrencyCode, tokens: u64) -> Option<Money> {
-        // The product of two u64 values fits u128 exactly; checked_mul keeps
-        // the arithmetic total even if the widths change later.
         let scaled = u128::from(tokens).checked_mul(u128::from(self.micros_per_million_tokens))?;
         let rounded = scaled
             .checked_add(RATE_DENOMINATOR - 1)?
@@ -65,38 +35,13 @@ impl TokenRate {
     }
 }
 
-/// Conservative upper bound of the token usage one provider request can bill.
-///
-/// `usage-cost-cap` §8: the provider adapter resolves this before the attempt
-/// claim, and the cap admission converts it into a [`Money`] upper bound under
-/// the admission pricing snapshot. An estimate is not a prediction: every
-/// count must be a value the provider contract cannot exceed for this request
-/// (the request's explicit output maximum, and a tokenizer-safe input bound).
-/// An average or best guess is not an upper bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsageEstimate {
-    /// Upper bound of tokens this request can bill as input.
     pub input_tokens_upper_bound: u64,
-    /// Upper bound of tokens this request can bill as output. The provider
-    /// request carries this same value as its explicit maximum, so the
-    /// provider cannot produce more.
     pub output_tokens_upper_bound: u64,
 }
 
 impl UsageEstimate {
-    /// The upper-bound cost of this estimate under `snapshot`, or `None` when
-    /// the amount is not representable.
-    ///
-    /// The input side charges every input token at the more expensive of the
-    /// snapshot's input and cached-input rates: a cache hit cannot be promised
-    /// before the call, so reserving at the cached rate alone could understate
-    /// the bill. Both components round up exactly like [`project_cost`], and
-    /// the input side carries one extra micro-unit: the settlement rounds the
-    /// non-cached and cached parts up *separately*, so their sum can exceed
-    /// the single rounded input bound by one micro-unit
-    /// (`ceil(a) + ceil(b) <= ceil(a + b) + 1`). Without that allowance the
-    /// reservation could fall one micro-unit below the settled amount for some
-    /// cache split, which `usage-cost-cap` §8 forbids.
     #[must_use]
     pub fn upper_bound_cost(self, snapshot: &PricingSnapshot) -> Option<Money> {
         let input_rate = if snapshot.input_rate.micros_per_million()
@@ -115,81 +60,31 @@ impl UsageEstimate {
     }
 }
 
-/// Cost components of one reported token usage, in the currency of the
-/// snapshot that priced it.
-///
-/// `input` charges only the non-cached input tokens; the cached subset is
-/// charged once at `cached_input`, never again at the normal input rate.
-/// `total` is the exact sum of the three components.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportedCost {
-    /// `(input_tokens - cached_input_tokens) * input_rate`.
     pub input: Money,
-    /// `cached_input_tokens * cached_input_rate`.
     pub cached_input: Money,
-    /// `output_tokens * output_rate`.
     pub output: Money,
-    /// Exact sum of the three components.
     pub total: Money,
-    /// Immutable pricing snapshot the components were derived from.
     pub pricing: PricingSnapshotRef,
 }
 
-/// The durable cost fact of one settled ticket.
-///
-/// `Unknown` means no amount is known: either the token usage itself is
-/// unknown, or no reviewed rate covered the route at admission. It carries
-/// the pricing snapshot reference when one existed so the missing amount is
-/// explainable, but it never carries a zero amount and is never rendered or
-/// summed as zero. The absent reference means no reviewed rate existed at
-/// admission; a fabricated reference would claim a rate basis that never did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageCostFact {
     Reported(ReportedCost),
     Unknown { pricing: Option<PricingSnapshotRef> },
 }
 
-/// Why a cost fact cannot be projected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum CostProjectionError {
-    /// The token counts disagree with their source: a Reported fact is
-    /// missing counts or reports cached input above input, or an Unknown fact
-    /// carries counts. Zero-filling such a fact would fabricate usage.
     #[error("usage counts are not internally consistent")]
     InconsistentUsage,
-    /// The pricing snapshot names a different provider/model than the usage
-    /// fact. Applying it would charge another model's rate.
     #[error("pricing snapshot does not match the usage attribution")]
     AttributionMismatch,
-    /// A component or the total does not fit the money representation.
-    /// Fail closed rather than wrap or saturate the amount.
     #[error("usage cost does not fit the money representation")]
     AmountOverflow,
 }
 
-/// Derives the cost fact for one token usage fact.
-///
-/// `pricing` is the snapshot bound to the ticket at admission, or `None` when
-/// the reviewed catalog had no rate for the route. The projection applies the
-/// `usage-cost-cap` §5 formula:
-///
-/// ```text
-/// non_cached_input = input_tokens - cached_input_tokens
-/// input_cost        = non_cached_input * input_rate
-/// cached_input_cost = cached_input_tokens * cached_input_rate
-/// output_cost       = output_tokens * output_rate
-/// ```
-///
-/// A Reported usage with no snapshot settles [`UsageCostFact::Unknown`], never
-/// a zero: the provider may have spent money that no reviewed rate can price.
-///
-/// # Errors
-///
-/// Returns [`CostProjectionError::InconsistentUsage`] for a malformed usage
-/// fact, [`CostProjectionError::AttributionMismatch`] when the pricing
-/// snapshot belongs to another route, and
-/// [`CostProjectionError::AmountOverflow`] when a component or the total is
-/// not representable.
 pub fn project_cost(
     usage: &UsageFact,
     pricing: Option<&PricingSnapshot>,
@@ -300,8 +195,6 @@ mod tests {
         let UsageCostFact::Reported(cost) = cost else {
             panic!("a Reported usage with a rate must project Reported");
         };
-        // non_cached = 800 * 2.0 = 1600 micros; cached = 200 * 0.5 = 100;
-        // output = 500 * 8.0 = 4000.
         assert_eq!(cost.input, Money::from_micros(CurrencyCode::Usd, 1_600));
         assert_eq!(
             cost.cached_input,
@@ -364,7 +257,6 @@ mod tests {
 
     #[test]
     fn total_overflow_fails_closed_even_when_each_component_fits() {
-        // One micro per token: each component fits, their exact sum does not.
         let rate = TokenRate::from_micros_per_million(1_000_000);
         let half = u64::MAX / 2;
         let pricing = snapshot("openai", "gpt-test", 1, rate, rate, rate);
@@ -385,7 +277,6 @@ mod tests {
             TokenRate::from_micros_per_million(1_250_000),
             TokenRate::from_micros_per_million(10_000_000),
         );
-        // Unknown token counts with a known rate: no amount is inferred.
         let unknown = usage("openai", "gpt-test", None);
         assert_eq!(
             project_cost(&unknown, Some(&pricing)),
@@ -393,13 +284,11 @@ mod tests {
                 pricing: Some(pricing.reference())
             })
         );
-        // Reported counts with no reviewed rate: no rate is guessed.
         let reported = usage("openai", "gpt-test", Some((10, 1, 2)));
         assert_eq!(
             project_cost(&reported, None),
             Ok(UsageCostFact::Unknown { pricing: None })
         );
-        // Unknown counts and no rate.
         assert_eq!(
             project_cost(&unknown, None),
             Ok(UsageCostFact::Unknown { pricing: None })
@@ -456,7 +345,6 @@ mod tests {
 
         let at = |value: &str| WallClockWithTz::parse_rfc3339(value).expect("fixture instant");
         let fact = usage("openai", "gpt-test", Some((1_000, 200, 500)));
-        // The call was admitted under revision 1.
         let first = catalog_of(&snapshot(
             "openai",
             "gpt-test",
@@ -472,7 +360,6 @@ mod tests {
         };
         let recorded =
             project_cost(&fact, Some(&bound)).expect("the bound snapshot prices the fact");
-        // The current catalog later moves to revision 2 with different rates.
         let second = catalog_of(&snapshot(
             "openai",
             "gpt-test",
@@ -487,8 +374,6 @@ mod tests {
             panic!("revision 2 covers the later instant");
         };
         assert_ne!(bound.reference(), current.reference());
-        // The recorded fact still projects from the bound revision; the
-        // current revision only prices calls admitted after it.
         assert_eq!(
             project_cost(&fact, Some(&bound)).expect("the bound snapshot still prices the fact"),
             recorded
@@ -501,8 +386,6 @@ mod tests {
 
     #[test]
     fn estimate_upper_bound_charges_the_more_expensive_input_rate() {
-        // The cached rate is intentionally the higher one here: reserving at
-        // the cheaper rate would understate a cache miss.
         let pricing = snapshot(
             "openai",
             "gpt-test",
@@ -515,9 +398,6 @@ mod tests {
             input_tokens_upper_bound: 10,
             output_tokens_upper_bound: 4,
         };
-        // max(input, cached) = 3.0 per token: 10 * 3 = 30, plus the one
-        // micro-unit that keeps the separately rounded settlement components
-        // below the bound; output 4 * 2 = 8.
         assert_eq!(
             estimate.upper_bound_cost(&pricing),
             Some(Money::from_micros(CurrencyCode::Usd, 39))
@@ -526,10 +406,6 @@ mod tests {
 
     #[test]
     fn estimate_upper_bound_never_falls_below_the_settled_total() {
-        // Regression: the settlement rounds the non-cached and cached input
-        // parts up separately, so `ceil(a) + ceil(b)` can exceed
-        // `ceil(a + b)` by one micro-unit. The estimate must still dominate
-        // every cache split inside its bounds (`usage-cost-cap` §8).
         let pricing = snapshot(
             "openai",
             "gpt-4o-mini",
@@ -545,7 +421,6 @@ mod tests {
         let bound = estimate
             .upper_bound_cost(&pricing)
             .expect("the bound is representable");
-        // Every cache split within the input bound settles at or below it.
         for cached in [0, 1, 2, 999, 1_000] {
             let fact = usage("openai", "gpt-4o-mini", Some((1_000, cached, 4_096)));
             let UsageCostFact::Reported(cost) =
@@ -560,8 +435,6 @@ mod tests {
                 bound.micros()
             );
         }
-        // The exact split the per-component ceiling used to understate: the
-        // settled total is one micro-unit above the naive bound.
         let split = usage("openai", "gpt-4o-mini", Some((1_000, 1, 4_096)));
         let UsageCostFact::Reported(cost) =
             project_cost(&split, Some(&pricing)).expect("the projection must succeed")
@@ -586,7 +459,6 @@ mod tests {
             input_tokens_upper_bound: 2,
             output_tokens_upper_bound: 2,
         };
-        // Each component rounds up: 5 + 1 + 5 = 11.
         assert_eq!(
             estimate.upper_bound_cost(&pricing),
             Some(Money::from_micros(CurrencyCode::Usd, 11))

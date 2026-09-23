@@ -1,9 +1,3 @@
-//! VRM overlay child (`apps/ene-body`).
-//!
-//! Modules match first-party-desktop §6: [`window`], [`vrm`], [`render`],
-//! [`ipc`]. This crate does not depend on Host, `ene-api`, `ene-client`,
-//! credentials, or Task commands.
-
 pub mod error;
 pub mod ipc;
 pub mod motion;
