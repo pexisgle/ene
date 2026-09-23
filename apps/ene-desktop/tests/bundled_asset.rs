@@ -1,10 +1,4 @@
 #![cfg(any(unix, windows))]
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration-test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
-)]
 
 use std::path::Path;
 
@@ -63,6 +57,7 @@ fn bundled_asset_is_seed_san_vrm_1_with_required_features() {
     assert_eq!(meta["allowRedistribution"].as_bool(), Some(true));
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(
         bytes[offset..offset + 4]
