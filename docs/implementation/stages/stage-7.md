@@ -163,7 +163,7 @@ Targeted Deletion は通常の忘却と分け、request → Host-local 最終確
 
 renderer に渡す情報は必要なアセット参照と表示指示に限定し、会話本文、Memory、API key、management authority を渡しません。avatar の非表示・終了を Companion 停止や Task cancel と同一視せず、renderer 再起動で古い会話/操作を replay しません。
 
-待機/発話中の仕草は同梱モーションパック（VRoid `VRMA_MotionPack`、`.vrma`）で再生します。モーションは VRM と同じ install asset であり、本リポジトリには置きません（取り出し可能な形での二次配布は規約で禁止）。配置は `scripts/install-vrma-motionpack.sh`（Linux / macOS）または `scripts/install-vrma-motionpack.ps1`（Windows）が配布 URL からダウンロードして行います。`ene-desktop` は探索して読み込むだけで、実行時にダウンロードやコピーは行いません。`ene-body` は渡された pose → clip の割り当てだけを再生します。探索順・環境変数・割り当て表は [`apps/ene-body/README.md`](../../../apps/ene-body/README.md#motion-pack-vrma) を正本とします。パックが無い状態は手書きの仕草で継続し、`HealthTick.motion` が `Unsupported` として明示されます。実機での見た目 acceptance は公式 `ene` VRM（#1651）と実 compositor が揃うまで **未実施** です。
+待機/発話中の仕草は同梱モーションパック（VRoid `VRMA_MotionPack`、`.vrma`）で再生します。モーションは VRM と同じ install asset であり、本リポジトリには置きません（取り出し可能な形での二次配布は規約で禁止）。配布ページと配置先は [`assets/README.md`](../../../assets/README.md#vroid-motion-pack-install-asset) に記載し、手動で配置します。`ene-desktop` は探索して読み込むだけで、実行時にダウンロードやコピーは行いません。`ene-body` は渡された pose → clip の割り当てだけを再生します。探索順・環境変数・割り当て表は [`apps/ene-body/README.md`](../../../apps/ene-body/README.md#motion-pack-vrma) を正本とします。パックが無い状態は手書きの仕草で継続し、`HealthTick.motion` が `Unsupported` として明示されます。実機での見た目 acceptance は公式 `ene` VRM（#1651）と実 compositor が揃うまで **未実施** です。
 
 **gate**: B の実 GUI へ統合して acceptance §2 を両実 desktop で通すこと。renderer の異常終了・hang・初期化失敗を注入しても、text 入力、Task cancel、設定/復旧が利用できることを確認する。別 Client や test shell が生存しているだけでは GUI fallback 合格にしない。renderer 単体の作業は B と並行してよい。
 
