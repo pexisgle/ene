@@ -91,7 +91,7 @@ Stage 文書は**実装方法を具体化する場所**であり、新しい製�
 
 | Stage / 領域 | 機能 | 前提・追跡先 |
 |---|---|---|
-| 10（優先） | Voice、会話での Task 操作・報告、不要な作業 GUI の削除 | D0 → [#1688](https://github.com/pexisgle/ene/issues/1688)・[#1689](https://github.com/pexisgle/ene/issues/1689)・[#1691](https://github.com/pexisgle/ene/issues/1691) → [#1690](https://github.com/pexisgle/ene/issues/1690) → [#1687](https://github.com/pexisgle/ene/issues/1687)。実装・統合 gate は [計画](stages/stage-10.md) |
+| 10（優先） | Voice、会話での Task 操作・報告、不要な作業 GUI の削除 | [#1688](https://github.com/pexisgle/ene/issues/1688)・[#1689](https://github.com/pexisgle/ene/issues/1689)・[#1691](https://github.com/pexisgle/ene/issues/1691)・[#1690](https://github.com/pexisgle/ene/issues/1690)・[#1687](https://github.com/pexisgle/ene/issues/1687)。D0、並列化、実装・統合 gate は [計画](stages/stage-10.md) |
 | Task / Execution 拡張 | Web 取得・MCP・PC 操作 | [#1692](https://github.com/pexisgle/ene/issues/1692)。対象ごとに設計・実装を分け、既存 Action / permission / Task 境界を利用。PC 操作はユーザー介入による停止を検証 |
 | 8 | 定期 schedule 実行 | Task・permission・usage と対話による設定/報告。[#1693](https://github.com/pexisgle/ene/issues/1693)。各回は新しい Task、Host 停止中の回はスキップ |
 | 9 | backup / restore / Host 自動起動 | preservation・管理/復旧経路。音声や新しい実行ツールに依存しない部分は独立して計画可能 |
