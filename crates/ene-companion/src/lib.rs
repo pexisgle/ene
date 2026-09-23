@@ -19,13 +19,6 @@ impl CompanionId {
     }
 }
 
-/// Command-scoped idempotency identity for history appends.
-///
-/// Carries a public [`RawId`]: the wire `CommandWireId` maps 1:1 at ingress
-/// when the Host parses its UUID text into this domain newtype. The client
-/// mints one per send; a transport retry reuses the same command id with a
-/// fresh message id. Non-secret correspondence, visible in
-/// [`core::fmt::Debug`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommandId(pub RawId);
 
@@ -127,12 +120,6 @@ impl core::fmt::Debug for AppendHistoryCommand {
     }
 }
 
-/// Builds the request semantics fingerprint shared by both constructors.
-///
-/// Returns [`None`] exactly when the request carries no replay key or no
-/// round intent: there is then nothing provable to compare. Keeping the
-/// construction in one place stops the store's in-transaction judge and the
-/// Host's early replay judge from drifting apart when a field is added.
 fn fingerprint_of(
     command_id: Option<&CommandId>,
     role: HistoryRole,
@@ -411,22 +398,6 @@ pub trait HistoryRepository {
         cmd: AppendHistoryCommand,
     ) -> Result<HistoryAppendOutcome, CompanionTechnicalError>;
 
-    /// Appends one companion reply and registers an undelivered entry for it
-    /// in the same atomic section.
-    ///
-    /// Conversation-sourced undelivered registration shares the history
-    /// append atom (AU1a); Task- and Action-sourced registration shares the
-    /// parent fact's own commit instead (AU1b). The returned [`Option`]
-    /// carries the registered [`UndeliveredRef`] when registration happened.
-    ///
-    /// `inference_claim` is the durable provider claim this reply was
-    /// produced under, when the caller obtained one. The implementor compares
-    /// it inside the same transaction against the canonical deletion
-    /// correspondence: a claim a deletion admission already associated with
-    /// an interval is refused with [`HistoryAppendOutcome::HeldForErasure`]
-    /// even after the operation completed and no current condition is
-    /// readable (lifecycle §11 R2). [`None`] skips the check (non-provider
-    /// appends and direct test fixtures).
     async fn append_reply_with_undelivered(
         &self,
         cmd: AppendHistoryCommand,
@@ -679,7 +650,6 @@ mod tests {
             !rendered.contains("private words"),
             "body redacted: {rendered}"
         );
-        // Same key, same request semantics: equal.
         let mut same = keyed.clone();
         same.round = RawId::new();
         same.round_wire = Some(String::from("rotated"));
@@ -691,8 +661,6 @@ mod tests {
             same.request_fingerprint(),
             "accepted-result and transport-only drift never decide replay"
         );
-        // Round intent is request semantics: a flip must not fingerprint
-        // equal, so a retry cannot adopt the changed intent.
         let mut joined = keyed.clone();
         joined.round_intent = Some(RoundIntentMark::Existing(String::from("round-wire-1")));
         assert_ne!(

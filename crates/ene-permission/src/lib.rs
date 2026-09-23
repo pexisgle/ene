@@ -21,22 +21,9 @@ pub use usage_cap::{
     usage_cap_mark,
 };
 
-/// Single-use authorization token for one inference use.
-///
-/// Wraps a [`RawId`] rather than a bare UUID so the opaque-identity
-/// discipline of `ene-primitive` applies: no string rendering, no prefix
-/// matching, equality only within this newtype. A value is valid for one
-/// [`EvaluationTracker::consume`] call presenting the candidate it was minted
-/// for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PermissionEvaluationId(RawId);
 
-/// Monotonic order of one consent identity's revisions.
-///
-/// Follows the [`RevisionInner`] discipline: a revision is meaningful only
-/// together with its consent identity, and [`Self::checked_next`] reports
-/// exhaustion instead of aliasing `u64::MAX`, so a new revision can never
-/// silently share the previous one's value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConsentRevision(RevisionInner);
 
@@ -264,10 +251,6 @@ pub enum IntentResolution<T> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IntentFingerprint {
     pub intent_id: String,
-    /// Opaque, Host-composed intent-kind discriminator (for example `assign`,
-    /// `register`, `complete`, `cancel-task`, `resume-task`, `select-workspace`,
-    /// `usage-cap`, or `deletion-targeted`). The permission owner compares it for
-    /// equality only and never enumerates or validates it.
     pub kind: String,
     pub target: String,
     pub base: String,
@@ -302,18 +285,11 @@ pub fn consent_mark(capability: CapabilityKind, rev: Option<u64>) -> String {
     render_revision_state(&format!("consent-{}-", capability.as_str()), rev)
 }
 
-/// Renders the mark of the stored consent row for `capability`, the "no
-/// current consent" and current-revision cases through one grammar.
 #[must_use]
 pub fn consent_current_mark(capability: CapabilityKind, current: Option<&ConsentRecord>) -> String {
     consent_mark(capability, current.map(|record| record.rev.as_u64()))
 }
 
-/// Renders the combined management view mark for both capabilities:
-/// `consent-dialogue-...;consent-learning-...`.
-///
-/// The mark stays opaque to the Client; clients echo it and the Host parses
-/// the segment for the capability the intent names.
 #[must_use]
 pub fn consent_view_mark(dialogue_rev: Option<u64>, learning_rev: Option<u64>) -> String {
     format!(
@@ -323,14 +299,6 @@ pub fn consent_view_mark(dialogue_rev: Option<u64>, learning_rev: Option<u64>) -
     )
 }
 
-/// Parses the state one base-view mark names for `capability`.
-///
-/// Accepts the combined view mark and a single-capability segment. Segments
-/// that do not carry `capability`'s qualifier are skipped, but the first
-/// capability-qualified segment decides: if its state does not parse (unknown
-/// token or revision syntax) the function returns `None` and never falls
-/// through to a later qualified segment. Returns `None` when no segment for
-/// `capability` parses.
 #[must_use]
 pub fn parse_consent_mark(mark: &str, capability: CapabilityKind) -> Option<Option<u64>> {
     let qualified = format!("consent-{}-", capability.as_str());
@@ -342,8 +310,6 @@ pub fn parse_consent_mark(mark: &str, capability: CapabilityKind) -> Option<Opti
     None
 }
 
-/// Renders the `rev-N` / `none` state tail shared by every revision mark, so
-/// consent and usage-cap marks cannot drift on the state grammar.
 fn render_revision_state(prefix: &str, revision: Option<u64>) -> String {
     match revision {
         Some(number) => format!("{prefix}rev-{number}"),
@@ -351,7 +317,6 @@ fn render_revision_state(prefix: &str, revision: Option<u64>) -> String {
     }
 }
 
-/// Parses the `rev-N` / `none` state tail; `None` is an unparseable state.
 fn parse_revision_state(state: &str) -> Option<Option<u64>> {
     if state == "none" {
         return Some(None);
@@ -377,12 +342,6 @@ impl EvaluationTracker {
         id
     }
 
-    /// Consumes an id iff it is known, unused, and bound to `candidate`.
-    ///
-    /// Returns `false` for unknown ids, replays, and fingerprint mismatches.
-    /// Only a matching presentation burns the id — removing it, so a second
-    /// consume finds nothing — while a mismatch leaves the entry so the caller
-    /// can retry with the correct candidate.
     pub fn consume(
         &mut self,
         id: &PermissionEvaluationId,
@@ -398,29 +357,6 @@ impl EvaluationTracker {
     }
 }
 
-/// Pure closed-world policy for one live authorization query.
-///
-/// Gates, in order:
-///
-/// 1. A `(consumer, capability, purpose)` triple outside the closed world
-///    denies with [`DenyCode::NotInAllowlist`]. The current world is
-///    `(CompanionDialogue, Dialogue, DialogueResponse)`,
-///    `(CompanionLearning, Learning, MemoryFormation)`, and
-///    `(TaskAgent, Dialogue, TaskAgentTurn)`.
-/// 2. With no stored consent, or a stored record for a different capability,
-///    the decision denies with [`DenyCode::ConsentStale`]. A record
-///    authorizes only the capability it names.
-/// 3. Consent comparison: when the stored record differs from
-///    `expected_consent`, the caller's view is stale and the decision is
-///    [`LiveAuthorizationDecision::NeedsRevalidation`].
-/// 4. A provider/model mismatch against the stored record denies with
-///    [`DenyCode::ConsentStale`].
-/// 5. Otherwise the candidate is allowed for exactly one use: a fresh id is
-///    minted from `tracker` and returned in
-///    [`LiveAuthorizationDecision::AllowForThisUse`].
-///
-/// Setup completeness is not checked here: only the caller that resolved a
-/// registered credential ref and confirmed its bearer exists builds a query.
 pub fn check_live_authorization(
     query: &CheckLiveAuthorizationQuery,
     current: Option<&ConsentRecord>,

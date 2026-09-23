@@ -1,7 +1,3 @@
-//! Bearer secret confinement: the zeroizing `SecretValue`, the
-//! [`CredentialStore`] request-builder boundary, and the in-memory and
-//! environment-backed store implementations.
-
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -10,11 +6,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::CredentialTechnicalError;
 use crate::registry::CredentialRef;
 
-/// Locks `mutex`, recovering from poisoning.
-///
-/// A poisoned mutex only follows a panic in a section with no panicking work,
-/// so the guarded data stays consistent; refusing to lock would turn an
-/// unrelated panic into a permanent storage outage.
 pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
@@ -22,12 +13,6 @@ pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, 
     }
 }
 
-/// Secret key material, confined to this crate.
-///
-/// The value is `pub(crate)` so only in-crate store implementations can
-/// touch it. There is deliberately no [`core::fmt::Debug`] implementation:
-/// deriving or hand-writing one would risk logging bearer material. Memory is
-/// zeroized on drop via [`ZeroizeOnDrop`].
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretValue {
     pub(crate) value: String,
@@ -43,19 +28,7 @@ impl SecretValue {
     }
 }
 
-/// Bearer store with a request-builder access pattern.
-///
-/// Implementations hold `SecretValue` internally and expose the bearer only
-/// as a `&str` borrowed into the caller's closure `f`. The caller must build
-/// an owned request (headers, body) inside the closure and perform I/O after
-/// it returns: the borrow cannot escape, so there is deliberately no getter
-/// returning an owned secret. Existence checks via [`CredentialStore::contains`]
-/// are non-secret and safe to branch on.
 pub trait CredentialStore: Send + Sync {
-    /// Runs `f` with the bearer for `cred`.
-    ///
-    /// Errors when the credential is unknown or the backend fails; the error
-    /// never carries secret material.
     fn with_bearer<R>(
         &self,
         cred: &CredentialRef,
@@ -87,11 +60,6 @@ impl PreparedCredentialSnapshot {
     }
 }
 
-/// Active publication snapshots shared by the versioned stores.
-///
-/// One ref maps to its active `(version, value)`; the credential owner
-/// replaces the entry only after the activation transaction commits, so
-/// routine use never re-reads a mutable external item as the same revision.
 pub(crate) struct ActiveVersions(Mutex<HashMap<CredentialRef, (u64, SecretValue)>>);
 
 impl ActiveVersions {
@@ -99,7 +67,6 @@ impl ActiveVersions {
         Self(Mutex::new(HashMap::new()))
     }
 
-    /// Publishes a prepared snapshot without OS I/O.
     pub(crate) fn publish(&self, snapshot: PreparedCredentialSnapshot) {
         let PreparedCredentialSnapshot {
             credential,
@@ -109,7 +76,6 @@ impl ActiveVersions {
         lock_or_recover(&self.0).insert(credential, (version, secret));
     }
 
-    /// Removes an entry after its durable version becomes unusable.
     pub(crate) fn deactivate(&self, cred: &CredentialRef) {
         lock_or_recover(&self.0).remove(cred);
     }
@@ -137,14 +103,6 @@ impl ActiveVersions {
     }
 }
 
-/// Version-aware backend for the publication protocol.
-///
-/// The product OS store exposes these operations as inherent methods, and the
-/// host-side `CredStore` adapts them to this trait; only
-/// [`MemoryVersionedStore`] implements it directly, for tests and local
-/// development. A backend that cannot hold versions (the environment store)
-/// deliberately does not: the Host then reports that registration is
-/// unavailable instead of writing a value nothing can activate.
 pub trait VersionedCredentialStore: Send + Sync {
     fn put_version(
         &self,
@@ -177,12 +135,6 @@ pub trait VersionedCredentialStore: Send + Sync {
     ) -> Result<(), CredentialTechnicalError>;
 }
 
-/// Versioned in-memory backend for tests and local development.
-///
-/// It exists so the publication protocol can be exercised end to end without
-/// an OS store. It is never a product source of truth: the Host wires the OS
-/// backend for the product path and reports registration as unavailable when
-/// no version-capable backend is configured.
 pub struct MemoryVersionedStore {
     versions: Mutex<HashMap<(CredentialRef, u64), SecretValue>>,
     active: ActiveVersions,
@@ -296,14 +248,6 @@ impl CredentialStore for MemoryVersionedStore {
     }
 }
 
-/// In-memory bearer store for tests and local development only.
-///
-/// Holds `SecretValue` entries keyed by `(provider, label)` behind a
-/// mutex. Not a production backend: contents live in process memory and
-/// vanish on restart.
-///
-/// [`core::fmt::Debug`] lists only the public refs and the entry count, never
-/// secret material.
 pub struct MemoryCredentialStore {
     entries: Mutex<HashMap<CredentialRef, SecretValue>>,
 }
@@ -361,21 +305,8 @@ impl CredentialStore for MemoryCredentialStore {
 
 pub const ENV_API_KEY: &str = "ENE_OPENAI_API_KEY";
 
-/// The single closed-world provider allow-list, consulted when the bearer is
-/// served.
 const SUPPORTED_PROVIDER: &str = "openai";
 
-/// Environment-backed bearer store for the `OpenAI` provider.
-///
-/// The bearer is read from [`ENV_API_KEY`] exactly once when the store is
-/// constructed (Host startup) and held as a zeroizing `SecretValue` for the
-/// rest of the run. It is deliberately not re-read per call: a running Host
-/// must not silently adopt a different value than the one its current
-/// credential-set revision was swept and advanced for. Rotation therefore
-/// takes effect on the next Host start, where the startup sweep and revision
-/// advance complete before any use. Only the `"openai"` provider is served
-/// (closed world until real OS stores arrive); every other provider reports
-/// absent. The value is in memory only, so backup exclusion still holds.
 pub struct EnvCredentialStore {
     bearer: Option<SecretValue>,
 }

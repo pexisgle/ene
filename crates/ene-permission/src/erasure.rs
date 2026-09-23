@@ -8,11 +8,6 @@ use ene_preservation::{
 
 use crate::PermissionTechnicalError;
 
-/// Store port for the permission owner's local erasure.
-///
-/// The `ene-store` adapter implements this against the canonical tables; a
-/// participant that cannot reach its store reports a hold instead of a
-/// verification, never a fake success.
 pub trait PermissionErasureRepository: Send + Sync {
     fn erase_target_text(
         &self,

@@ -8,12 +8,8 @@ pub const TASK_TARGET_PREFIX: &str = "task:";
 pub const WORKSPACE_TARGET_PREFIX: &str = "workspace:";
 pub const USAGE_CAP_TARGET_PREFIX: &str = "cap:";
 
-/// Parsed usage-cap target: exactly the assignment parameters. The scope is
-/// carried by [`Self::provider`] alone (`None` is the system scope), so an
-/// inconsistent `(scope, provider)` pair cannot exist.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageCapTarget {
-    /// Provider name for the provider scope, `None` for the system scope.
     pub provider: Option<String>,
     pub window: String,
     pub currency: String,
@@ -37,12 +33,6 @@ pub fn usage_cap_target(
     }
 }
 
-/// Exact rule: strip the `cap:` prefix and parse the two shapes of
-/// [`USAGE_CAP_TARGET_PREFIX`]. The first token fixes the shape, every part
-/// must be non-empty, and the limit must be a plain decimal `u64`; anything
-/// else is `None`, never a guessed cap. The closed window/currency
-/// vocabularies are validated by the owner at command time, so the grammar
-/// stays vocabulary-neutral.
 #[must_use]
 pub fn parse_usage_cap_target(target: &ManagementTargetWire) -> Option<UsageCapTarget> {
     let rest = target.0.strip_prefix(USAGE_CAP_TARGET_PREFIX)?;
@@ -147,9 +137,6 @@ pub fn parse_consent_target(
     ))
 }
 
-/// Management intent kinds (IPC §18.2). The kind name never decides the
-/// trust class: the Host classifies by operation, target, and impact, and
-/// each owner alone may accept its kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManagementIntentKind {
     StopCompanion,
@@ -184,10 +171,6 @@ pub struct ManagementIntent {
 }
 
 impl ManagementIntent {
-    /// Whether this intent's target carries the Owner's deletion body,
-    /// independent of the client-declared `kind`: the wire fields are
-    /// independent, so the target grammar — never the self-declared kind —
-    /// decides whether the body may be rendered or journaled.
     #[must_use]
     pub fn target_carries_owner_body(&self) -> bool {
         self.kind.target_carries_owner_body()
@@ -252,23 +235,8 @@ pub enum ManagementOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManagementViewRequest {
     pub sections: Vec<String>,
-    /// Current Memory id the `memory` section continues after, exclusive.
-    ///
-    /// The Host renders at most one page of the memory section and ends it
-    /// with a `next: <id>` line while older memories remain; passing that id
-    /// back here reads the next page. `None` starts at the newest. The field
-    /// is the typed read query for the one paged section, never a query
-    /// syntax embedded in a section name.
     pub memory_after: Option<String>,
-    /// When set, the `memory` section renders one Memory's revision history
-    /// (with grounds) instead of the current list. The value is the Memory id
-    /// from the list. The revision history is paged independently, so it is
-    /// never inflated into the list page.
     pub memory_revisions_of: Option<String>,
-    /// Revision number the revision page continues after, exclusive, oldest
-    /// first. Semantics mirror [`memory_after`](Self::memory_after); the Host
-    /// ends the page with a `next-revision: <n>` line while newer revisions
-    /// remain. `None` or zero starts at the first revision.
     pub memory_revisions_after: Option<u64>,
 }
 
@@ -611,8 +579,6 @@ mod tests {
                 None
             );
         }
-        // Zero is representable text; the owner refuses it as a limit, so the
-        // grammar does not pre-decide that domain outcome.
         assert!(parse_usage_cap_target(&usage_cap_target(None, "daily_utc", "USD", 0)).is_some());
     }
 }

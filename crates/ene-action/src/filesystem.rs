@@ -31,13 +31,7 @@ pub enum ListEntryKind {
 pub enum ActionOutput {
     Bytes(Vec<u8>),
     Listing(Vec<ListEntry>),
-    /// The created marker of a successful `Create`, carrying the exact
-    /// [`RealTargetRef`] the attempt was recorded and executed under; the
-    /// request path is never reconstructed into the result.
-    Created {
-        target: RealTargetRef,
-    },
-    /// The updated marker of a successful `Edit`.
+    Created { target: RealTargetRef },
     Updated,
 }
 
@@ -193,15 +187,6 @@ impl WorkspaceRoot {
         }
     }
 
-    /// Observes one directory as a sorted, non-recursive entry listing.
-    ///
-    /// Each direct child is classified from no-follow metadata: symlinks,
-    /// Windows reparse points, junctions, mounts/cross-device entries,
-    /// special files, and entries whose name is not valid UTF-8 are excluded
-    /// from the result rather than followed, mapped to `file`/`dir`, or
-    /// reported under a lossy name; an excluded child never fails the whole
-    /// listing. A partial read of the directory is a confirmed refusal (a
-    /// listing changes nothing).
     fn list_directory(&self, target: &RealTargetRef) -> ObservedEffect {
         let destination = Path::new(target.as_path());
         if !self.verified_existing_metadata(destination, true) {
@@ -287,7 +272,6 @@ impl WorkspaceRoot {
             Err(_) => return refused(),
         };
         if persisted.sync_all().is_err() {
-            // The rename landed but the content durability is unconfirmed.
             return unverified();
         }
         match fs::read(destination) {
@@ -298,23 +282,10 @@ impl WorkspaceRoot {
                     target: target.clone(),
                 }
             }),
-            // Something is at the destination but not what we intended; an
-            // effect occurred, but it cannot be confirmed as the intended one.
             _ => unverified(),
         }
     }
 
-    /// Best-effort re-verification immediately before the effect.
-    ///
-    /// Edit requires the target to still canonicalize to itself inside the
-    /// root and remain on the root's filesystem entity; create requires the
-    /// canonical parent to still be inside the root and on the same entity,
-    /// and the destination to still be absent.
-    ///
-    /// Read and list use [`Self::verified_existing_metadata`]: the stored
-    /// target must still canonicalize to itself, stay inside the root, and
-    /// remain on the root's filesystem entity. A forged [`RealTargetRef`]
-    /// pointing outside the workspace (even on the same device) is refused.
     fn verified_existing_metadata(&self, destination: &Path, want_directory: bool) -> bool {
         let Ok(canonical) = fs::canonicalize(destination) else {
             return false;
@@ -338,14 +309,6 @@ impl WorkspaceRoot {
         self.verified_existing_metadata(parent, true) && fs::symlink_metadata(destination).is_err()
     }
 
-    /// Whether `target` is on the same filesystem entity as the workspace root
-    /// and no nested mount/reparse boundary lies between them.
-    ///
-    /// Linux: root and target must share a device, and no mount point from
-    /// `/proc/self/mountinfo` may sit strictly below the root on the target's
-    /// path (an unreadable mount table fails closed). Other Unix: device
-    /// equality. Windows: volume serial number equality. Undeterminable
-    /// boundaries are refused, never assumed inside.
     #[cfg(unix)]
     fn boundary_holds(&self, target: &Path, metadata: &fs::Metadata) -> bool {
         use std::os::unix::fs::MetadataExt;
@@ -372,9 +335,6 @@ impl WorkspaceRoot {
 
     #[cfg(windows)]
     fn boundary_holds(&self, target: &Path, _metadata: &fs::Metadata) -> bool {
-        // A nested mounted volume or reparse target lives on a different
-        // volume serial; an undeterminable serial fails closed. Create passes
-        // its canonical parent, so the same equality covers it.
         match (
             Self::volume_serial_of(&self.root),
             Self::volume_serial_of(target),
@@ -516,8 +476,6 @@ fn unverified() -> ObservedEffect {
 fn canonical_target(path: PathBuf) -> Result<RealTargetRef, TargetRejection> {
     match path.to_str() {
         Some(text) => Ok(RealTargetRef::from_canonical_path(text.to_owned())),
-        // A non-UTF-8 resolved component cannot be represented as the
-        // persisted target text; refusing is safer than a lossy identity.
         None => Err(TargetRejection::TargetUnavailable),
     }
 }
@@ -529,11 +487,6 @@ fn map_io_error(error: &std::io::Error) -> TargetRejection {
     }
 }
 
-/// Splits one requested path into normal component names.
-///
-/// Everything that is not a normal UTF-8 component is malformed: `..`,
-/// absolute roots and prefixes, `.`, and a request that yields no components
-/// at all are refused, so a traversal never reaches the filesystem.
 fn requested_components(requested: &str) -> Option<Vec<String>> {
     let mut names = Vec::new();
     for component in Path::new(requested).components() {
@@ -1045,9 +998,6 @@ mod tests {
         let canonical =
             fs::canonicalize(directory.path().join("input.txt")).expect("canonical fixture");
         let target_metadata = fs::metadata(&canonical).expect("target metadata");
-        // A nested mounted volume presents a different volume serial, so the
-        // same equality refuses it; an undeterminable serial (None) fails
-        // closed by the matches! guard in boundary_holds.
         assert_eq!(
             WorkspaceRoot::volume_serial_of(root.as_path()),
             WorkspaceRoot::volume_serial_of(&canonical),

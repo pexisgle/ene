@@ -129,8 +129,6 @@ impl Mailbox {
             .pop_front()
     }
     fn complete(&self, lane: usize, epoch: u64) {
-        // The guard serializes the epoch check with `erase`: a completion for
-        // an erased epoch must not decrement a counter `erase` already reset.
         let _queue = self
             .queue
             .lock()
@@ -263,17 +261,10 @@ fn run_launcher(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
     })
 }
 
-/// Whether the launcher's bootstrap may ask the Host to open the GUI again
-/// after this failure. Bootstrap failures are retried while the freshly
-/// started Host comes up; a `BackpressureHold` is instead an admission answer,
-/// and re-sending it without a new user action would be the automatic resend
-/// the design forbids.
 fn launcher_retries(error: &DesktopError) -> bool {
     !matches!(error, DesktopError::BackpressureHold)
 }
 
-/// The Host-spawned GUI: adopt the inherited confirmation channel and run the
-/// windows.
 fn run_gui(data_dir: std::path::PathBuf) -> Result<(), DesktopError> {
     slint::BackendSelector::new()
         .backend_name(String::from("winit"))
@@ -921,9 +912,6 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         Command::RequestDeletion(text) => {
             d.set_deletion_exact_text(text);
             let result = d.request_deletion().await?;
-            // The destructive submission already returned an Ok domain
-            // outcome; a failed follow-up read must not mask it as a failure
-            // the Owner would retry.
             let _result = d.refresh_deletion_requests().await;
             Some(result)
         }
@@ -951,8 +939,6 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         }
         Command::Dismiss => {
             d.reject_pending_challenge().await;
-            // The reject above owns the live challenge; a locally deferred one
-            // must stay reachable instead of being silently discarded.
             d.cancel_secret_keep_pending();
             None
         }
@@ -963,12 +949,6 @@ fn local<'a>(ja: bool, japanese: &'a str, english: &'a str) -> &'a str {
     if ja { japanese } else { english }
 }
 
-/// The Owner-visible notice for one worker result, and whether it is styled as
-/// a failure. A requester-queue hold is its own state: it has distinct text,
-/// is not an error, and nothing resends it. An unavailable Host carries the
-/// domain reason it answered with, and a boundary refusal renders the shared
-/// deny text; the remaining technical failures keep the generic
-/// not-automatically-retried notice.
 fn result_notice(ja: bool, result: Result<String, DesktopError>) -> (String, bool) {
     match result {
         Ok(notice) => (notice, false),

@@ -1,9 +1,3 @@
-//! Usage / cost / cap management projection.
-//!
-//! Reads the Stage 6 first-party bounded query over the Client channel.
-//! Cap mutation uses the existing revisioned intent; displayed remaining
-//! is never the admit authority.
-
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome,
     RationaleOrigin, usage_cap_target,
@@ -179,7 +173,6 @@ impl UsagePanel {
         self.cap_limit_micros = micros;
     }
 
-    /// Drops the cached usage page. Filters stay; they are not target bodies.
     pub fn wipe_body(&mut self) {
         self.page = None;
         self.notice.clear();

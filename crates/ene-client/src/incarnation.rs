@@ -69,7 +69,6 @@ pub fn advance_counter(data_dir: &Path) -> Result<u64, ClientError> {
         None,
         "client incarnation counter store failed",
     )?;
-    // The OS lock releases when `lock_file` drops.
     Ok(next)
 }
 

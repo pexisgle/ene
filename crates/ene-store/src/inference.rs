@@ -47,8 +47,6 @@ const SQL_INSERT_USAGE: &str = "INSERT INTO usage_fact (ticket, provider, model,
 const SQL_SELECT_ATTEMPT_ROUTE: &str =
     "SELECT provider, model, pricing_snapshot FROM inference_attempt WHERE ticket = ?1";
 
-/// Reads the claimed attempt's route and admission pricing binding, if the
-/// attempt exists. Every caller keeps its own missing/route checks.
 fn select_attempt_route(
     conn: &Connection,
     ticket_text: &str,
@@ -60,16 +58,6 @@ fn select_attempt_route(
     .map_err(|error| inference_unavailable(error.to_string()))
 }
 
-/// One bounded page of the first-party usage summary (`usage-cost-cap` §16).
-///
-/// The status expression repeats the decode rule so the SQL `LIMIT` counts
-/// matching rows instead of being applied after an in-memory filter: a
-/// reported/unknown usage fact decides the settled status, an attempt without
-/// a fact is the still-reserved row, and a released reservation is excluded
-/// (no provider I/O ran, so it is no usage at all). The keyset comparison
-/// uses the canonical UTC `started_at` text, so lexical order is instant
-/// order; the index on `(started_at, ticket)` serves both the range and the
-/// order.
 pub(crate) const SQL_SELECT_USAGE_SUMMARY: &str = "SELECT a.ticket, a.provider, a.model, a.consumer, a.purpose, a.started_at, f.source, f.input_tokens, f.cached_input_tokens, f.output_tokens, f.pricing_snapshot, r.state, r.currency, r.upper_bound_micros, p.id, p.provider, p.model, p.currency, p.input_rate, p.cached_input_rate, p.output_rate, p.effective_at, p.source_revision, a.pricing_snapshot, r.committed_currency, r.committed_micros FROM inference_attempt a LEFT JOIN usage_fact f ON f.ticket = a.ticket LEFT JOIN usage_reservation r ON r.ticket = a.ticket LEFT JOIN pricing_snapshot p ON p.id = f.pricing_snapshot WHERE a.started_at >= ?1 AND a.started_at < ?2 AND (?3 IS NULL OR a.provider = ?3) AND (?4 IS NULL OR a.model = ?4) AND (?5 IS NULL OR a.consumer = ?5) AND (?6 IS NULL OR a.purpose = ?6) AND (r.state IS NULL OR r.state != 'released') AND (?7 IS NULL OR (CASE WHEN f.source = 'reported' THEN 'reported' WHEN f.source = 'unknown' THEN 'unknown' ELSE 'reserved' END) = ?7) AND (?8 IS NULL OR a.started_at < ?8 OR (a.started_at = ?8 AND a.ticket < ?9)) ORDER BY a.started_at DESC, a.ticket DESC LIMIT ?10";
 
 const SQL_SELECT_PRICING_BY_ROUTE: &str = "SELECT id, provider, model, currency, input_rate, cached_input_rate, output_rate, effective_at, source_revision FROM pricing_snapshot WHERE provider = ?1 AND model = ?2 AND source_revision = ?3";
@@ -112,9 +100,6 @@ impl InferenceAttemptRepository for Store {
             if !current_matches {
                 return Ok(AttemptBeginOutcome::Stale);
             }
-            // The credential-set premise rides the same claim transaction:
-            // a prompt scrubbed before a credential became registered must
-            // not reach the provider, even though the consent still holds.
             let current_set = current_set_revision(&tx)
                 .map_err(|error| inference_unavailable(error.to_string()))?;
             if current_set != attempt.expected_credential_set {
@@ -244,12 +229,6 @@ fn encode_data_use(data_use: &[RawId]) -> Vec<String> {
     data_use.iter().map(|source| encode_id(*source)).collect()
 }
 
-/// The consumer and its correlation are one premise: a Task Agent attempt
-/// without one would skip the delegation/revision compare, and a
-/// non-Task-Agent attempt with one would persist a correlation it has no
-/// right to. The public trait is callable directly, so the pairing is
-/// enforced here instead of trusting `AuthorizedInference`'s construction
-/// path.
 fn encode_correlation(
     attempt: &InferenceAttempt,
 ) -> Result<EncodedCorrelation, InferenceTechnicalError> {
@@ -451,12 +430,6 @@ fn decode_pricing(raw: RawPricing) -> Result<PricingSnapshot, InferenceTechnical
     })
 }
 
-/// Requires the stored row a usage fact's reference names to exist, decode,
-/// and derive exactly that reference.
-///
-/// A dangling reference or a row edited after publication is a technical
-/// error: the cost fact must never be projected from a rate that does not
-/// belong to the ticket.
 fn decode_referenced_pricing(
     reference: PricingSnapshotRef,
     stored: Option<RawPricing>,
@@ -475,13 +448,6 @@ fn decode_referenced_pricing(
     Ok(snapshot)
 }
 
-/// Publishes the resolved snapshot under its content-derived reference and
-/// returns the reference text the attempt binds.
-///
-/// Publication is idempotent for one `(provider, model, revision)`: an
-/// existing row must have exactly the resolved content and reference.
-/// Anything else means the stored revision is not the reviewed one, so the
-/// claim fails closed instead of binding a rate the catalog never published.
 fn publish_pricing_snapshot(
     tx: &rusqlite::Transaction<'_>,
     snapshot: &PricingSnapshot,
@@ -527,12 +493,6 @@ fn publish_pricing_snapshot(
     Ok(reference)
 }
 
-/// Reads the pricing snapshot a usage fact is bound to.
-///
-/// A dangling reference, a row whose content no longer derives its own
-/// reference, or a route that disagrees with the usage attribution is a
-/// technical error: the cost fact must never be projected from a rate that
-/// does not belong to the ticket.
 fn load_pricing_snapshot(
     conn: &Connection,
     reference_text: &str,
@@ -751,9 +711,6 @@ fn settle_reservation(
     Ok(())
 }
 
-/// The one usage-shape predicate the writer and the summary reader share:
-/// Reported carries all three counts with cached input a subset of input;
-/// Unknown carries none. Anything else is unreadable, never zero-filled.
 fn usage_counts_agree(
     source: UsageSource,
     input: Option<u64>,
@@ -774,10 +731,6 @@ impl UsageRepository for Store {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let ticket_text = encode_id(fact.ticket.0);
-            // The fact must be internally consistent before it touches the
-            // database: Reported carries all three counts with cached input a
-            // subset of input, Unknown carries none. Zero-as-unknown cannot
-            // survive this boundary.
             if !usage_counts_agree(
                 fact.source,
                 fact.input_tokens,
@@ -798,10 +751,6 @@ impl UsageRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| inference_unavailable(error.to_string()))?;
-            // Attribution belongs to the claimed attempt, and the rate the
-            // attempt was admitted under is the only one this fact may bind.
-            // Refuse orphan facts and route substitutions rather than
-            // manufacturing correspondence.
             let route = select_attempt_route(&tx, &ticket_text)?;
             let Some((attempt_provider, attempt_model, pricing_reference)) = route else {
                 return Err(inference_unavailable(String::from(
@@ -842,12 +791,6 @@ impl UsageRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| inference_unavailable(error.to_string()))?;
-            // One bounded read of every reservation still `reserved` (the
-            // only stored non-terminal state); each one settles as
-            // CommittedUnknown in this transaction. The external consumption
-            // cannot be denied after a crash, so the reserved upper bound stays
-            // counted and the ticket records an unknown token usage fact:
-            // recovery never releases a slot and never estimates zero.
             let orphans: Vec<crate::usage_cap::ReservationRow> = {
                 let mut statement = tx
                     .prepare(crate::usage_cap::SQL_SELECT_ORPHANED_RESERVATIONS)
@@ -859,13 +802,6 @@ impl UsageRepository for Store {
                     .map_err(|error| inference_unavailable(error.to_string()))?
             };
             for raw in orphans {
-                // `SQL_SELECT_ORPHANED_RESERVATIONS` pins `state = 'reserved'`,
-                // the only stored non-terminal value, so every returned row is
-                // settled here; no second filter can diverge from the query.
-                // The attempt row and the reservation were written in one
-                // transaction, so a missing or disagreeing route correlation
-                // is corruption: fail closed instead of recording an
-                // unattributable usage fact.
                 let route = select_attempt_route(&tx, &raw.ticket)?;
                 let Some((provider, model, pricing)) = route else {
                     return Err(inference_unavailable(String::from(
@@ -963,16 +899,6 @@ fn raw_usage_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawUsageSu
     })
 }
 
-/// Decodes one joined row into the owner-level usage summary.
-///
-/// The shapes that agree are the three legal combinations of fact and
-/// reservation state; anything else (a reported fact beside a
-/// non-reported reservation, a dangling pricing reference, or a committed
-/// amount that disagrees with the projected cost) is unreadable and fails
-/// closed, never a guessed status or amount. A `reported` fact beside a
-/// `CommittedUnknown` reservation is legal: the reservation settled with an
-/// unknown amount, as happens when a reported usage's cost cannot be
-/// represented, and the row stays viewable as an unknown cost.
 fn decode_usage_summary(
     raw: &RawUsageSummaryRow,
 ) -> Result<UsageSummaryRow, InferenceTechnicalError> {
@@ -1073,8 +999,6 @@ fn decode_usage_summary(
             };
             let cost = match project_cost(&fact, snapshot.as_ref()) {
                 Ok(cost) => cost,
-                // The provider call already ran; an unrepresentable amount is
-                // an unknown cost, never a reason to hide the usage row.
                 Err(CostProjectionError::AmountOverflow) => UsageCostFact::Unknown {
                     pricing: snapshot.as_ref().map(PricingSnapshot::reference),
                 },
@@ -1084,9 +1008,6 @@ fn decode_usage_summary(
                     });
                 }
             };
-            // The cap accounting of a reported settlement is the committed
-            // total; a row whose committed amount disagrees with the
-            // projected cost cannot be displayed as both.
             if let (UsageCostFact::Reported(projected), Some(currency), Some(micros)) = (
                 &cost,
                 raw.committed_currency.as_deref(),

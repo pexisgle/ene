@@ -1,85 +1,3 @@
-//! Unix socket listener: accept, same-user check, frame loop, close.
-//!
-//! The listener binds `ene.sock` inside the data directory and serves one
-//! task per connection. Each task reads length-prefixed
-//! [`ene_plugin_ipc::WireFrame`] values, runs them through
-//! [`HostHandle::handle_frame_to`], and writes the responses back. A terminal
-//! refusal — a
-//! [`DisconnectNotice`](ene_api::v1::handshake::DisconnectNotice) or the
-//! negotiation-level
-//! [`IncompatibleProtocol`](ene_api::v1::reject::IncompatibleProtocol) — is
-//! written, then the connection closes.
-//!
-//! Single instance: [`run`] binds through `bind_singleton`, which treats
-//! `AddrInUse` as a possible live peer and probes before deciding to unlink a
-//! stale path; a probe timeout fails safe toward live. The same process also
-//! binds the Host-local first-party control endpoint
-//! ([`crate::host_control`]) in its accept loop: the Owner's Targeted
-//! Deletion confirmation must execute against the live connection table and
-//! Client delivery tracking, so it is served from this process and never
-//! from an offline state open (lifecycle §8.1, PR §6.4).
-//!
-//! Per-connection state lives in `ConnectionTable`, owned by this module:
-//! [`run`] mints one [`ConnectionWireId`] per accepted connection, and every
-//! connection advances through the one-way [`ConnectionPhase`] machine
-//! (IPC §9.3): `Accepted → Paired → Challenged → Authenticated → Superseded |
-//! Closed`. `authenticated` means the ownership proof succeeded on this
-//! connection; `current` means the Host's per-device current slot still points
-//! at it. Domain ingress and presence reachability use only a connection that
-//! is authenticated, current, open, and bound to a valid device — never
-//! paired-socket counts or past authentication successes (#1384). A newer
-//! authentication for the same device supersedes the previous connection
-//! irreversibly; superseded sockets answer typed `StaleConnection` rejections
-//! while staying open (IPC §11.3) and can never become current again. Close
-//! admission compares connection identity before clearing the current slot:
-//! closing a superseded or unauthenticated connection never clears the newer
-//! current, and the presence fallback condition is the absence of a current
-//! authenticated connection, not a zero live-socket count.
-//!
-//! Each frame's [`LiveInput`] premises come from this table, never from Client
-//! self-reports; the ingress gate in [`HostHandle::handle_frame_to`] trusts
-//! exactly these conn-filled premises. [`LiveInput`] also carries the table
-//! handle, so the handshake phase operations (device bind, nonce consumption,
-//! auth install) and the close admission that runs the presence
-//! compare/commit (CCT §10.4) are short connection-ownership sections: the
-//! table section is never held across an `.await`, and the SQLite work runs
-//! synchronously inside `spawn_blocking`. `ConnectionTable::is_current_authenticated`
-//! is the synchronous currentness predicate for observation-only callers
-//! (notably the stream gate's final pre-publication check), while
-//! `ConnectionTable::with_current_connection` is the commit primitive every
-//! Client-dependent mutation uses. Lock order: connection table →
-//! presentation memory → Task execution registry → SQLite.
-//!
-//! Same-user proof without new dependencies: after binding, the listener reads
-//! the socket file owner through [`MetadataExt::uid`]
-//! (created by this process inside the `0700` data directory, so its owner is
-//! the Host user) and compares it against each peer credential uid from
-//! [`tokio::net::UnixStream::peer_cred`]. A mismatch, or an unreadable peer
-//! credential, closes the connection before any frame is read: an unprovable
-//! peer is a trust violation, not a protocol peer, so it receives no bytes
-//! (not even a denial, which would be an oracle). [`LiveInput::peer_uid_ok`]
-//! still travels into [`HostHandle::handle_frame_to`] for the pairing decision,
-//! as defense in depth for direct handle callers.
-//!
-//! Corrupt or oversize frames close the connection without a reply: the frame
-//! cannot be attributed to a request, so there is nothing honest to answer.
-//! An oversize response (only reachable through an unbounded timeline today)
-//! likewise ends the connection; paging that path is deferred work.
-//!
-//! Windows serves the same loop over a named pipe: [`run`] creates the
-//! exclusive first server instance for the data directory's pipe name (a
-//! second Host fails to create, like the Unix singleton probe), checks the OS
-//! peer token before any frame is read, and drives the same
-//! [`HostHandle::handle_frame_to`] seam, so authentication, currentness, and the
-//! connection phase machine are identical on both transports. Other platforms
-//! have no listener and [`run`] returns
-//! [`CoreError::UnsupportedPlatform`] there.
-//!
-//! [`LiveInput::peer_uid_ok`]: crate::serve::LiveInput::peer_uid_ok
-//! [`LiveInput`]: crate::serve::LiveInput
-//! [`MetadataExt::uid`]: https://doc.rust-lang.org/std/os/unix/fs/trait.MetadataExt.html#tymethod.uid
-//! [`tokio::net::UnixStream::peer_cred`]: https://docs.rs/tokio/latest/tokio/net/struct.UnixStream.html#method.peer_cred
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -96,12 +14,6 @@ const SINGLETON_PROBE_MILLIS: u64 = 200;
 #[cfg(any(unix, windows))]
 const DELETION_DRIVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Resolves the listener socket path for a data directory.
-///
-/// Public so integration tests derive the same path the Host binds. The
-/// sibling Client dialer keeps its own copy (`ene_client::socket_path`)
-/// because `ene-client` cannot depend on this crate, so a change to
-/// `SOCKET_NAME` must be mirrored there.
 #[must_use]
 pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join(SOCKET_NAME)
@@ -135,9 +47,6 @@ pub(crate) enum LiveDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionPhase {
     Accepted,
-    /// A `PairingProvision` issued a device key on this connection. A
-    /// reconnect capability frame binds an existing device and moves straight
-    /// to `Challenged`, never through this phase.
     Paired,
     Challenged,
     Authenticated,
@@ -146,7 +55,6 @@ pub enum ConnectionPhase {
 }
 
 impl ConnectionPhase {
-    /// Whether this connection was replaced by a newer authentication.
     #[must_use]
     pub fn is_superseded(self) -> bool {
         self == Self::Superseded
@@ -190,12 +98,6 @@ struct ConnectionRecord {
     seen_messages: std::collections::VecDeque<WireMessageId>,
 }
 
-/// Every method takes a short section over the inner maps and never awaits
-/// while holding it. Poisoning recovers the committed table: the table's own
-/// map mutations cannot panic, but `note_closed`'s `on_fallback` and
-/// `with_current_connection`'s `commit` run caller code under the guard, so a
-/// panic there poisons the mutex and `lock_unpoison` recovers the maps as
-/// committed before the callback ran.
 #[derive(Debug, Default)]
 pub(crate) struct ConnectionTable {
     inner: StdMutex<ConnectionTableInner>,
@@ -208,8 +110,6 @@ struct ConnectionTableInner {
 }
 
 impl ConnectionTableInner {
-    /// The one currentness predicate: `(phase, device)` names this connection
-    /// as authenticated and still its device's current one.
     fn current_authenticated(
         &self,
         id: &ConnectionWireId,
@@ -405,14 +305,6 @@ impl ConnectionTable {
         })
     }
 
-    /// Whether `id` is still its device's current authenticated connection.
-    ///
-    /// The synchronous currentness predicate for operations that only need
-    /// to observe the connection lifecycle at the point of a publication or
-    /// a guarded install: a superseded, closed, unauthenticated, unknown, or
-    /// replaced connection is `false`. Also a stream gate's final
-    /// pre-publication check (the caller pairs it with the ownership section
-    /// for actual mutations; this predicate is observation only).
     pub(crate) fn is_current_authenticated(&self, id: &ConnectionWireId) -> bool {
         let table = crate::lock_unpoison(&self.inner);
         let Some(record) = table.records.get(id) else {
@@ -482,11 +374,6 @@ impl ConnectionTable {
         Some(commit())
     }
 
-    /// [`LiveInput`] snapshot for a connection, without an envelope.
-    ///
-    /// Mirrors [`ConnectionTable::live_for`]'s premise derivation so the
-    /// connection-owned subscription loop and direct handle tests can read
-    /// the current premises without fabricating an inbound frame.
     #[cfg(any(unix, windows))]
     pub(crate) fn snapshot(self: &Arc<Self>, id: &ConnectionWireId) -> Option<LiveInput> {
         let table = crate::lock_unpoison(&self.inner);
@@ -566,9 +453,6 @@ impl Drop for AbortOnDrop {
 
 #[cfg(any(unix, windows))]
 impl AbortOnDrop {
-    /// Awaits the task without aborting it. Used after a shutdown signal so
-    /// an already-started bounded tick (and its `spawn_blocking` Store work)
-    /// can finish.
     async fn join(mut self) -> Result<(), tokio::task::JoinError> {
         let Some(task) = self.task.as_mut() else {
             return Ok(());
@@ -579,7 +463,6 @@ impl AbortOnDrop {
     }
 }
 
-/// Awaits an inner future, turning a panic in it into `Err(payload)`.
 #[cfg(any(unix, windows))]
 struct CatchUnwind<F>(F);
 
@@ -602,7 +485,6 @@ impl<F: std::future::Future> std::future::Future for CatchUnwind<F> {
     }
 }
 
-/// A serving-owned stop signal, independent of how the accept loop ends.
 #[cfg(any(unix, windows))]
 struct DeletionDriver {
     stop: tokio::sync::watch::Sender<bool>,
@@ -729,12 +611,6 @@ fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) -> DeletionDriver {
     }
 }
 
-/// The transport-generic serving composition both listeners own.
-///
-/// The launcher, the connection table, the Targeted Deletion driver, and the
-/// handler set are transport-independent; only the bind and the accept loop
-/// differ between the Unix socket and the Windows named pipe. The Task Agent
-/// owner releases the launcher's runners on drop, including emergency abort.
 #[cfg(any(unix, windows))]
 struct ServingComposition<T> {
     launcher: Arc<crate::task_run::BackgroundTaskAgent<T>>,
@@ -749,9 +625,6 @@ impl<T> ServingComposition<T>
 where
     T: ProviderTransport + Send + Sync + 'static,
 {
-    /// Starts the composition in the order the accept loop depends on it:
-    /// the production Task Agent launcher, the Client-incarnation
-    /// reachability table, then the Targeted Deletion driver.
     fn start(handle: &Arc<HostHandle>, transport: &Arc<T>) -> Self {
         let launcher = Arc::new(crate::task_run::BackgroundTaskAgent::new(
             Arc::clone(handle),
@@ -772,19 +645,12 @@ where
         }
     }
 
-    /// Quiesces the composition: handlers (including admitted requests, close
-    /// cleanup, and post-response Learning), then the Owner's confirmation
-    /// surface, then the Task Agent executions, then the deletion driver's
-    /// bounded tick and started Store work. An earlier failure wins the
-    /// `.and` fold. Forced drop remains an emergency abort.
     async fn quiesce(
         mut self,
         handle: &HostHandle,
         result: Result<(), CoreError>,
     ) -> Result<(), CoreError> {
         let handler_result = self.handlers.stop_and_join().await;
-        // The Owner's confirmation surface may have an admitted operation still
-        // running; it finishes before this process stops owning the authority.
         handle.join_confirmation_tasks().await;
         let task_result = self.launcher.shutdown_and_join().await;
         let driver_result = self.driver.stop_and_join().await;
@@ -795,25 +661,6 @@ where
     }
 }
 
-/// Serves the Unix socket listener until the process ends.
-///
-/// Binds [`socket_path`] through the singleton check, proves each peer
-/// against the socket owner, and spawns one frame-loop task per authorized
-/// connection, driving the fake-friendly [`HostHandle::handle_frame_to`] seam.
-/// The Host-local first-party control endpoint is bound in the same task and
-/// served by the same accept loop, so it lives and dies with this listener
-/// (one abort releases both). Production keeps an unsignalled shutdown
-/// sender, so the 15s Targeted Deletion driver keeps running until the
-/// process is killed. Dropping or aborting this future still aborts that
-/// driver as an emergency stop; graceful restart uses
-/// [`run_until_shutdown`] so a running tick can finish its started Store
-/// work. The handle is shared by reference (`Arc` with `&self` methods), so
-/// no handle-wide lock spans provider I/O.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Bind`] when the socket cannot be bound (including a
-/// live peer) or the socket metadata cannot be read.
 #[cfg(unix)]
 pub async fn run<T>(
     data_dir: PathBuf,
@@ -844,10 +691,6 @@ where
     let owner = std::fs::metadata(&socket)
         .map_err(|error| CoreError::Bind(format!("read socket metadata: {error}")))?
         .uid();
-    // The Host-local first-party control inlet is bound before the device
-    // listener accepts: the Owner's Targeted Deletion confirmation must run
-    // in this serving process, where the Client delivery tracking and the
-    // connection table are alive (lifecycle §8.1, PR §6.4).
     let control = crate::host_control::ControlListener::bind(&data_dir).await?;
     let mut composition = ServingComposition::start(&handle, &transport);
     let table = Arc::clone(&composition.table);
@@ -962,26 +805,13 @@ where
     }
 }
 
-/// The unsolicited frame kinds one connection may emit outside a request.
 #[cfg(any(unix, windows))]
 #[derive(Clone, Copy)]
 enum PendingEmission {
-    /// One subscription push from the presentation continuation.
     Subscription,
-    /// One pending Client local-erasure demand for the pinned incarnation.
     ClientDemand,
 }
 
-/// Emits one unsolicited frame of `kind` for a connection with a captured
-/// template.
-///
-/// Returns `false` when the write failed: further pushes stop, but the
-/// connection loop keeps draining inbound frames, because a frame the peer
-/// sent before closing (for example a stream's `ConfirmPresentation`) still
-/// carries a durable observation that must be applied. The reader's EOF ends
-/// the connection. A Client demand is marked delivered before the write, so a
-/// lost demand is re-driven idempotently (as an explicit hold, never a
-/// completion) by a later pass.
 #[cfg(any(unix, windows))]
 #[expect(
     clippy::too_many_arguments,
@@ -1026,8 +856,6 @@ where
     write_response(write_half, frame, terminal, shutdown).await
 }
 
-/// Advances this connection's unsolicited output: one subscription push and
-/// one Client demand, suppressed once a write failure latched `push_blocked`.
 #[cfg(any(unix, windows))]
 #[expect(
     clippy::too_many_arguments,
@@ -1079,23 +907,6 @@ async fn advance_output<W>(
     }
 }
 
-/// An incarnation mismatch, a corrupt or oversize frame, or a terminal
-/// refusal — [`DisconnectNotice`](ene_api::v1::handshake::DisconnectNotice) or
-/// [`IncompatibleProtocol`](ene_api::v1::reject::IncompatibleProtocol) — in
-/// the responses ends the connection; close always forgets the table entry and
-/// runs the presence fallback through
-/// [`HostHandle::close_connection`](crate::serve::HostHandle::close_connection)
-/// when this was the device's current authenticated connection.
-///
-/// Transport-generic over the byte stream so the Unix socket and the Windows
-/// named pipe share this loop, the duplicate suppression, and the phase gate.
-///
-/// The loop owns the connection lifetime: it processes inbound requests and,
-/// on the same lifetime, advances the undelivered subscription on a coalesced
-/// registration hint or on the nearest receipt deadline (CCT §10.5). Pushes
-/// run the same durable pass machinery as explicit requests, are bounded to
-/// one frame each, and cannot park the Task runner; a disconnect or
-/// supersession ends the loop and drops the connection-owned state.
 async fn serve_connection<S, T>(
     stream: S,
     connection: ConnectionWireId,
@@ -1144,8 +955,6 @@ async fn serve_connection<S, T>(
                 }
                 maybe = frames_rx.recv() => {
                     let Some(frame) = maybe else {
-                        // Reader ended (EOF, invalid frame, or oversize): the
-                        // connection is over.
                         break 'connection;
                     };
                     let live = match table.live_for(&connection, &frame.envelope) {
@@ -1155,12 +964,6 @@ async fn serve_connection<S, T>(
                     };
                     let frame_template = frame.clone();
                     let live_template = live.clone();
-                    // The handle emits each response as it is decided; this loop
-                    // writes them while the host future is still running, so an
-                    // early accept and provider deltas reach the socket before
-                    // provider completion. The channel is bounded: stream deltas
-                    // backpressure the provider when the client falls behind
-                    // instead of queueing without limit.
                     let (frame_tx, mut frame_rx) =
                         tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
                     let mut host = std::pin::pin!(handle.handle_frame_to(
@@ -1198,17 +1001,10 @@ async fn serve_connection<S, T>(
                             }
                         }
                     }
-                    // Stop output backpressure, but never drop an admitted request
-                    // while its Store work or Learning handoff can still mutate.
                     if !host_done {
                         drop(frame_rx);
                         host.await;
                     }
-                    // After request completion, Learning formation runs in its
-                    // own owned task even if transport output was interrupted.
-                    // The handler joins it before exiting. `run_pending_learning`
-                    // serializes and drains, so a second spawn that finds an
-                    // emptied queue is a cheap no-op.
                     if handle.has_pending_learning() {
                         let worker_handle = Arc::clone(&handle);
                         let worker_transport = Arc::clone(&transport);
@@ -1222,10 +1018,6 @@ async fn serve_connection<S, T>(
                         break 'connection;
                     }
                     template = Some((frame_template, live_template));
-                    // A registration hint that fired before this first admitted
-                    // frame was not lost: advance the subscription now that the
-                    // connection has an envelope to push under. A push write
-                    // failure disables pushes but does not end the connection.
                     advance_output(
                         &mut write_half,
                         &handle,
@@ -1264,7 +1056,6 @@ async fn serve_connection<S, T>(
                 }
                 changed = wake.changed() => {
                     if changed.is_err() {
-                        // The store is gone with the handle; the connection ends.
                         break 'connection;
                     }
                     advance_output(
@@ -1297,11 +1088,6 @@ async fn serve_connection<S, T>(
                     }
                 }
                 () = timer => {
-                    // Expiry is durable-state progression, not a socket write:
-                    // release due receipts even after a push write failure, or
-                    // the same elapsed deadline would stay readable and the loop
-                    // would spin. A blocked push only skips the unsolicited
-                    // write; inbound frames keep their own path below.
                     handle.expire_due_receipts(&connection);
                     advance_output(
                         &mut write_half,
@@ -1330,8 +1116,6 @@ async fn serve_connection<S, T>(
     handle.close_connection(&table, connection).await;
     let learning_failure = drain_learning(&mut learning, learning_failure).await;
     if let Some(payload) = panicked {
-        // The teardown above always ran; surface the handler panic through
-        // the task `JoinError` exactly as before.
         std::panic::resume_unwind(payload);
     }
     if let Some(error) = learning_failure.or(reader_failure) {
@@ -1355,24 +1139,6 @@ async fn drain_learning(
     failure
 }
 
-/// Serves the Windows named-pipe listener until the process ends.
-///
-/// Creates the exclusive first server instance for the data directory's pipe
-/// name (a live peer fails creation, like the Unix singleton probe — pipe
-/// instances vanish with their process, so there is no stale path to unlink),
-/// proves each peer with the OS token check, and spawns one frame-loop task
-/// per authorized connection over the shared [`HostHandle::handle_frame_to`]
-/// seam. Production keeps an unsignalled shutdown sender, matching Unix:
-/// the 15s Targeted Deletion driver keeps running until the process is
-/// killed. Dropping or aborting this future still aborts that driver as an
-/// emergency stop; graceful restart uses [`run_until_shutdown`] so a running
-/// tick can finish its started Store work. The same shutdown regressions
-/// exercise the Unix socket and Windows named-pipe transports.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Bind`] when the first pipe instance cannot be created
-/// (including a live peer) or a follow-up instance cannot be created.
 #[cfg(windows)]
 pub async fn run<T>(
     data_dir: PathBuf,
@@ -1400,9 +1166,6 @@ where
 
     let pipe = ene_plugin_ipc::pipe_name(&data_dir);
     let mut server = crate::conn_pipe::create_first_server(&pipe)?;
-    // The Host-local first-party control inlet: same ownership and peer
-    // check as the Unix path; the Owner's Targeted Deletion confirmation
-    // must run in this serving process (lifecycle §8.1, PR §6.4).
     let mut control = crate::host_control::ControlListener::bind(&data_dir)?;
     let mut composition = ServingComposition::start(&handle, &transport);
     let table = Arc::clone(&composition.table);

@@ -1,23 +1,3 @@
-//! Windows named-pipe transport (IPC §10.1).
-//!
-//! Same-machine Clients dial [`ene_plugin_ipc::pipe_name`] (one pipe per Host data
-//! directory). The listener in [`crate::conn`] creates the exclusive first
-//! server instance with `FILE_FLAG_FIRST_PIPE_INSTANCE` (a second Host for
-//! the same directory fails to create, like the Unix singleton probe),
-//! `PIPE_REJECT_REMOTE_CLIENTS` (remote machines cannot connect at the OS
-//! layer), and an explicit DACL limited to this process's logon SID (see
-//! `LogonSidAttrs`). Every accepted connection additionally passes
-//! [`peer_same_user`] — the OS peer token check — before a single frame is
-//! read: an unprovable peer is dropped without a byte, exactly like the Unix
-//! uid-mismatch path. Frames, the `ConnectionTable`,
-//! and [`HostHandle::handle_frame_to`](crate::serve::HostHandle::handle_frame_to)
-//! are shared with the Unix socket path, so authentication, currentness, and
-//! the connection phase machine are identical on both transports.
-//!
-//! Shared listener regressions exercise this transport on Windows and Unix
-//! sockets on Unix. [`CoreError::Bind`]
-//! reports every creation failure; nothing silently falls back.
-
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::RawHandle;
@@ -39,10 +19,6 @@ use windows_sys::core::{PCWSTR, PWSTR};
 
 use crate::serve::CoreError;
 
-/// `SE_GROUP_LOGON_ID` (`WinNT.h`): marks the logon SID inside a token's
-/// group list. windows-sys exposes this only under the
-/// `Win32_System_SystemServices` feature, which this crate does not enable,
-/// so it is redeclared here and kept equal to the SDK value.
 const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
 
 fn wide_null(text: &str) -> Vec<u16> {

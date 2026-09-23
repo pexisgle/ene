@@ -20,10 +20,6 @@ use crate::run_blocking;
 
 const SQL_UPSERT_CONSENT: &str = "INSERT INTO consent_record (capability, id, rev, provider, model, credential_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (capability) DO UPDATE SET id = excluded.id, rev = excluded.rev, provider = excluded.provider, model = excluded.model, credential_id = excluded.credential_id";
 
-/// Used by the intent-atomic assign so the premise check and the write
-/// cannot drift apart. The row is selected and written under the record's
-/// own capability, so a dialogue assignment can never overwrite or borrow
-/// the learning assignment.
 fn compare_and_save_row(
     tx: &Transaction<'_>,
     expected: Option<(&str, &ConsentRevision)>,
@@ -81,7 +77,6 @@ impl IntentOutcomeRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| permission_unavailable(error.to_string()))?;
-            // Write-once claim first: an existing row is never rewritten.
             if let Some(stored) = select_intent_row(&tx, &record.fingerprint.intent_id)
                 .map_err(permission_unavailable)?
             {
@@ -235,12 +230,6 @@ impl IntentOutcomeRepository for Store {
     }
 }
 
-/// Redacts the caller-supplied text columns of the decision journal.
-///
-/// The journal row itself is never deleted: deleting a decided intent would
-/// reopen its identity, so a retried id could re-execute a decision the Owner
-/// already received. The erased span is removed (`''`, never a marker), so no
-/// marker text can itself become a target match or a target-derived value.
 const SQL_REDACT_INTENT_JOURNAL: &str = "UPDATE management_intent
      SET target = replace(target, ?1, ''),
          rationale_quote = replace(rationale_quote, ?1, '')

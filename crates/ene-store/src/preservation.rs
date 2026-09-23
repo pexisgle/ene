@@ -1,11 +1,3 @@
-//! Canonical Group J admission and unfinished lifecycle. All mutations share
-//! SQLite's Immediate writer boundary with AU14 and Task resume; no I/O or
-//! participant erase runs under the transaction. The `PreservationRepository`
-//! read methods are SELECT-only and bound their validation to the rows they
-//! actually return; the Store coverage predicates fill the durable
-//! `erasure_use_hold` correspondence through `held_use` and are therefore not
-//! side-effect free.
-
 use std::sync::Arc;
 
 use ene_preservation::*;
@@ -28,17 +20,6 @@ pub(crate) fn check_page_limit(limit: u32) -> Result<(), PreservationTechnicalEr
     Ok(())
 }
 
-/// Whether `condition` is the operation's current, unfinished condition
-/// (lifecycle §6-§7).
-///
-/// A participant-local erasure pass must run this check inside the same
-/// transaction as its mutation: a sweep the operation has moved past or a
-/// completed operation must never erase local state. Completion ends the
-/// text's meaning as a deletion target (§7: a completed operation is not a
-/// permanent keyword ban), so a late duplicate from a superseded run must be
-/// refused instead of erasing text the Owner provided afterwards. A condition
-/// that cannot be encoded, or that has no matching operation row, is not
-/// current.
 pub(crate) fn condition_is_current(
     conn: &Connection,
     condition: ErasureConditionRef,
@@ -102,8 +83,6 @@ fn candidate_page(
         .map_err(storage)
 }
 
-/// The durable reconciliation cursor rows for one operation, as
-/// `(identity_table, sweep, complete)`.
 fn reconciliation_rows(
     conn: &Connection,
     operation: &str,
@@ -123,17 +102,6 @@ fn reconciliation_rows(
         .map_err(storage)
 }
 
-/// Structural integrity of one operation's reconciliation cursor rows,
-/// scoped to the operation a query actually touches.
-///
-/// Invariant: an unfinished operation carries exactly one row per known
-/// identity table for its current sweep; a `Finalizing` operation has every
-/// row complete (the completion premise was re-read before the marker was
-/// taken); a completed operation keeps zero rows. Any other shape — a missing
-/// table, a foreign sweep, an unknown table name, or leftover rows after
-/// completion — is torn canonical state that fails closed, never a silently
-/// incomplete walk. Rows for an operation that does not exist are torn state
-/// for the same reason a condition without its operation is.
 fn validate_reconciliation(
     conn: &Connection,
     operation: &str,
@@ -181,42 +149,6 @@ fn validate_reconciliation(
     Ok(())
 }
 
-/// Structural integrity of one operation's canonical rows, scoped to the
-/// operation a query actually touches: an inner join must never silently hide
-/// an orphan correlation, an unfinished operation whose condition was closed
-/// early, or a completed operation that still holds protected material.
-///
-/// Source-correlation invariant (current-sweep canonical): an unfinished
-/// operation keeps `erasure_condition_source` rows only in its current sweep
-/// (`NextSweep` copies forward then deletes the old sweep atomically);
-/// historical `erasure_condition` rows remain but carry no source rows; a
-/// completed operation keeps zero source rows (the A5 completion boundary
-/// must delete them — A1 exposes no completion authority — and any remaining
-/// row fails closed). No second copy exists for audit/history.
-///
-/// Participant invariant: every operation carries a non-empty required
-/// participant snapshot from admission; every row tracks the operation's
-/// current sweep (`NextSweep` resets all progress to pending atomically); a
-/// `Finalizing` operation has every row `verified` (verification is terminal
-/// for its sweep) and a completed operation has every row `verified` for that
-/// sweep. A participant row for an unknown owner, a foreign sweep, or a
-/// missing snapshot is torn canonical state and fails closed, never a silently
-/// incomplete set.
-///
-/// Completion invariant: the audit row exists exactly when the operation is
-/// `completed`, matches the operation's purpose, start time, and final sweep,
-/// names every required participant exactly once with `verified` as its final
-/// status and the participant row's erased count, and a completed request's
-/// staged `exact_text` is wiped. Because the wipe, the audit, the condition
-/// closure, and the phase change share one commit, no partial shape (closed
-/// condition without completion, audit without closure, wiped material without
-/// audit) is ever readable.
-///
-/// Request provenance (A1b): an operation admitted from a staged request keeps
-/// that request's purpose for its whole life, and — while its protected
-/// material exists — the same exact mechanical text. A completed operation's
-/// material is gone by design, so only the purpose link is checked there.
-/// Bounded by the touching query's page, never a whole-store scan.
 fn validate(conn: &Connection, operation: &str) -> Result<(), PreservationTechnicalError> {
     let broken: bool = conn
         .query_row(
@@ -320,15 +252,6 @@ pub(crate) const COVERING_TORN_PROBE_SQL: &str = "SELECT
          AND NOT EXISTS(SELECT 1 FROM erasure_condition c
              WHERE c.operation_id=o.operation_id AND c.sweep=o.sweep))";
 
-/// The unfinished operations whose current-sweep reconciliation is still
-/// walking, as `(operation_id, sweep)` in `operation_id` order.
-///
-/// The published current-sweep correlation is the fast path; while a sweep is
-/// incomplete, a covered identity may legitimately not be published yet. The
-/// direct-fallback probes share this candidate set so the fast-skip probe and
-/// the enumeration cannot drift. An empty result means no active/held
-/// operation is mid-reconciliation, so the published correlation set is
-/// already exhaustive.
 fn unreconciled_operations(
     conn: &Connection,
 ) -> Result<Vec<(String, i64)>, PreservationTechnicalError> {
@@ -350,8 +273,6 @@ fn unreconciled_operations(
     Ok(candidates)
 }
 
-/// The protected exact target of one operation, `None` when the material row
-/// is absent (completion wipe or missing row).
 fn load_exact_target(
     conn: &Connection,
     operation: &str,
@@ -365,11 +286,6 @@ fn load_exact_target(
     .map_err(storage)
 }
 
-/// The unreconciled operations' protected targets, as
-/// `(operation_id, sweep, exact_text)` in `operation_id` order.
-///
-/// Active/held operations always keep protected material (`validate`); a
-/// missing row is torn state, never a "checked everything" default.
 fn unreconciled_targets(
     conn: &Connection,
 ) -> Result<Vec<(String, i64, String)>, PreservationTechnicalError> {
@@ -382,16 +298,6 @@ fn unreconciled_targets(
     Ok(targets)
 }
 
-/// Direct mechanical coverage of one source identity by an operation whose
-/// current-sweep reconciliation is still walking.
-///
-/// The published current-sweep correlation is the fast path; while a sweep is
-/// incomplete, a covered identity may legitimately not be published yet. The
-/// identity's own stored body is durable evidence independent of any page
-/// bound, so it is compared directly against each unreconciled operation's
-/// protected target. This keeps a new send or adoption from starting on a
-/// covered source between the condition commit and the end of the walk; after
-/// the walk the published correlation answers the same way.
 fn directly_covered_source(
     conn: &Connection,
     source: &str,
@@ -428,14 +334,6 @@ pub(crate) fn covering_condition(
     directly_covered_source(conn, source)
 }
 
-/// One traversal of the canonical current conditions with their protected
-/// mechanical targets (lifecycle §7/§11).
-///
-/// Returns `(condition, target)` in `operation_id` order; `target` is `None`
-/// when the operation's protected material row is absent. Every unfinished
-/// operation is Owner-confirmed and validated here, so an operation whose
-/// structural rows are torn fails the read closed instead of being read as
-/// "not covering".
 fn current_operation_targets(
     conn: &Connection,
 ) -> Result<Vec<(ErasureConditionRef, Option<String>)>, PreservationTechnicalError> {
@@ -472,44 +370,11 @@ fn current_operation_targets(
     Ok(targets)
 }
 
-/// One mechanical text verdict against the canonical current conditions
-/// (lifecycle §7/§11).
-///
-/// [`Self::Target`] means a current condition's protected exact target occurs
-/// in the text; the target itself is never copied out of the store or rendered
-/// into a log, an outcome, a completion fact, or an audit row. [`Self::Unreadable`]
-/// is a current condition with no readable protected target: production never
-/// observes this shape (the completion wipe runs in the same transaction that
-/// commits `completed`), so it is a defensive branch for torn state. Should a
-/// wipe ever be observable before the completed commit, the condition still
-/// covers, but no target remains to redact mechanically, so callers fail
-/// closed (refuse; a collecting owner stores a body-free marker) rather than
-/// treating an unreadable target as "not covering".
 pub(crate) enum TextCoverage {
     Target,
     Unreadable,
 }
 
-/// The exact-target premise of one bounded read pass (lifecycle §7/§11).
-///
-/// This is the page-shaped companion of [`covering_text`]: one canonical read
-/// of the unfinished operations' protected mechanical targets, reused for
-/// every row of one read. The premise is read from the canonical store inside
-/// the caller's transaction, so an empty target set across every current
-/// condition is the authoritative "not covered" (no sentinel, no cached
-/// verdict). A completed operation is excluded by the canonical
-/// `phase`/`closed_at` invariant: its condition stopped covering text (§7:
-/// completion is not a permanent keyword ban). Unfinished operations are the
-/// bounded candidate set: they are Owner-confirmed and validated here, so an
-/// operation whose structural rows are torn fails the read closed instead of
-/// being read as "not covering".
-///
-/// [`Self::covers`] is the same mechanical predicate the A3 owner sweeps apply
-/// — an exact substring match of a protected target. A current condition with
-/// no readable target at all (defensive: should a wipe ever be observable
-/// before the completed commit) leaves nothing to compare, so the premise is
-/// unreadable and every body is covered (fail closed) rather than served as
-/// uncovered.
 pub(crate) struct TextCoveragePremise {
     targets: Option<Vec<String>>,
 }
@@ -558,10 +423,6 @@ pub(crate) fn covering_text_condition(
 ) -> Result<Option<(ErasureConditionRef, TextCoverage)>, PreservationTechnicalError> {
     for (condition, target) in current_operation_targets(conn)? {
         match target {
-            // Defensive: production commits the completed phase and the wipe
-            // in one transaction, so an unfinished condition keeps its
-            // material. Should a wipe ever be observable first, the body is
-            // covered with no readable target.
             None => return Ok(Some((condition, TextCoverage::Unreadable))),
             Some(target) if !target.is_empty() && text.contains(&target) => {
                 return Ok(Some((condition, TextCoverage::Target)));
@@ -584,21 +445,6 @@ pub(crate) fn covering_sources(
     Ok(None)
 }
 
-/// Collects one covered body instead of persisting it: redacts every current
-/// condition's mechanical target out of the text and returns the body-free
-/// result, or [`crate::erasure::ERASED_MARKER`] when a current condition's
-/// protected target is unreadable (defensive: see [`TextCoverage::Unreadable`])
-/// so no mechanical comparison is possible at all.
-///
-/// This is the "erase collection" side of the A4 boundary contract for bodies
-/// whose objective fact must survive (a Task result arrival seals its
-/// delegation): the fact is committed, the body is not. A marker inserted for
-/// one target can carry another (`"a"` and `"e"` both occur in the marker), so a
-/// later pass can re-create an earlier target and the marker phase has no
-/// fixpoint; it is therefore bounded at one pass per target. Residual coverage
-/// falls back to removal, which strictly shortens the value (a joined
-/// occurrence is removed on a later iteration) and so always reaches a
-/// body-free fixpoint instead of growing without limit.
 pub(crate) fn redact_covered_text(
     conn: &Connection,
     text: &str,
@@ -617,9 +463,6 @@ pub(crate) fn redact_covered_text(
         };
         match crate::erasure::redact_exact(&current, target) {
             Some((redacted, _)) => current = redacted,
-            // The premise matched the target, so a missing occurrence would be
-            // an inconsistent mechanical predicate; fail closed rather than
-            // storing a body that is still covered.
             None => return Err(corrupt()),
         }
     }
@@ -817,10 +660,6 @@ fn raw_participant(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawParticipant> 
     ))
 }
 
-/// One participant row is composed only when it is internally consistent: a
-/// known owner and state name, a positive sweep, a hold class exactly when
-/// held, and a parseable report time. Anything else is an unreadable row,
-/// never a guessed progress.
 fn decode_participant(
     operation: DeletionOperationId,
     raw: RawParticipant,
@@ -836,8 +675,6 @@ fn decode_participant(
     };
     let progress =
         ParticipantProgress::from_state_name(raw.1.as_str(), sweep, hold).ok_or_else(corrupt)?;
-    // The report time is not part of the record, but a stored value that does
-    // not parse is torn state and still fails the read closed.
     if let Some(text) = raw.4.as_deref() {
         parse_time(text)?;
     }
@@ -864,8 +701,6 @@ fn decode_request(raw: RawRequest) -> Result<TargetedDeletionRequest, Preservati
     if exact_text.is_empty() {
         return Err(corrupt());
     }
-    // The stored request time is journal metadata with no reader; parsing it
-    // still fails closed on an unreadable column.
     let _ = parse_time(&raw.3)?;
     Ok(TargetedDeletionRequest::from_durable(
         DeletionRequestId::from_raw(decode_id(&raw.0).map_err(|_| corrupt())?),
@@ -911,13 +746,6 @@ fn unfinished_by_exact_text(
     }
 }
 
-/// Whether one unfinished operation already covers the whole scope of a
-/// duplicate request: every semantic hint and every required participant owner
-/// must already belong to it. Same mechanical target is an idempotent request
-/// only if its scope is covered; a duplicate never silently widens a confirmed
-/// operation. The participant snapshot is part of the operation's scope, so a
-/// duplicate whose set needs an owner outside the snapshot is a
-/// live-operation conflict, not a silent widening.
 fn scope_covered(
     tx: &rusqlite::Transaction<'_>,
     current: DeletionOperationRef,
@@ -1001,13 +829,6 @@ pub(crate) const KNOWN_SOURCE_IDENTITIES: &[KnownSourceIdentity] = &[
     },
 ];
 
-/// Initializes the durable reconciliation cursors for one operation + sweep:
-/// exactly one row per known identity table, incomplete.
-///
-/// The confirmed admission path publishes its first bounded pages in the same
-/// transaction and the durable cursors carry the walk to its end; a row set
-/// that does not match the known table set is torn state and fails closed
-/// through [`validate`].
 fn insert_reconciliation_rows(
     tx: &rusqlite::Transaction<'_>,
     operation: &str,
@@ -2066,18 +1887,6 @@ fn durable_client_incarnations(
         .collect()
 }
 
-/// The canonical admission body for a durably confirmed staged request:
-/// duplicate detection plus the durable-before-enforce insert of operation,
-/// protected material, initial condition, and source correlations
-/// (lifecycle §4.1).
-///
-/// `request` is the Host-local request whose Owner confirmation is already
-/// durable; `deletion_operation.request_id` is `UNIQUE`, so one request can
-/// never start two operations. Admission enumerates the covered source
-/// correlations already durable in this store and publishes them with the
-/// operation (§4.1 point 4): the implementation walks the owner's durable
-/// identity rows whose stored text carries the confirmed exact target, in
-/// bounded pages. A Client, model output, or caller never names a source.
 fn admit_deletion(
     tx: &rusqlite::Transaction<'_>,
     command: &StartTargetedDeletionCommand,
@@ -2146,12 +1955,6 @@ fn admit_deletion(
         params![id, at],
     )
     .map_err(storage)?;
-    // §4.1 point 4: admission initializes the durable reconciliation cursors
-    // and publishes the first bounded page of every known identity table in
-    // this same transaction as the operation, the protected material, and the
-    // initial condition. The page is a work bound, not a correctness bound:
-    // the durable cursors carry the continuation, and completion refuses while
-    // any table is still incomplete.
     insert_reconciliation_rows(tx, &id, 1)?;
     reconcile_admission_pages(
         tx,
@@ -2160,9 +1963,6 @@ fn admit_deletion(
         material.expose_for_erasure(),
         DELETION_RECONCILIATION_PAGE_SIZE,
     )?;
-    // The surveyed covered occurrence identities are published in the same
-    // transaction: the occurrence identity is the durable name of the
-    // observed source, never its body.
     for observation in &covered_observations {
         tx.execute(
             "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
@@ -2464,8 +2264,6 @@ impl PreservationRepository for Store {
                 return Ok(StartTargetedDeletionOutcome::ConfirmationRequired);
             };
             let staged = decode_request(staged)?;
-            // The confirmation row's timestamp is validated even though the
-            // fact itself carries only the request identity.
             parse_time(&confirmed_at)?;
             let fact = OwnerConfirmationFact::from_durable(request);
             let Some(command) =
@@ -2629,17 +2427,6 @@ impl PreservationRepository for Store {
                     .map_err(storage)?;
                 }
                 DeletionLifecycleChange::NextSweep => {
-                    // A Held(Unavailable) operation keeps its current condition
-                    // active (§5.1) until an explicit Resume decides recovery:
-                    // advancing the generation underneath the hold would publish
-                    // a new current condition without a recovery decision and
-                    // silently flip the phase that A4/A5 participant sweep
-                    // tracking observes. Reject like the GenerationExhausted
-                    // hold below — no writes, no generation advance — so this
-                    // generic lifecycle call never moves a Held(Unavailable)
-                    // operation back to Active; only an explicit Resume, or the
-                    // §11 delayed-arrival sweep in
-                    // note_host_transient_learning_arrival_sync, may.
                     if record.phase == DeletionOperationPhase::Held
                         && record.hold == Some(DeletionHoldReason::Unavailable)
                     {
@@ -2690,8 +2477,6 @@ impl PreservationRepository for Store {
             ids.into_iter()
                 .map(|id| {
                     validate(&tx, &id)?;
-                    // An orphan condition candidate has no operation row:
-                    // that is exactly the torn state `validate` refuses.
                     decode_operation(load_operation(&tx, &id)?.ok_or_else(corrupt)?)
                 })
                 .collect()
@@ -2732,15 +2517,10 @@ impl PreservationRepository for Store {
         let conn = Arc::clone(&self.conn);
         run_deletion_blocking(self, move || {
             let mut guard = lock_shared(&conn);
-            // The cursor is not completion state: it shares the single-writer
-            // boundary so concurrent drivers cannot interleave a torn position,
-            // and it never joins the operation/participant rows in a check.
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage)?;
             match after {
-                // A wrapped walk keeps no row: absence means "start at the
-                // head", exactly like a fresh walk.
                 None => {
                     tx.execute(
                         "DELETE FROM deletion_walk_cursor WHERE walk=?1",
@@ -2852,9 +2632,6 @@ impl PreservationRepository for Store {
                 return Ok(DeletionMaterialOutcome::Destroyed);
             }
             let Some(exact) = load_exact_target(&tx, &id)? else {
-                // `validate` refuses an active or held operation without
-                // material, so only a finalizing operation that already ran its
-                // wipe reaches this branch (§12); a read must not resurrect it.
                 return Ok(DeletionMaterialOutcome::Destroyed);
             };
             let mut statement = tx
@@ -3073,9 +2850,6 @@ impl PreservationRepository for Store {
             if reconciliation_is_complete(&tx, &id, sweep)? {
                 return Ok(DeletionReconciliationOutcome::Complete);
             }
-            // `validate` refuses an active/held operation without protected
-            // material, so the exact target is readable while the walk runs:
-            // reconciliation happens before completion destroys it.
             let exact = load_exact_target(&tx, &id)?.ok_or_else(corrupt)?;
             let Some(identity) = next_incomplete_identity(&tx, &id, sweep)? else {
                 return Err(corrupt());
@@ -3136,14 +2910,7 @@ impl PreservationRepository for Store {
             if !reconciliation_is_complete(&tx, &id, sweep)? {
                 return Ok(DeletionFinalizationOutcome::ReconciliationIncomplete);
             }
-            // `validate` refuses an active operation without protected
-            // material, so the exact target is present while the sweep is
-            // being verified.
             let exact = load_exact_target(&tx, &id)?.ok_or_else(corrupt)?;
-            // §12 step 1 before entering Finalizing: a generation that still
-            // has collected target data never finalizes. Returning to Active
-            // happens before any material is destroyed, so the new sweep keeps
-            // the material its participants need (§12).
             if system_remainder(&tx, &exact)? > 0 {
                 let outcome = return_to_active_for_remainder(&tx, &id, sweep)?;
                 tx.commit().map_err(storage)?;
@@ -3207,16 +2974,8 @@ impl PreservationRepository for Store {
             let started_at = parse_time(&started_at)?;
             let erased_total = u64::try_from(erased_total).map_err(|_| corrupt())?;
             let Some(exact) = load_exact_target(&tx, &id)? else {
-                // No readable target: the system-wide mechanical probe cannot
-                // run, so completion fails closed instead of guessing the
-                // target away (§12).
                 return Ok(DeletionFinalizationOutcome::UnverifiableMaterial);
             };
-            // §12 step 1, inside the commit transaction: the current
-            // generation must not have grown a delayed arrival or remainder
-            // after verification. A remainder returns the operation to
-            // Active on a new sweep *without* destroying material, so a later
-            // verification can never lack what it needs.
             if system_remainder(&tx, &exact)? > 0 {
                 let outcome = return_to_active_for_remainder(&tx, &id, sweep)?;
                 tx.commit().map_err(storage)?;

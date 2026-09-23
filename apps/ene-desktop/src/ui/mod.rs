@@ -91,7 +91,6 @@ impl Composer {
         }
     }
 
-    /// Returns the committed draft when IME is not composing.
     pub fn take_sendable(&mut self) -> Option<String> {
         if self.composing {
             return None;
@@ -180,30 +179,18 @@ pub enum DesktopError {
     DeniedByBoundary,
     #[error("{0}")]
     Protocol(String),
-    /// The Host could not answer technically; the request changed nothing and
-    /// is retryable. Distinct from [`DesktopError::Protocol`], which reports a
-    /// peer that violated the shape of the exchange.
     #[error("unavailable: {0}")]
     Unavailable(String),
-    /// The Host answered a stale cursor / moved premise: a domain outcome, not
-    /// a protocol violation; restart from the head.
     #[error("stale: {0}")]
     Stale(String),
-    /// The Host refused admission because its requester queue is saturated
-    /// (`FromHost::BackpressureHold`). A hold, not a technical failure and not
-    /// a boundary refusal: nothing was accepted, the Owner's surface shows the
-    /// retry guidance, and no path resends the held request automatically.
     #[error("the Host requester queue is saturated; retry shortly")]
     BackpressureHold,
     #[error(transparent)]
     Client(#[from] ClientError),
 }
 
-/// Default budget for one bounded panel request.
 pub(crate) const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Sends one Client request under a caller-chosen budget. The only shared
-/// difference between panels is the timeout, so it stays a parameter.
 pub(crate) async fn request_with_timeout(
     client: &mut ene_client::Client,
     payload: ene_api::v1::payload::WirePayload,
@@ -212,8 +199,6 @@ pub(crate) async fn request_with_timeout(
     timed_request(client.request(payload), timeout).await
 }
 
-/// [`request_with_timeout`] on the observed request form, which also carries
-/// the presentation round and presence generation.
 pub(crate) async fn request_observed_with_timeout(
     client: &mut ene_client::Client,
     payload: ene_api::v1::payload::WirePayload,

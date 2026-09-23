@@ -40,8 +40,6 @@ pub async fn assign_consent(
         )
         .await;
     }
-    // The base premise is enforced before the shortcut: a stale base with a
-    // coincidentally equal route must answer stale, never silent success.
     let current_state = current.as_ref().map(|record| record.rev.as_u64());
     if parsed != current_state {
         return record_decided(

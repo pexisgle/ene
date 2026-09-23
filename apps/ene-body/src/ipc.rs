@@ -1,29 +1,9 @@
-//! Projection IPC owned by `ene-body`.
-//!
-//! This is **not** the Host↔Client protocol (`ene-api` / `ene-plugin-ipc`) and
-//! not plugin IPC. `ene-desktop` links this crate and uses these types and the
-//! codec directly; this module owns the byte layout. See
-//! `apps/ene-body/README.md` for the table of flags and the separation between
-//! automated checks and real probes.
-//!
-//! Frame:
-//!
-//! ```text
-//! u32 BE exclusive body length | MessagePack body (named structs, ≤ 64 KiB)
-//! ```
-//!
-//! Direction is implied by the writer: parent encodes [`ParentToBody`]; body
-//! encodes [`BodyToParent`]. Forbidden content (secrets, conversation text,
-//! pairing material, Task commands, Host PKs) has no variant and is rejected
-//! as an unknown payload, not interpreted.
-
 use serde::{Deserialize, Serialize};
 
 const LEN_PREFIX_LEN: usize = 4;
 
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
-/// Maximum accepted byte length of one clip path.
 pub const MAX_MOTION_PATH_BYTES: usize = 4096;
 
 pub const HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -134,13 +114,6 @@ pub struct MotionSetInfo {
 }
 
 impl MotionSetInfo {
-    /// Structural checks that run before any clip file is opened, so a
-    /// malformed set cannot partially replace playback state.
-    ///
-    /// # Errors
-    ///
-    /// [`MotionFailReason::EmptySet`], [`MotionFailReason::DuplicatePose`],
-    /// [`MotionFailReason::EmptyPath`], or [`MotionFailReason::PathTooLong`].
     pub fn validate(&self) -> Result<(), MotionFailInfo> {
         if self.clips.is_empty() {
             return Err(MotionFailInfo::new(
@@ -283,8 +256,6 @@ pub struct AssetReadyInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthTick {
-    /// Whether at least one validated clip is loaded. Layout capability and
-    /// per-pose coverage are not claimed here.
     pub motion: FeatureSupport,
 }
 
@@ -318,11 +289,6 @@ pub enum PresentationOutcome {
     },
 }
 
-/// Encode a parent→body command for projection IPC.
-///
-/// # Errors
-///
-/// Returns [`IpcError::EncodeFailed`] or [`IpcError::FrameTooLarge`].
 pub fn encode_parent(message: &ParentToBody) -> Result<Vec<u8>, IpcError> {
     encode_named(message)
 }
@@ -354,15 +320,6 @@ fn encode_named<T: Serialize>(message: &T) -> Result<Vec<u8>, IpcError> {
     Ok(out)
 }
 
-/// Total byte length of the frame at the front of `bytes` (prefix + body).
-/// Returns the boundary without decoding so a rejected frame can still be
-/// discarded whole. `Truncated` means more bytes are needed.
-///
-/// # Errors
-///
-/// Truncated input. An oversize claimed length yields no boundary and must be
-/// treated as unrecoverable: the stream cannot be resynchronized from a length
-/// the cap rejects.
 pub fn frame_len(bytes: &[u8]) -> Result<usize, IpcError> {
     if bytes.len() < LEN_PREFIX_LEN {
         return Err(IpcError::Truncated {
@@ -394,9 +351,6 @@ fn decode_named<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<(T, usize)
     Ok((message, need))
 }
 
-/// Structural decode text without any frame-derived value. `Syntax` embeds the
-/// unexpected value (serde's `invalid_type`/`unknown variant` text), which a
-/// confused parent could have stuffed with conversation content.
 fn decode_reason(error: &rmp_serde::decode::Error) -> String {
     match error {
         rmp_serde::decode::Error::Syntax(_) => {

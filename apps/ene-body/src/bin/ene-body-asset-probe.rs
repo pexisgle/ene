@@ -1,10 +1,3 @@
-//! Machine-readable VRM runtime probe.
-//!
-//! Usage: `ene-body-asset-probe PATH.vrm [MOTION_DIR]`
-//!
-//! This validates runtime capability only. It does not claim that the avatar
-//! was displayed by a real compositor or accepted as the official `ene`.
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 

@@ -1,35 +1,3 @@
-//! Host-composition Targeted Deletion participant registry and fan-out.
-//!
-//! `ene-preservation` owns the participant vocabulary; each semantic owner
-//! implements [`ErasureParticipant`] in its own crate, and the Host
-//! composition (`serve.rs`) constructs each concrete implementation and
-//! registers it here (lifecycle §9); this module holds only
-//! `Arc<dyn ErasureParticipant>`. The
-//! fan-out reads the durable operation and participant snapshot, issues one
-//! bounded demand at a time, and records each returned fact through the
-//! canonical store — it never invents a second participant registry and never
-//! treats a missing implementation, an unreachable holder, or a local
-//! completion as global completion.
-//!
-//! A demand for an owner with no registered implementation is driven as an
-//! explicit unsupported participant whose durable hold keeps the operation
-//! unfinished.
-//!
-//! The production entry points over this module are bounded: Host startup
-//! restores unfinished operations (resuming a retryable hold once, lifecycle
-//! §14), the serving composition runs a periodic tick (one pass plus a
-//! backed-off retry of a retryable hold), and a first-party confirmation kicks
-//! a bounded drive immediately after admission. None of them decides
-//! completion: only the sealed store boundary does.
-//!
-//! Each bounded walk keeps a durable keyset cursor in the canonical store and
-//! starts its page after the last operation the previous pass examined,
-//! wrapping to the beginning at the end of the unfinished set. The cursor is
-//! a scheduling position only: with more unfinished operations than one pass
-//! bound, later passes reach the tail instead of re-reading the head forever,
-//! and every completion premise is still re-derived from durable operation
-//! and participant state on each visit.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -140,19 +108,6 @@ impl ErasureParticipantRegistry {
     }
 }
 
-/// Bounded parameters for one fan-out pass.
-///
-/// A pass never runs unbounded participant work: each unfinished participant
-/// receives at most [`Self::demands_per_participant`] bounded demands, and at
-/// most [`Self::operation_limit`] unfinished operations are examined. A
-/// participant still reporting more work is left unfinished for the next pass.
-///
-/// The examined window starts after the fan-out walk's durable cursor and
-/// advances past the last operation the pass examined, so an unfinished set
-/// larger than one pass is rotated instead of truncated: the operations past
-/// the window are reached by later passes when the walk wraps. The cursor is
-/// scheduling state only; it never substitutes for the durable phase,
-/// participant, and completion premises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetedDeletionPass {
     pub operation_limit: u32,
@@ -175,18 +130,11 @@ impl Default for TargetedDeletionPass {
     }
 }
 
-/// What one bounded fan-out pass observed. The counts are progress metadata
-/// for the pass's own continuation decision and tests; they are never a
-/// completion decision (the durable participant aggregate plus the
-/// system-wide remainder probe are, and only the sealed completion boundary
-/// re-derives them).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TargetedDeletionPassOutcome {
     pub operations: u32,
     pub demands: u32,
     pub verified: u32,
-    /// Operations that entered the durable `Finalizing` marker during this
-    /// pass (including a resumed finalizing operation observed again).
     pub finalizing: u32,
     pub finalized: u32,
     pub remainder_sweeps: u32,
@@ -194,14 +142,6 @@ pub struct TargetedDeletionPassOutcome {
 }
 
 impl TargetedDeletionPassOutcome {
-    /// Whether one pass advanced durable work: it demanded a participant,
-    /// verified one, moved an operation into `Finalizing`, committed a
-    /// completion, opened a remainder sweep, or published a covered-source
-    /// reconciliation page.
-    ///
-    /// Counters only, and deliberately never a completion decision. A recorded
-    /// hold is not progress: the operation waits for a resume and the same
-    /// bounded driver must not keep hammering it (lifecycle §5.1).
     #[must_use]
     pub(crate) fn progressed(self) -> bool {
         self.demands > 0
@@ -235,9 +175,6 @@ fn valid_pass(pass: TargetedDeletionPass) -> bool {
     (1..=100).contains(&pass.operation_limit) && pass.demands_per_participant > 0
 }
 
-/// Whether one durable unfinished record is a hold this Host may retry.
-/// Only `Held(Unavailable)` is retryable: `GenerationExhausted` cannot resume
-/// by construction and every non-hold phase is not a hold.
 fn is_retryable_hold(
     phase: DeletionOperationPhase,
     hold: Option<ene_preservation::DeletionHoldReason>,
@@ -261,23 +198,9 @@ fn command_scope(
     }
 }
 
-/// A durable keyset rotation over the unfinished-operation set.
-///
-/// The stored position only chooses where a bounded pass starts reading; it is
-/// never completion, verification, or hold truth, and every visit re-derives
-/// the operation phase, hold, sweep, and participant status from the canonical
-/// rows. The walk advances to the last operation a pass examined, so a restart
-/// resumes after it instead of stampeding the head, and it wraps to the
-/// beginning when a page reaches the end of the unfinished set (a short page,
-/// or an empty page at a non-start position), so the tail is reached within
-/// one lap even while the head stays unfinished.
 struct UnfinishedWalk {
     walk: DeletionWalk,
-    /// The position the next page starts after, in memory.
     after: Option<DeletionOperationId>,
-    /// The position last durably written (or read at open). A pass persists
-    /// its position only when it moved, so an idle pass performs no durable
-    /// mutation.
     persisted: Option<DeletionOperationId>,
 }
 
@@ -294,10 +217,6 @@ impl UnfinishedWalk {
         })
     }
 
-    /// Reads the next bounded page after the current position. An empty page
-    /// at a non-start position is the end of the unfinished set: the walk
-    /// wraps and returns the page from the beginning in the same pass, so an
-    /// emptied tail does not cost a whole idle pass.
     async fn page(
         &mut self,
         store: &Store,
@@ -317,18 +236,10 @@ impl UnfinishedWalk {
             .map_err(deletion_error)
     }
 
-    /// Moves the in-memory position past one examined operation.
     fn examined(&mut self, operation: DeletionOperationId) {
         self.after = Some(operation);
     }
 
-    /// Persists the position after a pass. `end` means the pass reached the
-    /// end of the unfinished set (a short page), which wraps the next pass to
-    /// the head.
-    ///
-    /// A crash between the last examined operation and this write repeats that
-    /// page on the next pass (idempotent work, never a skip); a pass that
-    /// fails before this call writes nothing.
     async fn advance(&mut self, store: &Store, end: bool) -> Result<(), CoreError> {
         if end {
             self.after = None;
@@ -345,33 +256,6 @@ impl UnfinishedWalk {
     }
 }
 
-/// Drives one bounded fan-out pass over the durable unfinished operations.
-///
-/// `Active` operations are driven through their required participants and then
-/// through the sealed completion boundary once the durable aggregate says
-/// every participant verified. A `Held` operation waits for an explicit resume
-/// decision. A `Finalizing` operation is resumed directly at the completion
-/// boundary: the durable marker means local erasure and current-sweep
-/// verification are complete and only the material wipe / audit / condition
-/// closure commit is owed (§12/§14). Participants already `Verified` for the
-/// current sweep are never demanded again, so a fan-out that crashed after a
-/// participant's semantic effect continues with only the unfinished
-/// participants (§14). No caller boolean exists anywhere on this path: the
-/// completion premise is re-derived by the store inside its own write
-/// transaction.
-///
-/// The pass reads one bounded window of unfinished operations after the
-/// fan-out walk's durable cursor and advances the cursor past the operations
-/// it examined (wrapping at the end of the set). The cursor bounds where a
-/// pass looks, never what it believes: an unfinished operation on a later page
-/// is deferred to the next pass instead of being permanently starved by a
-/// stuck head page.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Deletion`] for an invalid pass parameter or when the
-/// canonical store refuses (including torn participant state, which fails
-/// closed instead of reading as an incomplete set).
 pub async fn drive_targeted_deletion(
     store: &Store,
     registry: &ErasureParticipantRegistry,
@@ -404,10 +288,6 @@ pub async fn drive_targeted_deletion(
                 )
                 .await?;
             }
-            // A crash between the finalizing marker and the completion
-            // commit resumes here; the operation identity, the current
-            // condition, and the participant statuses come from durable
-            // state, never from memory defaults (§14).
             DeletionOperationPhase::Finalizing => {
                 settle_finalizing(store, registry, record.current, &mut outcome).await?;
             }
@@ -476,9 +356,6 @@ async fn settle_finalizing(
     Ok(())
 }
 
-/// Drives one active operation. A concurrent lifecycle transition (a new sweep
-/// or a completion/phase change) ends this operation's work for the pass; the
-/// other records on the pass's page are still driven.
 async fn drive_operation(
     store: &Store,
     registry: &ErasureParticipantRegistry,
@@ -487,13 +364,6 @@ async fn drive_operation(
     outcome: &mut TargetedDeletionPassOutcome,
 ) -> Result<(), CoreError> {
     let condition = current.condition();
-    // Phase 1: exhaust the covered-source reconciliation before the first
-    // participant demand. The identity bodies carrying the target are the
-    // evidence the already-claimed in-flight-use correspondence is derived
-    // from, and the owner sweeps redact them; publishing and associating
-    // first is what keeps the correspondence complete regardless of how many
-    // covered identities exist. The page budget bounds one pass; the durable
-    // cursor resumes the walk on the next pass or after a restart.
     let mut reconciled = false;
     for _ in 0..RECONCILIATION_PAGES_PER_PASS {
         match store
@@ -620,21 +490,6 @@ async fn drive_operation(
     Ok(())
 }
 
-/// Drives bounded passes until a pass advances no durable work or the budget
-/// is exhausted.
-///
-/// This is the continuation driver behind startup recovery and the post-
-/// confirmation kick: each iteration is one [`drive_targeted_deletion`] pass
-/// with its own bounded operation/demand limits, and the loop stops as soon as
-/// a pass reports no demand, verification, finalizing step, completion,
-/// remainder sweep, or published reconciliation page. It never decides
-/// completion itself — the sealed store
-/// boundary re-derives every premise on each pass.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Deletion`] for an invalid budget and when the
-/// canonical store refuses.
 pub(crate) async fn drive_targeted_deletion_until_settled(
     store: &Store,
     registry: &ErasureParticipantRegistry,
@@ -658,31 +513,12 @@ pub(crate) async fn drive_targeted_deletion_until_settled(
     Ok(total)
 }
 
-/// Restores unfinished Targeted Deletion operations at startup (lifecycle
-/// §14).
-///
-/// A `Held(Unavailable)` operation is retryable and a Host restart is a
-/// recovery decision: the hold is resumed so the reopened composition can
-/// re-drive the stored participant snapshot. This only reads the durable
-/// phase and applies the canonical [`DeletionLifecycleChange::Resume`]; a
-/// `Held(GenerationExhausted)` operation is left untouched (fail closed — no
-/// generation can be reused or invented) and an `Active` / `Finalizing`
-/// operation is left for the bounded drive below. Every operation identity,
-/// sweep, and participant row comes from durable state; nothing is reset to a
-/// memory default, and a restart is never taken as completion evidence.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Deletion`] for an invalid budget and when the
-/// canonical store refuses.
 pub(crate) async fn recover_targeted_deletions(
     store: &Store,
     registry: &ErasureParticipantRegistry,
     pass_budget: u32,
 ) -> Result<TargetedDeletionPassOutcome, CoreError> {
     let pass = TargetedDeletionPass::default();
-    // Startup recovery is a fresh schedule: the empty retry map makes every
-    // retryable hold eligible, so the page is offered whole.
     resume_hold_page(
         store,
         pass.operation_limit,
@@ -693,19 +529,6 @@ pub(crate) async fn recover_targeted_deletions(
     drive_targeted_deletion_until_settled(store, registry, pass_budget).await
 }
 
-/// Offers one bounded page of retryable-hold resumes.
-///
-/// Only `Held(Unavailable)` is a resume candidate. `GenerationExhausted`
-/// cannot be resumed by construction, every other phase is not a hold, and
-/// the canonical store re-checks all of that inside its own write
-/// transaction; this read only decides which candidates to offer.
-///
-/// The page is the next window of the retryable-hold walk (the same durable
-/// rotation as the fan-out pass), so a hold page blocked by earlier
-/// non-retryable holds or other unfinished operations is still reached on a
-/// later call instead of being starved. The walk position is scheduling state
-/// only: every offered resume re-derives its premise in the store's write
-/// transaction. `schedule`/`tick` are pacing only.
 async fn resume_hold_page(
     store: &Store,
     limit: u32,
@@ -728,10 +551,6 @@ async fn resume_hold_page(
         {
             continue;
         }
-        // The store re-checks the phase, sweep, and hold class inside its
-        // write transaction; a refusal (another writer moved the operation, or
-        // the durable state cannot resume) leaves it for the bounded drive
-        // below without inventing an outcome here.
         match store
             .change_deletion_lifecycle(record.current, DeletionLifecycleChange::Resume)
             .await
@@ -740,8 +559,6 @@ async fn resume_hold_page(
             DeletionLifecycleOutcome::Applied(_) => {
                 schedule.record_resume(record.current.operation, tick);
             }
-            // The durable state moved or refuses the resume; the next pass
-            // re-reads the phase instead of guessing.
             DeletionLifecycleOutcome::Missing
             | DeletionLifecycleOutcome::StaleSweep
             | DeletionLifecycleOutcome::Completed
@@ -753,16 +570,6 @@ async fn resume_hold_page(
     Ok(())
 }
 
-/// In-memory pacing for retrying `Held(Unavailable)` operations from the
-/// serving tick.
-///
-/// The driver retries a retryable hold by resuming it and driving the reopened
-/// operation; each consecutive unanswered retry doubles the number of ticks
-/// before the next attempt, up to `2^`[`HELD_RETRY_MAX_SKIP_SHIFT`] ticks. The
-/// schedule is pacing only and never authority: it decides no phase, stores no
-/// deletion condition, converts no hold into a completion, and a restart drops
-/// it (startup recovery resumes independently of it). Pruning entries that are
-/// no longer held keeps the map bounded by the unfinished-hold page.
 #[derive(Default)]
 pub(crate) struct HeldRetrySchedule {
     tick: u64,
@@ -814,27 +621,6 @@ impl HeldRetrySchedule {
     }
 }
 
-/// One bounded serving tick: at most one backed-off resume per retryable hold
-/// plus exactly one fan-out pass.
-///
-/// Holds are read from the durable phase; the schedule bounds how often a hold
-/// is retried, and a resume is offered only to `Held(Unavailable)` operations.
-/// `GenerationExhausted` is never retried (fail closed). The pass itself is
-/// [`drive_targeted_deletion`], so a tick can never run unbounded participant
-/// work and can never complete an operation without the sealed store
-/// boundary re-deriving every premise.
-///
-/// The hold page is the next window of the retryable-hold walk, so a tick
-/// examines a bounded page while successive ticks rotate through a hold set
-/// larger than one page instead of re-reading the head. Because the in-memory
-/// schedule only sees the window read by its tick, its backoff bounds
-/// consecutive attempts within a lap; a hold is still offered at most one
-/// resume per lap while the set exceeds one page, and the schedule is pacing
-/// only, never authority.
-///
-/// # Errors
-///
-/// Returns [`CoreError::Deletion`] when the canonical store refuses.
 pub(crate) async fn tick_targeted_deletion(
     store: &Store,
     registry: &ErasureParticipantRegistry,

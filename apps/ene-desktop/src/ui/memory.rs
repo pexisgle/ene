@@ -143,8 +143,6 @@ impl MemoryPage {
         self.notice.as_deref()
     }
 
-    /// Drops every Host-projected Memory copy this page holds. Old cursors
-    /// and revision views are invalid after this.
     pub fn wipe(&mut self) {
         *self = Self::default();
     }

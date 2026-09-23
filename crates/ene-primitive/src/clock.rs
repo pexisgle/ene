@@ -25,22 +25,11 @@ impl WallClockWithTz {
         self.0.to_rfc3339()
     }
 
-    /// Second-precision RFC 3339 rendering with the creation offset: always
-    /// `YYYY-MM-DDTHH:MM:SS±HH:MM` (25 bytes), so callers that budget the
-    /// rendered text (the dialogue prompt check vs. assembly) get a length
-    /// that cannot vary with the subsecond value.
     #[must_use]
     pub fn to_rfc3339_secs(&self) -> String {
         self.0.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
     }
 
-    /// Canonical UTC rendering with fixed nanosecond precision.
-    ///
-    /// Every instant renders as `YYYY-MM-DDTHH:MM:SS.NNNNNNNNNZ`, so lexical
-    /// order equals chronological order and storage/query layers can compare
-    /// the rendered text without parsing. The display rendering
-    /// ([`to_rfc3339`](Self::to_rfc3339)) keeps the creation offset; this one
-    /// is for ordering and range filters only.
     #[must_use]
     pub fn to_rfc3339_utc(&self) -> String {
         use chrono::{SecondsFormat, Utc};

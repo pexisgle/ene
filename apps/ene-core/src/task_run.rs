@@ -37,11 +37,6 @@ struct RunningExecution {
 }
 
 impl TaskExecutionRegistry {
-    /// Signals every running execution of `task`, if any is registered.
-    ///
-    /// Returns whether at least one token was signalled; `false` means no
-    /// execution of this Task is running in this process, which says nothing
-    /// about durable work.
     pub fn cancel(&self, task: ene_task::TaskId) -> bool {
         let running = crate::lock_unpoison(&self.running);
         let mut signalled = false;
@@ -81,14 +76,6 @@ impl TaskExecutionRegistry {
                 .any(|reserved| *reserved == task)
     }
 
-    /// Consumes one launch reservation and registers the execution.
-    ///
-    /// `AlreadyRunning` wins over `Unreserved`: a delegation that is
-    /// already running in this process is refused even if its reservation
-    /// row is somehow also present. An `Unreserved` delegation never starts
-    /// provider calls or Actions — after a restart, only a new explicit
-    /// commit reserves again. The returned registration removes its own
-    /// running entry on drop.
     pub fn take_reservation(
         &self,
         delegation: ene_task::DelegationId,
@@ -249,51 +236,6 @@ impl From<ene_task::TaskTechnicalError> for TaskAgentRunError {
     }
 }
 
-/// Runs one delegated Task Agent execution under the fixed protocol.
-///
-/// `inference` is the Task-owned inference port; the Host composition root
-/// wires it to the concrete inference executor with
-/// [`TaskAgentInferenceAdapter::new`](crate::task_agent::TaskAgentInferenceAdapter::new)
-/// and implements `instructions`/`scrubber` against History and credentials.
-/// The loop starts from the execution's relied revision and continues until a
-/// final answer is recorded, an owner boundary refuses, the response is
-/// malformed, the effect is unresolved, the consent premise for the produced
-/// output lapsed, the cooperative stop signals, or the turn bound is reached.
-/// See the module docs for the exact boundary order.
-///
-/// A provider output whose `adoption_consent_current` is `false` is discarded
-/// as [`TaskAgentRunOutcome::ConsentStaleAfterSend`] before any Action or
-/// result record: the consent premise that admitted the send no longer holds,
-/// while the already-started attempt and its usage fact stay durable. An
-/// output refused before the send at all stays [`TaskAgentRunOutcome::NotSent`].
-///
-/// A final answer is scrubbed through the injected credential boundary and
-/// arrives with that scrub premise; the durable commit compares the premise
-/// inside its transaction. If the credential set advanced since the scrub,
-/// the commit refuses without writing and the answer is re-scrubbed under the
-/// observed revision (bounded by `FINAL_RESULT_SCRUB_ATTEMPTS`); an answer
-/// whose premise keeps going stale is never committed and ends as
-/// [`TaskAgentRunRefusal::StaleCredentialSet`].
-///
-/// The execution's in-process identity and cooperative stop token come from
-/// `registration`: holding a [`TaskExecutionRegistration`] is what makes the
-/// per-delegation refusal real, because [`TaskExecutionRegistry::take_reservation`]
-/// never admits a second registration for the same delegation while this one
-/// is held. The token is checked before every provider call and Action start,
-/// and it is handed to the inference port (via the Host adapter) so an
-/// in-flight provider call is aborted best-effort with its usage fact recorded
-/// before the turn answers [`TaskAgentTurnOutcome::Aborted`]. The signal is
-/// never authority: the durable cancel admission (AU16) is the Task owner's
-/// commit, and stopping locally proves nothing about provider or external
-/// effects. A final answer that was already produced is still recorded and
-/// adoption still runs, so a cancel race resolves through the ordinary
-/// `RecordedToOriginalOnly` path.
-///
-/// One delegated execution is run once. A stopped execution (no final result)
-/// is never continued by calling this function again over the same
-/// delegation, and the entry enforces that on the durable attempt facts even
-/// when no in-process registration is held (restart): continued work is a
-/// new delegation under the design's execution-lifetime contract.
 pub async fn run_task_agent_execution(
     store: &Store,
     instructions: &impl TaskInstructionSource,
@@ -763,11 +705,6 @@ where
         let transport = Arc::clone(&self.transport);
         tasks.spawn(async move {
             drop(handle.run_task_agent(transport.as_ref(), delegation).await);
-            // A runner that refused before taking its reservation (a
-            // transient delegation load failure or a missing delegation) must
-            // not leave the launch token pinning the Task as running; a
-            // consumed reservation is already absent, so the release is a
-            // no-op there.
             handle.task_executions.release(delegation);
         });
         Ok(())

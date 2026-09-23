@@ -9,7 +9,6 @@ use crate::ipc::{LocalUiFact, OverlayKind, PlacementBox};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::render::RenderFailure;
 
-/// Scales a logical extent to physical pixels, never below one pixel.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) fn physical(logical: u32, scale: f32) -> u32 {
     ((logical as f64 * f64::from(scale)).round() as u64).clamp(1, u64::from(u32::MAX)) as u32
@@ -27,7 +26,6 @@ pub(crate) fn gpu_info(failure: RenderFailure) -> crate::ipc::GpuFailInfo {
     }
 }
 
-/// Reported when `try_gpu` is false: no adapter is ever attempted.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) fn gpu_disabled() -> crate::ipc::GpuFailInfo {
     crate::ipc::GpuFailInfo {
@@ -46,13 +44,9 @@ pub(crate) fn gpu_status(
     }
 }
 
-/// Logical-pixel extent of the resize target, anchored to the rightmost
-/// visible character pixels in the bottom band (mirrors the Windows
-/// `WM_NCHITTEST` grip).
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) const RESIZE_GRIP_LOGICAL_PX: u32 = 32;
 
-/// Initial overlay placement shared by the native backends.
 pub const DEFAULT_PLACEMENT: PlacementBox = PlacementBox {
     x: 24,
     y: 24,
@@ -61,7 +55,6 @@ pub const DEFAULT_PLACEMENT: PlacementBox = PlacementBox {
     scale: 1.0,
 };
 
-/// Native backend this build would request; off Linux/Windows there is none.
 #[cfg(target_os = "linux")]
 const REQUESTED_NATIVE: OverlayKind = OverlayKind::KdeLayerShell;
 #[cfg(target_os = "windows")]
@@ -69,8 +62,6 @@ const REQUESTED_NATIVE: OverlayKind = OverlayKind::WindowsDwm;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 const REQUESTED_NATIVE: OverlayKind = OverlayKind::Headless;
 
-/// Overlay in this process. Production attempts the native backend and reports
-/// an explicit unavailable outcome before using Headless.
 #[derive(Debug)]
 pub enum Overlay {
     Headless(HeadlessOverlay),
@@ -141,8 +132,6 @@ impl Overlay {
         }
     }
 
-    /// Native backends report overlay-local drag/resize/hide as `LocalUiFact`;
-    /// Headless never synthesizes them.
     #[must_use]
     pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
         match self {
@@ -165,8 +154,6 @@ impl Overlay {
         }
     }
 
-    /// Headless attempts no surface creation, so there is no GPU failure to
-    /// report; [`Self::unavailable_info`] carries the overlay's reason.
     #[must_use]
     pub fn gpu_failure(&self) -> Option<crate::ipc::GpuFailInfo> {
         match self {

@@ -1,8 +1,3 @@
-//! Japanese / English locale and deny-reason text.
-//!
-//! Switching locale rewrites labels only. Conversation bodies, history, and
-//! Host domain state are not rewritten.
-
 use ene_api::v1::management::ManagementOutcome;
 use ene_local_control::{ControlOutcome, FromConfirmation};
 
@@ -64,8 +59,6 @@ pub fn management_deny(locale: Locale, outcome: &ManagementOutcome) -> &'static 
 }
 
 #[must_use]
-/// Renders one confirmation-channel answer. The requester listener's own
-/// answers are rendered where they are read.
 pub fn control_deny(locale: Locale, from: &FromConfirmation) -> &'static str {
     match (locale, from) {
         (Locale::Ja, FromConfirmation::DeniedByBoundary) => {
@@ -105,9 +98,6 @@ pub fn control_deny(locale: Locale, from: &FromConfirmation) -> &'static str {
     }
 }
 
-/// Renders the requester-listener hold. The Host refused admission because
-/// its pending queue is saturated; nothing was accepted. The Owner retries by
-/// an explicit action, so no path may resend the held request on its own.
 #[must_use]
 pub fn backpressure_hold(locale: Locale) -> &'static str {
     match locale {
@@ -140,7 +130,6 @@ mod tests {
         let en = backpressure_hold(Locale::En);
         assert!(ja.contains("保留"));
         assert_eq!(en, "Held due to load; retry shortly.");
-        // The hold is not the generic unexpected-answer fallback.
         assert!(!ja.contains("処理できません"));
         assert!(!en.contains("unexpected"));
     }

@@ -36,10 +36,6 @@ impl HostHandle {
             frame.envelope.correlation.request_id,
             &descriptor,
         ) {
-            // A repeat on this connection answers the live pending instead of
-            // minting a second one (IPC §9.3); the device identity is never
-            // re-issued and the first pending stays approveable. A reused
-            // request id with a different body is a conflict, not a retry.
             return match resend {
                 PendingResend::Answer(pending_id) => vec![outgoing_frame_pre_auth(
                     frame,
@@ -66,8 +62,6 @@ impl HostHandle {
                     frame.envelope.correlation.request_id,
                     &descriptor,
                 ) {
-                    // The denial below remains authoritative; the connection's
-                    // own cleanup owns the unapproved row.
                     return vec![denied_pairing(
                         frame,
                         live,
@@ -86,26 +80,6 @@ impl HostHandle {
         }
     }
 
-    /// Handles one [`CapabilityAdvertise`]: bind, negotiate, then challenge.
-    ///
-    /// On a connection that never paired, the frame's `sender.device_id` must
-    /// resolve to an existing device in the device store; that resolution,
-    /// the device bind, the terms, and the challenge are one phase operation
-    /// (`Accepted → Challenged`), so a reconnect never needs a redundant
-    /// pairing round trip and an unresolved claim cannot bind anything. On a
-    /// freshly paired connection the record's device is already bound
-    /// (`Paired → Challenged`). The table writes the terms and the nonce
-    /// exactly once: a repeat capability frame answers
-    /// [`InvalidHandshakePhase`](ene_api::v1::reject::RejectKind::InvalidHandshakePhase)
-    /// and changes neither.
-    ///
-    /// When no advertised version shares the v1 major, the reply is the typed
-    /// terminal
-    /// [`IncompatibleProtocol`](ene_api::v1::reject::IncompatibleProtocol)
-    /// naming both sides' maxima and the upgrade hint (IPC §7.2, V-11); the
-    /// connection closes after it. Capability frames never attach presence:
-    /// attach happens only on the submit path, so a negotiating-but-never-
-    /// submitting peer leaves attribution untouched.
     pub(super) async fn advertise(
         &self,
         frame: &WireFrame,
@@ -117,9 +91,6 @@ impl HostHandle {
             .iter()
             .any(|candidate| candidate.shares_major_with(&ProtocolVersion::V1));
         if !negotiable {
-            // The rejection names the Client's highest advertised version; an
-            // empty advertisement leaves only the frame's own envelope version
-            // as its claim, and either way no advertised major is shared.
             let client_max = advertise
                 .supported_protocol
                 .iter()
@@ -139,9 +110,6 @@ impl HostHandle {
                 match DevicePairingRepository::find_device_by_wire(&self.store, &claim).await {
                     Ok(Some(_)) => Some(claim),
                     Ok(None) => return vec![unpaired_close(frame, live)],
-                    // A store failure is infrastructure, not an unknown
-                    // device: answer nothing and keep the phase, so the same
-                    // capability frame can be retried.
                     Err(_) => return Vec::new(),
                 }
             }
@@ -179,46 +147,12 @@ impl HostHandle {
         }
     }
 
-    /// Handles one [`AuthProof`]: verify against the persisted secret and
-    /// install currentness, or answer.
-    ///
-    /// The pending nonce for this connection is consumed single-use in the
-    /// challenged phase; a proof in any other phase never reaches here (the
-    /// dispatcher answers `InvalidHandshakePhase`) and a second proof after
-    /// the nonce was consumed cannot challenge again. A missing device, a
-    /// missing or unreadable secret, or a bad proof consumes the nonce and
-    /// ends the connection phase in `Closed` with
-    /// [`Rejected`](AuthResult::Rejected) — a captured proof can never
-    /// replay. A store failure while resolving the bound device answers
-    /// nothing and leaves the challenge (and its nonce) retryable instead of
-    /// fabricating a rejection. Success installs this connection as the
-    /// device's current authenticated one in one table section (superseding
-    /// the previous
-    /// current irreversibly) *before* the
-    /// [`Accepted`](AuthResult::Accepted) answer is sent, so a lost response
-    /// never rolls the install back and a concurrent authentication only wins
-    /// by installing later. Proof comparison itself runs in constant time
-    /// inside `ene-credential`.
     pub(super) async fn verify_proof(
         &self,
         frame: &WireFrame,
         proof: &AuthProof,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        // Device attribution comes from the connection table (bound moments
-        // earlier on this same connection), never from the envelope claim:
-        // the proof authenticates the pending pairing the Host recorded, and
-        // trusting a Client-supplied device here would let any peer claim
-        // any identity. The opaque wire string resolves to its domain record
-        // through the store — never by parsing, since projections are
-        // unrelated to the domain bytes — and the domain id keys the secret.
-        // The resolution precedes the single-use nonce consumption: a store
-        // failure is infrastructure, not proof evidence, and must leave the
-        // challenged phase and its nonce intact for a retry. Device
-        // revocation has no store API yet (explicitly deferred in
-        // `ene-credential`), so no revoke can interleave between that
-        // resolution and the install below; the install still re-checks the
-        // phase before installing.
         let stored = match live.paired_device.clone() {
             Some(device) => {
                 match DevicePairingRepository::find_device_by_wire(&self.store, &device).await {

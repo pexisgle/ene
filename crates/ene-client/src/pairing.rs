@@ -1,7 +1,3 @@
-//! Pairing ownership proof: HMAC-SHA256 of the Host nonce keyed by the
-//! pairing secret. Lives here so `ene-client` does not depend on
-//! `ene-credential` (secret-as-API); `ene-credential` owns verification.
-
 use hmac::{Hmac, KeyInit as _, Mac as _};
 use sha2::Sha256;
 

@@ -144,28 +144,10 @@ pub struct RawUsage {
 }
 
 pub trait ProviderTransport: Send + Sync {
-    /// The safe upper bound of the token usage this adapter's request can
-    /// bill (`usage-cost-cap` §8), or `None` when the adapter cannot build a
-    /// finite bound.
-    ///
-    /// The admission converts the estimate into a cap reservation under the
-    /// admission pricing snapshot, so it must cover every token the provider
-    /// contract can charge: the input bound must be tokenizer-safe for the
-    /// request body, and the output bound must be the explicit maximum the
-    /// adapter sets on the request itself (not an average). A `None` answer
-    /// keeps uncapped sends working and refuses cap-enabled sends
-    /// ([`NotSentReason::UsageCapIndeterminate`]) instead of guessing.
     fn usage_estimate(&self, _req: &ProviderRequest) -> Option<UsageEstimate> {
         None
     }
 
-    /// Runs one completion, pushing incremental output to `sink`.
-    ///
-    /// Deltas are pushed in provider order and the transport stops reading
-    /// on [`DeltaFlow::Abort`], reporting [`InferenceTechnicalError::StreamAborted`]:
-    /// no delta produced after the consumer stopped is presented, and the
-    /// call never completes normally with a delivery gap. The returned
-    /// response carries the full text for adoption and History.
     fn complete_streaming<'a>(
         &'a self,
         req: ProviderRequest,
@@ -203,30 +185,8 @@ impl DeltaSink for DiscardSink {
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait UsageRepository: Send + Sync {
-    /// Persist the first complete settlement for a claimed ticket. Duplicate
-    /// arrivals are idempotent; an Unknown settlement is not revised later.
-    /// Reject orphan tickets, route mismatches, and inconsistent token facts.
-    ///
-    /// The same transaction settles the ticket's usage reservation when one
-    /// exists: a reported fact commits it as
-    /// [`ene_permission::UsageReservationState::CommittedReported`] with the
-    /// actual cost derived from the bound pricing snapshot (releasing the
-    /// unused reservation), and an unknown fact commits it as
-    /// [`ene_permission::UsageReservationState::CommittedUnknown`], which
-    /// keeps the reserved upper bound counted against every cap. The first
-    /// settlement wins; a duplicate never revises a terminal reservation.
     async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError>;
 
-    /// Settles every non-terminal usage reservation as
-    /// [`ene_permission::UsageReservationState::CommittedUnknown`]
-    /// (`usage-cost-cap` §15).
-    ///
-    /// This is the Host-startup re-evaluation of reservations orphaned by a
-    /// crash: external consumption cannot be denied, so the reserved upper
-    /// bound stays counted and the ticket settles an Unknown token usage
-    /// fact; a crash never releases a reservation and never zeroes usage.
-    /// Terminal reservations are not re-counted or re-inserted. The operation
-    /// is idempotent.
     async fn reconcile_orphaned_usage_reservations(&self) -> Result<(), InferenceTechnicalError>;
 }
 
@@ -264,17 +224,7 @@ pub enum AttemptBeginOutcome {
     Stale,
     TaskPremiseStale,
     DataUseHeld,
-    /// A current cap's window consumption plus this request's safe upper
-    /// bound would exceed the limit: the caller must NOT issue provider I/O
-    /// for this ticket, and neither the attempt nor a reservation is
-    /// recorded.
     HeldByCap,
-    /// At least one current cap applies to the route, but the claim cannot
-    /// construct a finite safe upper bound under it (no reviewed rate, no
-    /// provider estimate, a cap currency the request cannot be compared in,
-    /// or an unrepresentable sum): the caller must NOT issue provider I/O.
-    /// The cap is never treated as satisfied and the bound is never assumed
-    /// zero.
     CapIndeterminate,
 }
 
@@ -296,7 +246,6 @@ pub trait InferenceAttemptRepository: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Admission {
-    /// Authorized; the single-use decision is already consumed.
     Admitted(Box<AuthorizedInference>),
     Declined(NotSentReason),
 }
@@ -953,8 +902,6 @@ mod dispatch_tests {
         }
     }
 
-    /// An attempt repository whose claim answers a moved Task Agent premise,
-    /// modelling steering landing between admission and the claim.
     struct TaskPremiseStaleAttempts;
 
     impl InferenceAttemptRepository for TaskPremiseStaleAttempts {
@@ -981,9 +928,6 @@ mod dispatch_tests {
         }
     }
 
-    /// An attempt repository whose claim finds a covering erasure condition,
-    /// modelling a Targeted Deletion condition landing after the History read
-    /// but before the send admission.
     struct DataUseHeldAttempts;
 
     impl InferenceAttemptRepository for DataUseHeldAttempts {
@@ -1010,8 +954,6 @@ mod dispatch_tests {
         }
     }
 
-    /// An attempt repository whose claim always answers that a cap would be
-    /// exceeded, modelling a send the reservation refuses.
     struct HeldByCapAttempts;
 
     impl InferenceAttemptRepository for HeldByCapAttempts {
@@ -1091,8 +1033,6 @@ mod dispatch_tests {
         }
     }
 
-    /// An attempt repository that raises the caller's abort signal from
-    /// inside the claim, modelling a stop that lands while the claim commits.
     struct AbortingAttempts(DispatchAbort);
 
     impl InferenceAttemptRepository for AbortingAttempts {
@@ -1120,8 +1060,6 @@ mod dispatch_tests {
         }
     }
 
-    /// Usage repository that fails every write, modelling a storage failure
-    /// at settlement time.
     struct FailingUsage;
 
     impl UsageRepository for FailingUsage {
@@ -1148,7 +1086,6 @@ mod dispatch_tests {
         }
     }
 
-    /// Transport that counts calls without performing I/O.
     struct CountingTransport(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
     impl ProviderTransport for CountingTransport {
@@ -1545,9 +1482,6 @@ mod dispatch_tests {
             &transport,
         )
         .await;
-        // The transport error already proves the call may have run, so losing
-        // its accounting too would report a technical failure with no durable
-        // fact; the settlement failure takes precedence.
         assert!(
             matches!(
                 result,
@@ -1687,8 +1621,6 @@ mod dispatch_tests {
     async fn explicit_zero_cached_tokens_stays_reported() {
         let usage = CapturedUsage(Mutex::new(Vec::new()));
         let consent = FixedConsent(Some(record(1)));
-        // A provider that decodes cache detail and reports zero hits yields a
-        // legitimate reported fact: zero here is evidence, not a filler.
         let transport = FakeProviderTransport::new(
             String::from("hi there"),
             Some(RawUsage {
@@ -2149,8 +2081,6 @@ mod admission_tests {
 
     #[tokio::test]
     async fn dialogue_consent_does_not_prepare_a_learning_admission() {
-        // Same provider, model, credential, and bearer: only the capability
-        // differs, and capability-scoped consent must not be borrowed.
         let (credential_store, credential) = provisioned();
         let consent = FixedConsent(Some(record_for(CapabilityKind::Dialogue)));
         let refs = FixedRefs(vec![credential]);
@@ -2259,8 +2189,6 @@ mod admission_tests {
 
     #[tokio::test]
     async fn learning_preparation_never_returns_inference_errors_as_outcomes() {
-        // A store failure is `Err`, never a fabricated decline; both consumers
-        // share the rule.
         let (credential_store, credential) = provisioned();
         let refs = FixedRefs(vec![credential]);
         let failing = FailingConsent;

@@ -144,9 +144,6 @@ impl HostHandle {
                 )];
             }
         };
-        // The rows are bounded by the walk's effective window (a declared past
-        // `to`, or the bounds frozen in the cursor); the cap section is the
-        // live state at `now`, reported through `evaluated_at`.
         let caps = match self
             .store
             .load_usage_cap_status(UsageCapStatusQuery {
@@ -221,16 +218,6 @@ impl HostHandle {
         )]
     }
 
-    /// Maps one `ManageRuleConsentCap` intent whose target carries the shared
-    /// `cap:` grammar onto the permission-owned command (`usage-cost-cap`
-    /// §13/§17).
-    ///
-    /// Currentness is re-checked here, not trusted from the Client: the
-    /// `base_view` mark names exactly `(scope, window)` at one revision (or
-    /// the none state), and the command serializes the compare with the send
-    /// admission. A face-stale mark, an unknown window/currency, or an
-    /// unrepresentable limit clarifies with zero writes; a store failure
-    /// holds (nothing decided, a retry is safe).
     pub(crate) async fn set_usage_cap_intent(
         &self,
         frame: &WireFrame,
@@ -322,13 +309,10 @@ impl HostHandle {
                 self.clarify(frame, live, intent, INTENT_KIND_USAGE_CAP)
                     .await
             }
-            // Nothing was decided, so a retry is safe.
             Err(_) => Self::hold(frame, live, intent),
         }
     }
 
-    /// Answers a face-stale base view with the rebuilt current mark, reading
-    /// the current cap without mutating anything.
     async fn cap_stale(
         &self,
         frame: &WireFrame,
@@ -399,12 +383,6 @@ fn parse_filter<T>(name: Option<&str>, from_name: fn(&str) -> Option<T>) -> Opti
     }
 }
 
-/// The cap slots the response reports: the system scope always (it budgets
-/// every provider), plus the provider the query names (its slots appear even
-/// without a stored cap, so the Client receives the none-state mark it must
-/// echo to create the first cap). Stored caps of every provider are included
-/// with their slots in an unfiltered read; a read that names a provider
-/// reports only the system scope and that provider.
 fn build_cap_views(
     provider_filter: Option<&str>,
     statuses: &[UsageCapStatus],

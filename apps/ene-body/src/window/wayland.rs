@@ -50,9 +50,6 @@ mod imp {
         event_queue: EventQueue<State>,
         state: State,
         visible: bool,
-        /// A hide frame was requested but the renderer skipped it; the last
-        /// visible buffer is still on screen and [`Self::render`] must retry
-        /// the transparent present instead of presenting meshes.
         hide_pending: bool,
         gpu_failure: Option<GpuFailInfo>,
         next_commit: u64,
@@ -87,14 +84,6 @@ mod imp {
                 CompositorState::bind(&globals, &qh).map_err(|error| error.to_string())?;
             let layer_shell = LayerShell::bind(&globals, &qh)
                 .map_err(|_| String::from("zwlr_layer_shell_v1 is unavailable"))?;
-            // Optional protocol: KWin, GNOME and wlroots compositors expose
-            // it. Drag and resize use its accelerated deltas (the cursor
-            // vector the user sees), with the unaccelerated delta only as a
-            // fallback when the compositor leaves the accelerated vector at
-            // zero, so the overlay never feeds its own surface movement back
-            // into the gesture (surface-local motion coordinates are relative
-            // to the moving surface, which made the overlay travel at half
-            // speed).
             let relative_pointer_state = RelativePointerState::bind(&globals, &qh);
             let presentation = globals
                 .bind(&qh, 1..=1, ())
@@ -210,22 +199,9 @@ mod imp {
                 self.state.frame_ready = true;
                 return;
             }
-            // Hide by presenting one transparent frame and keeping the
-            // surface mapped. Unmapping (`attach(None)` + commit) makes KWin
-            // require a new configure before the next buffer attach, and that
-            // configure is not sent for a null-buffer commit, so a later show
-            // would never render again (observed on KWin 6.7.5: protocol
-            // error 0 "a buffer has been attached to a layer surface prior to
-            // the first layer_surface.configure event" and a dead renderer).
-            // The transparent frame also makes the alpha-aware input region
-            // empty, so the hidden overlay claims no input. A surface the
-            // compositor already closed must not be committed again.
             if !self.state.closed {
                 if self.renderer.is_some() {
                     if !self.present_hidden() {
-                        // Nothing was submitted, so the last visible buffer is
-                        // still on screen: stay logically visible and retry
-                        // rather than presenting the avatar again.
                         self.hide_pending = true;
                         return;
                     }
@@ -239,15 +215,10 @@ mod imp {
             self.visible = false;
         }
 
-        /// Presents the transparent hide frame and empties the input region.
-        /// Returns false when the surface submitted no buffer, which leaves
-        /// the previous buffer on screen.
         fn present_hidden(&mut self) -> bool {
             if !self.render_frame(&[], true) {
                 return false;
             }
-            // The presented hide frame already set the empty input region as
-            // double-buffered surface state; this state-only commit publishes it.
             self.state.layer.commit();
             true
         }
@@ -255,11 +226,7 @@ mod imp {
         pub fn set_placement(&mut self, placement: PlacementBox) {
             self.state.size = (placement.width, placement.height);
             self.state.position = (placement.x, placement.y);
-            // The alpha-aware region is recomputed from the next presented
-            // frame at the new size; until then the old region is not reused.
             self.state.region_dirty = true;
-            // A surface the compositor already closed must not be committed
-            // again (same invariant as set_visible).
             if !self.state.closed {
                 self.state.layer.set_margin(placement.y, 0, 0, placement.x);
                 self.state.layer.set_size(placement.width, placement.height);
@@ -307,9 +274,6 @@ mod imp {
                 });
                 return;
             }
-            // A compositor-closed layer surface is terminal (it is never
-            // committed or presented again), so report it like the DWM surface
-            // failure instead of leaving `gpu_status` Ok while nothing renders.
             if self.state.closed && self.renderer.is_some() {
                 self.renderer = None;
                 self.gpu_failure = Some(GpuFailInfo {
@@ -324,8 +288,6 @@ mod imp {
 
         pub fn render(&mut self, meshes: &[crate::vrm::RenderMesh]) {
             if self.hide_pending {
-                // Retry the transparent hide frame until the surface submits
-                // one. The mesh path must not present the avatar again.
                 if self.present_hidden() {
                     self.hide_pending = false;
                     self.visible = false;
@@ -335,9 +297,6 @@ mod imp {
             self.render_frame(meshes, false);
         }
 
-        /// Presents one frame, returning whether a buffer was submitted.
-        /// `force` skips the visible/frame pacing gate so the hide path can
-        /// present the transparent unmapping frame.
         fn render_frame(&mut self, meshes: &[crate::vrm::RenderMesh], force: bool) -> bool {
             if self.renderer.is_none() {
                 return false;
@@ -471,8 +430,6 @@ mod imp {
         }
     }
 
-    /// Replaces the surface input region with the given surface-local
-    /// rectangles. Empty input makes the whole surface click-through.
     fn set_input_region(
         compositor: &CompositorState,
         qh: &QueueHandle<State>,
@@ -497,8 +454,6 @@ mod imp {
         region.destroy();
     }
 
-    /// Output name reported by the compositor, or the proxy identity when the
-    /// output was not announced with a name.
     fn output_name(output_state: &OutputState, output: &wl_output::WlOutput) -> String {
         output_state
             .info(output)
@@ -528,18 +483,11 @@ mod imp {
 
     #[derive(Debug)]
     enum Interaction {
-        /// Dragging the whole overlay. `origin` is the surface position at
-        /// press; `accum` is the accelerated pointer displacement since
-        /// press. `start_local` is only the fallback anchor for compositors
-        /// without `zwp_relative_pointer_v1`.
         Drag {
             origin: (i32, i32),
             accum: (f64, f64),
             start_local: (f64, f64),
         },
-        /// Resizing from the bottom-band grip. `origin` is the surface size
-        /// at press; `accum` is the accelerated pointer displacement since
-        /// press. `start_local` is the fallback anchor.
         Resize {
             origin: (u32, u32),
             accum: (f64, f64),
@@ -562,18 +510,10 @@ mod imp {
         layer: LayerSurface,
         presentation: wp_presentation::WpPresentation,
         pointer: Option<wl_pointer::WlPointer>,
-        /// Optional relative-motion source for drag / resize; its accelerated
-        /// delta is preferred.
         relative_pointer: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
         configured: bool,
         frame_ready: bool,
-        /// Set when the compositor sends `layer_surface.closed`; the surface
-        /// must not be committed or presented again.
         closed: bool,
-        /// Surface buffer scale. Only [`CompositorHandler::scale_factor_changed`]
-        /// writes it: SCTK invokes that handler when the surface enters or
-        /// leaves an output with a different scale, so per-output scale
-        /// tracking must not be duplicated in the output handlers.
         scale: i32,
         size: (u32, u32),
         position: (i32, i32),
@@ -589,9 +529,6 @@ mod imp {
     }
 
     impl State {
-        /// `origin` is the position captured at press; `total` is the pointer
-        /// displacement since then, so the overlay cannot feed its own surface
-        /// movement back into the gesture.
         fn drag_to(&mut self, origin: (i32, i32), total: (f64, f64)) {
             let (x, y) = dragged_position(origin, total);
             if (x, y) != self.position {
@@ -602,10 +539,6 @@ mod imp {
             }
         }
 
-        /// `origin` is the size captured at press; `total` is the pointer
-        /// displacement since then. The next presented frame recomputes the
-        /// alpha-aware region at the new size; the pointer stays on this
-        /// surface through the implicit button-down grab.
         fn resize_to(&mut self, origin: (u32, u32), total: (f64, f64)) {
             let (width, height) = resized_extent(origin, total);
             if (width, height) != self.size {
@@ -619,8 +552,6 @@ mod imp {
 
         fn missing_all(&mut self, reason: &str) {
             for correlation_id in std::mem::take(&mut self.pending_feedback) {
-                // A compositor terminal for an already-synthesized commit must
-                // be dropped, exactly as the Skipped/Err paths arrange.
                 self.ignored_feedback.insert(correlation_id);
                 self.events
                     .push_back(Event::Presentation(PresentationFeedback {
@@ -869,12 +800,6 @@ mod imp {
                         self.events.push_back(Event::LocalUi(LocalUiFact::Hide));
                     }
                     PointerEventKind::Motion { .. } => {
-                        // Fallback for compositors without
-                        // `zwp_relative_pointer_v1`: surface-local motion is
-                        // relative to the moving surface, so this path can
-                        // under-travel during sustained drags. KWin, GNOME and
-                        // wlroots use the relative-motion path below instead
-                        // (accelerated delta preferred).
                         if self.relative_pointer.is_none() {
                             match self.interaction {
                                 Some(Interaction::Resize {

@@ -1,10 +1,3 @@
-//! Targeted Deletion management projection.
-//!
-//! Distinct from conversational forget. Client intent only stages a request;
-//! Host-local seated control confirms. Status is the bounded
-//! `DeletionStatusRequest`. Exact target text is Owner body and stays out of
-//! snapshots and Debug.
-
 use ene_api::v1::deletion::{
     DeletionHoldWire, DeletionOperationStatusView, DeletionParticipantReportWire,
     DeletionPhaseWire, DeletionPurposeWire, DeletionStatusPage, DeletionStatusRequest,
@@ -189,7 +182,6 @@ impl DeletionPanel {
         lines.join("\n")
     }
 
-    /// Advisory Client request. Destructive confirmation is Host-local.
     pub async fn request(
         &mut self,
         client: &mut Client,

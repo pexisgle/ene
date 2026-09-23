@@ -55,11 +55,6 @@ pub enum TaskReportSourceRef {
     ResultBody(TaskResultId),
 }
 
-/// One byte-bounded page of a report source body.
-///
-/// `text` is cut on a UTF-8 character boundary; `next` names the exact byte
-/// cursor of the following page so a caller can page a body larger than one
-/// frame without decoding it whole. `total_bytes` is the full body length.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TaskReportSourcePage {
     pub text: String,
@@ -67,7 +62,6 @@ pub struct TaskReportSourcePage {
     pub next: Option<u64>,
 }
 
-/// Diagnostics see lengths and cursors, never the body text.
 impl core::fmt::Debug for TaskReportSourcePage {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter

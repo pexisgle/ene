@@ -1,10 +1,3 @@
-//! Shared fixtures for the `ene-desktop` Stage 7 integration binaries.
-//!
-//! Each integration-test binary compiles this module on its own, so the same
-//! Host-open, private-seat, and deletion-driver pump logic cannot diverge
-//! between binaries. The pump interleaving is a Host/IPC ordering contract,
-//! not a convenience loop.
-
 #![allow(
     dead_code,
     clippy::expect_used,
@@ -26,9 +19,6 @@ use ene_desktop::ui::DesktopRuntime;
 use ene_inference::ProviderTransport;
 use ene_local_control::{ControlOutcome, FromConfirmation};
 
-/// A serving Host task. It must be drained and joined before the next process
-/// can re-bind the control socket; the join is an ordering contract, not a
-/// convenience cleanup.
 pub struct ServingTask {
     shutdown: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<Result<(), CoreError>>,
@@ -93,11 +83,6 @@ pub async fn wait_for_control(dir: &Path) -> bool {
     false
 }
 
-/// Registers this runtime as the GUI the Host spawned, then pairs it.
-///
-/// The private channel is the seat: the test adopts it through the same
-/// registration path the Host uses for its own child, so no test takes a seat
-/// from a public endpoint. The Owner's direct gesture is still the test's.
 pub async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
     let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
     desktop
@@ -113,7 +98,6 @@ pub async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle
     }
 }
 
-/// Stores a credential and assigns the model, with the Owner's direct gesture.
 pub async fn complete_setup(desktop: &mut DesktopRuntime, secret: &str, model: &str) {
     desktop.set_secret(secret.to_string());
     desktop
@@ -161,9 +145,6 @@ pub async fn drive_gui_until(desktop: &mut DesktopRuntime, handle: &HostHandle, 
             desktop.snapshot().deletion_body
         );
         handle.wake_deletion_driver_for_tests();
-        // Pump the Client while the tick waits: a sequential tick-then-refresh
-        // only ever answers an already-abandoned demand (IPC local-erasure
-        // wait), so the operation would sit on silence / driver period.
         let mut drive = std::pin::pin!(handle.run_targeted_deletion_tick());
         loop {
             tokio::select! {

@@ -1,6 +1,3 @@
-//! In-memory only: no sockets are opened and the environment is never
-//! mutated; frames go through the in-memory codec or plain in-memory scripts.
-
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthResult;
 use ene_api::v1::management::{
@@ -406,10 +403,6 @@ fn session_frames_stamp_only_text_inputs() {
     );
 }
 
-/// The boot cache is process-global; this serializes the boot tests so a
-/// reset in one never clears another's cached boot mid-assertion (nextest
-/// already isolates tests per process, this covers the shared-process runner
-/// too).
 static BOOT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
@@ -511,7 +504,6 @@ fn boot_incarnation_fails_closed_on_corrupt_or_exhausted_counters() {
             boot_incarnation(&dir).is_err(),
             "{name} counter must fail closed, never re-initialized"
         );
-        // Fail-closed leaves the corrupt bytes untouched for the operator.
         assert!(
             std::fs::read(counter_path(&dir)).unwrap_or_default() == bytes,
             "{name} failure must not rewrite the counter"
@@ -609,7 +601,6 @@ fn prepare_keeps_command_identity_and_leaves_requests_unstamped() -> Result<(), 
         incarnation_id: incarnation(),
         connection_id: None,
     };
-    // A pure request/response payload pairs by `request_id` only.
     let request = PreparedRequest::new(answer_payload());
     let request_frame = request.frame(sender, Some(6));
     assert!(
@@ -620,8 +611,6 @@ fn prepare_keeps_command_identity_and_leaves_requests_unstamped() -> Result<(), 
         request_frame.envelope.correlation.request_id.is_some(),
         "a pure request still pairs its response with a fresh request ID"
     );
-    // A management intent keeps one canonical identity: the envelope reuses
-    // the payload's `intent_id`, never a second minted command ID.
     let intent_id = CommandWireId(uuid::Uuid::new_v4());
     let intent = credential_intent(intent_id, &BaseViewMark(String::from("mark-1")), "openai");
     let prepared_intent = PreparedRequest::new(WirePayload::ManagementIntent(intent));
@@ -638,7 +627,6 @@ fn prepare_keeps_command_identity_and_leaves_requests_unstamped() -> Result<(), 
         carried.intent_id, intent_id,
         "the envelope and the payload carry one identity"
     );
-    // A text input mints a fresh command ID per prepared send.
     let submit = || {
         WirePayload::SubmitTextInput(submit_input(
             "companion-1",
@@ -772,7 +760,6 @@ fn decide_frame_classifies_facts_answers_and_deferrals() {
     );
 }
 
-/// Carries `limit` so out-of-order answers stay distinguishable by payload.
 fn history_answer(limit: u64) -> WirePayload {
     WirePayload::HistoryRequest(history_request("companion-1", limit))
 }
@@ -780,8 +767,6 @@ fn history_answer(limit: u64) -> WirePayload {
 #[test]
 fn deferred_queue_drops_the_oldest_frame_at_capacity() {
     let mut session = SessionState::default();
-    // The oldest frame is distinguishable, so its loss is observable through
-    // the only drain left: `take_undelivered`.
     session.push_deferred(script_frame(
         WirePayload::UndeliveredResponse(
             ene_api::v1::undelivered::UndeliveredResponse::NoCurrentPresence,

@@ -1,13 +1,3 @@
-//! GUI erasure participant: every copy this process actually holds.
-//!
-//! Inventory (Stage 7 E): timeline, Memory grounds/history, Task report,
-//! input draft, IME composition, undo, deferred frames (Client),
-//! usage/deletion panel bodies, and presented chat receipts. Registered
-//! secrets are not user content and are not wiped through this path; C1
-//! secret intake is zeroized by crate-private `SecretIntake`.
-//!
-//! `wiped` is returned only after the named copies are confirmed empty.
-
 use ene_api::v1::deletion::{
     ClientTempClass, DeletionDemand, DeletionTargetWire, LocalErasureResult,
 };

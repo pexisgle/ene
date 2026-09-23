@@ -171,11 +171,6 @@ pub enum ClientTempClass {
     InputDraft,
 }
 
-/// One target of a [`DeletionDemand`].
-///
-/// Targets name local data by class, never by the mechanical target text or a
-/// re-derivable copy of it: the wire never carries the Owner's body or the
-/// Host's search material (IPC §17.2, §23).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeletionTargetWire {
     WipeClass { class: ClientTempClass },

@@ -1,12 +1,3 @@
-//! Typed transport rejections (IPC §7.2, §24).
-//!
-//! Domain rejections stay Ok-side domain outcomes; these reject malformed
-//! or unnegotiated WIRE usage without side effects. A [`RejectNotice`] is
-//! frame-level and keeps the connection unless the connection itself is
-//! unusable; [`IncompatibleProtocol`] answers a major mismatch — in the
-//! envelope or in capability negotiation — and is terminal. Never a retry
-//! signal: resending the same bytes fails identically.
-
 use serde::{Deserialize, Serialize};
 
 use super::envelope::ProtocolVersion;
@@ -16,13 +7,7 @@ pub enum RejectKind {
     UnsupportedMessage,
     UnsupportedFieldValue,
     MissingRequiredField,
-    /// The message's protocol version cannot be processed: no shared major at
-    /// negotiation, or an envelope outside the connection's negotiated
-    /// version.
     IncompatibleProtocol,
-    /// The connection was superseded by a newer authentication for the same
-    /// device. The socket stays open (IPC §11.3), but the connection can never
-    /// become current again: further service requires a new connection.
     StaleConnection,
     InvalidHandshakePhase,
 }
@@ -33,22 +18,10 @@ pub struct RejectNotice {
     pub detail: String,
 }
 
-/// Terminal protocol refusal: no common major version (IPC §7.2, V-11).
-///
-/// Answers a major mismatch — capability negotiation with no shared major, or
-/// a pre-negotiation envelope the Host's major cannot interpret — and the
-/// connection ends after it is written. The Host reports both sides' maxima
-/// plus operator guidance, so the Client can distinguish "upgrade the Client"
-/// from "this Host is older" and never guesses compatibility. Never a retry
-/// signal: no retry makes the majors intersect.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IncompatibleProtocol {
-    /// Highest protocol version the Host supports.
     pub host_max: ProtocolVersion,
-    /// Highest protocol version the Client advertised.
     pub client_max: ProtocolVersion,
-    /// Upgrade guidance naming the protocol major to move to. Operational
-    /// text only.
     pub hint: String,
 }
 

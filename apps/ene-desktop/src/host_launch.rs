@@ -9,13 +9,6 @@ pub enum LaunchError {
     Spawn(String),
 }
 
-/// True when the Client listener already answers.
-///
-/// On Unix a stale socket that refuses a connect is not serving. The Windows
-/// arm probes with `std::fs::metadata`, which opens the pipe; only a
-/// successful open counts as serving, so a busy pipe instance can still read
-/// as not serving. That is a wasted `ene-core serve` (it loses the Host lock
-/// and exits), never a wrong "not serving" for a live Host.
 #[must_use]
 pub fn host_is_serving(data_dir: &Path) -> bool {
     #[cfg(unix)]
@@ -39,8 +32,6 @@ fn probe_windows_client_pipe(data_dir: &Path) -> bool {
     std::fs::metadata(pipe).is_ok()
 }
 
-/// Resolves `ENE_CORE_PATH` when it names a file, then falls back to `ene-core`
-/// next to this binary.
 #[must_use]
 pub fn locate_host_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("ENE_CORE_PATH") {
@@ -64,10 +55,6 @@ fn host_binary_name() -> &'static str {
     }
 }
 
-/// Starts `ene-core serve` in a new process group / detached session.
-///
-/// A waiter thread reaps the direct child so this GUI does not accumulate
-/// zombies; that wait is not a kill, and returning does not signal the child.
 pub fn detach_serve(data_dir: &Path, host_bin: &Path) -> Result<(), LaunchError> {
     if !host_bin.is_file() {
         return Err(LaunchError::MissingBinary);
@@ -100,8 +87,6 @@ pub fn detach_serve(data_dir: &Path, host_bin: &Path) -> Result<(), LaunchError>
     Ok(())
 }
 
-/// Reuses a serving Host, otherwise starts one. The launcher and the GUI share
-/// this one bootstrap policy.
 pub fn ensure_serving(data_dir: &Path) -> Result<(), LaunchError> {
     if host_is_serving(data_dir) {
         return Ok(());

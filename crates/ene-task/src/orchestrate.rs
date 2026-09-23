@@ -37,14 +37,6 @@ pub async fn orchestrate_task_creation(
     Ok(TaskProposalOutcome::AcceptedAsTask(reference))
 }
 
-/// Orchestrates one conversation-sourced Task creation proposal.
-///
-/// Identical identity minting as [`orchestrate_task_creation`], but the commit
-/// additionally requires the relied Owner input to still be the newest
-/// accepted one: [`ConversationTaskRepository::create_task_from_conversation`]
-/// compares that premise inside the same short transaction as the creation
-/// unit, so a newer Owner input supersedes the turn and answers
-/// [`TaskProposalOutcome::Superseded`] with zero writes.
 pub async fn orchestrate_task_creation_current(
     repository: &impl ConversationTaskRepository,
     premise: TaskProposalPremise,
@@ -94,18 +86,10 @@ pub struct SteeringProposalPremise {
 pub enum TaskProposalOutcome {
     AcceptedAsTask(TaskRef),
     AcceptedAsSteering(TaskRef),
-    /// A newer accepted Owner input superseded the relied utterance; nothing
-    /// was changed. Only the conversation-sourced guarded steering and
-    /// creation answer this.
     Superseded,
-    /// The relied-on revision or purpose does not match the durable current
-    /// state; nothing was changed and the caller re-evaluates.
     StalePremise {
         current: TaskRef,
     },
-    /// The Task is terminal (`Completed` / `Failed` / `Cancelled`); the revision and
-    /// context are unchanged. Absorbing, so it is distinct from revision
-    /// staleness.
     TaskTerminal {
         task: TaskId,
         progress: TaskProgress,
@@ -230,23 +214,6 @@ fn map_commit_outcome(outcome: TaskCommitOutcome) -> TaskProposalOutcome {
     }
 }
 
-/// Orchestrates one delegation creation against the repository (H-A / AU3).
-///
-/// The precheck loads the durable current state: an absent Task returns
-/// [`DelegationOutcome::MissingTask`], a terminal Task returns
-/// [`DelegationOutcome::TaskTerminal`] (terminal is never folded into a stale
-/// answer, even when the revision also differs), and only then does a current
-/// revision different from `command.task` return
-/// [`DelegationOutcome::StaleTaskRevision`]; none of these paths mints
-/// identities or writes anything. On a match the orchestration
-/// mints the delegation and agent identities, builds the premise, and calls
-/// [`TaskRepository::create_delegation`]. The precheck is not the
-/// concurrency guarantee: `create_delegation` compares the revision again
-/// inside its atomic commit, so a competing winner between the precheck and
-/// the commit still yields [`DelegationOutcome::StaleTaskRevision`].
-///
-/// The repository outcome is passed through unchanged, and repository
-/// technical errors stay `Err`; domain outcomes are never folded into them.
 pub async fn orchestrate_delegation(
     repository: &impl TaskRepository,
     command: CreateDelegationCommand,

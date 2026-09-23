@@ -2,10 +2,6 @@ use std::path::Path;
 
 use crate::ipc::{PoseClip, PoseHint};
 
-/// Activity hint → clip file name.
-///
-/// Idle uses the model pose, listening the greeting, speaking the full-body
-/// presentation, working the stretching motion, and attention the V sign.
 pub const DEFAULT_POSE_CLIPS: [(PoseHint, &str); 5] = [
     (PoseHint::Idle, "VRMA_06.vrma"),
     (PoseHint::Listening, "VRMA_02.vrma"),

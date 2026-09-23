@@ -1,12 +1,3 @@
-//! Routing envelope and protocol version (IPC §5, §7.2).
-//!
-//! The envelope routes; it never authorizes. Envelope validation success is
-//! not payload acceptance: the Host maps the envelope, validates the payload,
-//! and hands domain premises to owner checks. There is deliberately no
-//! payload field here: payload framing is the transport frame's job, and
-//! [`super::payload::WirePayload`] is the typed body carried beside the
-//! envelope.
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -24,9 +15,6 @@ pub struct ProtocolVersion {
 impl ProtocolVersion {
     pub const V1: Self = Self { major: 1, minor: 0 };
 
-    /// A narrow predicate, not a compatibility verdict: sharing a major only
-    /// admits the pair to negotiation. The negotiated version is fixed per
-    /// connection (older minor's understood range, never silent upgrade).
     #[must_use]
     pub fn shares_major_with(&self, other: &Self) -> bool {
         self.major == other.major

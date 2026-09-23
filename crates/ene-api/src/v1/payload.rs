@@ -30,22 +30,14 @@ pub struct BodyStateHint {
     pub pose_hint: String,
 }
 
-/// One variant per wire payload: the enum, its externally tagged serde form,
-/// and [`WirePayload::message_type`]'s canonical envelope name all come from
-/// the same list, so a variant and its tag can never drift apart.
 macro_rules! wire_payload {
     ($( $variant:ident($type:ty) ),+ $(,)?) => {
-        /// Externally tagged; unknown variants are rejected at deserialization,
-        /// never defaulted. The tag is the variant name.
         #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
         pub enum WirePayload {
             $($variant($type)),+
         }
 
         impl WirePayload {
-            /// Canonical name senders put in the envelope; receivers compare the
-            /// envelope string against this (instead of trusting it) and reject
-            /// mismatches without guessing.
             #[must_use]
             pub fn message_type(&self) -> &'static str {
                 match self {

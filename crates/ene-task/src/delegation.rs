@@ -81,13 +81,9 @@ pub struct DelegationCreationPremise {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DelegationOutcome {
     Delegated(DelegationRef),
-    /// The expected Task revision no longer matches; nothing was changed.
     StaleTaskRevision {
         current: TaskRef,
     },
-    /// The Task is terminal (`Completed` / `Failed` / `Cancelled`); no delegation is
-    /// created and the revision is not advanced. Absorbing, so it is
-    /// distinct from revision staleness.
     TaskTerminal {
         task: TaskId,
         progress: TaskProgress,

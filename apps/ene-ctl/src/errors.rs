@@ -9,8 +9,6 @@ pub enum CliError {
     Usage(String),
     #[error(transparent)]
     Config(#[from] ConfigError),
-    /// Transport, codec, and Host domain outcomes pass through from
-    /// [`ene_client::ClientError`] unchanged.
     #[error(transparent)]
     Client(#[from] ClientError),
 }

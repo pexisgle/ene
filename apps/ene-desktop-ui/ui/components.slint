@@ -4,8 +4,6 @@ import { Theme } from "theme.slint";
 export struct Item { key: string, title: string, body: string, meta: string, state: string }
 export struct Message { owner: bool, text: string, caption: string }
 
-/// One activation surface: pointer hover, focus, Return/Space activation, and
-/// the focus target a button or card forwards to.
 component Activate inherits FocusScope {
     out property <bool> hovered: hit.has-hover;
     callback activated();
@@ -142,8 +140,6 @@ component RowCardBody inherits VerticalLayout {
     if item.body != "": BodyText { text: root.item.body; }
     if item.meta != "": Caption { text: root.item.meta; }
 }
-/// Informational card: no button role, pointer target, or focus, so it offers
-/// no affordance an operator could activate.
 export component StaticRowCard inherits Rectangle {
     in property <Item> item;
     min-height: content.min-height;

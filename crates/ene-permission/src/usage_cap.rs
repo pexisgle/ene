@@ -165,7 +165,6 @@ impl UsageCapRef {
         Self { id, revision }
     }
 
-    /// What the cap limits.
     #[must_use]
     pub const fn scope(&self) -> &UsageCapScope {
         self.id.scope()
@@ -203,7 +202,6 @@ impl UsageCap {
         UsageCapRef::new(self.id.clone(), self.revision)
     }
 
-    /// What the cap limits.
     #[must_use]
     pub const fn scope(&self) -> &UsageCapScope {
         self.id.scope()
@@ -367,7 +365,6 @@ mod tests {
         let period = window
             .period_containing(at("2026-03-15T13:45:00+09:00"))
             .expect("the period exists");
-        // 2026-03-15T04:45:00Z: the local offset does not move the boundary.
         assert_eq!(period.start(), at("2026-03-15T00:00:00Z"));
         assert_eq!(period.end(), at("2026-03-16T00:00:00Z"));
     }
@@ -486,7 +483,6 @@ mod tests {
                 "the mark roundtrips: {mark}"
             );
         }
-        // Face-stale: another slot, another shape, a bad revision, or empty.
         for mark in [
             "usage-cap-system-monthly_utc-rev-3",
             "usage-cap-provider-other-daily_utc-rev-1",
@@ -502,8 +498,6 @@ mod tests {
                 "a foreign mark must be face-stale, not a guess: {mark}"
             );
         }
-        // A provider name containing `-` still parses: the prefix is built
-        // from the exact provider the reader asked about.
         let hyphenated = UsageCapScope::Provider(String::from("open-ai"));
         assert_eq!(
             parse_usage_cap_mark(

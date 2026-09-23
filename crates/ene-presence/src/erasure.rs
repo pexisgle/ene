@@ -8,7 +8,6 @@ use ene_preservation::{
 
 use crate::PresenceTechnicalError;
 
-/// Store port for the presence owner's local erasure.
 pub trait PresenceErasureRepository: Send + Sync {
     fn erase_target_text(
         &self,

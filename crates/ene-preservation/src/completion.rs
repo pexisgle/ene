@@ -1,17 +1,3 @@
-//! Global completion vocabulary for Targeted Deletion (lifecycle §10, §12-§14).
-//!
-//! Local completion and system-wide completion are different facts. A
-//! participant's `LocalComplete` (or one successful transaction, one Client
-//! ACK, or one LLM self-report) is never a global completion candidate: only a
-//! durable aggregate of the whole required participant set for the operation's
-//! *current* sweep can be, and the completion boundary re-derives that premise
-//! from the canonical store instead of accepting a caller boolean.
-//!
-//! This module owns the vocabulary only. The state transition, the
-//! system-wide mechanical remainder verification, and the atomic
-//! material-wipe / audit / condition-closure commit live in the canonical
-//! store (`PreservationRepository`).
-
 use crate::{
     DeletionHoldReason, DeletionOperationId, DeletionOperationRef, DeletionSweepGeneration,
 };

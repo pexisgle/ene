@@ -69,13 +69,6 @@ pub fn load_stored_device(data_dir: &Path) -> DeviceFileState {
     DeviceFileState::Loaded(stored)
 }
 
-/// Atomically replaces the device file: the new document is staged to an
-/// owner-only temp in the same directory, synced, and renamed over the
-/// target, so a crash or write failure leaves either the old or the new
-/// document whole, never a torn or empty file.
-///
-/// Callers persist only after the Host accepted the ownership proof, so a
-/// failed pairing attempt never replaces a working file.
 pub fn store_device(data_dir: &Path, device: &StoredDevice) -> Result<(), ClientError> {
     let bytes = Zeroizing::new(serde_json::to_vec(device).map_err(|error| {
         ClientError::Transport(format!("client device encode failed: {error}"))
@@ -88,12 +81,6 @@ pub fn store_device(data_dir: &Path, device: &StoredDevice) -> Result<(), Client
     )
 }
 
-/// Atomically replaces `target` with `bytes`: staged to a temp in the same
-/// directory, synced, and renamed over the target, so concurrent writers and
-/// crashes publish only whole content. `mode` is the Unix permission applied
-/// to the staging temp (secret material uses `0o600`); other platforms ignore
-/// it. Failure messages carry `context` and the I/O kind only, never content
-/// or paths, and the temp is removed best-effort after a failure.
 pub(crate) fn atomic_replace(
     target: &Path,
     bytes: &[u8],
@@ -128,8 +115,6 @@ pub(crate) fn atomic_replace(
         }
         #[cfg(not(unix))]
         {
-            // Unix permission bits do not apply to the staging temp here; the
-            // platform's default ACLs govern it.
             let _ = mode;
         }
         let mut file = options
@@ -164,8 +149,6 @@ mod tests {
         DeviceFileState, StoredDevice, device_file_path, load_stored_device, store_device,
     };
 
-    /// Unique per process and test, so parallel tests never share a device
-    /// file.
     fn scratch_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "ene-ctl-device-{}-{}-{name}",
@@ -178,10 +161,7 @@ mod tests {
     }
 
     fn remove_dir(dir: &std::path::Path) {
-        if std::fs::remove_dir_all(dir).is_err() {
-            // Scratch cleanup is best effort; a leftover temp dir never
-            // affects the test verdict.
-        }
+        if std::fs::remove_dir_all(dir).is_err() {}
     }
 
     fn stored() -> StoredDevice {
@@ -276,9 +256,6 @@ mod tests {
         remove_dir(&dir);
     }
 
-    /// A staging failure (here: the parent directory refuses creation) must
-    /// leave the previous document byte-identical. Skipped when permissions
-    /// are not enforced (for example a privileged runner).
     #[cfg(unix)]
     #[test]
     fn staging_failure_keeps_the_previous_document() {
@@ -294,8 +271,6 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
             .expect("the scratch directory must be made read-only");
 
-        // A privileged environment can still write into a 0500 directory;
-        // the failure mode under test cannot be reached there.
         let enforced = std::fs::write(dir.join("probe"), b"x").is_err();
         if enforced {
             let replacement = StoredDevice::new(
@@ -322,9 +297,6 @@ mod tests {
         remove_dir(&dir);
     }
 
-    /// Concurrent writers never publish a partial document: every observed
-    /// file state is either absent (first creation) or a complete, loadable
-    /// identity written by one of the writers.
     #[test]
     fn concurrent_stores_publish_only_whole_documents() {
         use std::sync::Arc;

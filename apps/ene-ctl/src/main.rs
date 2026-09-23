@@ -1,31 +1,3 @@
-//! `ene-ctl` CLI client entrypoint.
-//!
-//! The client holds no canonical state and establishes no local authority of
-//! its own; round identity stays Host-issued, and every acceptance or outcome
-//! is Host-reported.
-//!
-//! Presentation output avoids the `print!` family (workspace-denied): all
-//! output goes through `writeln!`/`write!` on locked stdio handles with
-//! explicit flushes, so each write site states its destination and its
-//! failure becomes a [`CliError::Client`] transport error.
-//!
-//! Stdout contract: view and history commands print their rendered lines (or
-//! nothing when empty). `send` prints `AcceptedForRound <round>`, then the
-//! stream deltas concatenated as they arrive (flushed per frame), then a
-//! trailing newline on [`TextStreamClose`](ene_api::v1::round::TextStreamClose),
-//! and finally sends one presentation observation for the round whose status
-//! is `Presented` only when text was shown or the stream completed and
-//! `Unknown` otherwise (no reply is expected; nothing is sent when stdio
-//! failed mid-stream). Host auto-presented backlog summaries are painted to
-//! stdout before and among the deltas and ACKed as receipts after the stream
-//! observation. Deltas on stdout are the user's own conversation text by
-//! design; error paths (stderr, exit codes) never carry bodies or secrets.
-//!
-//! Exit codes: `0` on success; `1` for usage and technical failures
-//! (transport, codec, terminal server refusals); `2` for retryable
-//! server-side domain outcomes (stale rounds, held transitions, stale base
-//! views, pending confirmations, and similar Ok-side declines).
-
 use ene_ctl::errors::CliError;
 use ene_ctl::{client, cmds};
 
@@ -303,8 +275,6 @@ run `ene-ctl --help`",
     ))
 }
 
-/// Defaults shared by the clap surface and the parser fallbacks so the two
-/// cannot drift apart.
 const DEFAULT_DELETION_PURPOSE: &str = "privacy";
 const DEFAULT_USAGE_CAP_WINDOW: &str = "daily_utc";
 const DEFAULT_USAGE_CAP_CURRENCY: &str = "USD";
@@ -314,8 +284,6 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
     let Some((name, sub)) = matches.subcommand() else {
         return Err(usage_error("missing command"));
     };
-    // A global `--config` after the subcommand lands on the subcommand's
-    // matches; either placement selects the same file.
     let config = config.or_else(|| sub.get_one::<PathBuf>("config").cloned());
     let command = match name {
         "setup" => cmds::Command::Setup(setup_mode(sub)?),
@@ -506,8 +474,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// Runs on a single-threaded Tokio runtime; the transport is a Host-local
-/// socket/pipe (no network today).
 fn run() -> Result<(), CliError> {
     let args = std::env::args_os().skip(1);
     let matches = match ene_ctl_command()
@@ -656,11 +622,6 @@ async fn run_command(
     }
 }
 
-/// Fails a `Reject` frame before any helper matches on its expected payload, so
-/// a superseded authenticated connection surfaces the Host's operational reason
-/// (`RejectKind::StaleConnection`) rather than an "unexpected Reject" shape
-/// error. `Reject` is a defined answer, not a malformed payload; the exit class
-/// stays `ServerRejected`.
 fn answer(payload: WirePayload, operation: &str) -> Result<WirePayload, CliError> {
     match payload {
         WirePayload::Reject(notice) => Err(CliError::Client(ClientError::ServerRejected(format!(
@@ -671,9 +632,6 @@ fn answer(payload: WirePayload, operation: &str) -> Result<WirePayload, CliError
     }
 }
 
-/// The one "unexpected payload" rejection shape: the operation and the
-/// expected payload kind are stated, and the actual kind comes from the wire
-/// type name only.
 fn unexpected_payload(payload: &WirePayload, operation: &str, expected: &str) -> CliError {
     CliError::Client(ClientError::ServerRejected(format!(
         "unexpected {} while {operation}; expected {expected}",
@@ -681,9 +639,6 @@ fn unexpected_payload(payload: &WirePayload, operation: &str, expected: &str) ->
     )))
 }
 
-/// One bounded usage summary read. `Reject` (a malformed filter the Host
-/// refuses) stays distinct from `Unavailable` (the read could not answer) and
-/// from a stale cursor.
 async fn request_usage(
     session: &mut client::Client,
     request: &UsageSummaryRequest,
@@ -807,8 +762,6 @@ fn emit(text: &str) -> Result<(), CliError> {
     stdout_line(&mut std::io::stdout(), text)
 }
 
-/// Writes one line and flushes explicitly so piped output is complete on
-/// return.
 fn stdout_line(stdout: &mut std::io::Stdout, text: &str) -> Result<(), CliError> {
     writeln!(stdout, "{text}").map_err(|error| {
         CliError::Client(ClientError::Transport(format!(
@@ -819,8 +772,6 @@ fn stdout_line(stdout: &mut std::io::Stdout, text: &str) -> Result<(), CliError>
     stdout_flush(stdout)
 }
 
-/// Writes one fragment and flushes explicitly so piped output is complete on
-/// return.
 fn stdout_write(stdout: &mut std::io::Stdout, text: &str) -> Result<(), CliError> {
     write!(stdout, "{text}").map_err(|error| {
         CliError::Client(ClientError::Transport(format!(
@@ -840,13 +791,6 @@ fn stdout_flush(stdout: &mut std::io::Stdout) -> Result<(), CliError> {
     })
 }
 
-/// A setup view always carries the five Host setup sections when the
-/// stores are readable; an empty section set is `unavailable_view()`, the only
-/// signal the view path has for an unreadable store (`ene-core` `setup.rs`).
-/// Both the read-only display and the assign flow must refuse that view before
-/// reading its mark: `unavailable_view()` carries no usable mark, so an assign
-/// against it would commit mutating steps before the assignment is rejected as
-/// stale.
 fn require_setup_view(view: &ene_api::v1::management::ManagementView) -> Result<(), CliError> {
     if view.sections.is_empty() {
         return Err(CliError::Client(ClientError::ServerOutcome(String::from(
@@ -953,9 +897,6 @@ async fn request_task_report(
     cmds::describe_report(response)
 }
 
-/// One bounded source-body page; `describe_report_source` keeps
-/// `InputUnavailable` retryable (exit 2): the body exists but cannot be
-/// projected safely right now.
 async fn request_report_source(
     session: &mut client::Client,
     source: &str,
@@ -1000,8 +941,6 @@ async fn request_select_task(
     }
 }
 
-/// Explicit first-party resume through the wire command; the Host keys
-/// idempotency on the command id.
 async fn run_resume_task(
     session: &mut client::Client,
     task: &str,
@@ -1164,9 +1103,6 @@ async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Resul
     }
 }
 
-/// Paints one auto-presented backlog summary to `stdout` and remembers its
-/// receipt in `auto` for the post-close ACK. A stdio failure returns before
-/// any ACK, so the Host keeps the batch `Unknown`.
 fn paint_auto(
     stdout: &mut std::io::Stdout,
     summary: UndeliveredSummary,
@@ -1186,10 +1122,6 @@ fn paint_auto(
     Ok(())
 }
 
-/// Any stdio failure before the close frame and the buffered frames are
-/// flushed returns early and sends no presentation observation, so the Host
-/// keeps the stream `Pending`/`Unknown` instead of recording a presentation
-/// the operator never saw.
 async fn run_send(
     session: &mut client::Client,
     language: &str,
@@ -1218,10 +1150,6 @@ async fn run_send(
     let round = cmds::describe_intake(&outcome)?;
     let mut stdout = std::io::stdout();
     stdout_line(&mut stdout, &format!("AcceptedForRound {round}"))?;
-    // Backlog the Host auto-presented at attach (recovery/summon, no Owner
-    // query): paint it before the new reply and ACK it with the stream's
-    // presentation observation below. A stdio failure here sends no ACK, so
-    // the Host keeps the batch Unknown.
     let mut auto: Vec<(UndeliveredAck, RoundWireId, u64)> = Vec::new();
     for frame in session.take_undelivered() {
         if let WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)) =
@@ -1257,8 +1185,6 @@ async fn run_send(
                 // generation in the frame loop; there is nothing to display.
             }
             WirePayload::UndeliveredResponse(UndeliveredResponse::Summary(summary)) => {
-                // Auto-presented backlog interleaved with the stream: paint
-                // inline and remember the receipt for the end-of-send ACK.
                 paint_auto(&mut stdout, summary, &mut auto)?;
             }
             WirePayload::UndeliveredResponse(_) | WirePayload::UndeliveredAckOutcome(_) => {
@@ -1284,9 +1210,6 @@ async fn run_send(
             detail: None,
         }))
         .await?;
-    // The backlog painted above (attach-time and in-stream auto-presents)
-    // is ACKed only now, after its final frame painted: a partial batch
-    // would have returned early above with no ACK, keeping it Unknown.
     for (ack, round, generation) in auto {
         ack_summary(session, ack, round, generation).await?;
     }
@@ -1351,7 +1274,6 @@ mod tests {
             clap_error(&["--version"]),
             clap::error::ErrorKind::DisplayVersion
         ));
-        // Subcommand help is standard too.
         assert!(matches!(
             clap_error(&["send", "--help"]),
             clap::error::ErrorKind::DisplayHelp
@@ -1373,7 +1295,6 @@ mod tests {
             parse(&["--config", "/tmp/ene.json", "setup", "--show"]).expect("config plus setup");
         assert!(cli.config == Some(PathBuf::from("/tmp/ene.json")));
         assert!(cli.command == super::cmds::Command::Setup(super::cmds::SetupMode::Show));
-        // `--config` after the subcommand is accepted as a global option.
         let after =
             parse(&["setup", "--show", "--config", "/tmp/ene.json"]).expect("config after setup");
         assert!(after.config == Some(PathBuf::from("/tmp/ene.json")));

@@ -24,24 +24,18 @@ const SQL_INSERT_MEMORY_REVISION: &str = "INSERT INTO learning_memory_revision (
 
 const SQL_INSERT_SUMMARY_IGNORE: &str = "INSERT OR IGNORE INTO learning_summary (summary_id, companion_id, content, source_kind, source_start, source_end, formed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
-/// The Memory row projection every Memory read decodes with, in the exact
-/// order [`RawMemory`] consumes it. Single-sourced so a column cannot be
-/// added to one read and missed in another.
 macro_rules! memory_projection {
     () => {
         "memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at"
     };
 }
 
-/// The qualified [`memory_projection`] for the recall union's lexical arm,
-/// which joins the derived token index and must qualify every column.
 macro_rules! qualified_memory_projection {
     () => {
         "m.memory_id, m.companion_id, m.revision, m.content, m.importance, m.temporal, m.recall_suppressed, m.updated_at"
     };
 }
 
-/// The Summary row projection in the exact order [`RawSummary`] consumes it.
 macro_rules! summary_projection {
     () => {
         "summary_id, companion_id, content, source_kind, source_start, source_end, formed_at"
@@ -169,9 +163,6 @@ fn commit_change_sync(
             let Some(next) = current.checked_next() else {
                 return Ok(MemoryChangeOutcome::RevisionExhausted { memory: id });
             };
-            // The durable column is signed: a revision at the representable
-            // bound is exhausted for storage even though `checked_next`
-            // succeeded, and nothing may be written.
             if encode_revision(next).is_err() {
                 return Ok(MemoryChangeOutcome::RevisionExhausted { memory: id });
             }
@@ -221,17 +212,6 @@ fn insert_summary(
     Ok(())
 }
 
-/// Writes one Memory's current row for either branch of a committed change.
-///
-/// The `New`/`Existing` pre-check in [`commit_change_sync`] already decided
-/// the outcome and, for `Existing`, proved the row's scope and revision, so
-/// the upsert's conflict arm only ever overwrites that same row; the scope
-/// (`companion_id`) is deliberately not rewritten.
-///
-/// The derived recall token rows are rebuilt in the same transaction, so the
-/// index never observes a half-written recognition. Suppression needs no
-/// reindexing: the lexical arm filters suppressed rows at read time, and
-/// clearing the flag re-exposes the already-indexed tokens.
 fn insert_current(
     tx: &Transaction<'_>,
     memory: MemoryId,

@@ -110,9 +110,6 @@ fn insert_attempt_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(action_unavailable)?;
-    // Attempt identities and evaluations are single-use. The `Immediate`
-    // transaction excludes any concurrent writer between these pre-checks and
-    // the insert, so the pre-checks are the complete duplicate answer.
     let existing: Option<String> = tx
         .query_row(SQL_SELECT_ATTEMPT_EXISTS, params![attempt_text], |row| {
             row.get(0)
@@ -240,8 +237,6 @@ fn insert_attempt_sync(
         ],
     )
     .map_err(action_unavailable)?;
-    // AU5 registers the started attempt in the same transaction: phase
-    // `unknown` until objective evidence moves the certainty.
     register_action_attempt(
         &tx,
         &task_text,
@@ -292,8 +287,6 @@ fn compare_and_set_sync(
     if current != expected {
         return Ok(CertaintyUpdateOutcome::StaleCurrent { current });
     }
-    // The `WHERE ... certainty = ?4` guard cannot miss under the `Immediate`
-    // writer that read `current` above, so the update always applies once.
     tx.execute(
         SQL_UPDATE_CERTAINTY,
         params![
@@ -304,9 +297,6 @@ fn compare_and_set_sync(
         ],
     )
     .map_err(action_unavailable)?;
-    // The certainty CAS is a new fact: register the new phase in the same
-    // transaction. A grounded `unknown -> unknown` update reuses the start
-    // phase and the source-key constraint keeps that a no-op.
     register_action_attempt(&tx, &task_text, attempt.as_raw(), certainty_wire(new))?;
     tx.commit().map_err(action_unavailable)?;
     Ok(CertaintyUpdateOutcome::Updated)
