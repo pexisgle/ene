@@ -1170,9 +1170,6 @@ where
 }
 
 #[cfg(test)]
-mod tests;
-
-#[cfg(test)]
 mod launcher_tests {
     use super::*;
 

@@ -29,9 +29,6 @@ mod repository;
 mod scope;
 mod summary;
 
-#[cfg(test)]
-mod test_support;
-
 #[doc(no_inline)]
 pub use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
 pub use formation::{

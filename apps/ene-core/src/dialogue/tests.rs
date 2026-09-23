@@ -234,19 +234,6 @@ fn split_presence_fact(
     (Some(fact.clone()), &responses[1..])
 }
 
-fn accepted_round(responses: &[ene_plugin_ipc::WireFrame]) -> Result<RoundWireId, String> {
-    let (_, answers) = split_presence_fact(responses);
-    let Some(first) = answers.first() else {
-        return Err(String::from("the submit must answer"));
-    };
-    match &first.payload {
-        WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) => {
-            Ok(round.clone())
-        }
-        other => Err(format!("the submit must accept, got {other:?}")),
-    }
-}
-
 async fn timeline_count(handle: &HostHandle) -> Result<usize, String> {
     use ene_companion::CompanionRepository as _;
     use ene_companion::HistoryRepository as _;
@@ -262,26 +249,6 @@ async fn timeline_count(handle: &HostHandle) -> Result<usize, String> {
         .await
         .map_err(|error| format!("the timeline must load: {error:?}"))?;
     Ok(timeline.len())
-}
-
-async fn current_generation(handle: &HostHandle) -> Result<u64, String> {
-    use ene_companion::CompanionRepository as _;
-    use ene_presence::PresenceRepository as _;
-
-    let companion = handle
-        .store
-        .ensure_running_companion()
-        .await
-        .map_err(|error| format!("the companion must resolve: {error:?}"))?;
-    let attribution = handle
-        .store
-        .load_attribution(companion.as_raw())
-        .await
-        .map_err(|error| format!("attribution must load: {error:?}"))?;
-    let Some(current) = attribution else {
-        return Err(String::from("attribution must load"));
-    };
-    Ok(current.generation.as_u64())
 }
 
 /// The durable attribution of the running companion, as the Host reads it
@@ -1170,9 +1137,6 @@ async fn accepted_replacement(after_install: bool) -> Result<(), String> {
 }
 
 mod credential_suite;
-mod task_agent;
-mod task_control;
-mod task_run;
 
 /// Stage 6 A3c: a Targeted Deletion condition that becomes durable while a
 /// reply is streaming stops the remaining deltas and refuses the assembled

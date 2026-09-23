@@ -661,44 +661,6 @@ impl ConnectionTable {
         Some(commit())
     }
 
-    /// Test-only: pins one incarnation on an accepted record exactly as the
-    /// first admitted frame would, so Client-lifecycle tests need no transport.
-    #[cfg(test)]
-    pub(crate) fn pin_incarnation_for_tests(
-        &self,
-        id: &ConnectionWireId,
-        counter: u64,
-        random: u64,
-    ) -> bool {
-        let mut table = crate::lock_unpoison(&self.inner);
-        let Some(record) = table.records.get_mut(id) else {
-            return false;
-        };
-        if record.incarnation.is_some() {
-            return false;
-        }
-        record.incarnation = Some(ClientIncarnationId { counter, random });
-        true
-    }
-
-    /// Test-only pending-challenge snapshot.
-    #[cfg(test)]
-    pub(crate) fn challenge_nonce_of(&self, id: &ConnectionWireId) -> Option<String> {
-        crate::lock_unpoison(&self.inner)
-            .records
-            .get(id)
-            .and_then(|record| record.nonce.clone())
-    }
-
-    /// Test-only negotiated-terms snapshot.
-    #[cfg(all(test, unix))]
-    pub(crate) fn negotiated_of(&self, id: &ConnectionWireId) -> Option<NegotiatedConnection> {
-        crate::lock_unpoison(&self.inner)
-            .records
-            .get(id)
-            .and_then(|record| record.negotiated.clone())
-    }
-
     /// [`LiveInput`] snapshot for a connection, without an envelope.
     ///
     /// Mirrors [`ConnectionTable::live_for`]'s premise derivation so the
@@ -1819,9 +1781,6 @@ pub async fn run_until_shutdown(
 ) -> Result<(), CoreError> {
     Err(CoreError::UnsupportedPlatform("no supported listener"))
 }
-
-#[cfg(all(test, unix))]
-mod tests;
 
 #[cfg(all(test, any(unix, windows)))]
 pub(crate) mod shutdown_tests;

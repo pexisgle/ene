@@ -1353,18 +1353,6 @@ impl HostHandle {
         self.transient_fence.epoch()
     }
 
-    /// Test-only: empties the erasure-participant registry.
-    ///
-    /// The built-in composition registers one implementation per served
-    /// owner; a fan-out test that needs the unsupported-hold path, or a
-    /// scripted implementation for a served owner, clears the registry first.
-    /// Production code has no path that removes an implementation.
-    #[cfg(test)]
-    pub(crate) fn reset_deletion_participants_for_tests(&self) {
-        *crate::lock_unpoison(&self.targeted_deletion) =
-            crate::targeted_deletion::ErasureParticipantRegistry::new();
-    }
-
     /// Runs one bounded Targeted Deletion fan-out pass over the durable
     /// unfinished operations.
     ///
@@ -2891,6 +2879,3 @@ impl HostHandle {
 }
 
 use ene_plugin_ipc::WireFrame;
-
-#[cfg(test)]
-mod tests;

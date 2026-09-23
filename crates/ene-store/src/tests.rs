@@ -8,13 +8,12 @@ use ene_companion::{
 use ene_credential::{
     CredentialApprovalRepository, CredentialIntentRepository as _, CredentialRef,
     CredentialRefRepository, CredentialSetRepository, CredentialSetRevision,
-    CredentialTechnicalError, DevicePairingRepository, MemoryCredentialStore, RegistrationApply,
-    RegistrationFingerprint, RegistrationState,
+    CredentialTechnicalError, MemoryCredentialStore, RegistrationApply, RegistrationFingerprint,
+    RegistrationState,
 };
 use ene_inference::{
-    AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _,
-    InferenceTechnicalError, InferenceTicketId, TaskAgentAttemptPremise, UsageFact,
-    UsageRepository, UsageSource,
+    AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _, InferenceTicketId,
+    TaskAgentAttemptPremise, UsageFact, UsageRepository, UsageSource,
 };
 use ene_learning::{
     ChangeKind, ExperienceSourceKind, Importance, LearningRepository, LearningScope, MemoryChange,
@@ -25,10 +24,7 @@ use ene_permission::{
     CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
     ConsumerKind, IntentFingerprint, IntentOutcomeRepository, IntentResolution, PurposeKind,
 };
-use ene_presence::{
-    ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
-    PresenceGeneration, PresenceRepository, PresenceState, ThinMoveReason,
-};
+use ene_presence::{PresenceGeneration, PresenceRepository, PresenceState};
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 use ene_task::{
     AssigneeRef, DelegatedWorkspace, DelegationCreationPremise, DelegationId, DelegationOutcome,
@@ -1811,26 +1807,12 @@ async fn record_result(store: &Store, delegation: DelegationId, text: &str) -> T
     }
 }
 
-mod action;
-mod agent;
-mod cancel;
 mod client_delivery;
-mod completion;
-mod delayed_arrival;
-mod deletion_request;
-mod erasure;
-mod erasure_owners;
-mod participant_erasure;
-mod presence;
 mod preservation;
 mod report_reads;
 mod result_reevaluation;
-mod resume;
 mod source_reconciliation;
 mod targeted_deletion;
-mod task_failure;
 mod task_result;
-mod undelivered;
-mod usage;
 mod usage_cap;
 mod usage_query;

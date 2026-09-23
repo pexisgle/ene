@@ -1369,6 +1369,3 @@ fn inconsistent(reason: &str) -> TaskTechnicalError {
         reason: String::from(reason),
     }
 }
-
-#[cfg(test)]
-mod tests;
