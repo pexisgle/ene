@@ -49,7 +49,7 @@ const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, compa
 /// one read and missed in another.
 macro_rules! history_projection {
     () => {
-        "message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random"
+        "message_id, round_id, role, body, lang, at, presence_generation, command_id, round_wire, round_intent, round_intent_ref, client_counter, client_random"
     };
 }
 
@@ -600,7 +600,7 @@ impl HistoryRepository for Store {
                 .query_row(
                     SQL_SELECT_HISTORY_BY_MESSAGE,
                     params![message_text],
-                    |row| Ok((HistoryRow::from_row(row)?, row.get(14)?)),
+                    |row| Ok((HistoryRow::from_row(row)?, row.get(13)?)),
                 )
                 .optional()
                 .map_err(|error| companion_unavailable(error.to_string()))?;

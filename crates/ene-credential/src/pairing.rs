@@ -62,6 +62,24 @@ pub trait DevicePairingRepository: Send + Sync {
         origin_connection: String,
     ) -> Result<PendingPairing, CredentialTechnicalError>;
 
+    /// Approves the pending request `pending_id` issued on `origin_connection`,
+    /// pairing the device and issuing its one-time pairing secret.
+    ///
+    /// The pending delete and the paired insert share one transaction keyed on
+    /// both columns (compare-and-swap): only the row with this exact id and
+    /// origin pairs, so an unknown id, an already-approved id, or a wrong
+    /// connection yields `Ok(None)`. Re-approval never rotates a secret.
+    ///
+    /// Secret custody flow: the trait is secret-free in storage. The approve
+    /// caller (Host composition) holds the returned secret in memory,
+    /// short-lived, persists it through the protected device-auth store
+    /// (`FileDeviceAuthStore::save_secret`) for later proof verification, and
+    /// transfers it once through the authentication-only provision frame to
+    /// the live originating Client connection.
+    ///
+    /// Approval records an Owner decision transported from a trusted inlet;
+    /// the repository never decides whether pairing is allowed, it records
+    /// the decision it was given.
     async fn approve_pending(
         &self,
         pending_id: &str,

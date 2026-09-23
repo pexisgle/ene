@@ -146,7 +146,9 @@ pub enum TaskAgentTurnError {
     /// The port failed technically; never prompt or output text.
     #[error(transparent)]
     InferenceUnavailable(#[from] TaskAgentInferenceError),
-    /// The logical input could not be proven scrubbed; nothing was sent.
+    /// The logical input could not be assembled or proven scrubbed; nothing
+    /// was sent. `reason` is a fixed class and never body, History, or secret
+    /// text.
     #[error("task agent input unavailable: {reason}")]
     InputUnavailable { reason: String },
 }
@@ -372,8 +374,7 @@ pub async fn orchestrate_task_agent_turn(
     // would otherwise be outgrown; an exchange that cannot fit even alone is
     // kept so the port refuses the over-limit input instead of the model
     // answering from a silently shortened transcript.
-    let mut raw_input =
-        assemble_logical_input(purpose_text, &instruction_texts, &past.facts, &[], false);
+    let mut raw_input = assemble_logical_input(purpose_text, &instruction_texts, &past.facts);
     // The never-omitted head is measured from the assembled framing itself,
     // so the fit and the refusal guard below cannot drift from the bytes
     // actually sent.
@@ -456,12 +457,23 @@ const TOOL_RESULT_MARKER: &str = "\n[TOOL RESULT]\n";
 
 const OMISSION_NOTE: &str = "\n[NOTE] earlier tool exchanges were omitted to fit the input bound";
 
+/// Assembles the never-omitted logical-input head for one turn.
+///
+/// The protocol preamble comes first (it tells the model how to answer and
+/// never varies), then the purpose, then each resolved instruction body in
+/// `TaskRecord.context` order, then the past-executed facts block (the
+/// marker with zero or more attribution lines, always present and never an
+/// omission candidate). The caller appends the omission note and the kept
+/// Action exchanges after this head.
+/// The boundary markers are identical for every turn (including a turn with
+/// no instructions or no facts), so the provider-visible boundaries are
+/// never body text and never vary by caller. Instructions and facts are not
+/// sorted, deduplicated, or filtered: repeated adoption of the same source
+/// remains repeated input.
 fn assemble_logical_input(
     purpose: &str,
     instructions: &[String],
     facts: &[crate::report::PastExecutedFact],
-    exchanges: &[TaskAgentActionExchange],
-    omitted: bool,
 ) -> String {
     let mut input = String::from(RESPONSE_FORMAT_PREAMBLE);
     input.push_str(purpose);
@@ -473,12 +485,6 @@ fn assemble_logical_input(
     for fact in facts {
         input.push_str(&fact.line);
         input.push('\n');
-    }
-    if omitted {
-        input.push_str(OMISSION_NOTE);
-    }
-    for exchange in exchanges {
-        push_exchange(&mut input, exchange);
     }
     input
 }
@@ -510,16 +516,7 @@ fn fit_exchanges(
         return (exchanges, false);
     }
     let reserved = budget - head_len;
-    let mut used = 0usize;
-    let mut start = exchanges.len();
-    for exchange in exchanges.iter().rev() {
-        let length = exchange_input_len(exchange);
-        if used + length > reserved {
-            break;
-        }
-        used += length;
-        start -= 1;
-    }
+    let start = fit_tail(exchanges, reserved);
     if start == 0 {
         return (exchanges, false);
     }
@@ -529,16 +526,7 @@ fn fit_exchanges(
     let Some(available) = reserved.checked_sub(OMISSION_NOTE.chars().count()) else {
         return (exchanges, false);
     };
-    let mut used = 0usize;
-    let mut start = exchanges.len();
-    for exchange in exchanges.iter().rev() {
-        let length = exchange_input_len(exchange);
-        if used + length > available {
-            break;
-        }
-        used += length;
-        start -= 1;
-    }
+    let start = fit_tail(exchanges, available);
     if start == exchanges.len() {
         return (exchanges, false);
     }
@@ -553,6 +541,30 @@ fn exchange_input_len(exchange: &TaskAgentActionExchange) -> usize {
     scratch.chars().count()
 }
 
+/// The index of the first exchange in the newest suffix that fits `budget`,
+/// measured through [`exchange_input_len`].
+fn fit_tail(exchanges: &[TaskAgentActionExchange], budget: usize) -> usize {
+    let mut used = 0usize;
+    let mut start = exchanges.len();
+    for exchange in exchanges.iter().rev() {
+        let length = exchange_input_len(exchange);
+        if used + length > budget {
+            break;
+        }
+        used += length;
+        start -= 1;
+    }
+    start
+}
+
+/// Maps one stale claim refusal to the durable reason, re-reading only
+/// bounded state.
+///
+/// Terminal progress is reported before the execution seal: a terminal Task
+/// explains the refusal regardless of whether the delegation is also sealed.
+/// A sealed delegation is reported before revision staleness because the
+/// execution can never contribute new work even while the Task is
+/// `InProgress`.
 async fn re_read_stale_premise(
     repository: &impl TaskRepository,
     delegation: DelegationId,

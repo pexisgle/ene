@@ -361,8 +361,8 @@ impl CredentialStore for MemoryCredentialStore {
 
 pub const ENV_API_KEY: &str = "ENE_OPENAI_API_KEY";
 
-/// The single closed-world provider allow-list, consulted both when the bearer
-/// is pinned at construction and when it is served.
+/// The single closed-world provider allow-list, consulted when the bearer is
+/// served.
 const SUPPORTED_PROVIDER: &str = "openai";
 
 /// Environment-backed bearer store for the `OpenAI` provider.
@@ -398,13 +398,11 @@ impl Default for EnvCredentialStore {
 impl EnvCredentialStore {
     #[must_use]
     pub fn new() -> Self {
-        Self::from_lookup(|name| std::env::var(name).ok())
-    }
-
-    #[must_use]
-    pub fn from_lookup(lookup: impl FnOnce(&str) -> Option<String>) -> Self {
         Self {
-            bearer: resolve_for(SUPPORTED_PROVIDER, lookup).map(SecretValue::new),
+            bearer: std::env::var(ENV_API_KEY)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(SecretValue::new),
         }
     }
 
@@ -414,24 +412,6 @@ impl EnvCredentialStore {
         }
         self.bearer.as_ref()
     }
-}
-
-// `SUPPORTED_PROVIDER` is the single allow-list: the construction-time gate in
-// `resolve_for` and the serving-time gate in `pinned` both consult it, so the
-// two can never drift. An empty value counts as absent, matching an unset
-// variable.
-pub(crate) fn resolve_for(
-    provider: &str,
-    lookup: impl FnOnce(&str) -> Option<String>,
-) -> Option<String> {
-    if provider != SUPPORTED_PROVIDER {
-        return None;
-    }
-    let raw = lookup(ENV_API_KEY)?;
-    if raw.is_empty() {
-        return None;
-    }
-    Some(raw)
 }
 
 impl CredentialStore for EnvCredentialStore {

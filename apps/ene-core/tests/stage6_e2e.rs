@@ -4016,7 +4016,6 @@ async fn stage6_dialogue_claim_before_completion_refuses_the_delayed_paraphrase(
                             importance: Importance::default(),
                             temporal: TemporalMeaning::Enduring,
                             change: ChangeKind::Initial,
-                            recall_suppressed: false,
                             at: WallClockWithTz::now(),
                         },
                     })
@@ -4210,7 +4209,6 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
                 importance: Importance::default(),
                 temporal: TemporalMeaning::Enduring,
                 change: ChangeKind::Initial,
-                recall_suppressed: false,
                 at: WallClockWithTz::now(),
             },
         }
@@ -4894,7 +4892,6 @@ async fn stage6_reconciliation_erases_paraphrase_pinned_past_the_page() {
                     importance: Importance::default(),
                     temporal: TemporalMeaning::Enduring,
                     change: ChangeKind::Initial,
-                    recall_suppressed: false,
                     at: WallClockWithTz::now(),
                 },
             })

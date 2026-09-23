@@ -69,7 +69,6 @@ expected_revision INTEGER NULL,
 candidate_version INTEGER NULL,
 phase TEXT NOT NULL,
 decided_outcome TEXT NULL,
-decided_revision INTEGER NULL,
 created_at TEXT NOT NULL
 );
 CREATE TABLE credential_active (

@@ -13,9 +13,14 @@ use crate::repository::{
 use crate::scope::LearningScope;
 use crate::summary::SummaryRecord;
 
-pub const MAX_FORMATION_CHANGES: usize = 5;
+/// Most Memory changes one formation pass accepts.
+///
+/// The prompt states this cap. An answer proposing more is undecidable as a
+/// whole and deferred rather than truncated, so no entry is silently dropped.
+const MAX_FORMATION_CHANGES: usize = 5;
 
-pub const MAX_FORMATION_TURNS: usize = 24;
+/// Cap on the turns read into one formation prompt.
+const MAX_FORMATION_TURNS: usize = 24;
 
 /// Most current memories one formation reads before selecting candidates.
 ///
@@ -278,7 +283,6 @@ pub async fn form_experience(
                     importance,
                     temporal,
                     change,
-                    recall_suppressed: change.suppresses_recall(),
                     at: candidate.at,
                 },
             })

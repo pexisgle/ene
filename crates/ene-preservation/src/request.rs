@@ -1,3 +1,28 @@
+//! Targeted Deletion first-party request / confirmation / status surface.
+//!
+//! [Targeted Deletion Lifecycle](../../../docs/design/concrete/targeted-deletion-lifecycle.md)
+//! §15 puts the wire intent, the trusted Host-local confirmation, and the
+//! bounded status view in one first-party management boundary; §4 fixes the
+//! admission premise: an explicit privacy/security purpose **and** a trusted
+//! Owner confirmation.
+//!
+//! Types here keep those two apart:
+//!
+//! - [`TargetedDeletionRequest`] is a staged, still harmless request. The wire
+//!   can legitimately produce one; it can start nothing.
+//! - [`OwnerConfirmationFact`] is the durable Owner decision read from the
+//!   Host-local confirmation journal (IPC §18.1). It has no wire form.
+//! - [`TargetedDeletionRequest::into_command`] is the only production mint
+//!   site of the admission command; it needs both the staged request and its
+//!   durable confirmation fact, and the confirmation binds to the request
+//!   identity, so it can never be transferred to another target or purpose.
+//!   The store re-reads the confirmation row inside the same transaction that
+//!   commits the operation.
+//!
+//! No Client payload, LLM output, or Task Agent text can construct any of
+//! these: there is no `Deserialize`, no public literal constructor, and no
+//! caller boolean anywhere on the path.
+
 use ene_primitive::{RawId, WallClockWithTz};
 
 use crate::{
@@ -82,7 +107,6 @@ impl TargetedDeletionRequest {
             return None;
         }
         Some(StartTargetedDeletionCommand::confirmed(
-            self.request.as_raw(),
             self.target,
             self.purpose,
             admitted_at,
@@ -239,10 +263,6 @@ mod tests {
                 ],
             )
             .expect("the matching confirmation must mint the command");
-        assert!(
-            command.is_confirmed(),
-            "the minted command carries the sealed confirmation premise"
-        );
         assert_eq!(command.purpose(), DeletionPurpose::Privacy);
 
         let foreign =

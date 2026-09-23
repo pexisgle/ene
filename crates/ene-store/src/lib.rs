@@ -436,30 +436,9 @@ impl Store {
             .await;
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_deletion_finalizing_park_for_tests(&self) {
-        self.test_parks.deletion_finalizing.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_deletion_finalizing_park_for_tests(&self) {
-        self.test_parks.deletion_finalizing.wait_entered().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_deletion_finalizing_park_for_tests(&self) {
-        self.test_parks.deletion_finalizing.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_deletion_finalizing_if_armed_for_tests(&self) {
-        self.test_parks.deletion_finalizing.pause_if_armed().await;
-    }
-
+    /// Arms the first-waiter park after Dialogue has pinned an
+    /// `ExperienceCandidate` and before that candidate is handed to the
+    /// Learning formation queue.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn arm_learning_pin_queue_park_for_tests(&self) {

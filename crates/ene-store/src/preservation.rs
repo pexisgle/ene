@@ -805,15 +805,7 @@ fn require_operation(conn: &Connection, id: &str) -> Result<(), PreservationTech
     }
 }
 
-type RawParticipant = (
-    String,
-    String,
-    i64,
-    Option<String>,
-    i64,
-    i64,
-    Option<String>,
-);
+type RawParticipant = (String, String, i64, Option<String>, Option<String>);
 
 fn raw_participant(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawParticipant> {
     Ok((
@@ -822,11 +814,13 @@ fn raw_participant(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawParticipant> 
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
-        row.get(5)?,
-        row.get(6)?,
     ))
 }
 
+/// One participant row is composed only when it is internally consistent: a
+/// known owner and state name, a positive sweep, a hold class exactly when
+/// held, and a parseable report time. Anything else is an unreadable row,
+/// never a guessed progress.
 fn decode_participant(
     operation: DeletionOperationId,
     raw: RawParticipant,
@@ -842,15 +836,14 @@ fn decode_participant(
     };
     let progress =
         ParticipantProgress::from_state_name(raw.1.as_str(), sweep, hold).ok_or_else(corrupt)?;
-    let erased_count = u64::try_from(raw.4).map_err(|_| corrupt())?;
-    let remainder_count = u64::try_from(raw.5).map_err(|_| corrupt())?;
-    let reported_at = raw.6.as_deref().map(parse_time).transpose()?;
+    // The report time is not part of the record, but a stored value that does
+    // not parse is torn state and still fails the read closed.
+    if let Some(text) = raw.4.as_deref() {
+        parse_time(text)?;
+    }
     Ok(DeletionParticipantRecord {
         participant: DeletionParticipantRef { operation, owner },
         progress,
-        erased_count,
-        remainder_count,
-        reported_at,
     })
 }
 
@@ -918,17 +911,20 @@ fn unfinished_by_exact_text(
     }
 }
 
+/// Whether one unfinished operation already covers the whole scope of a
+/// duplicate request: every semantic hint and every required participant owner
+/// must already belong to it. Same mechanical target is an idempotent request
+/// only if its scope is covered; a duplicate never silently widens a confirmed
+/// operation. The participant snapshot is part of the operation's scope, so a
+/// duplicate whose set needs an owner outside the snapshot is a
+/// live-operation conflict, not a silent widening.
 fn scope_covered(
     tx: &rusqlite::Transaction<'_>,
     current: DeletionOperationRef,
-    sources: &[RawId],
     hints: &[DeletionSearchMaterial],
     participants: &[ParticipantOwnerRef],
 ) -> Result<bool, PreservationTechnicalError> {
     let mut covered = true;
-    for source in sources {
-        covered &= source_is_covered(tx, current.condition(), *source)?;
-    }
     for hint in hints {
         let found: bool = tx
             .query_row(
@@ -2109,7 +2105,6 @@ fn admit_deletion(
         let covered = scope_covered(
             tx,
             record.current,
-            command.known_sources(),
             &command.target().semantic_hints,
             &participants,
         )?;
@@ -2203,24 +2198,12 @@ fn completion_summary(
     if sweep == 0 {
         return Err(corrupt());
     }
-    let (required, verified, local_complete, in_progress, held): (i64, i64, i64, i64, i64) = conn
+    let (required, verified): (i64, i64) = conn
         .query_row(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(state='verified'),0),
-                    COALESCE(SUM(state='local_complete'),0),
-                    COALESCE(SUM(state IN ('pending','running')),0),
-                    COALESCE(SUM(state='held'),0)
+            "SELECT COUNT(*), COALESCE(SUM(state='verified'),0)
              FROM deletion_participant WHERE operation_id=?1 AND sweep=?2",
             params![operation, i64::try_from(sweep).map_err(|_| corrupt())?],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(storage)?;
     let count = |value: i64| u64::try_from(value).map_err(|_| corrupt());
@@ -2229,9 +2212,6 @@ fn completion_summary(
         sweep: DeletionSweepGeneration::from_u64(sweep),
         required: count(required)?,
         verified: count(verified)?,
-        local_complete: count(local_complete)?,
-        in_progress: count(in_progress)?,
-        held: count(held)?,
     })
 }
 
@@ -2340,13 +2320,8 @@ impl PreservationRepository for Store {
             let MechanicalDeletionTarget::ExactText(material) = &command.target().mechanical;
             let text = material.expose_for_erasure();
             if let Some(record) = unfinished_by_exact_text(&tx, text)? {
-                let covered = scope_covered(
-                    &tx,
-                    record.current,
-                    &[],
-                    &command.target().semantic_hints,
-                    &[],
-                )?;
+                let covered =
+                    scope_covered(&tx, record.current, &command.target().semantic_hints, &[])?;
                 return Ok(if covered {
                     StageTargetedDeletionRequestOutcome::AlreadyCoveredBy(record.current)
                 } else {
@@ -2838,10 +2813,12 @@ impl PreservationRepository for Store {
             let id = encode_id(operation.as_raw());
             require_operation(&tx, &id)?;
             validate(&tx, &id)?;
-            let after = after.map(ParticipantOwnerRef::storage_name).unwrap_or_default();
+            let after = after
+                .map(ParticipantOwnerRef::storage_name)
+                .unwrap_or_default();
             let mut statement = tx
                 .prepare(
-                    "SELECT participant_owner,state,sweep,hold_class,erased_count,remainder_count,reported_at
+                    "SELECT participant_owner,state,sweep,hold_class,reported_at
                      FROM deletion_participant WHERE operation_id=?1 AND participant_owner>?2
                      ORDER BY participant_owner LIMIT ?3",
                 )
@@ -3062,29 +3039,6 @@ impl PreservationRepository for Store {
             validate(&tx, &id)?;
             tx.commit().map_err(storage)?;
             Ok(ParticipantCompletionOutcome::Recorded(progress))
-        })
-        .await
-    }
-
-    async fn deletion_completion_summary(
-        &self,
-        operation: DeletionOperationId,
-    ) -> Result<DeletionCompletionSummary, PreservationTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let guard = lock_shared(&conn);
-            let tx = guard.unchecked_transaction().map_err(storage)?;
-            let id = encode_id(operation.as_raw());
-            require_operation(&tx, &id)?;
-            validate(&tx, &id)?;
-            let sweep: i64 = tx
-                .query_row(
-                    "SELECT sweep FROM deletion_operation WHERE operation_id=?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .map_err(storage)?;
-            completion_summary(&tx, &id, sweep)
         })
         .await
     }
@@ -3354,73 +3308,6 @@ impl PreservationRepository for Store {
             validate(&tx, &id)?;
             tx.commit().map_err(storage)?;
             Ok(DeletionFinalizationOutcome::Completed)
-        })
-        .await
-    }
-
-    async fn deletion_completion_audit(
-        &self,
-        operation: DeletionOperationId,
-    ) -> Result<Option<DeletionCompletionAudit>, PreservationTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let guard = lock_shared(&conn);
-            let tx = guard.unchecked_transaction().map_err(storage)?;
-            let id = encode_id(operation.as_raw());
-            require_operation(&tx, &id)?;
-            validate(&tx, &id)?;
-            let row: Option<(String, String, String, i64, i64)> = tx
-                .query_row(
-                    "SELECT purpose,started_at,completed_at,sweep_count,erased_count FROM deletion_completion_audit WHERE operation_id=?1",
-                    [&id],
-                    |r| {
-                        Ok((
-                            r.get(0)?,
-                            r.get(1)?,
-                            r.get(2)?,
-                            r.get(3)?,
-                            r.get(4)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(storage)?;
-            let Some((purpose, started_at, completed_at, sweep_count, erased_count)) = row else {
-                return Ok(None);
-            };
-            let mut statement = tx
-                .prepare(
-                    "SELECT participant_owner,final_state,erased_count FROM deletion_audit_participant WHERE operation_id=?1 ORDER BY participant_owner",
-                )
-                .map_err(storage)?;
-            let rows: Vec<(String, String, i64)> = statement
-                .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .map_err(storage)?
-                .collect::<Result<_, _>>()
-                .map_err(storage)?;
-            let participants = rows
-                .into_iter()
-                .map(|(owner, state, erased)| {
-                    if state != "verified" {
-                        return Err(corrupt());
-                    }
-                    Ok(DeletionAuditParticipant {
-                        owner: ParticipantOwnerRef::from_storage_name(&owner)
-                            .ok_or_else(corrupt)?,
-                        status: DeletionAuditStatus::Verified,
-                        erased_count: u64::try_from(erased).map_err(|_| corrupt())?,
-                    })
-                })
-                .collect::<Result<Vec<_>, PreservationTechnicalError>>()?;
-            Ok(Some(DeletionCompletionAudit {
-                operation,
-                purpose: decode_purpose(&purpose)?,
-                started_at: parse_time(&started_at)?,
-                completed_at: parse_time(&completed_at)?,
-                sweep_count: u64::try_from(sweep_count).map_err(|_| corrupt())?,
-                erased_count: u64::try_from(erased_count).map_err(|_| corrupt())?,
-                participants,
-            }))
         })
         .await
     }

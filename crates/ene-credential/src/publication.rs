@@ -120,7 +120,6 @@ pub struct CredentialMutation {
     pub candidate_version: Option<SecretVersionId>,
     pub phase: MutationPhase,
     pub outcome: Option<MutationOutcome>,
-    pub decided_revision: Option<u64>,
 }
 
 /// One retired version whose OS item removal is not yet confirmed.

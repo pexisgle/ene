@@ -691,7 +691,7 @@ pub(crate) fn decode_pending_credential(
 /// `None` command text means no replay key; `None` wire projection is
 /// unreadable stored state (every current writer persists one); the
 /// incarnation appears only when both counter and random are present and
-/// decode; `local_id` is correspondence metadata only.
+/// decode.
 pub(crate) fn decode_history_message(
     companion: CompanionId,
     row: HistoryRow,
@@ -705,7 +705,6 @@ pub(crate) fn decode_history_message(
         at_text,
         generation_raw,
         command_text,
-        stored_local_id,
         round_wire,
         round_intent_kind,
         round_intent_ref,
@@ -739,7 +738,6 @@ pub(crate) fn decode_history_message(
         round_wire,
         round_intent,
         incarnation,
-        local_id: stored_local_id,
     })
 }
 
@@ -828,7 +826,6 @@ pub(crate) struct HistoryRow {
     at_text: String,
     generation_raw: i64,
     command_text: Option<String>,
-    stored_local_id: Option<String>,
     round_wire: Option<String>,
     round_intent_kind: Option<String>,
     round_intent_ref: Option<String>,
@@ -847,12 +844,11 @@ impl HistoryRow {
             at_text: row.get(5)?,
             generation_raw: row.get(6)?,
             command_text: row.get(7)?,
-            stored_local_id: row.get(8)?,
-            round_wire: row.get(9)?,
-            round_intent_kind: row.get(10)?,
-            round_intent_ref: row.get(11)?,
-            client_counter: row.get(12)?,
-            client_random: row.get(13)?,
+            round_wire: row.get(8)?,
+            round_intent_kind: row.get(9)?,
+            round_intent_ref: row.get(10)?,
+            client_counter: row.get(11)?,
+            client_random: row.get(12)?,
         })
     }
 }

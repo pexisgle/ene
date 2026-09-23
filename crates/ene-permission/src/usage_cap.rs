@@ -275,14 +275,10 @@ pub fn usage_cap_mark(
         UsageCapScope::System => String::from("system"),
         UsageCapScope::Provider(provider) => format!("provider-{provider}"),
     };
-    match revision {
-        Some(revision) => format!(
-            "usage-cap-{scope}-{}-rev-{}",
-            window.as_str(),
-            revision.as_u64()
-        ),
-        None => format!("usage-cap-{scope}-{}-none", window.as_str()),
-    }
+    super::render_revision_state(
+        &format!("usage-cap-{scope}-{}-", window.as_str()),
+        revision.map(|revision| revision.as_u64()),
+    )
 }
 
 #[must_use]
@@ -298,11 +294,7 @@ pub fn parse_usage_cap_mark(
         }
     };
     let state = mark.strip_prefix(&prefix)?;
-    if state == "none" {
-        return Some(None);
-    }
-    let revision = state.strip_prefix("rev-")?.parse::<u64>().ok()?;
-    Some(Some(revision))
+    super::parse_revision_state(state)
 }
 
 #[expect(

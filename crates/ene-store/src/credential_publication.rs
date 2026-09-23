@@ -14,13 +14,13 @@ use crate::credential::{
 };
 use crate::run_blocking;
 
-const SQL_INSERT_MUTATION: &str = "INSERT INTO credential_mutation (mutation_id, op, provider, label, expected_revision, candidate_version, phase, decided_outcome, decided_revision, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8)";
+const SQL_INSERT_MUTATION: &str = "INSERT INTO credential_mutation (mutation_id, op, provider, label, expected_revision, candidate_version, phase, decided_outcome, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)";
 
-const SQL_SELECT_MUTATION: &str = "SELECT op, provider, label, expected_revision, candidate_version, phase, decided_outcome, decided_revision FROM credential_mutation WHERE mutation_id = ?1";
+const SQL_SELECT_MUTATION: &str = "SELECT op, provider, label, expected_revision, candidate_version, phase, decided_outcome FROM credential_mutation WHERE mutation_id = ?1";
 
 const SQL_MARK_STAGED: &str = "UPDATE credential_mutation SET phase = ?3 WHERE mutation_id = ?1 AND candidate_version = ?2 AND phase = ?4 AND decided_outcome IS NULL";
 
-const SQL_DECIDE_MUTATION: &str = "UPDATE credential_mutation SET phase = ?2, decided_outcome = ?3, decided_revision = ?4 WHERE mutation_id = ?1 AND decided_outcome IS NULL";
+const SQL_DECIDE_MUTATION: &str = "UPDATE credential_mutation SET phase = ?2, decided_outcome = ?3 WHERE mutation_id = ?1 AND decided_outcome IS NULL";
 
 const SQL_UPSERT_ACTIVE: &str = "INSERT INTO credential_active (provider, label, active_version) VALUES (?1, ?2, ?3) ON CONFLICT (provider, label) DO UPDATE SET active_version = excluded.active_version";
 
@@ -115,7 +115,6 @@ fn mutation_from_row(
     let candidate_version: Option<i64> = row.get(4)?;
     let phase: String = row.get(5)?;
     let decided_outcome: Option<String> = row.get(6)?;
-    let decided_revision: Option<i64> = row.get(7)?;
     let (Some(kind), Some(phase)) = (MutationKind::parse(&op), MutationPhase::parse(&phase)) else {
         return Ok(None);
     };
@@ -129,7 +128,6 @@ fn mutation_from_row(
     // unreadable row, never "no premise".
     if expected_revision.is_some_and(|value| value < 0)
         || candidate_version.is_some_and(|value| value < 0)
-        || decided_revision.is_some_and(|value| value < 0)
     {
         return Ok(None);
     }
@@ -144,7 +142,6 @@ fn mutation_from_row(
             .map(SecretVersionId::from_u64),
         phase,
         outcome,
-        decided_revision: decided_revision.and_then(|value| u64::try_from(value).ok()),
     }))
 }
 
@@ -183,7 +180,6 @@ fn abandon_stale(
             mutation_id,
             MutationPhase::Abandoned.as_str(),
             outcome_text(&MutationOutcome::Stale),
-            Option::<i64>::None,
         ],
     )
     .map_err(|error| credential_unavailable(error.to_string()))?;
@@ -252,7 +248,6 @@ impl CredentialPublicationRepository for Store {
                 candidate_version,
                 phase: MutationPhase::Prepared,
                 outcome: None,
-                decided_revision: None,
             };
             tx.commit()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
@@ -392,7 +387,6 @@ impl CredentialPublicationRepository for Store {
                     mutation_id,
                     phase.as_str(),
                     outcome_text(&MutationOutcome::Activated { revision: next }),
-                    next as i64,
                 ],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
@@ -493,7 +487,6 @@ impl CredentialPublicationRepository for Store {
                     mutation_id,
                     phase.as_str(),
                     outcome_text(&MutationOutcome::Revoked { revision: next }),
-                    next as i64,
                 ],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
@@ -527,7 +520,6 @@ impl CredentialPublicationRepository for Store {
                         mutation_id,
                         MutationPhase::Abandoned.as_str(),
                         outcome_text(&uncommitted_outcome(outcome)),
-                        Option::<i64>::None,
                     ],
                 )
                 .map_err(|error| credential_unavailable(error.to_string()))?;

@@ -247,7 +247,7 @@ fn insert_current(
             change.content,
             encode_importance(change.importance),
             encode_temporal(change.temporal),
-            i64::from(change.recall_suppressed),
+            i64::from(change.change.suppresses_recall()),
             change.at.to_rfc3339(),
         ],
     )
@@ -298,7 +298,7 @@ fn insert_revision(
             change.content,
             encode_importance(change.importance),
             encode_temporal(change.temporal),
-            i64::from(change.recall_suppressed),
+            i64::from(change.change.suppresses_recall()),
             encode_change(change.change),
             summary_id,
             change.at.to_rfc3339(),

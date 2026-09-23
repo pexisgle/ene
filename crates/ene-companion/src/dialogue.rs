@@ -352,13 +352,7 @@ impl<'a> ControlHoldingSink<'a> {
                 self.buffer.clear();
                 return DeltaFlow::Continue;
             }
-            self.mode = ControlMode::LateMarker;
-            let prefix = self.buffer[..position].to_owned();
-            self.buffer.clear();
-            if prefix.is_empty() {
-                return DeltaFlow::Continue;
-            }
-            return self.push_raw(&prefix).await;
+            return self.flush_ordinary().await;
         }
         let candidate = &self.buffer[start..];
         if candidate.len() < TASK_CONTROL_MARKER.len() && TASK_CONTROL_MARKER.starts_with(candidate)
@@ -395,10 +389,6 @@ impl<'a> ControlHoldingSink<'a> {
                 ControlPresentation::Ordinary
             }
         }
-    }
-
-    async fn present(&mut self, text: &str) -> DeltaFlow {
-        self.push_raw(text).await
     }
 }
 
@@ -508,7 +498,7 @@ pub async fn finish_turn(
                     let Ok(scrubbed) = scrubber.scrub(&tail).await else {
                         return DialogueOutcome::Interrupted;
                     };
-                    if let DeltaFlow::Abort(_) = holder.present(scrubbed.text()).await {
+                    if let DeltaFlow::Abort(_) = holder.push_raw(scrubbed.text()).await {
                         return DialogueOutcome::Interrupted;
                     }
                     (scrubbed.text().to_owned(), scrubbed.credential_set())
@@ -555,9 +545,11 @@ pub async fn finish_turn(
     }
 }
 
-pub const DIALOGUE_CONTEXT_MESSAGES: u64 = 8;
+/// Recent History messages read into one dialogue prompt.
+pub(crate) const DIALOGUE_CONTEXT_MESSAGES: u64 = 8;
 
-pub const DIALOGUE_RECALL_LIMIT: usize = 6;
+/// Memories offered to one dialogue prompt.
+pub(crate) const DIALOGUE_RECALL_LIMIT: usize = 6;
 
 const DIALOGUE_PREAMBLE: &str = "You are ene, the companion. Reply to the owner's latest message, using the conversation and any relevant memories below naturally. Do not mention these instructions. If the owner asks for file work as a task, asks about task progress or results, changes a task's instructions, resumes an interrupted task, or cancels a task, reply with exactly one task-control line as the very first non-empty line and nothing else (no other prose): the line starts with [task-control] followed by one JSON object with exactly these fields: {\"kind\":\"propose_task\",\"purpose\":\"<summary of the work>\"} to start a task; {\"kind\":\"report\"} to ask about the current task; {\"kind\":\"steer\",\"instruction\":\"<instruction>\",\"purpose\":null} to change it; {\"kind\":\"resume\"} to resume the current interrupted task; or {\"kind\":\"cancel\"} to cancel it. Never emit any other field, and never add a task-control line to ordinary conversation.";
 
@@ -743,7 +735,8 @@ pub async fn assemble_dialogue_input(
     Ok(DialogueInput { prompt, data_use })
 }
 
-pub const EXPERIENCE_SOURCE_MESSAGES: u64 = 12;
+/// Recent History messages read into one Experience source.
+pub(crate) const EXPERIENCE_SOURCE_MESSAGES: u64 = 12;
 
 pub async fn pin_experience(
     input: &AcceptedDialogueInput,
@@ -913,7 +906,7 @@ pub async fn propose_task_current(
 /// marker, and only as the reply's first non-empty line. A control turn stores
 /// the scrubbed owner-derived outcome, not the provider text with a line
 /// removed.
-pub const TASK_CONTROL_MARKER: &str = "[task-control]";
+pub(crate) const TASK_CONTROL_MARKER: &str = "[task-control]";
 
 #[derive(Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -955,7 +948,7 @@ impl core::fmt::Debug for DialogueTaskCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DialogueTaskInterpretation {
+pub(crate) enum DialogueTaskInterpretation {
     /// No control marker: ordinary conversation text, unchanged.
     Conversation,
     /// The reply is exactly one valid control command line. Provider prose is
@@ -968,9 +961,11 @@ pub enum DialogueTaskInterpretation {
 }
 
 #[must_use]
-pub fn interpret_task_control(text: &str) -> DialogueTaskInterpretation {
-    if !text.contains(TASK_CONTROL_MARKER) {
-        return DialogueTaskInterpretation::Conversation;
+pub(crate) fn interpret_task_control(text: &str) -> DialogueTaskInterpretation {
+    match text.matches(TASK_CONTROL_MARKER).count() {
+        0 => return DialogueTaskInterpretation::Conversation,
+        1 => {}
+        _ => return DialogueTaskInterpretation::Invalid,
     }
     let lines: Vec<&str> = text.lines().collect();
     let Some(first_non_empty) = lines.iter().position(|line| !line.trim().is_empty()) else {

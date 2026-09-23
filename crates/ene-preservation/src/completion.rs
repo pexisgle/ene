@@ -1,8 +1,19 @@
-use ene_primitive::WallClockWithTz;
+//! Global completion vocabulary for Targeted Deletion (lifecycle §10, §12-§14).
+//!
+//! Local completion and system-wide completion are different facts. A
+//! participant's `LocalComplete` (or one successful transaction, one Client
+//! ACK, or one LLM self-report) is never a global completion candidate: only a
+//! durable aggregate of the whole required participant set for the operation's
+//! *current* sweep can be, and the completion boundary re-derives that premise
+//! from the canonical store instead of accepting a caller boolean.
+//!
+//! This module owns the vocabulary only. The state transition, the
+//! system-wide mechanical remainder verification, and the atomic
+//! material-wipe / audit / condition-closure commit live in the canonical
+//! store (`PreservationRepository`).
 
 use crate::{
-    DeletionHoldReason, DeletionOperationId, DeletionOperationRef, DeletionPurpose,
-    DeletionSweepGeneration, ParticipantOwnerRef,
+    DeletionHoldReason, DeletionOperationId, DeletionOperationRef, DeletionSweepGeneration,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,9 +22,6 @@ pub struct DeletionCompletionSummary {
     pub sweep: DeletionSweepGeneration,
     pub required: u64,
     pub verified: u64,
-    pub local_complete: u64,
-    pub in_progress: u64,
-    pub held: u64,
 }
 
 impl DeletionCompletionSummary {
@@ -48,27 +56,4 @@ pub enum DeletionReconciliationOutcome {
     Completed,
     Missing,
     StaleSweep,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeletionAuditStatus {
-    Verified,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeletionAuditParticipant {
-    pub owner: ParticipantOwnerRef,
-    pub status: DeletionAuditStatus,
-    pub erased_count: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeletionCompletionAudit {
-    pub operation: DeletionOperationId,
-    pub purpose: DeletionPurpose,
-    pub started_at: WallClockWithTz,
-    pub completed_at: WallClockWithTz,
-    pub sweep_count: u64,
-    pub erased_count: u64,
-    pub participants: Vec<DeletionAuditParticipant>,
 }

@@ -301,11 +301,7 @@ pub enum ShortcutIntentOutcome {
 
 #[must_use]
 pub fn consent_mark(capability: CapabilityKind, rev: Option<u64>) -> String {
-    let name = capability.as_str();
-    match rev {
-        Some(number) => format!("consent-{name}-rev-{number}"),
-        None => format!("consent-{name}-none"),
-    }
+    render_revision_state(&format!("consent-{}-", capability.as_str()), rev)
 }
 
 /// Renders the mark of the stored consent row for `capability`, the "no
@@ -342,18 +338,27 @@ pub fn parse_consent_mark(mark: &str, capability: CapabilityKind) -> Option<Opti
     let qualified = format!("consent-{}-", capability.as_str());
     for segment in mark.split(';').map(str::trim) {
         if let Some(state) = segment.strip_prefix(&qualified) {
-            return parse_consent_state(state);
+            return parse_revision_state(state);
         }
     }
     None
 }
 
-fn parse_consent_state(state: &str) -> Option<Option<u64>> {
+/// Renders the `rev-N` / `none` state tail shared by every revision mark, so
+/// consent and usage-cap marks cannot drift on the state grammar.
+fn render_revision_state(prefix: &str, revision: Option<u64>) -> String {
+    match revision {
+        Some(number) => format!("{prefix}rev-{number}"),
+        None => format!("{prefix}none"),
+    }
+}
+
+/// Parses the `rev-N` / `none` state tail; `None` is an unparseable state.
+fn parse_revision_state(state: &str) -> Option<Option<u64>> {
     if state == "none" {
         return Some(None);
     }
-    let revision = state.strip_prefix("rev-")?.parse::<u64>().ok()?;
-    Some(Some(revision))
+    Some(Some(state.strip_prefix("rev-")?.parse::<u64>().ok()?))
 }
 #[derive(Debug, Default)]
 pub struct EvaluationTracker {

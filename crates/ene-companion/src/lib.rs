@@ -63,7 +63,6 @@ pub struct HistoryMessage {
     pub round_wire: Option<String>,
     pub round_intent: Option<RoundIntentMark>,
     pub incarnation: Option<(u64, u64)>,
-    pub local_id: Option<String>,
 }
 
 impl core::fmt::Debug for HistoryMessage {
@@ -82,7 +81,6 @@ impl core::fmt::Debug for HistoryMessage {
             .field("round_wire", &self.round_wire)
             .field("round_intent", &self.round_intent)
             .field("incarnation", &self.incarnation)
-            .field("local_id", &self.local_id)
             .finish()
     }
 }
@@ -625,7 +623,6 @@ mod tests {
             round_wire: None,
             round_intent: None,
             incarnation: None,
-            local_id: None,
         }
     }
 

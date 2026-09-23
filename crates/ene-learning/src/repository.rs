@@ -52,7 +52,8 @@ pub struct MemoryChange {
     pub importance: Importance,
     pub temporal: TemporalMeaning,
     pub change: ChangeKind,
-    pub recall_suppressed: bool,
+    /// When this change was decided; becomes the revision and current-row
+    /// timestamp.
     pub at: WallClockWithTz,
 }
 
@@ -66,7 +67,6 @@ impl core::fmt::Debug for MemoryChange {
             .field("importance", &self.importance)
             .field("temporal", &self.temporal)
             .field("change", &self.change)
-            .field("recall_suppressed", &self.recall_suppressed)
             .field("at", &self.at)
             .finish()
     }

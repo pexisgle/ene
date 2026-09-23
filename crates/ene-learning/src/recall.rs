@@ -3,7 +3,13 @@ use ene_primitive::RawId;
 use crate::identity::MemoryId;
 use crate::repository::{LearningRepository, LearningTechnicalError};
 
-pub const RECALL_CANDIDATE_LIMIT: u64 = 200;
+/// Rows one candidate arm contributes to one recall.
+///
+/// Three arms run in one bounded, index-backed query, so one recall decodes
+/// at most `3 * RECALL_CANDIDATE_LIMIT` rows regardless of how many memories
+/// exist, and finding those rows visits at most one index walk of `limit`
+/// entries per arm rather than scanning the companion's whole set.
+const RECALL_CANDIDATE_LIMIT: u64 = 200;
 
 const RECALL_MAX_TERMS: usize = 8;
 

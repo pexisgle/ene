@@ -1,13 +1,23 @@
-use ene_primitive::{RawId, WallClockWithTz};
+//! Targeted Deletion admission and unfinished-operation contracts.
+//!
+//! A1 deliberately provides no public confirmation mint. A1b supplies the
+//! trusted first-party issuer
+//! ([`TargetedDeletionRequest::into_command`](crate::TargetedDeletionRequest::into_command));
+//! A5 supplies the sealed finalizing/completion boundary
+//! ([`PreservationRepository::begin_deletion_finalizing`] /
+//! [`PreservationRepository::complete_deletion_finalizing`]), whose premise is
+//! the durable participant aggregate and the system-wide mechanical remainder
+//! verification — never a caller boolean.
+
+use ene_primitive::WallClockWithTz;
 use zeroize::Zeroizing;
 
 use crate::{
-    ConfirmTargetedDeletionOutcome, DeletionCompletionAudit, DeletionCompletionSummary,
-    DeletionFinalizationOutcome, DeletionMaterialOutcome, DeletionOperationId,
-    DeletionParticipantRecord, DeletionReconciliationOutcome, DeletionRequestId,
-    DeletionSurfaceMark, DeletionSweepGeneration, ErasureConditionRef, ParticipantCompletionFact,
-    ParticipantCompletionOutcome, ParticipantDemandOutcome, ParticipantOwnerRef,
-    StageTargetedDeletionRequestCommand, StageTargetedDeletionRequestOutcome,
+    ConfirmTargetedDeletionOutcome, DeletionFinalizationOutcome, DeletionMaterialOutcome,
+    DeletionOperationId, DeletionParticipantRecord, DeletionReconciliationOutcome,
+    DeletionRequestId, DeletionSurfaceMark, DeletionSweepGeneration, ErasureConditionRef,
+    ParticipantCompletionFact, ParticipantCompletionOutcome, ParticipantDemandOutcome,
+    ParticipantOwnerRef, StageTargetedDeletionRequestCommand, StageTargetedDeletionRequestOutcome,
     TargetedDeletionRequest,
 };
 
@@ -68,72 +78,19 @@ impl DeletionPurpose {
     }
 }
 
-/// Sealed, request-bound evidence. No Deserialize, raw-ID constructor, or
-/// public fields: Client/LLM output cannot manufacture final confirmation.
-/// The only production mint site is
-/// [`TargetedDeletionRequest::into_command`](crate::TargetedDeletionRequest::into_command),
-/// which requires the store-read staged request *and* its durable Host-local
-/// confirmation fact.
-///
-/// ```compile_fail
-/// use ene_preservation::TrustedOwnerConfirmationRef;
-/// let confirmation = TrustedOwnerConfirmationRef {};
-/// ```
-///
-/// ```compile_fail
-/// use ene_preservation::{DeletionPurpose, StartTargetedDeletionCommand, TargetedDeletionTarget,
-///     MechanicalDeletionTarget, DeletionSearchMaterial};
-/// let forged = StartTargetedDeletionCommand::confirmed(
-///     ene_primitive::RawId::new(),
-///     TargetedDeletionTarget {
-///         mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
-///             String::from("target"),
-///         )),
-///         semantic_hints: Vec::new(),
-///     },
-///     DeletionPurpose::Privacy,
-///     ene_primitive::WallClockWithTz::now(),
-///     Vec::new(),
-/// );
-/// ```
-#[derive(Debug, Clone)]
-pub struct TrustedOwnerConfirmationRef {
-    request: RawId,
-}
-
+/// Immutable request: the target, purpose, and required participant snapshot
+/// are fixed at mint, so a caller cannot retarget or widen an admitted
+/// operation. The required participant set is the current product surface the
+/// composition decides on; this crate does not enumerate capabilities.
 #[derive(Debug, Clone)]
 pub struct StartTargetedDeletionCommand {
-    request: RawId,
     target: TargetedDeletionTarget,
     purpose: DeletionPurpose,
     requested_at: WallClockWithTz,
-    known_sources: Vec<RawId>,
     required_participants: Vec<ParticipantOwnerRef>,
-    confirmation: Option<TrustedOwnerConfirmationRef>,
 }
 
 impl StartTargetedDeletionCommand {
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn new(
-        target: TargetedDeletionTarget,
-        purpose: DeletionPurpose,
-        requested_at: WallClockWithTz,
-        known_sources: Vec<RawId>,
-        required_participants: Vec<ParticipantOwnerRef>,
-    ) -> Self {
-        Self {
-            request: RawId::new(),
-            target,
-            purpose,
-            requested_at,
-            known_sources,
-            required_participants,
-            confirmation: None,
-        }
-    }
-
     #[must_use]
     pub fn target(&self) -> &TargetedDeletionTarget {
         &self.target
@@ -146,48 +103,34 @@ impl StartTargetedDeletionCommand {
     pub fn requested_at(&self) -> WallClockWithTz {
         self.requested_at
     }
-    #[must_use]
-    pub fn known_sources(&self) -> &[RawId] {
-        &self.known_sources
-    }
+    /// Required participant snapshot for the operation being admitted. The
+    /// durable set must be non-empty and duplicate-free: an operation with no
+    /// required participants could be completed without any erasure, so it is
+    /// refused rather than treated as vacuously complete.
     #[must_use]
     pub fn required_participants(&self) -> &[ParticipantOwnerRef] {
         &self.required_participants
     }
-    #[must_use]
-    pub fn is_confirmed(&self) -> bool {
-        self.confirmation
-            .as_ref()
-            .is_some_and(|fact| fact.request == self.request)
-    }
 
+    /// Crate-internal mint for the durable-confirmed path (A1b).
+    ///
+    /// Only [`TargetedDeletionRequest::into_command`](crate::TargetedDeletionRequest::into_command)
+    /// calls this, and only with a store-read staged request whose Owner
+    /// confirmation row the admission transaction re-reads. No public
+    /// constructor, `Deserialize`, or caller boolean exists on this path.
     #[must_use]
     pub(crate) fn confirmed(
-        request: RawId,
         target: TargetedDeletionTarget,
         purpose: DeletionPurpose,
         requested_at: WallClockWithTz,
         required_participants: Vec<ParticipantOwnerRef>,
     ) -> Self {
         Self {
-            request,
             target,
             purpose,
             requested_at,
-            known_sources: Vec::new(),
             required_participants,
-            confirmation: Some(TrustedOwnerConfirmationRef { request }),
         }
-    }
-
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn confirmed_for_tests(mut self) -> Self {
-        self.confirmation = Some(TrustedOwnerConfirmationRef {
-            request: self.request,
-        });
-        self
     }
 }
 
@@ -520,13 +463,30 @@ pub trait PreservationRepository: Send + Sync {
         &self,
     ) -> impl std::future::Future<Output = Result<DeletionSurfaceMark, PreservationTechnicalError>> + Send;
 
-    fn deletion_completion_summary(
-        &self,
-        operation: DeletionOperationId,
-    ) -> impl std::future::Future<
-        Output = Result<DeletionCompletionSummary, PreservationTechnicalError>,
-    > + Send;
-
+    /// Sealed finalizing transition (§12).
+    ///
+    /// The caller supplies only the expected operation ref. The store re-reads
+    /// the durable participant aggregate inside the write transaction and
+    /// refuses unless **every** required participant is `Verified` for the
+    /// operation's *current* sweep; there is no boolean, token, or
+    /// self-reported premise that can substitute for that durable state. The
+    /// same transaction re-reads the current sweep's covered-source
+    /// reconciliation state and refuses with
+    /// [`DeletionFinalizationOutcome::ReconciliationIncomplete`] while any
+    /// known identity table is still being walked: the already-claimed
+    /// in-flight uses the completion must account for are only all durable
+    /// once the exhaustive walk finished, and an arbitrary page bound is never
+    /// a completion premise (§4.1 point 4, §18).
+    ///
+    /// Before entering `Finalizing`, the same transaction runs the
+    /// system-wide mechanical remainder verification (LLM-independent, over
+    /// the closed canonical content surface). If it finds still-collected
+    /// target data, the completion is abandoned *before* any material is
+    /// destroyed: a new sweep generation opens, every participant resets to
+    /// pending, and the outcome is
+    /// [`DeletionFinalizationOutcome::RemainderCollected`].
+    ///
+    /// The transition is idempotent for an operation already `Finalizing`.
     fn begin_deletion_finalizing(
         &self,
         expected: DeletionOperationRef,
@@ -539,12 +499,5 @@ pub trait PreservationRepository: Send + Sync {
         expected: DeletionOperationRef,
     ) -> impl std::future::Future<
         Output = Result<DeletionFinalizationOutcome, PreservationTechnicalError>,
-    > + Send;
-
-    fn deletion_completion_audit(
-        &self,
-        operation: DeletionOperationId,
-    ) -> impl std::future::Future<
-        Output = Result<Option<DeletionCompletionAudit>, PreservationTechnicalError>,
     > + Send;
 }

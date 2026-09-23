@@ -139,14 +139,6 @@ impl ParticipantProgress {
     }
 
     #[must_use]
-    pub const fn hold_reason(self) -> Option<ParticipantHoldClass> {
-        match self {
-            Self::Held { reason, .. } => Some(reason),
-            _ => None,
-        }
-    }
-
-    #[must_use]
     pub const fn is_verified(self) -> bool {
         matches!(self, Self::Verified { .. })
     }
@@ -383,9 +375,6 @@ pub enum DeletionMaterialOutcome {
 pub struct DeletionParticipantRecord {
     pub participant: DeletionParticipantRef,
     pub progress: ParticipantProgress,
-    pub erased_count: u64,
-    pub remainder_count: u64,
-    pub reported_at: Option<WallClockWithTz>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,7 +498,6 @@ mod tests {
             reason: ParticipantHoldClass::Failed,
         };
         assert_eq!(held.sweep(), Some(sweep));
-        assert_eq!(held.hold_reason(), Some(ParticipantHoldClass::Failed));
         assert!(!held.is_verified());
         assert!(ParticipantProgress::Verified { sweep }.is_verified());
     }
