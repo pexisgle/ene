@@ -54,7 +54,10 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), ProbeError> {
-    let asset = std::env::args().nth(1).ok_or(ProbeError::Usage)?;
+    let asset = std::env::args_os()
+        .nth(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .ok_or(ProbeError::Usage)?;
     let mut options = RunOptions::default();
     if std::env::var_os("ENE_BODY_SKIP_GPU").is_some() {
         options.try_gpu = false;
@@ -164,16 +167,16 @@ fn initial_placement() -> Result<PlacementBox, ProbeError> {
         });
     };
     let raw = raw.to_string_lossy();
-    let parts = raw.split(',').collect::<Vec<_>>();
-    if parts.len() != 5 {
-        return Err(ProbeError::Usage);
-    }
-    let x = parts[0].trim().parse().map_err(|_| ProbeError::Usage)?;
-    let y = parts[1].trim().parse().map_err(|_| ProbeError::Usage)?;
-    let width = parts[2].trim().parse().map_err(|_| ProbeError::Usage)?;
-    let height = parts[3].trim().parse().map_err(|_| ProbeError::Usage)?;
-    let scale = parts[4].trim().parse().map_err(|_| ProbeError::Usage)?;
-    Ok(PlacementBox {
+    parse_placement(raw.split(',')).ok_or(ProbeError::Usage)
+}
+
+fn parse_placement<'a>(mut fields: impl Iterator<Item = &'a str>) -> Option<PlacementBox> {
+    let x = fields.next()?.trim().parse().ok()?;
+    let y = fields.next()?.trim().parse().ok()?;
+    let width = fields.next()?.trim().parse().ok()?;
+    let height = fields.next()?.trim().parse().ok()?;
+    let scale = fields.next()?.trim().parse().ok()?;
+    fields.next().is_none().then_some(PlacementBox {
         x,
         y,
         width,
@@ -212,35 +215,13 @@ async fn command(line: &str, writer: &mut tokio::io::DuplexStream) -> Result<boo
                 None
             }
         },
-        "placement" => {
-            let values = parts.collect::<Vec<_>>();
-            if values.len() == 5 {
-                match (
-                    values[0].parse::<i32>(),
-                    values[1].parse::<i32>(),
-                    values[2].parse::<u32>(),
-                    values[3].parse::<u32>(),
-                    values[4].parse::<f32>(),
-                ) {
-                    (Ok(x), Ok(y), Ok(width), Ok(height), Ok(scale)) => {
-                        Some(ParentToBody::Placement(PlacementBox {
-                            x,
-                            y,
-                            width,
-                            height,
-                            scale,
-                        }))
-                    }
-                    _ => {
-                        eprintln!("probe: placement takes X Y W H SCALE");
-                        None
-                    }
-                }
-            } else {
+        "placement" => match parse_placement(parts) {
+            Some(placement) => Some(ParentToBody::Placement(placement)),
+            None => {
                 eprintln!("probe: placement takes X Y W H SCALE");
                 None
             }
-        }
+        },
         "asset" => Some(ParentToBody::AssetRef(AssetRef::Path {
             path: parts.collect::<Vec<_>>().join(" "),
         })),
@@ -275,14 +256,19 @@ async fn command(line: &str, writer: &mut tokio::io::DuplexStream) -> Result<boo
 
 fn absorb(frame: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ProbeError> {
     frame.extend_from_slice(bytes);
-    while let Ok((event, used)) = decode_body(frame) {
-        frame.drain(..used);
-        emit(&event)?;
-        if matches!(event, BodyToParent::CleanExit) {
-            frame.clear();
+    loop {
+        match decode_body(frame) {
+            Ok((event, used)) => {
+                frame.drain(..used);
+                emit(&event)?;
+                if matches!(event, BodyToParent::CleanExit) {
+                    frame.clear();
+                }
+            }
+            Err(ene_body::ipc::IpcError::Truncated { .. }) => return Ok(()),
+            Err(error) => return Err(ProbeError::Ipc(error)),
         }
     }
-    Ok(())
 }
 
 fn emit(event: &BodyToParent) -> Result<(), ProbeError> {

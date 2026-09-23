@@ -183,8 +183,12 @@ where
     let mut tmp = [0u8; 4096];
     let mut health = tokio::time::interval(HEALTH_INTERVAL);
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    const RUNTIME_HZ: f32 = 60.0;
-    let mut runtime_tick = tokio::time::interval(std::time::Duration::from_nanos(16_666_667));
+    // Single cadence source: tick interval and animation dt must stay in
+    // lockstep. 60 Hz is the measured presentation margin for the fixed-window
+    // >= 30 FPS gate (a fixed 30 Hz tick could not absorb a Present stall);
+    // lowering it requires a fresh measurement per first-party-desktop §8.4.
+    const RUNTIME_TICK: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
+    let mut runtime_tick = tokio::time::interval(RUNTIME_TICK);
     runtime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut render_paused_until = None;
 
@@ -249,7 +253,7 @@ where
                 overlay.pump();
                 if overlay.ready_to_render() && !high_load_paused {
                     let started = std::time::Instant::now();
-                    match vrm.update(1.0 / RUNTIME_HZ) {
+                    match vrm.update(RUNTIME_TICK.as_secs_f32()) {
                         Ok(meshes) => {
                             reported_asset_failure = None;
                             overlay.render(&meshes);

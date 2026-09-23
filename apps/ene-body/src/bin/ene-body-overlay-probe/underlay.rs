@@ -10,7 +10,6 @@
 
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
@@ -106,7 +105,7 @@ fn run(path: PathBuf) -> Result<(), UnderlayError> {
         pool,
         buffer: None,
         surface_size: (width, height),
-        log: Mutex::new(log),
+        log,
     };
     queue
         .roundtrip(&mut state)
@@ -164,14 +163,11 @@ struct State {
     pool: SlotPool,
     buffer: Option<smithay_client_toolkit::shm::slot::Buffer>,
     surface_size: (u32, u32),
-    log: Mutex<std::fs::File>,
+    log: std::fs::File,
 }
 
 impl State {
-    fn record(&self, kind: &str, detail: serde_json::Value) {
-        let Ok(mut file) = self.log.lock() else {
-            return;
-        };
+    fn record(&mut self, kind: &str, detail: serde_json::Value) {
         let observed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
@@ -181,9 +177,9 @@ impl State {
             "kind": kind,
             "detail": detail,
         });
-        if serde_json::to_writer(&mut *file, &line).is_ok() {
+        if serde_json::to_writer(&mut self.log, &line).is_ok() {
             // Best effort: a lost newline is not a probe failure.
-            drop(file.write_all(b"\n"));
+            drop(self.log.write_all(b"\n"));
         }
     }
 }

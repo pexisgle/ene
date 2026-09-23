@@ -26,7 +26,7 @@ struct ProbeReport {
     renderer_frame_data: bool,
     motion_dir: Option<String>,
     vrma_motion_pack: bool,
-    pose_motions: Vec<String>,
+    pose_motions: Vec<PoseHint>,
     stats: AssetReadyInfo,
     note: &'static str,
 }
@@ -76,11 +76,7 @@ fn run() -> Result<ProbeReport, String> {
                 clips: pose_clips_in(dir),
             })
             .map_err(|error| std::format!("{:?}: {}", error.reason, error.detail))?;
-        pose_motions = session
-            .motion_poses()
-            .iter()
-            .map(|pose| std::format!("{pose:?}"))
-            .collect();
+        pose_motions = session.motion_poses();
     }
     let mut renderer_frame_data = true;
     for pose in [

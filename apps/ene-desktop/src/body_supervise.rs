@@ -1,3 +1,9 @@
+//! Optional Body child. Chat and settings do not wait for this process.
+//!
+//! Projection IPC matches `apps/ene-body/README.md`: length-prefixed
+//! MessagePack on `--ipc-stdio`. Commands are [`ene_body::ipc::ParentToBody`]
+//! only — secrets, chat text, and Task commands have no variant.
+
 use std::collections::VecDeque;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};

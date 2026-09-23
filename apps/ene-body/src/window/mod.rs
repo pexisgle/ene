@@ -23,7 +23,6 @@ pub(crate) fn gpu_info(failure: RenderFailure) -> crate::ipc::GpuFailInfo {
             RenderFailure::Device => crate::ipc::GpuFailReason::RequestDevice,
             RenderFailure::Surface => crate::ipc::GpuFailReason::Surface,
             RenderFailure::DeviceLost => crate::ipc::GpuFailReason::DeviceLost,
-            RenderFailure::OutOfMemory => crate::ipc::GpuFailReason::OutOfMemory,
         },
     }
 }
@@ -61,6 +60,14 @@ pub const DEFAULT_PLACEMENT: PlacementBox = PlacementBox {
     height: 640,
     scale: 1.0,
 };
+
+/// Native backend this build would request; off Linux/Windows there is none.
+#[cfg(target_os = "linux")]
+const REQUESTED_NATIVE: OverlayKind = OverlayKind::KdeLayerShell;
+#[cfg(target_os = "windows")]
+const REQUESTED_NATIVE: OverlayKind = OverlayKind::WindowsDwm;
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+const REQUESTED_NATIVE: OverlayKind = OverlayKind::Headless;
 
 /// Overlay in this process. Production attempts the native backend and reports
 /// an explicit unavailable outcome before using Headless.
@@ -112,7 +119,9 @@ impl Overlay {
 
     pub fn set_visible(&mut self, visible: bool) {
         match self {
-            Self::Headless(inner) => inner.set_visible(visible),
+            Self::Headless(_) => {
+                let _ = visible;
+            }
             #[cfg(target_os = "linux")]
             Self::KdeLayerShell(inner) => inner.set_visible(visible),
             #[cfg(target_os = "windows")]
@@ -120,20 +129,11 @@ impl Overlay {
         }
     }
 
-    #[must_use]
-    pub fn visible(&self) -> bool {
-        match self {
-            Self::Headless(inner) => inner.visible(),
-            #[cfg(target_os = "linux")]
-            Self::KdeLayerShell(inner) => inner.visible(),
-            #[cfg(target_os = "windows")]
-            Self::WindowsDwm(inner) => inner.visible(),
-        }
-    }
-
     pub fn set_placement(&mut self, placement: PlacementBox) {
         match self {
-            Self::Headless(inner) => inner.set_placement(placement),
+            Self::Headless(_) => {
+                let _ = placement;
+            }
             #[cfg(target_os = "linux")]
             Self::KdeLayerShell(inner) => inner.set_placement(placement),
             #[cfg(target_os = "windows")]
@@ -223,18 +223,10 @@ impl Overlay {
     #[must_use]
     pub fn unavailable_info(&self) -> Option<crate::ipc::OverlayUnavailableInfo> {
         match self {
-            Self::Headless(inner) => {
-                inner
-                    .unavailable_reason()
-                    .map(|reason| crate::ipc::OverlayUnavailableInfo {
-                        requested: if cfg!(target_os = "windows") {
-                            OverlayKind::WindowsDwm
-                        } else {
-                            OverlayKind::KdeLayerShell
-                        },
-                        reason: reason.to_string(),
-                    })
-            }
+            Self::Headless(inner) => Some(crate::ipc::OverlayUnavailableInfo {
+                requested: REQUESTED_NATIVE,
+                reason: inner.reason().to_string(),
+            }),
             #[cfg(target_os = "linux")]
             Self::KdeLayerShell(_) => None,
             #[cfg(target_os = "windows")]

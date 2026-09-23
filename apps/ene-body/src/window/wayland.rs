@@ -54,7 +54,6 @@ mod imp {
         /// visible buffer is still on screen and [`Self::render`] must retry
         /// the transparent present instead of presenting meshes.
         hide_pending: bool,
-        placement: PlacementBox,
         gpu_failure: Option<GpuFailInfo>,
         next_commit: u64,
         renderer_size: (u32, u32),
@@ -65,7 +64,9 @@ mod imp {
             formatter
                 .debug_struct("WaylandOverlay")
                 .field("visible", &self.visible)
-                .field("placement", &self.placement)
+                .field("size", &self.state.size)
+                .field("position", &self.state.position)
+                .field("scale", &self.state.scale)
                 .field("gpu_ready", &self.renderer.is_some())
                 .finish()
         }
@@ -128,7 +129,6 @@ mod imp {
                 configured: false,
                 frame_ready: true,
                 closed: false,
-                dead: false,
                 scale: 1,
                 size: (placement.width, placement.height),
                 position: (placement.x, placement.y),
@@ -186,7 +186,6 @@ mod imp {
                 renderer,
                 visible: false,
                 hide_pending: false,
-                placement,
                 gpu_failure,
                 next_commit: 1,
                 renderer_size: (placement.width, placement.height),
@@ -253,12 +252,7 @@ mod imp {
             true
         }
 
-        pub fn visible(&self) -> bool {
-            self.visible && !self.state.closed && !self.state.dead
-        }
-
         pub fn set_placement(&mut self, placement: PlacementBox) {
-            self.placement = placement;
             self.state.size = (placement.width, placement.height);
             self.state.position = (placement.x, placement.y);
             // The alpha-aware region is recomputed from the next presented
@@ -307,7 +301,6 @@ mod imp {
 
         pub fn pump(&mut self) {
             if self.pump_events().is_err() {
-                self.state.dead = true;
                 self.renderer = None;
                 self.gpu_failure = Some(GpuFailInfo {
                     reason: GpuFailReason::DeviceLost,
@@ -323,11 +316,6 @@ mod imp {
                     reason: GpuFailReason::Surface,
                 });
             }
-            self.placement.scale = self.state.scale as f32;
-            self.placement.width = self.state.size.0;
-            self.placement.height = self.state.size.1;
-            self.placement.x = self.state.position.0;
-            self.placement.y = self.state.position.1;
         }
 
         pub fn ready_to_render(&self) -> bool {
@@ -431,7 +419,11 @@ mod imp {
             meshes: &[crate::vrm::RenderMesh],
             physical_size: (u32, u32),
         ) {
-            let mask = HitTestMask::from_meshes(meshes, physical_size.0, physical_size.1);
+            let Some(mask) = self.renderer.as_ref().and_then(|renderer| {
+                renderer.hit_test_mask(meshes, physical_size.0, physical_size.1)
+            }) else {
+                return;
+            };
             if !self.state.region_dirty && self.state.hit_test_mask.as_ref() == Some(&mask) {
                 return;
             }
@@ -578,9 +570,6 @@ mod imp {
         /// Set when the compositor sends `layer_surface.closed`; the surface
         /// must not be committed or presented again.
         closed: bool,
-        /// Set when the Wayland connection is unusable; the surface can no
-        /// longer be committed or presented.
-        dead: bool,
         /// Surface buffer scale. Only [`CompositorHandler::scale_factor_changed`]
         /// writes it: SCTK invokes that handler when the surface enters or
         /// leaves an output with a different scale, so per-output scale
@@ -600,6 +589,34 @@ mod imp {
     }
 
     impl State {
+        /// `origin` is the position captured at press; `total` is the pointer
+        /// displacement since then, so the overlay cannot feed its own surface
+        /// movement back into the gesture.
+        fn drag_to(&mut self, origin: (i32, i32), total: (f64, f64)) {
+            let (x, y) = dragged_position(origin, total);
+            if (x, y) != self.position {
+                self.position = (x, y);
+                self.layer.set_margin(y, 0, 0, x);
+                self.events
+                    .push_back(Event::LocalUi(LocalUiFact::Drag { x, y }));
+            }
+        }
+
+        /// `origin` is the size captured at press; `total` is the pointer
+        /// displacement since then. The next presented frame recomputes the
+        /// alpha-aware region at the new size; the pointer stays on this
+        /// surface through the implicit button-down grab.
+        fn resize_to(&mut self, origin: (u32, u32), total: (f64, f64)) {
+            let (width, height) = resized_extent(origin, total);
+            if (width, height) != self.size {
+                self.size = (width, height);
+                self.layer.set_size(width, height);
+                self.region_dirty = true;
+                self.events
+                    .push_back(Event::LocalUi(LocalUiFact::Resize { width, height }));
+            }
+        }
+
         fn missing_all(&mut self, reason: &str) {
             for correlation_id in std::mem::take(&mut self.pending_feedback) {
                 // A compositor terminal for an already-synthesized commit must
@@ -865,37 +882,22 @@ mod imp {
                                     start_local,
                                     ..
                                 }) => {
-                                    let (width, height) = resized_extent(
-                                        origin,
-                                        (
-                                            event.position.0 - start_local.0,
-                                            event.position.1 - start_local.1,
-                                        ),
+                                    let total = (
+                                        event.position.0 - start_local.0,
+                                        event.position.1 - start_local.1,
                                     );
-                                    self.size = (width, height);
-                                    self.layer.set_size(width, height);
-                                    self.region_dirty = true;
-                                    self.events.push_back(Event::LocalUi(LocalUiFact::Resize {
-                                        width,
-                                        height,
-                                    }));
+                                    self.resize_to(origin, total);
                                 }
                                 Some(Interaction::Drag {
                                     origin,
                                     start_local,
                                     ..
                                 }) => {
-                                    let (x, y) = dragged_position(
-                                        origin,
-                                        (
-                                            event.position.0 - start_local.0,
-                                            event.position.1 - start_local.1,
-                                        ),
+                                    let total = (
+                                        event.position.0 - start_local.0,
+                                        event.position.1 - start_local.1,
                                     );
-                                    self.position = (x, y);
-                                    self.layer.set_margin(y, 0, 0, x);
-                                    self.events
-                                        .push_back(Event::LocalUi(LocalUiFact::Drag { x, y }));
+                                    self.drag_to(origin, total);
                                 }
                                 None => {}
                             }
@@ -937,25 +939,12 @@ mod imp {
                 Interaction::Drag { origin, accum, .. } => {
                     accum.0 += dx;
                     accum.1 += dy;
-                    let (x, y) = dragged_position(*origin, *accum);
-                    if (x, y) != self.position {
-                        self.position = (x, y);
-                        self.layer.set_margin(y, 0, 0, x);
-                        self.events
-                            .push_back(Event::LocalUi(LocalUiFact::Drag { x, y }));
-                    }
+                    self.drag_to(*origin, *accum);
                 }
                 Interaction::Resize { origin, accum, .. } => {
                     accum.0 += dx;
                     accum.1 += dy;
-                    let (width, height) = resized_extent(*origin, *accum);
-                    if (width, height) != self.size {
-                        self.size = (width, height);
-                        self.layer.set_size(width, height);
-                        self.region_dirty = true;
-                        self.events
-                            .push_back(Event::LocalUi(LocalUiFact::Resize { width, height }));
-                    }
+                    self.resize_to(*origin, *accum);
                 }
             }
             self.interaction = Some(interaction);

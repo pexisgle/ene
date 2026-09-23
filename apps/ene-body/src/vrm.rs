@@ -60,19 +60,6 @@ pub struct VrmSession {
     asset_generation: u32,
 }
 
-impl std::fmt::Debug for VrmSession {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("VrmSession")
-            .field("runtime_loaded", &self.runtime.is_some())
-            .field("pose", &self.pose)
-            .field("motion_poses", &self.motion_poses())
-            .field("playing", &self.playing)
-            .field("stats", &self.stats)
-            .finish()
-    }
-}
-
 impl Default for VrmSession {
     fn default() -> Self {
         Self::new()
@@ -92,11 +79,6 @@ impl VrmSession {
             material_textures: Vec::new(),
             asset_generation: 0,
         }
-    }
-
-    #[must_use]
-    pub fn pose(&self) -> PoseHint {
-        self.pose
     }
 
     #[must_use]
@@ -585,7 +567,6 @@ mod tests {
         let session = VrmSession::new();
         assert_eq!(session.motion(), FeatureSupport::Unsupported);
         assert!(session.motion_poses().is_empty());
-        assert_eq!(session.pose(), PoseHint::Idle);
     }
 
     #[test]

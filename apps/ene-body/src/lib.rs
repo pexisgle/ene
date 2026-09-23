@@ -9,7 +9,6 @@ pub mod vrm;
 pub mod window;
 
 pub use error::BodyError;
-pub use ipc::ParentToBody;
 pub use run::{RunOptions, parse_endpoint, run, run_with_io};
 
 #[cfg(test)]

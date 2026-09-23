@@ -209,7 +209,6 @@ pub enum GpuFailReason {
     RequestDevice,
     Surface,
     DeviceLost,
-    OutOfMemory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

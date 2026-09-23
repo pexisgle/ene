@@ -16,7 +16,6 @@ const HIT_TEST_CELL_PIXELS: u32 = 4;
 const VISIBLE_ALPHA_THRESHOLD: f32 = 0.001;
 
 pub struct SurfaceRenderer {
-    _instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -25,8 +24,11 @@ pub struct SurfaceRenderer {
     sampler: wgpu::Sampler,
     fallback_texture: wgpu::BindGroup,
     textures: BTreeMap<u64, wgpu::BindGroup>,
-    depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    /// CPU-side frame retained from the last [`Self::render`] call so the
+    /// alpha-aware hit-test mask can be rebuilt without re-deriving the vertex
+    /// stream.
+    last_frame: Option<Frame>,
     config: wgpu::SurfaceConfiguration,
     lost: Arc<AtomicBool>,
 }
@@ -44,6 +46,19 @@ struct DrawRange {
     texture_id: Option<u64>,
 }
 
+/// CPU-side geometry of one rendered frame, retained for hit-testing.
+struct Frame {
+    vertices: Vec<Vertex>,
+    indices: Vec<u32>,
+    draws: Vec<DrawRange>,
+}
+
+/// Coarse alpha-aware ownership mask for native pointer hit-testing.
+///
+/// Four-pixel cells keep per-frame CPU work bounded while following the
+/// deformed mesh closely enough that transparent desktop space remains owned
+/// by the underlying application. One-cell dilation avoids tiny ungrabbable
+/// gaps around thin geometry and texture-filtered edges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HitTestMask {
     width: u32,
@@ -71,20 +86,10 @@ impl HitTestMask {
         }
     }
 
-    pub(crate) fn from_meshes(meshes: &[RenderMesh], width: u32, height: u32) -> Self {
-        let (vertices, indices, draws) = vertices(meshes, width, height);
-        let textures = meshes
-            .iter()
-            .filter_map(|mesh| mesh.texture.as_ref())
-            .map(|texture| (texture.id, texture))
-            .collect::<BTreeMap<_, _>>();
-        Self::from_frame(&vertices, &indices, draws, &textures, width, height)
-    }
-
     fn from_frame(
         vertices: &[Vertex],
         indices: &[u32],
-        draws: Vec<DrawRange>,
+        draws: &[DrawRange],
         textures: &BTreeMap<u64, &RenderTexture>,
         width: u32,
         height: u32,
@@ -394,7 +399,6 @@ pub enum RenderFailure {
     Adapter,
     Device,
     DeviceLost,
-    OutOfMemory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -646,9 +650,8 @@ struct VertexOut {
             multiview_mask: None,
             cache: None,
         });
-        let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
+        let depth_view = create_depth(&device, config.width, config.height);
         Ok(Self {
-            _instance: instance,
             surface,
             device,
             queue,
@@ -657,8 +660,8 @@ struct VertexOut {
             sampler,
             fallback_texture,
             textures: BTreeMap::new(),
-            depth_texture,
             depth_view,
+            last_frame: None,
             config,
             lost,
         })
@@ -671,8 +674,7 @@ struct VertexOut {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
-        (self.depth_texture, self.depth_view) =
-            create_depth(&self.device, self.config.width, self.config.height);
+        self.depth_view = create_depth(&self.device, self.config.width, self.config.height);
     }
 
     pub fn render(&mut self, meshes: &[RenderMesh]) -> Result<RenderOutcome, RenderFailure> {
@@ -702,6 +704,11 @@ struct VertexOut {
             }
         }
         let (vertices, indices, draws) = vertices(meshes, self.config.width, self.config.height);
+        self.last_frame = Some(Frame {
+            vertices,
+            indices,
+            draws,
+        });
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -717,19 +724,22 @@ struct VertexOut {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let vertex_buffer = (!vertices.is_empty()).then(|| {
+        let Some(frame_data) = self.last_frame.as_ref() else {
+            return Ok(RenderOutcome::Skipped);
+        };
+        let vertex_buffer = (!frame_data.vertices.is_empty()).then(|| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("ene-body frame vertices"),
-                    contents: bytemuck::cast_slice(&vertices),
+                    contents: bytemuck::cast_slice(&frame_data.vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
-        let index_buffer = (!indices.is_empty()).then(|| {
+        let index_buffer = (!frame_data.indices.is_empty()).then(|| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("ene-body frame indices"),
-                    contents: bytemuck::cast_slice(&indices),
+                    contents: bytemuck::cast_slice(&frame_data.indices),
                     usage: wgpu::BufferUsages::INDEX,
                 })
         });
@@ -766,19 +776,45 @@ struct VertexOut {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                for draw in draws {
+                for draw in &frame_data.draws {
                     let texture = draw
                         .texture_id
                         .and_then(|id| self.textures.get(&id))
                         .unwrap_or(&self.fallback_texture);
                     pass.set_bind_group(0, texture, &[]);
-                    pass.draw_indexed(draw.indices, 0, 0..1);
+                    pass.draw_indexed(draw.indices.clone(), 0, 0..1);
                 }
             }
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
         Ok(RenderOutcome::Presented)
+    }
+
+    /// Rebuilds the alpha-aware hit-test mask from the last rendered frame.
+    ///
+    /// `meshes` supplies the texture alpha data the retained frame keeps only
+    /// as texture ids. Returns `None` when nothing has been rendered yet.
+    pub(crate) fn hit_test_mask(
+        &self,
+        meshes: &[RenderMesh],
+        width: u32,
+        height: u32,
+    ) -> Option<HitTestMask> {
+        let frame = self.last_frame.as_ref()?;
+        let textures = meshes
+            .iter()
+            .filter_map(|mesh| mesh.texture.as_ref())
+            .map(|texture| (texture.id, texture))
+            .collect::<BTreeMap<_, _>>();
+        Some(HitTestMask::from_frame(
+            &frame.vertices,
+            &frame.indices,
+            &frame.draws,
+            &textures,
+            width,
+            height,
+        ))
     }
 }
 
@@ -920,11 +956,7 @@ fn create_texture_binding(
     })
 }
 
-fn create_depth(
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-) -> (wgpu::Texture, wgpu::TextureView) {
+fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ene-body depth"),
         size: wgpu::Extent3d {
@@ -939,6 +971,5 @@ fn create_depth(
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }

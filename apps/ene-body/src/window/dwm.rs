@@ -104,6 +104,7 @@ mod imp {
                 placement,
                 events: VecDeque::new(),
                 hidden: true,
+                fullscreen: false,
                 hit_test_mask: HitTestMask::empty(placement.width, placement.height),
                 region_dirty: true,
                 defer_region_refresh_once: false,
@@ -203,14 +204,14 @@ mod imp {
 
         pub fn set_visible(&mut self, visible: bool) {
             self.visible = visible;
-            let show = visible && self.renderer.is_some() && !self.state.region_failed;
-            self.state.hidden = !show;
+            self.state.hidden = !(visible && self.renderer.is_some() && !self.state.region_failed);
+            let show = self.visible() && self.renderer.is_some() && !self.state.region_failed;
             // SAFETY: hwnd is live and owned by this object.
             unsafe { ShowWindow(self.hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
         }
 
         pub fn visible(&self) -> bool {
-            self.visible && !self.state.hidden
+            self.visible && !self.state.hidden && !self.state.fullscreen
         }
 
         pub fn set_placement(&mut self, placement: PlacementBox) {
@@ -247,13 +248,20 @@ mod imp {
 
         pub fn pump(&mut self) {
             self.pump_messages();
+            let fullscreen = foreground_is_fullscreen(self.hwnd);
+            if fullscreen != self.state.fullscreen {
+                self.state.fullscreen = fullscreen;
+                let show = self.visible() && self.renderer.is_some() && !self.state.region_failed;
+                // SAFETY: hwnd is live and owned by this object.
+                unsafe { ShowWindow(self.hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
+            }
             if self.state.region_failed {
                 self.fail_surface();
             }
         }
 
         pub fn ready_to_render(&self) -> bool {
-            self.visible() && !foreground_is_fullscreen(self.hwnd) && self.renderer.is_some()
+            self.visible() && self.renderer.is_some()
         }
 
         pub fn render(&mut self, meshes: &[crate::vrm::RenderMesh]) {
@@ -269,12 +277,13 @@ mod imp {
                     if should_refresh_input_region(
                         self.state.region_dirty,
                         &mut self.state.defer_region_refresh_once,
-                    ) {
-                        let hit_test_mask = HitTestMask::from_meshes(
+                    ) && let Some(hit_test_mask) = self.renderer.as_ref().and_then(|renderer| {
+                        renderer.hit_test_mask(
                             meshes,
                             physical(self.state.placement.width, self.state.placement.scale),
                             physical(self.state.placement.height, self.state.placement.scale),
-                        );
+                        )
+                    }) {
                         if self.state.hit_test_mask == hit_test_mask && !self.state.region_dirty {
                             return;
                         }
@@ -356,6 +365,7 @@ mod imp {
         placement: PlacementBox,
         events: VecDeque<LocalUiFact>,
         hidden: bool,
+        fullscreen: bool,
         hit_test_mask: HitTestMask,
         region_dirty: bool,
         defer_region_refresh_once: bool,
