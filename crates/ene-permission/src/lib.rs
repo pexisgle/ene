@@ -12,9 +12,7 @@ pub use action::{
     ActionAuthorizationDecision, ActionDenyCode, ActionEvaluationTracker, ActionKind,
     ActionPermissionEvaluationId, ActionUseCandidate, CurrentActionPremise, authorize_action_use,
 };
-pub use erasure::{
-    PermissionErasureOutcome, PermissionErasureParticipant, PermissionErasureRepository,
-};
+pub use erasure::{PermissionErasureParticipant, PermissionErasureRepository};
 pub use intent::{AssignConsentIntent, assign_consent};
 pub use usage_cap::{
     SetUsageCapCommand, SetUsageCapOutcome, UsageCap, UsageCapConsumption, UsageCapId, UsageCapRef,

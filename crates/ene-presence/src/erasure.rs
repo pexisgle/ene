@@ -2,25 +2,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use ene_preservation::{
-    DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant, MechanicalDeletionTarget,
-    ParticipantCompletionFact, ParticipantHoldClass, ParticipantOwnerRef,
+    DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant, LocalErasurePass,
+    ParticipantCompletionFact, ParticipantOwnerRef, drive_local_erasure,
 };
-use ene_primitive::WallClockWithTz;
 
 use crate::PresenceTechnicalError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PresenceErasureOutcome {
-    NotCurrent,
-    Applied { erased: u64, remainder: u64 },
-}
-
+/// Store port for the presence owner's local erasure.
 pub trait PresenceErasureRepository: Send + Sync {
     fn erase_target_text(
         &self,
         condition: ErasureConditionRef,
         target: &str,
-    ) -> impl std::future::Future<Output = Result<PresenceErasureOutcome, PresenceTechnicalError>> + Send;
+    ) -> impl std::future::Future<Output = Result<LocalErasurePass, PresenceTechnicalError>> + Send;
 }
 
 pub struct PresenceErasureParticipant<R> {
@@ -45,62 +39,14 @@ impl<R: PresenceErasureRepository + 'static> ErasureParticipant for PresenceEras
         &self,
         command: DemandLocalErasureCommand,
     ) -> Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>> {
-        Box::pin(async move {
-            let condition = command.condition();
-            let Some(target) = command.scope().target() else {
-                return ParticipantCompletionFact::held(
-                    condition,
-                    Self::OWNER,
-                    ParticipantHoldClass::Failed,
-                    WallClockWithTz::now(),
-                );
-            };
-            let MechanicalDeletionTarget::ExactText(material) = &target.mechanical;
-            let text = material.expose_for_erasure();
-            if text.trim().is_empty() {
-                return ParticipantCompletionFact::held(
-                    condition,
-                    Self::OWNER,
-                    ParticipantHoldClass::Failed,
-                    WallClockWithTz::now(),
-                );
-            }
-            match self.repository.erase_target_text(condition, text).await {
-                Ok(PresenceErasureOutcome::NotCurrent) => {
-                    ParticipantCompletionFact::local_complete(
-                        condition,
-                        Self::OWNER,
-                        0,
-                        0,
-                        WallClockWithTz::now(),
-                    )
-                }
-                Ok(PresenceErasureOutcome::Applied {
-                    erased,
-                    remainder: 0,
-                }) => ParticipantCompletionFact::verified(
-                    condition,
-                    Self::OWNER,
-                    erased,
-                    WallClockWithTz::now(),
-                ),
-                Ok(PresenceErasureOutcome::Applied { erased, remainder }) => {
-                    ParticipantCompletionFact::more_work(
-                        condition,
-                        Self::OWNER,
-                        erased,
-                        remainder,
-                        WallClockWithTz::now(),
-                    )
-                }
-                Err(_) => ParticipantCompletionFact::held(
-                    condition,
-                    Self::OWNER,
-                    ParticipantHoldClass::Failed,
-                    WallClockWithTz::now(),
-                ),
-            }
-        })
+        Box::pin(drive_local_erasure(
+            Self::OWNER,
+            command,
+            |condition, text| {
+                let repository = Arc::clone(&self.repository);
+                Box::pin(async move { repository.erase_target_text(condition, text).await })
+            },
+        ))
     }
 }
 
@@ -111,7 +57,8 @@ mod tests {
     use super::*;
     use ene_preservation::{
         DeletionOperationId, DeletionSearchMaterial, DeletionSweepGeneration,
-        ParticipantErasureScope, TargetedDeletionTarget,
+        MechanicalDeletionTarget, ParticipantErasureScope, ParticipantHoldClass,
+        TargetedDeletionTarget,
     };
     use ene_primitive::RawId;
 
@@ -139,7 +86,7 @@ mod tests {
     }
 
     struct FakeRepo {
-        outcome: Mutex<PresenceErasureOutcome>,
+        outcome: Mutex<LocalErasurePass>,
         calls: Mutex<usize>,
     }
 
@@ -148,18 +95,15 @@ mod tests {
             &self,
             _condition: ErasureConditionRef,
             _target: &str,
-        ) -> impl std::future::Future<
-            Output = Result<PresenceErasureOutcome, PresenceTechnicalError>,
-        > + Send {
+        ) -> impl std::future::Future<Output = Result<LocalErasurePass, PresenceTechnicalError>> + Send
+        {
             *self.calls.lock().unwrap() += 1;
             let outcome = *self.outcome.lock().unwrap();
             async move { Ok(outcome) }
         }
     }
 
-    fn fake(
-        outcome: PresenceErasureOutcome,
-    ) -> (Arc<FakeRepo>, PresenceErasureParticipant<FakeRepo>) {
+    fn fake(outcome: LocalErasurePass) -> (Arc<FakeRepo>, PresenceErasureParticipant<FakeRepo>) {
         let repo = Arc::new(FakeRepo {
             outcome: Mutex::new(outcome),
             calls: Mutex::new(0),
@@ -170,7 +114,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_zero_remainder_pass_is_a_verified_fact() {
-        let (repo, participant) = fake(PresenceErasureOutcome::Applied {
+        let (repo, participant) = fake(LocalErasurePass::Applied {
             erased: 4,
             remainder: 0,
         });
@@ -191,7 +135,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_remaining_reference_reports_more_work() {
-        let (_repo, participant) = fake(PresenceErasureOutcome::Applied {
+        let (_repo, participant) = fake(LocalErasurePass::Applied {
             erased: 0,
             remainder: 1,
         });
@@ -207,7 +151,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_not_current_pass_claims_no_verification() {
-        let (_repo, participant) = fake(PresenceErasureOutcome::NotCurrent);
+        let (_repo, participant) = fake(LocalErasurePass::NotCurrent);
         let fact = participant
             .demand_local_erasure(command(condition(), local_scope("client-target")))
             .await;
@@ -219,7 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_correlation_only_demand_is_an_explicit_hold() {
-        let (repo, participant) = fake(PresenceErasureOutcome::Applied {
+        let (repo, participant) = fake(LocalErasurePass::Applied {
             erased: 0,
             remainder: 0,
         });

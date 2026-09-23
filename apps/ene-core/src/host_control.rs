@@ -321,7 +321,7 @@ impl FirstPartyControlSeat {
             op,
             target,
             premise_generation,
-            nonce,
+            nonce: RedactedSecret::new(nonce),
         };
         let delivered = inner.outbound.as_ref().is_some_and(|outbound| {
             outbound
@@ -693,7 +693,7 @@ async fn dispatch_requester(handle: &Arc<HostHandle>, request: ToHost) -> FromHo
 async fn dispatch_confirmation(handle: &HostHandle, request: ToConfirmation) -> FromConfirmation {
     match request {
         ToConfirmation::SessionComplete { session_id, nonce } => {
-            match handle.control_seat.take(session_id, &nonce) {
+            match handle.control_seat.take(session_id, nonce.expose()) {
                 Some((request_id, pending)) => {
                     let (reply, outcome) = execute_pending(handle, pending).await;
                     if let Some(outcome) = outcome {
@@ -707,7 +707,7 @@ async fn dispatch_confirmation(handle: &HostHandle, request: ToConfirmation) -> 
             }
         }
         ToConfirmation::SessionReject { session_id, nonce } => {
-            match handle.control_seat.reject(session_id, &nonce) {
+            match handle.control_seat.reject(session_id, nonce.expose()) {
                 Some(request_id) => {
                     handle.control_seat.reject_request(&request_id);
                     FromConfirmation::Outcome(ControlOutcome::Rejected { session_id })
@@ -724,7 +724,7 @@ async fn dispatch_confirmation(handle: &HostHandle, request: ToConfirmation) -> 
         } => {
             if !handle.control_seat.stage_credential_secret(
                 session_id,
-                &nonce,
+                nonce.expose(),
                 &format!("{provider}:{label}"),
                 secret,
             ) {
@@ -1555,7 +1555,7 @@ mod tests {
         let second = seat.seat_spawned_gui(second_outbound);
         assert_ne!(first, second, "a new child is a new seat generation");
         assert!(
-            seat.take(session_id, &nonce).is_none(),
+            seat.take(session_id, nonce.expose()).is_none(),
             "the previous GUI's session must not complete under the new seat"
         );
     }
@@ -1631,7 +1631,7 @@ mod tests {
             session.deadline = std::time::Instant::now() - CONTROL_SESSION_TTL;
         }
         assert!(
-            seat.take(session_id, &nonce).is_none(),
+            seat.take(session_id, nonce.expose()).is_none(),
             "an expired session must not complete"
         );
         assert_eq!(

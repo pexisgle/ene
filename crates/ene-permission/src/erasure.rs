@@ -2,27 +2,23 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use ene_preservation::{
-    DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant, MechanicalDeletionTarget,
-    ParticipantCompletionFact, ParticipantHoldClass, ParticipantOwnerRef,
+    DemandLocalErasureCommand, ErasureConditionRef, ErasureParticipant, LocalErasurePass,
+    ParticipantCompletionFact, ParticipantOwnerRef, drive_local_erasure,
 };
-use ene_primitive::WallClockWithTz;
 
 use crate::PermissionTechnicalError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionErasureOutcome {
-    NotCurrent,
-    Applied { erased: u64, remainder: u64 },
-}
-
+/// Store port for the permission owner's local erasure.
+///
+/// The `ene-store` adapter implements this against the canonical tables; a
+/// participant that cannot reach its store reports a hold instead of a
+/// verification, never a fake success.
 pub trait PermissionErasureRepository: Send + Sync {
     fn erase_target_text(
         &self,
         condition: ErasureConditionRef,
         target: &str,
-    ) -> impl std::future::Future<
-        Output = Result<PermissionErasureOutcome, PermissionTechnicalError>,
-    > + Send;
+    ) -> impl std::future::Future<Output = Result<LocalErasurePass, PermissionTechnicalError>> + Send;
 }
 
 pub struct PermissionErasureParticipant<R> {
@@ -49,62 +45,14 @@ impl<R: PermissionErasureRepository + 'static> ErasureParticipant
         &self,
         command: DemandLocalErasureCommand,
     ) -> Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>> {
-        Box::pin(async move {
-            let condition = command.condition();
-            let Some(target) = command.scope().target() else {
-                return ParticipantCompletionFact::held(
-                    condition,
-                    Self::OWNER,
-                    ParticipantHoldClass::Failed,
-                    WallClockWithTz::now(),
-                );
-            };
-            let MechanicalDeletionTarget::ExactText(material) = &target.mechanical;
-            let text = material.expose_for_erasure();
-            if text.trim().is_empty() {
-                return ParticipantCompletionFact::held(
-                    condition,
-                    Self::OWNER,
-                    ParticipantHoldClass::Failed,
-                    WallClockWithTz::now(),
-                );
-            }
-            match self.repository.erase_target_text(condition, text).await {
-                Ok(PermissionErasureOutcome::NotCurrent) => {
-                    ParticipantCompletionFact::local_complete(
-                        condition,
-                        Self::OWNER,
-                        0,
-                        0,
-                        WallClockWithTz::now(),
-                    )
-                }
-                Ok(PermissionErasureOutcome::Applied {
-                    erased,
-                    remainder: 0,
-                }) => ParticipantCompletionFact::verified(
-                    condition,
-                    Self::OWNER,
-                    erased,
-                    WallClockWithTz::now(),
-                ),
-                Ok(PermissionErasureOutcome::Applied { erased, remainder }) => {
-                    ParticipantCompletionFact::more_work(
-                        condition,
-                        Self::OWNER,
-                        erased,
-                        remainder,
-                        WallClockWithTz::now(),
-                    )
-                }
-                Err(_) => ParticipantCompletionFact::held(
-                    condition,
-                    Self::OWNER,
-                    ParticipantHoldClass::Failed,
-                    WallClockWithTz::now(),
-                ),
-            }
-        })
+        Box::pin(drive_local_erasure(
+            Self::OWNER,
+            command,
+            |condition, text| {
+                let repository = Arc::clone(&self.repository);
+                Box::pin(async move { repository.erase_target_text(condition, text).await })
+            },
+        ))
     }
 }
 
@@ -115,7 +63,7 @@ mod tests {
     use super::*;
     use ene_preservation::{
         DeletionOperationId, DeletionSearchMaterial, DeletionSweepGeneration,
-        TargetedDeletionTarget,
+        MechanicalDeletionTarget, ParticipantHoldClass, TargetedDeletionTarget,
     };
     use ene_primitive::RawId;
 
@@ -143,12 +91,12 @@ mod tests {
     }
 
     struct FakeRepo {
-        outcome: Mutex<PermissionErasureOutcome>,
+        outcome: Mutex<LocalErasurePass>,
         called_with: Mutex<Vec<String>>,
     }
 
     impl FakeRepo {
-        fn new(outcome: PermissionErasureOutcome) -> Self {
+        fn new(outcome: LocalErasurePass) -> Self {
             Self {
                 outcome: Mutex::new(outcome),
                 called_with: Mutex::new(vec![]),
@@ -161,9 +109,8 @@ mod tests {
             &self,
             _condition: ErasureConditionRef,
             target: &str,
-        ) -> impl std::future::Future<
-            Output = Result<PermissionErasureOutcome, PermissionTechnicalError>,
-        > + Send {
+        ) -> impl std::future::Future<Output = Result<LocalErasurePass, PermissionTechnicalError>> + Send
+        {
             let outcome = *self.outcome.lock().unwrap();
             self.called_with.lock().unwrap().push(target.to_owned());
             async move { Ok(outcome) }
@@ -172,7 +119,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_zero_remainder_pass_is_a_verified_fact() {
-        let repo = Arc::new(FakeRepo::new(PermissionErasureOutcome::Applied {
+        let repo = Arc::new(FakeRepo::new(LocalErasurePass::Applied {
             erased: 3,
             remainder: 0,
         }));
@@ -198,7 +145,7 @@ mod tests {
 
     #[tokio::test]
     async fn remaining_matches_report_more_work() {
-        let repo = Arc::new(FakeRepo::new(PermissionErasureOutcome::Applied {
+        let repo = Arc::new(FakeRepo::new(LocalErasurePass::Applied {
             erased: 1,
             remainder: 2,
         }));
@@ -215,7 +162,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_not_current_pass_claims_no_verification() {
-        let repo = Arc::new(FakeRepo::new(PermissionErasureOutcome::NotCurrent));
+        let repo = Arc::new(FakeRepo::new(LocalErasurePass::NotCurrent));
         let participant = PermissionErasureParticipant::new(repo);
         let fact = participant
             .demand_local_erasure(command(condition(), local_scope("private target")))
@@ -229,7 +176,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_correlation_only_or_blank_demand_is_an_explicit_hold() {
-        let repo = Arc::new(FakeRepo::new(PermissionErasureOutcome::Applied {
+        let repo = Arc::new(FakeRepo::new(LocalErasurePass::Applied {
             erased: 0,
             remainder: 0,
         }));
@@ -258,7 +205,7 @@ mod tests {
                 &self,
                 _condition: ErasureConditionRef,
                 _target: &str,
-            ) -> Result<PermissionErasureOutcome, PermissionTechnicalError> {
+            ) -> Result<LocalErasurePass, PermissionTechnicalError> {
                 Err(PermissionTechnicalError::StorageUnavailable {
                     reason: String::from("fixture"),
                 })

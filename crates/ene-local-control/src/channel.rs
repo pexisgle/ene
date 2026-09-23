@@ -380,7 +380,7 @@ mod tests {
         let mut buffer = Vec::new();
         let frame = ToConfirmation::SessionComplete {
             session_id: uuid::Uuid::nil(),
-            nonce: String::from("n"),
+            nonce: crate::RedactedSecret::new("n"),
         };
         write_frame(&mut buffer, &frame).expect("encode");
         let mut cursor = std::io::Cursor::new(buffer);

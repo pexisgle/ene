@@ -26,7 +26,7 @@ pub struct PendingChallenge {
     pub session_id: Uuid,
     pub op: ControlOp,
     pub target: String,
-    nonce: String,
+    nonce: ene_local_control::RedactedSecret,
 }
 
 /// Requester-side client for the serving Host's local listener.

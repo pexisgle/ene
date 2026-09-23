@@ -62,26 +62,19 @@ impl Config {
     /// EmptyLanguage when the final language is blank, or EmptyDataDir when
     /// the final data directory is the empty path.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
-        load_with_env(path, |key| std::env::var(key).ok())
+        let mut config: Config = match path.map(std::fs::read).transpose() {
+            Ok(Some(bytes)) => serde_json::from_slice(&bytes)?,
+            Ok(None) => Config::default(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(error) => return Err(error.into()),
+        };
+        if let Ok(language) = std::env::var("ENE_LANGUAGE") {
+            config.language = language;
+        }
+        if let Ok(data_dir) = std::env::var("ENE_DATA_DIR") {
+            config.data_dir = Some(PathBuf::from(data_dir));
+        }
+        config.validate()?;
+        Ok(config)
     }
-}
-
-fn load_with_env(
-    path: Option<&Path>,
-    env: impl Fn(&str) -> Option<String>,
-) -> Result<Config, ConfigError> {
-    let mut config: Config = match path.map(std::fs::read).transpose() {
-        Ok(Some(bytes)) => serde_json::from_slice(&bytes)?,
-        Ok(None) => Config::default(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
-        Err(error) => return Err(error.into()),
-    };
-    if let Some(language) = env("ENE_LANGUAGE") {
-        config.language = language;
-    }
-    if let Some(data_dir) = env("ENE_DATA_DIR") {
-        config.data_dir = Some(PathBuf::from(data_dir));
-    }
-    config.validate()?;
-    Ok(config)
 }

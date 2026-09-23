@@ -1,7 +1,7 @@
 use ene_primitive::{GenerationInner, RawId};
 
 mod erasure;
-pub use erasure::{PresenceErasureOutcome, PresenceErasureParticipant, PresenceErasureRepository};
+pub use erasure::{PresenceErasureParticipant, PresenceErasureRepository};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientId(RawId);

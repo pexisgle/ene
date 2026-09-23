@@ -1,3 +1,20 @@
+//! Host-local control DTOs. Not on `ene-api`, not remote-capable.
+//!
+//! Two channels with different authority share this crate:
+//!
+//! - [`ToHost`] / [`FromHost`] speak the **requester listener**, a local
+//!   endpoint any same-user process may dial. It carries non-secret requests
+//!   and non-secret outcomes. It never issues a seat, never carries a secret,
+//!   and never completes a [`FromConfirmation::ConfirmationChallenge`] session.
+//! - [`ToConfirmation`] / [`FromConfirmation`] speak the **inherited
+//!   confirmation channel** the Host hands to the GUI it spawned. Only this
+//!   channel carries challenges, secret intake, and session completion.
+//!
+//! The nonce and every secret field use [`RedactedSecret`]: `Debug` never
+//! prints the raw value. A completion is a seat-bound session id plus a
+//! freshness nonce; knowing a nonce, declaring a PID, or opening the requester
+//! listener grants nothing.
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -155,19 +172,22 @@ pub enum ToConfirmation {
     },
     CredentialSecret {
         session_id: Uuid,
-        nonce: String,
+        nonce: RedactedSecret,
         provider: String,
         label: String,
         secret: RedactedSecret,
     },
+    /// The Owner's direct confirmation on the challenge surface.
     SessionComplete {
         session_id: Uuid,
-        nonce: String,
+        nonce: RedactedSecret,
     },
+    /// The Owner declined on the challenge surface. Applies nothing.
     SessionReject {
         session_id: Uuid,
-        nonce: String,
+        nonce: RedactedSecret,
     },
+    /// Session-less self-declaration. Always [`FromConfirmation::DeniedByBoundary`].
     ConfirmedTrue,
 }
 
@@ -178,7 +198,7 @@ pub enum FromConfirmation {
         op: ControlOp,
         target: String,
         premise_generation: u64,
-        nonce: String,
+        nonce: RedactedSecret,
     },
     Outcome(ControlOutcome),
     DeniedByBoundary,

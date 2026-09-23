@@ -84,10 +84,7 @@ pub struct IntakePremise {
     pub open_round: Option<OpenRound>,
 }
 
-/// Opaque revalidation reason matched at Host ingress.
-///
-/// Unknown wire values map to [`RevalidationReason::UnknownReasonTag`];
-/// [`check_intake`] itself never emits that variant.
+/// Opaque revalidation reason.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RevalidationReason {
     MissingGenerationView,
@@ -95,7 +92,6 @@ pub enum RevalidationReason {
     StoppedCompanion,
     MissingCommandId,
     InputOverLimit,
-    UnknownReasonTag,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

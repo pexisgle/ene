@@ -3,11 +3,10 @@ use std::sync::Arc;
 use ene_permission::{
     CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
     IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
-    IntentResolution, PermissionErasureOutcome, PermissionErasureRepository,
-    PermissionTechnicalError, ShortcutIntentOutcome, consent_current_mark, consent_mark,
-    parse_consent_mark,
+    IntentResolution, PermissionErasureRepository, PermissionTechnicalError, ShortcutIntentOutcome,
+    consent_current_mark, consent_mark, parse_consent_mark,
 };
-use ene_preservation::ErasureConditionRef;
+use ene_preservation::{ErasureConditionRef, LocalErasurePass};
 use rusqlite::{Transaction, TransactionBehavior, params};
 
 use crate::Store;
@@ -272,9 +271,8 @@ impl PermissionErasureRepository for Store {
         &self,
         condition: ErasureConditionRef,
         target: &str,
-    ) -> impl std::future::Future<
-        Output = Result<PermissionErasureOutcome, PermissionTechnicalError>,
-    > + Send {
+    ) -> impl std::future::Future<Output = Result<LocalErasurePass, PermissionTechnicalError>> + Send
+    {
         #[cfg(any(test, feature = "test-support"))]
         let parks = Arc::clone(&self.test_parks);
         let conn = Arc::clone(&self.conn);
@@ -290,7 +288,7 @@ impl PermissionErasureRepository for Store {
                 if !condition_is_current(&tx, condition)
                     .map_err(|error| permission_unavailable(error.to_string()))?
                 {
-                    return Ok(PermissionErasureOutcome::NotCurrent);
+                    return Ok(LocalErasurePass::NotCurrent);
                 }
                 let journal_redacted = tx
                     .execute(
@@ -319,7 +317,7 @@ impl PermissionErasureRepository for Store {
                 .map_err(permission_unavailable)?;
                 tx.commit()
                     .map_err(|error| permission_unavailable(error.to_string()))?;
-                Ok(PermissionErasureOutcome::Applied { erased, remainder })
+                Ok(LocalErasurePass::Applied { erased, remainder })
             })
             .await
         }

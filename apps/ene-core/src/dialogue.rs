@@ -18,12 +18,9 @@
 //! [`NeedsRevalidation`](ene_api::v1::round::RoundIntakeOutcomeWire::NeedsRevalidation)
 //! outcomes: `intake_reason` maps [`ene_presentation::RevalidationReason`]
 //! to `"missing-generation-view"`, `"unknown-companion"`,
-//! `"stopped-companion"`, `"missing-command-id"`, `"input-over-limit"`, and
-//! the defensive `"unknown-reason"`; `admission_reason` maps the admission
-//! declines to `"setup-incomplete"`, `"consent-stale"`,
-//! `"not-in-allowlist"`, and `"evaluation-consumed"`. `"unknown-reason"` is
-//! defensive only: [`ene_presentation::check_intake`] never emits its source
-//! variant.
+//! `"stopped-companion"`, `"missing-command-id"`, and `"input-over-limit"`;
+//! `admission_reason` maps the admission declines to `"setup-incomplete"`,
+//! `"consent-stale"`, `"not-in-allowlist"`, and `"evaluation-consumed"`.
 //!
 //! Infallible-frame mapping used here (no `Result`: [`HostHandle::handle_frame_to`]
 //! answers every frame):
@@ -149,7 +146,6 @@ fn intake_reason(reason: &RevalidationReason) -> &'static str {
         RevalidationReason::StoppedCompanion => "stopped-companion",
         RevalidationReason::MissingCommandId => "missing-command-id",
         RevalidationReason::InputOverLimit => "input-over-limit",
-        RevalidationReason::UnknownReasonTag => "unknown-reason",
     }
 }
 

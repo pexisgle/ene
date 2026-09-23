@@ -3,12 +3,12 @@ use std::sync::Arc;
 use ene_companion::CompanionLifecycle;
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceAttribution,
-    PresenceCheckRef, PresenceErasureOutcome, PresenceErasureRepository, PresenceGeneration,
-    PresenceRepository, PresenceState, PresenceTechnicalError, RelocationHint,
-    StartupNormalizationFailure, StartupNormalizationFailureReason, StartupNormalizationReport,
-    StopCompanionOutcome, ThinMoveReason,
+    PresenceCheckRef, PresenceErasureRepository, PresenceGeneration, PresenceRepository,
+    PresenceState, PresenceTechnicalError, RelocationHint, StartupNormalizationFailure,
+    StartupNormalizationFailureReason, StartupNormalizationReport, StopCompanionOutcome,
+    ThinMoveReason,
 };
-use ene_preservation::ErasureConditionRef;
+use ene_preservation::{ErasureConditionRef, LocalErasurePass};
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{TransactionBehavior, params};
 
@@ -547,7 +547,7 @@ impl PresenceErasureRepository for Store {
         &self,
         condition: ErasureConditionRef,
         target: &str,
-    ) -> impl std::future::Future<Output = Result<PresenceErasureOutcome, PresenceTechnicalError>> + Send
+    ) -> impl std::future::Future<Output = Result<LocalErasurePass, PresenceTechnicalError>> + Send
     {
         #[cfg(any(test, feature = "test-support"))]
         let parks = Arc::clone(&self.test_parks);
@@ -564,7 +564,7 @@ impl PresenceErasureRepository for Store {
                 if !condition_is_current(&tx, condition)
                     .map_err(|error| presence_unavailable(error.to_string()))?
                 {
-                    return Ok(PresenceErasureOutcome::NotCurrent);
+                    return Ok(LocalErasurePass::NotCurrent);
                 }
                 let attribution = tx
                     .execute(
@@ -609,7 +609,7 @@ impl PresenceErasureRepository for Store {
                 let remainder = erasure_count(remainder).map_err(presence_unavailable)?;
                 tx.commit()
                     .map_err(|error| presence_unavailable(error.to_string()))?;
-                Ok(PresenceErasureOutcome::Applied { erased, remainder })
+                Ok(LocalErasurePass::Applied { erased, remainder })
             })
             .await
         }
