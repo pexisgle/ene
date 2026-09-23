@@ -114,7 +114,7 @@ A1b / A1c は A1a 後、共通 session / mutation outcome の最小 interface �
 
 A1 の完了は Host / transport / publication 基盤の成立であり、実 GUI の直接確認と初回セットアップの合格は B で記録する。
 
-### A2: 通常 Client 通信の WSS 統一（未実装）
+### A2: 通常 Client 通信の WSS 統一
 
 正本は [IPC 第7・9・10・22・23・25節](../../design/concrete/host-client-ipc.md)、[Crate / Module 分解](../../design/concrete/crate-module-decomposition.md)、[Persistence / Recovery Group K](../../design/concrete/persistence-recovery.md) です。既存 A1 の統合や旧 transport の検証成功は、A2 の完了を意味しません。
 

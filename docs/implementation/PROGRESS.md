@@ -6,9 +6,9 @@
 
 ## 現在進行中のステージ
 
-**Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — 未完了。** A1 と B/C/E、D/F の production candidate は統合済みです。[Stage 7 計画](stages/stage-7.md)の A2 と F、および [Desktop 後続計画](follow-ups/desktop.md)を参照します。
+**Stage 7: 管理画面・デスクトップアバター・最初の受け入れ検証 — 未完了。** A1、A2、B/C/E、D/F の production candidate は統合済みです。[Stage 7 計画](stages/stage-7.md)の F、および [Desktop 後続計画](follow-ups/desktop.md)を参照します。
 
-通常 Host–Client 通信の WSS 統一は**設計済み・未実装**です。旧 transport の検証を WSS の合格に読み替えません。
+通常 Host–Client 通信の WSS 統一は**実装済み・両 OS の実機 gate は未実施**です。自動テストは実 WSS で、未知 wire 値の型付き拒否、Origin / トークン拒否、過大 frame、runtime 情報の公開・削除、connection replacement、presence reconnect を確認しています。Windows / Linux の実 V-15 / V-16、acceptance S5、TLS 追加後の性能は slice F で残ります。旧 transport の検証を WSS の合格に読み替えません。
 
 過去の実機検証は次の範囲に限る。詳細な当時の記録は [Git 履歴](https://github.com/pexisgle/ene/tree/1f9cbfac0e74e237449c87364304bc317ce28181/docs/implementation/reports) にある。
 
@@ -29,7 +29,7 @@
 
 ## Stage 7 の未完了 gate
 
-- [A2](stages/stage-7.md#a2-通常-client-通信の-wss-統一未実装): WSS 実装と両 OS の接続・安全性・性能回帰。未知 wire 値と round 指定は [基盤計画](follow-ups/foundation.md)で判断する。
+- [A2](stages/stage-7.md#a2-通常-client-通信の-wss-統一): 両 OS の実 WSS での接続・安全性・性能回帰（V-15 / V-16 ローカル項目と acceptance S5）。実装と自動テストは統合済みで、未知 wire 値と round 指定は [基盤計画](follow-ups/foundation.md)で確定済みです。
 - [D/F](follow-ups/desktop.md): 公式同梱 `ene` VRM の製品検証、物理 display scale=2 の HiDPI 検証、モーション中の framing 修正と公式アセットでの確認。
 - [F](stages/stage-7.md#f-milestone-1-の実機-acceptance--performance-と-closeout): 正式 NixOS 26.11 / KDE Wayland と Windows 11 の最終 acceptance、WSS・公式アセットを含む統合 tip の性能・安全性確認。
 
@@ -37,6 +37,6 @@
 
 ## 次の作業
 
-WSS 統一と並行して、[Stage 10 D0](stages/stage-10.md#2-d0-要件と設計を先に確定する) の音声 Task UX の要件・設計を確定します。音声操作・対象特定・Workspace/権限・報告の経路が成立する前に既存の作業 GUI を削除しません。
+[Stage 10 D0](stages/stage-10.md#2-d0-要件と設計を先に確定する) の音声 Task UX の要件・設計は、統合済みの WSS 公開境界を使って確定します。音声操作・対象特定・Workspace/権限・報告の経路が成立する前に既存の作業 GUI を削除しません。
 
 Learning、費用・provider 障害、Desktop、基盤整理の個別の作業順と gate は [後続計画](README.md#43-後続作業の実装計画) に置きます。Stage 8 の Schedule は音声による設定・報告へ接続する次の拡張とし、番号順だけで着手を決めません。

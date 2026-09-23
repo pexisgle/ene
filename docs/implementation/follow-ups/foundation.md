@@ -1,6 +1,6 @@
 # Wire・共通型・起動設定の後続計画
 
-[実装ガイド](../README.md) / [Stage 7 A2](../stages/stage-7.md#a2-通常-client-通信の-wss-統一未実装) / [Stage 10](../stages/stage-10.md)
+[実装ガイド](../README.md) / [Stage 7 A2](../stages/stage-7.md#a2-通常-client-通信の-wss-統一) / [Stage 10](../stages/stage-10.md)
 
 これらは一括の開発停止条件ではない。変更する境界の直前に設計を確定し、独立した整理は並行して進める。古い調査時点の行数・consumer・テスト数は着手時の source とコンパイルで再確認する。
 
