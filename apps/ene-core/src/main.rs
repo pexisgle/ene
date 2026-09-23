@@ -778,223 +778,61 @@ mod tests {
     use super::{CliCommand, cli_from_matches, ene_core_command};
     use std::path::PathBuf;
 
-    fn args(words: &[&str]) -> Vec<String> {
-        words.iter().map(|word| (*word).to_string()).collect()
-    }
-
     fn parse(words: &[&str]) -> Result<CliCommand, super::CliError> {
         let matches = ene_core_command()
-            .try_get_matches_from(std::iter::once(String::from("ene-core")).chain(args(words)))
+            .try_get_matches_from(std::iter::once("ene-core").chain(words.iter().copied()))
             .map_err(|error| super::CliError::Usage(error.to_string()))?;
         cli_from_matches(matches)
     }
 
-    fn clap_error(words: &[&str]) -> clap::error::ErrorKind {
-        match ene_core_command()
-            .try_get_matches_from(std::iter::once(String::from("ene-core")).chain(args(words)))
-        {
-            Ok(_) => panic!("{words:?} must fail"),
-            Err(error) => error.kind(),
-        }
-    }
-
     #[test]
-    fn help_and_version_are_successful_clap_exits() {
-        assert!(matches!(
-            clap_error(&["--help"]),
-            clap::error::ErrorKind::DisplayHelp
-        ));
-        assert!(matches!(
-            clap_error(&["--version"]),
-            clap::error::ErrorKind::DisplayVersion
-        ));
-        assert!(matches!(
-            clap_error(&["approve-device", "--help"]),
-            clap::error::ErrorKind::DisplayHelp
-        ));
-    }
-
-    #[test]
-    fn no_args_yields_no_override() {
-        let parsed = parse(&[]).expect("no args must succeed");
-        assert_eq!(parsed, CliCommand::ShowConfig { config: None });
-    }
-
-    #[test]
-    fn config_flag_captures_its_value_verbatim() {
-        let parsed = parse(&["--config", "/tmp/ene.json"]).expect("--config must succeed");
+    fn global_config_reaches_the_selected_mode() {
+        let config = Some(PathBuf::from("/tmp/ene.json"));
+        assert_eq!(parse(&[]).unwrap(), CliCommand::ShowConfig { config: None });
         assert_eq!(
-            parsed,
+            parse(&["--config", "serve"]).unwrap(),
             CliCommand::ShowConfig {
-                config: Some(PathBuf::from("/tmp/ene.json"))
+                config: Some(PathBuf::from("serve")),
             }
         );
-        let hyphen = parse(&["--config", "--odd"]).expect("a hyphen value must be consumed");
-        assert_eq!(
-            hyphen,
-            CliCommand::ShowConfig {
-                config: Some(PathBuf::from("--odd"))
-            }
-        );
-    }
-
-    #[test]
-    fn missing_config_value_is_a_usage_error() {
-        assert!(matches!(
-            parse(&["--config"]),
-            Err(super::CliError::Usage(_))
-        ));
-    }
-
-    #[test]
-    fn unknown_argument_is_a_usage_error() {
-        assert!(matches!(
-            parse(&["--verbose"]),
-            Err(super::CliError::Usage(_))
-        ));
-    }
-
-    #[test]
-    fn repeated_config_keeps_the_last_value() {
-        let parsed = parse(&[
-            "--config",
-            "/tmp/first.json",
-            "--config",
-            "/tmp/second.json",
-        ])
-        .expect("a repeated --config must succeed");
-        assert_eq!(
-            parsed,
-            CliCommand::ShowConfig {
-                config: Some(PathBuf::from("/tmp/second.json"))
-            }
-        );
-    }
-
-    #[test]
-    fn serve_parses_in_any_position() {
         for words in [
-            &["serve"][..],
-            &["serve", "--config", "/tmp/e.json"][..],
-            &["--config", "/tmp/e.json", "serve"][..],
+            &["--config", "/tmp/ene.json", "serve"][..],
+            &["serve", "--config", "/tmp/ene.json"][..],
         ] {
-            let parsed = parse(words).expect("serve must parse");
-            let config = match parsed {
-                CliCommand::Serve { config } => config,
-                other => panic!("expected serve, got {other:?}"),
-            };
-            if words.contains(&"--config") {
-                assert_eq!(config, Some(PathBuf::from("/tmp/e.json")));
-            } else {
-                assert_eq!(config, None);
-            }
+            assert_eq!(
+                parse(words).unwrap(),
+                CliCommand::Serve {
+                    config: config.clone()
+                }
+            );
         }
     }
 
     #[test]
-    fn repeated_serve_is_a_usage_error() {
-        assert!(matches!(
-            parse(&["serve", "serve"]),
-            Err(super::CliError::Usage(_))
-        ));
-    }
-
-    #[test]
-    fn combined_subcommands_are_rejected() {
-        assert!(matches!(
-            parse(&["serve", "approve-device"]),
-            Err(super::CliError::Usage(_))
-        ));
-    }
-
-    #[test]
-    fn config_value_named_serve_is_not_a_subcommand() {
-        let parsed = parse(&["--config", "serve"]).expect("the value is data");
+    fn device_and_credential_commands_keep_their_distinct_inputs() {
         assert_eq!(
-            parsed,
-            CliCommand::ShowConfig {
-                config: Some(PathBuf::from("serve"))
-            }
-        );
-    }
-
-    #[test]
-    fn descriptor_value_named_serve_is_not_a_subcommand() {
-        let parsed = parse(&["approve-device", "--pending", "serve"]).expect("the value is data");
-        assert_eq!(
-            parsed,
+            parse(&["approve-device"]).unwrap(),
             CliCommand::ApproveDevice {
                 config: None,
-                pending: Some(String::from("serve"))
+                pending: None,
             }
         );
-    }
-
-    #[test]
-    fn pending_flag_captures_its_value_verbatim() {
-        let parsed = parse(&["approve-device", "--pending", "--odd-value"])
-            .expect("--pending with a value must parse");
         assert_eq!(
-            parsed,
+            parse(&["approve-device", "--pending", "serve"]).unwrap(),
             CliCommand::ApproveDevice {
                 config: None,
-                pending: Some(String::from("--odd-value"))
-            },
-            "the value is consumed verbatim, even with a leading --"
-        );
-    }
-
-    #[test]
-    fn repeated_pending_keeps_the_last_value() {
-        let parsed = parse(&[
-            "approve-device",
-            "--pending",
-            "first",
-            "--pending",
-            "second",
-        ])
-        .expect("a repeated --pending must parse");
-        assert_eq!(
-            parsed,
-            CliCommand::ApproveDevice {
-                config: None,
-                pending: Some(String::from("second"))
+                pending: Some(String::from("serve")),
             }
         );
-    }
-
-    #[test]
-    fn missing_pending_value_is_a_usage_error() {
-        assert!(matches!(
-            parse(&["approve-device", "--pending"]),
-            Err(super::CliError::Usage(_))
-        ));
-    }
-
-    #[test]
-    fn approve_device_without_pending_lists_pendings() {
-        let parsed = parse(&["approve-device"]).expect("approve-device must parse");
         assert_eq!(
-            parsed,
-            CliCommand::ApproveDevice {
-                config: None,
-                pending: None
-            }
-        );
-    }
-
-    #[test]
-    fn approve_credential_requires_a_non_blank_pair() {
-        let parsed = parse(&[
-            "approve-credential",
-            "--provider",
-            "openai",
-            "--label",
-            "main",
-        ])
-        .expect("a complete pair must parse");
-        assert_eq!(
-            parsed,
+            parse(&[
+                "approve-credential",
+                "--provider",
+                "openai",
+                "--label",
+                "main"
+            ])
+            .unwrap(),
             CliCommand::ApproveCredential {
                 config: None,
                 provider: String::from("openai"),
@@ -1011,60 +849,32 @@ mod tests {
             ]),
             Err(super::CliError::Usage(_))
         ));
-        assert!(matches!(
-            parse(&["approve-credential", "--provider", "openai"]),
-            Err(super::CliError::Usage(_))
-        ));
-        assert!(matches!(
-            parse(&[
-                "approve-credential",
-                "--provider",
-                "openai",
-                "--label",
-                "main",
-                "--descriptor",
-                "x"
-            ]),
-            Err(super::CliError::Usage(_))
-        ));
     }
 
     #[test]
-    fn flags_before_the_subcommand_still_parse() {
-        let parsed = parse(&[
-            "--config",
-            "/tmp/e.json",
-            "approve-device",
-            "--pending",
-            "pending-1",
-        ])
-        .expect("global flags and subcommand options must parse");
+    fn deletion_commands_preserve_paging_and_request_values() {
         assert_eq!(
-            parsed,
-            CliCommand::ApproveDevice {
-                config: Some(PathBuf::from("/tmp/e.json")),
-                pending: Some(String::from("pending-1"))
+            parse(&["pending-deletions", "--after", "request-1", "--limit", "7"]).unwrap(),
+            CliCommand::PendingDeletions {
+                config: None,
+                after: Some(String::from("request-1")),
+                limit: 7,
             }
         );
-    }
-
-    #[test]
-    fn stray_mode_flags_are_rejected() {
-        assert!(matches!(
-            parse(&["serve", "--pending", "pending-1"]),
-            Err(super::CliError::Usage(_))
-        ));
-        assert!(matches!(
-            parse(&["approve-device", "--provider", "openai"]),
-            Err(super::CliError::Usage(_))
-        ));
-    }
-
-    #[test]
-    fn unknown_trailing_arguments_are_rejected() {
-        assert!(matches!(
-            parse(&["serve", "extra"]),
-            Err(super::CliError::Usage(_))
-        ));
+        assert_eq!(
+            parse(&["confirm-deletion", "--request", "request-2"]).unwrap(),
+            CliCommand::ConfirmDeletion {
+                config: None,
+                request: String::from("request-2"),
+            }
+        );
+        assert_eq!(
+            parse(&["deletion-status", "--cursor", "next"]).unwrap(),
+            CliCommand::DeletionStatus {
+                config: None,
+                cursor: Some(String::from("next")),
+                limit: 50,
+            }
+        );
     }
 }

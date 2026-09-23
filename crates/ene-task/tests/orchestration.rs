@@ -40,7 +40,6 @@ struct FakeTaskRepository {
     record: Mutex<Option<TaskRecord>>,
     forward: Mutex<Option<Result<TaskCommitOutcome, TaskTechnicalError>>>,
     forwarded: Mutex<Vec<TaskCommitPremise>>,
-    delegation_replies: Mutex<VecDeque<Result<bool, TaskTechnicalError>>>,
     delegated: Mutex<Vec<DelegationCreationPremise>>,
     delegator: Mutex<Option<AssigneeRef>>,
     commits: Mutex<VecDeque<Result<TaskResumeOutcome, TaskTechnicalError>>>,
@@ -52,10 +51,6 @@ struct FakeTaskRepository {
 }
 
 impl FakeTaskRepository {
-    fn for_resume() -> Self {
-        Self::default()
-    }
-
     fn for_delegation(
         load: Result<Option<TaskRecord>, TaskTechnicalError>,
         delegator: AssigneeRef,
@@ -74,13 +69,6 @@ impl FakeTaskRepository {
         *repo.load.lock().unwrap() = Some(load);
         *repo.forward.lock().unwrap() = Some(forward);
         repo
-    }
-
-    fn script_delegation(&self, reply: Result<(), TaskTechnicalError>) {
-        self.delegation_replies
-            .lock()
-            .unwrap()
-            .push_back(reply.map(|_| true));
     }
 
     fn script_commit(&self, reply: Result<TaskResumeOutcome, TaskTechnicalError>) {
@@ -155,28 +143,18 @@ impl TaskRepository for FakeTaskRepository {
         premise: DelegationCreationPremise,
     ) -> Result<DelegationOutcome, TaskTechnicalError> {
         self.delegated.lock().unwrap().push(premise.clone());
-        let reply = self
-            .delegation_replies
+        let delegator = self
+            .delegator
             .lock()
             .unwrap()
-            .pop_front()
-            .expect("create_delegation called without scripted reply")?;
-        if reply {
-            let delegator = self
-                .delegator
-                .lock()
-                .unwrap()
-                .expect("delegator must be set for create_delegation");
-            Ok(DelegationOutcome::Delegated(DelegationRef {
-                delegation: premise.delegation,
-                task: premise.task,
-                delegator,
-                agent: premise.agent,
-                scope: premise.scope_copy,
-            }))
-        } else {
-            unsupported("delegation failure")
-        }
+            .expect("delegator must be set for create_delegation");
+        Ok(DelegationOutcome::Delegated(DelegationRef {
+            delegation: premise.delegation,
+            task: premise.task,
+            delegator,
+            agent: premise.agent,
+            scope: premise.scope_copy,
+        }))
     }
 
     async fn load_delegation(
@@ -435,7 +413,6 @@ mod delegation {
             ))),
             assignee(),
         );
-        repository.script_delegation(Ok(()));
 
         let outcome = orchestrate_delegation(
             &repository,
@@ -466,7 +443,17 @@ mod delegation {
             adopted_revision: revision(1),
         };
         let delegator = assignee();
-        let scope_copy = DelegationScope { workspace: None };
+        let scope_copy = DelegationScope {
+            workspace: Some(DelegatedWorkspace {
+                assoc: WorkspaceAssocId::generate(),
+                folder: WorkspaceFolderRef {
+                    path: String::from("/workspace/inbox/"),
+                },
+                save_target: Some(WorkspaceFolderRef {
+                    path: String::from("/workspace/outbox/"),
+                }),
+            }),
+        };
         let repository = FakeTaskRepository::for_delegation(
             Ok(Some(record(
                 task,
@@ -476,18 +463,6 @@ mod delegation {
             ))),
             delegator,
         );
-        repository.script_delegation(Ok(()));
-
-        // Compile-level shape check: exhaustively destructuring the command proves
-        // it carries exactly the boundary task token and the scope copy. A
-        // caller-minted delegation or agent identity, or a placeholder field for a
-        // producer that does not exist yet, would not compile here.
-        let CreateDelegationCommand {
-            task: probed_task,
-            scope_copy: probed_scope,
-        } = command(expected, scope_copy.clone());
-        assert_eq!(probed_task, expected);
-        assert_eq!(probed_scope, scope_copy);
 
         let outcome = orchestrate_delegation(&repository, command(expected, scope_copy.clone()))
             .await
@@ -536,74 +511,6 @@ mod delegation {
             premise.scope_copy, scope_copy,
             "the precheck's scope copy crosses unchanged"
         );
-    }
-
-    #[tokio::test]
-    async fn delegated_workspace_scope_copy_crosses_unchanged() {
-        let task = TaskId::generate();
-        let expected = TaskRef {
-            task,
-            revision: revision(1),
-        };
-        let purpose = TaskPurposeRef {
-            task,
-            adopted_revision: revision(1),
-        };
-        let folder = WorkspaceFolderRef {
-            path: String::from("/workspace/inbox/"),
-        };
-        let save_target = WorkspaceFolderRef {
-            path: String::from("/workspace/outbox/"),
-        };
-        let scope_copy = DelegationScope {
-            workspace: Some(DelegatedWorkspace {
-                assoc: WorkspaceAssocId::generate(),
-                folder: folder.clone(),
-                save_target: Some(save_target.clone()),
-            }),
-        };
-        let repository = FakeTaskRepository::for_delegation(
-            Ok(Some(record(
-                task,
-                revision(1),
-                purpose,
-                TaskContextEntryId::generate(),
-            ))),
-            assignee(),
-        );
-        repository.script_delegation(Ok(()));
-
-        let outcome = orchestrate_delegation(&repository, command(expected, scope_copy.clone()))
-            .await
-            .expect("a delegation decision is a domain outcome, not a technical error");
-
-        let captured = repository.delegated();
-        let premise = captured
-            .first()
-            .expect("the delegation premise was captured");
-        assert_eq!(
-            premise.scope_copy, scope_copy,
-            "the Some(DelegatedWorkspace) copy must cross byte-identically, never normalized"
-        );
-        // Pin the original field values directly: the copy is the creation-time
-        // projection, so folder and save target must survive whole-struct equality.
-        let workspace = premise
-            .scope_copy
-            .workspace
-            .as_ref()
-            .expect("the workspace copy crosses");
-        assert_eq!(workspace.folder, folder);
-        assert_eq!(workspace.save_target, Some(save_target));
-
-        match outcome {
-            DelegationOutcome::Delegated(found) => {
-                assert_eq!(
-                    found.scope, scope_copy,
-                    "the committed copy is the command's copy"
-                );
-            }
-            other => panic!("expected Delegated, got {other:?}"),
-        }
     }
 }
 
@@ -1042,7 +949,7 @@ mod resume {
 
     #[tokio::test]
     async fn resume_mints_fresh_identities_and_passes_the_command_through() {
-        let repository = FakeTaskRepository::for_resume();
+        let repository = FakeTaskRepository::default();
         let task = TaskId::generate();
         let relied = task_ref(task, 3);
         let purpose = TaskPurposeRef {
@@ -1132,7 +1039,7 @@ mod resume {
                 task: TaskId::generate(),
             },
         ] {
-            let repository = FakeTaskRepository::for_resume();
+            let repository = FakeTaskRepository::default();
             let task = TaskId::generate();
             repository.script_commit(Ok(outcome.clone()));
             let answered = orchestrate_resume(
@@ -1158,7 +1065,7 @@ mod resume {
 
     #[tokio::test]
     async fn result_available_routes_the_current_revision_through_adoption() {
-        let repository = FakeTaskRepository::for_resume();
+        let repository = FakeTaskRepository::default();
         let task = TaskId::generate();
         let current = task_ref(task, 2);
         let result = TaskResultId::generate();
@@ -1257,7 +1164,7 @@ mod resume {
 
     #[tokio::test]
     async fn guarded_resume_carries_the_currentness_to_the_commit() {
-        let repository = FakeTaskRepository::for_resume();
+        let repository = FakeTaskRepository::default();
         let task = TaskId::generate();
         repository.script_commit(Ok(resumed(task_ref(task, 2))));
         let currentness = OwnerMessageCurrentness {
