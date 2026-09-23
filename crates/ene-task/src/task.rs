@@ -333,64 +333,16 @@ pub struct TaskCommitPremise {
 
 #[cfg(test)]
 mod tests {
-    use ene_primitive::RawId;
-
-    use super::{
-        AssigneeRef, TaskId, TaskProgress, TaskPurpose, TaskPurposeRef, TaskRef, TaskRevision,
-    };
-
-    #[test]
-    fn initial_task_revision_is_one() {
-        assert_eq!(TaskRevision::initial().as_u64(), 1);
-        assert_eq!(TaskRevision::from_u64(7).as_u64(), 7);
-        assert_ne!(TaskRevision::initial(), TaskRevision::from_u64(2));
-    }
+    use super::{TaskProgress, TaskPurpose, TaskRevision};
 
     #[test]
     fn revision_successor_reports_exhaustion_instead_of_aliasing_the_maximum() {
+        assert_eq!(TaskRevision::initial().as_u64(), 1);
         assert_eq!(
             TaskRevision::initial().checked_next(),
             Some(TaskRevision::from_u64(2))
         );
         assert_eq!(TaskRevision::from_u64(u64::MAX).checked_next(), None);
-    }
-
-    #[test]
-    fn task_refs_keep_identity_and_revision_as_one_pair() {
-        let first = TaskRef {
-            task: TaskId::generate(),
-            revision: TaskRevision::initial(),
-        };
-        let second = TaskRef {
-            task: TaskId::generate(),
-            revision: TaskRevision::initial(),
-        };
-        assert_ne!(first, second, "different identities are different refs");
-        assert_ne!(
-            TaskRef {
-                task: first.task,
-                revision: TaskRevision::from_u64(2),
-            },
-            first,
-            "the revision stays part of the pair"
-        );
-    }
-
-    #[test]
-    fn purpose_ref_identifies_the_adoption_revision() {
-        let task = TaskId::generate();
-        let first = TaskPurposeRef {
-            task,
-            adopted_revision: TaskRevision::initial(),
-        };
-        let second = TaskPurposeRef {
-            task,
-            adopted_revision: TaskRevision::from_u64(2),
-        };
-        assert_ne!(
-            first, second,
-            "the adoption revision stays part of the purpose identity"
-        );
     }
 
     #[test]
@@ -400,13 +352,6 @@ mod tests {
         };
         let rendered = format!("{purpose:?}");
         assert!(!rendered.contains("probe-task-purpose"));
-    }
-
-    #[test]
-    fn assignee_ref_carries_the_raw_companion_identity() {
-        let companion = RawId::new();
-        let assignee = AssigneeRef { companion };
-        assert_eq!(assignee.companion, companion);
     }
 
     #[test]

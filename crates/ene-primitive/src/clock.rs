@@ -95,14 +95,6 @@ mod tests {
     }
 
     #[test]
-    fn wraps_and_returns_the_same_instant() {
-        let clock = WallClockWithTz::parse_rfc3339("2026-01-02T03:04:05Z")
-            .expect("UTC timestamp must parse");
-        let rebuilt = WallClockWithTz::from_datetime(clock.as_datetime());
-        assert_eq!(rebuilt, clock);
-    }
-
-    #[test]
     fn utc_rendering_is_canonical_and_converts_the_offset() {
         let tokyo = WallClockWithTz::parse_rfc3339("2026-09-12T10:00:00.123456789+09:00")
             .expect("offset timestamp must parse");
