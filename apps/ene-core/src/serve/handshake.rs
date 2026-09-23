@@ -138,7 +138,11 @@ impl HostHandle {
             (None, Some(claim)) => {
                 match DevicePairingRepository::find_device_by_wire(&self.store, &claim).await {
                     Ok(Some(_)) => Some(claim),
-                    _ => return vec![unpaired_close(frame, live)],
+                    Ok(None) => return vec![unpaired_close(frame, live)],
+                    // A store failure is infrastructure, not an unknown
+                    // device: answer nothing and keep the phase, so the same
+                    // capability frame can be retried.
+                    Err(_) => return Vec::new(),
                 }
             }
             (None, None) => return vec![unpaired_close(frame, live)],
@@ -175,12 +179,55 @@ impl HostHandle {
         }
     }
 
+    /// Handles one [`AuthProof`]: verify against the persisted secret and
+    /// install currentness, or answer.
+    ///
+    /// The pending nonce for this connection is consumed single-use in the
+    /// challenged phase; a proof in any other phase never reaches here (the
+    /// dispatcher answers `InvalidHandshakePhase`) and a second proof after
+    /// the nonce was consumed cannot challenge again. A missing device, a
+    /// missing or unreadable secret, or a bad proof consumes the nonce and
+    /// ends the connection phase in `Closed` with
+    /// [`Rejected`](AuthResult::Rejected) — a captured proof can never
+    /// replay. A store failure while resolving the bound device answers
+    /// nothing and leaves the challenge (and its nonce) retryable instead of
+    /// fabricating a rejection. Success installs this connection as the
+    /// device's current authenticated one in one table section (superseding
+    /// the previous
+    /// current irreversibly) *before* the
+    /// [`Accepted`](AuthResult::Accepted) answer is sent, so a lost response
+    /// never rolls the install back and a concurrent authentication only wins
+    /// by installing later. Proof comparison itself runs in constant time
+    /// inside `ene-credential`.
     pub(super) async fn verify_proof(
         &self,
         frame: &WireFrame,
         proof: &AuthProof,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
+        // Device attribution comes from the connection table (bound moments
+        // earlier on this same connection), never from the envelope claim:
+        // the proof authenticates the pending pairing the Host recorded, and
+        // trusting a Client-supplied device here would let any peer claim
+        // any identity. The opaque wire string resolves to its domain record
+        // through the store — never by parsing, since projections are
+        // unrelated to the domain bytes — and the domain id keys the secret.
+        // The resolution precedes the single-use nonce consumption: a store
+        // failure is infrastructure, not proof evidence, and must leave the
+        // challenged phase and its nonce intact for a retry. Device
+        // revocation has no store API yet (explicitly deferred in
+        // `ene-credential`), so no revoke can interleave between that
+        // resolution and the install below; the install still re-checks the
+        // phase before installing.
+        let stored = match live.paired_device.clone() {
+            Some(device) => {
+                match DevicePairingRepository::find_device_by_wire(&self.store, &device).await {
+                    Ok(stored) => stored,
+                    Err(_) => return Vec::new(),
+                }
+            }
+            None => None,
+        };
         let nonce = match live.authority.take_nonce(&live.connection_id) {
             NonceAdmission::Nonce(nonce) => nonce,
             NonceAdmission::Superseded => {
@@ -199,10 +246,7 @@ impl HostHandle {
             }
         };
         let reason = match live.paired_device.clone() {
-            Some(device) => {
-                let stored = DevicePairingRepository::find_device_by_wire(&self.store, &device)
-                    .await
-                    .unwrap_or_default();
+            Some(_) => {
                 let verified = stored.is_some_and(|record| {
                     matches!(
                         self.auth_store

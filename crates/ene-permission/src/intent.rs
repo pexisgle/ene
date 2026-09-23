@@ -6,34 +6,6 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BaseViewExpectation {
-    ExpectEmpty,
-    ExpectRevision(String, ConsentRevision),
-    FaceStale,
-}
-
-#[must_use]
-pub fn base_view_expectation(
-    capability: CapabilityKind,
-    base_view: &str,
-    current: Option<&ConsentRecord>,
-) -> BaseViewExpectation {
-    match parse_consent_mark(base_view, capability) {
-        Some(None) => BaseViewExpectation::ExpectEmpty,
-        Some(Some(revision_number)) => {
-            let Some(stored) = current else {
-                return BaseViewExpectation::FaceStale;
-            };
-            BaseViewExpectation::ExpectRevision(
-                stored.id.clone(),
-                ConsentRevision::from_u64(revision_number),
-            )
-        }
-        None => BaseViewExpectation::FaceStale,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignConsentIntent {
     pub capability: CapabilityKind,
     pub provider: String,
@@ -50,21 +22,16 @@ pub async fn assign_consent(
     intent: AssignConsentIntent,
 ) -> Result<IntentResolution<IntentOutcome>, PermissionTechnicalError> {
     let current = consents.load_current(intent.capability).await?;
-    let expected =
-        match base_view_expectation(intent.capability, &intent.base_view, current.as_ref()) {
-            BaseViewExpectation::ExpectEmpty => None,
-            BaseViewExpectation::ExpectRevision(id, revision) => Some((id, revision)),
-            BaseViewExpectation::FaceStale => {
-                return record_decided(
-                    intents,
-                    intent.fingerprint,
-                    IntentOutcome::StaleBaseView {
-                        current: consent_current_mark(intent.capability, current.as_ref()),
-                    },
-                )
-                .await;
-            }
-        };
+    let Some(parsed) = parse_consent_mark(&intent.base_view, intent.capability) else {
+        return record_decided(
+            intents,
+            intent.fingerprint,
+            IntentOutcome::StaleBaseView {
+                current: consent_current_mark(intent.capability, current.as_ref()),
+            },
+        )
+        .await;
+    };
     if !intent.credential_present {
         return record_decided(
             intents,
@@ -75,14 +42,8 @@ pub async fn assign_consent(
     }
     // The base premise is enforced before the shortcut: a stale base with a
     // coincidentally equal route must answer stale, never silent success.
-    // `base_view_expectation` already fills the identity from `current`, so
-    // only the revision can differ here.
-    let base_fresh = match (&expected, current.as_ref()) {
-        (None, None) => true,
-        (Some((_, revision)), Some(record)) => record.rev == *revision,
-        _ => false,
-    };
-    if !base_fresh {
+    let current_state = current.as_ref().map(|record| record.rev.as_u64());
+    if parsed != current_state {
         return record_decided(
             intents,
             intent.fingerprint,
@@ -92,6 +53,9 @@ pub async fn assign_consent(
         )
         .await;
     }
+    let expected = current
+        .as_ref()
+        .map(|record| (record.id.clone(), record.rev));
     match intents
         .shortcut_with_intent(
             intent.capability,

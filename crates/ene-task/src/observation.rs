@@ -11,11 +11,7 @@ impl TaskAgentObservationId {
         self.0
     }
 
-    #[must_use]
-    pub fn from_raw(raw: RawId) -> Self {
-        Self(raw)
-    }
-
+    /// Mints one fresh occurrence identity.
     #[must_use]
     pub fn generate() -> Self {
         Self(RawId::new())

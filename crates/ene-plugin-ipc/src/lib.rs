@@ -16,11 +16,36 @@
 //! encoding (structs as maps) together with the `ene-api` DTOs, not from
 //! any logic here.
 
+use std::path::Path;
+
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::payload::WirePayload;
 use serde::{Deserialize, Serialize};
 
 const LEN_PREFIX_LEN: usize = 4;
+
+/// Pipe name for one Host data directory.
+///
+/// Named pipes live in a flat per-machine namespace, so the data directory
+/// is folded into the name: FNV-1a (64-bit, fixed offsets, so the name is
+/// stable across processes) over its string form, rendered as hex. Backslash
+/// can never appear in the hex tag. One definition: the Host listener, the
+/// Client dialer, and the first-party control inlet derive the same name.
+#[must_use]
+pub fn pipe_name(data_dir: &Path) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut tag = FNV_OFFSET;
+    for byte in data_dir.as_os_str().as_encoded_bytes() {
+        tag ^= u64::from(*byte);
+        tag = tag.wrapping_mul(FNV_PRIME);
+    }
+    format!(r"\\.\pipe\ene-{tag:016x}")
+}
+
+/// Maximum `MessagePack` body length in bytes, exclusive of the prefix. The
+/// bound keeps a single hostile or corrupt length prefix from driving
+/// unbounded allocation while comfortably fitting text round-trip traffic.
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,6 +154,14 @@ mod tests {
             },
         });
         WireFrame { envelope, payload }
+    }
+
+    #[test]
+    fn pipe_name_is_the_stable_data_directory_vector() {
+        assert_eq!(
+            super::pipe_name(std::path::Path::new("/tmp/ene-data")),
+            String::from(r"\\.\pipe\ene-2c2d8a5218b804b9"),
+        );
     }
 
     #[test]

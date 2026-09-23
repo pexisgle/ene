@@ -140,10 +140,13 @@ pub trait TaskAgentInference: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TaskAgentTurnError {
-    #[error("task storage unavailable: {reason}")]
-    StorageUnavailable { reason: String },
-    #[error("task agent inference unavailable: {reason}")]
-    InferenceUnavailable { reason: String },
+    /// The repository could not be read; no prompt was assembled.
+    #[error(transparent)]
+    StorageUnavailable(#[from] TaskTechnicalError),
+    /// The port failed technically; never prompt or output text.
+    #[error(transparent)]
+    InferenceUnavailable(#[from] TaskAgentInferenceError),
+    /// The logical input could not be proven scrubbed; nothing was sent.
     #[error("task agent input unavailable: {reason}")]
     InputUnavailable { reason: String },
 }
@@ -343,14 +346,15 @@ pub async fn orchestrate_task_agent_turn(
         }
     }
     let Some(purpose_text) = purpose_text else {
-        return Err(TaskAgentTurnError::StorageUnavailable {
-            reason: String::from("task context has no adopted purpose entry"),
-        });
+        return Err(TaskAgentTurnError::StorageUnavailable(
+            TaskTechnicalError::StorageUnavailable {
+                reason: String::from("task context has no adopted purpose entry"),
+            },
+        ));
     };
     let past = repository
         .load_past_executed_facts(record.task.reference.task)
-        .await
-        .map_err(storage_error)?;
+        .await?;
     if past.has_more {
         return Err(TaskAgentTurnError::InputUnavailable {
             reason: String::from("past executed facts exceed the turn bound"),
@@ -359,23 +363,39 @@ pub async fn orchestrate_task_agent_turn(
     for fact in &past.facts {
         data_use.push(fact.source);
     }
-    let (kept_exchanges, omitted) = fit_exchanges(
-        purpose_text,
-        &instruction_texts,
-        &past.facts,
-        &premise.exchanges,
-        inference.input_budget(),
-    );
+    // The logical input is assembled in full before the single scrub: the
+    // scrubber sees purpose, every resolved instruction body, and the
+    // execution-local Action transcript once, and only its output may cross
+    // the port. A scrub failure fails closed with no provider I/O and never
+    // logs the raw input. The transcript is execution-local, so the oldest
+    // exchanges are dropped (with a fixed note) when the port's input budget
+    // would otherwise be outgrown; an exchange that cannot fit even alone is
+    // kept so the port refuses the over-limit input instead of the model
+    // answering from a silently shortened transcript.
+    let mut raw_input =
+        assemble_logical_input(purpose_text, &instruction_texts, &past.facts, &[], false);
+    // The never-omitted head is measured from the assembled framing itself,
+    // so the fit and the refusal guard below cannot drift from the bytes
+    // actually sent.
+    let head_len = raw_input.chars().count();
+    let (kept_exchanges, omitted) =
+        fit_exchanges(&premise.exchanges, head_len, inference.input_budget());
+    // The kept transcript's observation occurrences join the ordered
+    // correlation after the canonical sources, in the same order they appear
+    // in the logical input. The occurrence identity is the durable ledger
+    // identity minted at observation time: it lets the claim gate and the
+    // deletion admission association name what this turn consumed without any
+    // body, hash, or matcher being stored. A dropped exchange is not in the
+    // input, so it adds no correlation.
     for exchange in kept_exchanges {
         data_use.push(exchange.observation.occurrence().as_raw());
     }
-    let raw_input = assemble_logical_input(
-        purpose_text,
-        &instruction_texts,
-        &past.facts,
-        kept_exchanges,
-        omitted,
-    );
+    if omitted {
+        raw_input.push_str(OMISSION_NOTE);
+    }
+    for exchange in kept_exchanges {
+        push_exchange(&mut raw_input, exchange);
+    }
     // The never-omitted logical input head (preamble, purpose, instructions,
     // adopted facts) that alone outgrows the port budget is never silently
     // shortened and never sent: no transcript trimming could help, so the turn
@@ -383,9 +403,7 @@ pub async fn orchestrate_task_agent_turn(
     // around a fitting head keeps its existing port-refusal behavior: the port
     // refuses the over-limit input as `OverLimit` instead of the model
     // answering from a silently shortened transcript.
-    if raw_input.chars().count() > inference.input_budget()
-        && fixed_input_len(purpose_text, &instruction_texts, &past.facts)
-            >= inference.input_budget()
+    if raw_input.chars().count() > inference.input_budget() && head_len >= inference.input_budget()
     {
         return Err(TaskAgentTurnError::InputUnavailable {
             reason: String::from("never-omitted logical input exceeds the input budget"),
@@ -403,8 +421,7 @@ pub async fn orchestrate_task_agent_turn(
             prompt,
             data_use,
         })
-        .await
-        .map_err(inference_error)?;
+        .await?;
     Ok(match outcome {
         TaskAgentInferenceOutcome::Produced {
             output,
@@ -461,34 +478,17 @@ fn assemble_logical_input(
         input.push_str(OMISSION_NOTE);
     }
     for exchange in exchanges {
-        input.push_str(TOOL_CALL_MARKER);
-        input.push_str(exchange.request.text());
-        input.push_str(TOOL_RESULT_MARKER);
-        input.push_str(exchange.observation.text());
+        push_exchange(&mut input, exchange);
     }
     input
 }
 
-/// The never-omitted head of the logical input: the protocol preamble,
-/// the relied purpose, every resolved instruction body, and the
-/// past-executed facts block. When this alone reaches the port budget, no
-/// transcript trimming could produce a fitting input.
-fn fixed_input_len(
-    purpose: &str,
-    instructions: &[String],
-    facts: &[crate::report::PastExecutedFact],
-) -> usize {
-    RESPONSE_FORMAT_PREAMBLE.chars().count()
-        + purpose.chars().count()
-        + instructions
-            .iter()
-            .map(|text| INSTRUCTION_MARKER.chars().count() + text.chars().count())
-            .sum::<usize>()
-        + PAST_FACTS_MARKER.chars().count()
-        + facts
-            .iter()
-            .map(|fact| fact.line.chars().count() + 1)
-            .sum::<usize>()
+/// Appends one Action exchange in the fixed tool-call / tool-result framing.
+fn push_exchange(input: &mut String, exchange: &TaskAgentActionExchange) {
+    input.push_str(TOOL_CALL_MARKER);
+    input.push_str(exchange.request.text());
+    input.push_str(TOOL_RESULT_MARKER);
+    input.push_str(exchange.observation.text());
 }
 
 /// Fits the execution-local transcript into the port's input budget.
@@ -501,18 +501,15 @@ fn fixed_input_len(
 /// port refuses the over-limit input: the model must never answer from a
 /// silently shortened observation. The omitted note's length is reserved up
 /// front, so adding it cannot push the input back over the budget.
-fn fit_exchanges<'a>(
-    purpose: &str,
-    instructions: &[String],
-    facts: &[crate::report::PastExecutedFact],
-    exchanges: &'a [TaskAgentActionExchange],
+fn fit_exchanges(
+    exchanges: &[TaskAgentActionExchange],
+    head_len: usize,
     budget: usize,
-) -> (&'a [TaskAgentActionExchange], bool) {
-    let prefix = fixed_input_len(purpose, instructions, facts);
-    if prefix >= budget {
+) -> (&[TaskAgentActionExchange], bool) {
+    if head_len >= budget {
         return (exchanges, false);
     }
-    let reserved = budget - prefix;
+    let reserved = budget - head_len;
     let mut used = 0usize;
     let mut start = exchanges.len();
     for exchange in exchanges.iter().rev() {
@@ -548,11 +545,12 @@ fn fit_exchanges<'a>(
     (&exchanges[start..], true)
 }
 
+/// The assembled length of one transcript exchange, in Unicode scalar values,
+/// measured through the one appender so the framing cannot drift.
 fn exchange_input_len(exchange: &TaskAgentActionExchange) -> usize {
-    TOOL_CALL_MARKER.chars().count()
-        + exchange.request.text().chars().count()
-        + TOOL_RESULT_MARKER.chars().count()
-        + exchange.observation.text().chars().count()
+    let mut scratch = String::new();
+    push_exchange(&mut scratch, exchange);
+    scratch.chars().count()
 }
 
 async fn re_read_stale_premise(
@@ -571,10 +569,7 @@ async fn re_read_stale_premise(
                     progress: loaded.record.task.progress,
                 });
             }
-            let sealed = repository
-                .load_delegation_result(delegation)
-                .await
-                .map_err(storage_error)?;
+            let sealed = repository.load_delegation_result(delegation).await?;
             if sealed.is_some() {
                 return Ok(TaskAgentTurnOutcome::ExecutionSealed { delegation });
             }
@@ -585,14 +580,9 @@ async fn re_read_stale_premise(
     }
 }
 
-fn storage_error(error: TaskTechnicalError) -> TaskAgentTurnError {
-    match error {
-        TaskTechnicalError::StorageUnavailable { reason } => {
-            TaskAgentTurnError::StorageUnavailable { reason }
-        }
-    }
-}
-
+/// One durable premise load, shared by the precheck and the stale re-read.
+///
+/// The loaded payload is boxed so the rejection variants stay small.
 enum PremiseLoad {
     Loaded(Box<LoadedPremise>),
     MissingDelegation,
@@ -608,18 +598,10 @@ async fn load_premise(
     repository: &impl TaskRepository,
     delegation: DelegationId,
 ) -> Result<PremiseLoad, TaskAgentTurnError> {
-    let Some(delegation) = repository
-        .load_delegation(delegation)
-        .await
-        .map_err(storage_error)?
-    else {
+    let Some(delegation) = repository.load_delegation(delegation).await? else {
         return Ok(PremiseLoad::MissingDelegation);
     };
-    let Some(record) = repository
-        .load_task(delegation.task.task)
-        .await
-        .map_err(storage_error)?
-    else {
+    let Some(record) = repository.load_task(delegation.task.task).await? else {
         return Ok(PremiseLoad::MissingTask {
             task: delegation.task.task,
         });
@@ -628,12 +610,4 @@ async fn load_premise(
         delegation,
         record,
     })))
-}
-
-fn inference_error(error: TaskAgentInferenceError) -> TaskAgentTurnError {
-    match error {
-        TaskAgentInferenceError::InferenceUnavailable { reason } => {
-            TaskAgentTurnError::InferenceUnavailable { reason }
-        }
-    }
 }

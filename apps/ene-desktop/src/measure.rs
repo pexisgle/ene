@@ -466,11 +466,16 @@ pub fn import_presentmon_csv(
     )
 }
 
+/// Input-to-Host-outcome-to-painted timestamps for a first-party GUI
+/// operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InteractionSample {
     pub operation: String,
     pub input_monotonic_ns: u64,
-    pub host_intake_monotonic_ns: u64,
+    /// When this GUI received the Host outcome, including any follow-up
+    /// refresh work. An upper bound on the Host's intake instant, not an
+    /// instrumented intake timestamp.
+    pub host_outcome_monotonic_ns: u64,
     pub gui_painted_monotonic_ns: u64,
 }
 
@@ -488,8 +493,8 @@ pub fn monotonic_ns() -> u64 {
 
 impl InteractionSample {
     #[must_use]
-    pub fn intake_latency_secs(&self) -> Option<f64> {
-        self.host_intake_monotonic_ns
+    pub fn outcome_latency_secs(&self) -> Option<f64> {
+        self.host_outcome_monotonic_ns
             .checked_sub(self.input_monotonic_ns)
             .map(|ns| ns as f64 / 1_000_000_000.0)
     }
@@ -503,9 +508,9 @@ impl InteractionSample {
 
     fn passes(&self) -> bool {
         !self.operation.trim().is_empty()
-            && self.gui_painted_monotonic_ns >= self.host_intake_monotonic_ns
+            && self.gui_painted_monotonic_ns >= self.host_outcome_monotonic_ns
             && self
-                .intake_latency_secs()
+                .outcome_latency_secs()
                 .is_some_and(|latency| latency <= INTAKE_LIMIT_SECS)
             && self
                 .painted_latency_secs()
@@ -579,11 +584,6 @@ enum VerdictKind {
 
 impl MeasurementVerdict {
     pub const UNMEASURED: Self = Self(VerdictKind::Unmeasured);
-
-    #[must_use]
-    pub fn is_pass(self) -> bool {
-        self.0 == VerdictKind::Pass
-    }
 
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -788,7 +788,7 @@ impl MeasurementRecord {
 
     #[must_use]
     pub fn claims_pass(&self) -> bool {
-        self.verdict.is_pass()
+        self.verdict.0 == VerdictKind::Pass
     }
 
     #[must_use]
@@ -863,9 +863,9 @@ impl MeasurementRecord {
         }
         for interaction in &self.interactions {
             out.push_str(&format!(
-                "Interaction {}: intake {:.6}s; painted {:.6}s\n",
+                "Interaction {}: host outcome (upper bound) {:.6}s; painted {:.6}s\n",
                 interaction.operation,
-                interaction.intake_latency_secs().unwrap_or(f64::NAN),
+                interaction.outcome_latency_secs().unwrap_or(f64::NAN),
                 interaction.painted_latency_secs().unwrap_or(f64::NAN)
             ));
         }
@@ -995,9 +995,6 @@ pub fn sample_idle(
         .unwrap_or(0);
     let mut rss_totals = vec![0_u64; rounds];
     for process in &processes {
-        if process.points.len() != rounds {
-            return Err(MeasurementError::UnalignedSamples);
-        }
         for (total, point) in rss_totals.iter_mut().zip(&process.points) {
             *total = total
                 .checked_add(point.rss_bytes)
@@ -1046,8 +1043,6 @@ pub enum MeasurementError {
     InvalidWindow,
     #[error("duplicate presentation correlation id {0}")]
     DuplicatePresentation(u64),
-    #[error("process samples were not aligned")]
-    UnalignedSamples,
     #[error("numeric overflow")]
     NumericOverflow,
     #[error("system clock is before the Unix epoch")]
@@ -1288,7 +1283,7 @@ mod tests {
             interactions: vec![InteractionSample {
                 operation: String::from("cancel_task"),
                 input_monotonic_ns: 1_000,
-                host_intake_monotonic_ns: 100_000_000,
+                host_outcome_monotonic_ns: 100_000_000,
                 gui_painted_monotonic_ns: 200_000_000,
             }],
             click_through: Some(ClickThroughRecord {

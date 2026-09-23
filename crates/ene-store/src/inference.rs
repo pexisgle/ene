@@ -150,8 +150,8 @@ impl InferenceAttemptRepository for Store {
             {
                 crate::usage_cap::ReservationAdmission::NoCap
                 | crate::usage_cap::ReservationAdmission::Reserved => {}
-                crate::usage_cap::ReservationAdmission::Held(cap) => {
-                    return Ok(AttemptBeginOutcome::HeldByCap(cap));
+                crate::usage_cap::ReservationAdmission::Held => {
+                    return Ok(AttemptBeginOutcome::HeldByCap);
                 }
                 crate::usage_cap::ReservationAdmission::Indeterminate => {
                     return Ok(AttemptBeginOutcome::CapIndeterminate);

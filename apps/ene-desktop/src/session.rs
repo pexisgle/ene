@@ -37,6 +37,12 @@ pub fn client_pipe_name(data_dir: &Path) -> String {
 pub const SETUP_PROVIDER_OPENAI: &str = "openai";
 pub const CAPABILITY_DIALOGUE: &str = "dialogue";
 pub const DEFAULT_HISTORY_LIMIT: u64 = 50;
+
+/// The GUI's bounded bootstrap budget while a freshly started Host comes up.
+/// The launcher and the Client connect share the budget; only the retried
+/// error class differs.
+pub const BOOTSTRAP_ATTEMPTS: u8 = 80;
+pub const BOOTSTRAP_DELAY: Duration = Duration::from_millis(50);
 const HOST_SETUP_SECTIONS: &[&str] = &["provider", "model", "consent", "credential", "learning"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,10 +90,13 @@ impl SetupFacts {
     }
 }
 
-pub async fn connect(data_dir: &Path, descriptor: &str) -> Result<Client, ClientError> {
-    Client::connect(data_dir, descriptor, &ene_client::platform_display()).await
-}
-
+/// One GUI connect attempt: an established session, or a pairing that is
+/// still waiting for the Owner.
+///
+/// A stored device authenticates and returns [`Paired`](Self::Paired); only a
+/// first run (or a run whose device file is gone) pends. The two are never
+/// conflated: a successful connect is not an error, and a pending pairing owns
+/// the connection the GUI must retain until confirmation completes.
 pub enum DesktopConnect {
     Paired(Box<Client>),
     PendingOwnerConfirmation(PendingPairingClient),
@@ -108,10 +117,10 @@ pub async fn connect_or_pending(
             }
             Err(ClientError::Transport(error)) => {
                 attempts = attempts.saturating_add(1);
-                if attempts >= 80 {
+                if attempts >= BOOTSTRAP_ATTEMPTS {
                     return Err(DesktopError::Client(ClientError::Transport(error)));
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(BOOTSTRAP_DELAY).await;
             }
             Err(error) => return Err(DesktopError::Client(error)),
         }
@@ -175,14 +184,6 @@ pub fn setup_complete_intent(mark: &str) -> WirePayload {
         },
         confirmed: false,
     })
-}
-
-pub fn confirmed_true_intent(mark: &str) -> WirePayload {
-    let mut intent = assignment_intent(mark, SETUP_PROVIDER_OPENAI, "must-not-apply");
-    if let WirePayload::ManagementIntent(inner) = &mut intent {
-        inner.confirmed = true;
-    }
-    intent
 }
 
 pub async fn fetch_setup_view(client: &mut Client) -> Result<ManagementView, DesktopError> {

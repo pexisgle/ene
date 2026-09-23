@@ -69,14 +69,6 @@ pub struct ErasureParticipantRegistry {
     host_transient: Option<Arc<crate::transient_erasure::HostTransientParticipant>>,
 }
 
-impl std::fmt::Debug for ErasureParticipantRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ErasureParticipantRegistry")
-            .field("owners", &self.participants.len())
-            .finish()
-    }
-}
-
 impl ErasureParticipantRegistry {
     #[must_use]
     pub fn new() -> Self {
@@ -106,15 +98,8 @@ impl ErasureParticipantRegistry {
         &mut self,
         participant: Arc<crate::transient_erasure::HostTransientParticipant>,
     ) -> Result<(), ParticipantOwnerRef> {
-        if self
-            .participants
-            .contains_key(&ParticipantOwnerRef::HostTransient)
-        {
-            return Err(ParticipantOwnerRef::HostTransient);
-        }
-        self.host_transient = Some(Arc::clone(&participant));
-        self.participants
-            .insert(ParticipantOwnerRef::HostTransient, participant);
+        self.register(participant.clone())?;
+        self.host_transient = Some(participant);
         Ok(())
     }
 
@@ -190,14 +175,18 @@ impl Default for TargetedDeletionPass {
     }
 }
 
+/// What one bounded fan-out pass observed. The counts are progress metadata
+/// for the pass's own continuation decision and tests; they are never a
+/// completion decision (the durable participant aggregate plus the
+/// system-wide remainder probe are, and only the sealed completion boundary
+/// re-derives them).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TargetedDeletionPassOutcome {
     pub operations: u32,
     pub demands: u32,
     pub verified: u32,
-    pub unfinished: u32,
-    pub held: u32,
-    pub stale_reports: u32,
+    /// Operations that entered the durable `Finalizing` marker during this
+    /// pass (including a resumed finalizing operation observed again).
     pub finalizing: u32,
     pub finalized: u32,
     pub remainder_sweeps: u32,
@@ -227,9 +216,6 @@ impl TargetedDeletionPassOutcome {
         self.operations = self.operations.saturating_add(other.operations);
         self.demands = self.demands.saturating_add(other.demands);
         self.verified = self.verified.saturating_add(other.verified);
-        self.unfinished = self.unfinished.saturating_add(other.unfinished);
-        self.held = self.held.saturating_add(other.held);
-        self.stale_reports = self.stale_reports.saturating_add(other.stale_reports);
         self.finalizing = self.finalizing.saturating_add(other.finalizing);
         self.finalized = self.finalized.saturating_add(other.finalized);
         self.remainder_sweeps = self.remainder_sweeps.saturating_add(other.remainder_sweeps);
@@ -530,7 +516,6 @@ async fn drive_operation(
             DeletionReconciliationOutcome::Finalizing
             | DeletionReconciliationOutcome::Completed => return Ok(advanced_any),
             DeletionReconciliationOutcome::Missing | DeletionReconciliationOutcome::StaleSweep => {
-                outcome.stale_reports += 1;
                 return Ok(advanced_any);
             }
         }
@@ -570,10 +555,7 @@ async fn drive_operation(
                     ParticipantDemandOutcome::StaleSweep
                     | ParticipantDemandOutcome::Missing
                     | ParticipantDemandOutcome::Completed
-                    | ParticipantDemandOutcome::NotRequired => {
-                        outcome.stale_reports += 1;
-                        return Ok(false);
-                    }
+                    | ParticipantDemandOutcome::NotRequired => return Ok(false),
                 }
                 outcome.demands += 1;
                 let material = match store
@@ -593,7 +575,6 @@ async fn drive_operation(
                 );
                 let fact = registry.demand(command).await;
                 if fact.condition() != condition || fact.participant() != record.participant.owner {
-                    outcome.stale_reports += 1;
                     return Ok(false);
                 }
                 let fact_status = fact.status();
@@ -619,19 +600,13 @@ async fn drive_operation(
                     ParticipantCompletionOutcome::StaleSweep
                     | ParticipantCompletionOutcome::Missing
                     | ParticipantCompletionOutcome::Completed
-                    | ParticipantCompletionOutcome::NotRequired => {
-                        outcome.stale_reports += 1;
-                        return Ok(false);
-                    }
+                    | ParticipantCompletionOutcome::NotRequired => return Ok(false),
                 }
             }
             if verified {
                 outcome.verified += 1;
-            } else {
-                outcome.unfinished += 1;
             }
             if held_this_participant {
-                outcome.held += 1;
                 held = true;
             }
         }
@@ -699,11 +674,19 @@ pub(crate) async fn recover_targeted_deletions(
             "invalid targeted deletion recovery parameters",
         )));
     }
-    resume_retryable_holds(store, pass.operation_limit).await?;
+    // Startup recovery is a fresh schedule: the empty retry map makes every
+    // retryable hold eligible, so the page is offered whole.
+    resume_hold_page(
+        store,
+        pass.operation_limit,
+        &mut HeldRetrySchedule::new(),
+        1,
+    )
+    .await?;
     drive_targeted_deletion_until_settled(store, registry, pass, pass_budget).await
 }
 
-/// Resumes the retryable holds inside one bounded operation page.
+/// Offers one bounded page of retryable-hold resumes.
 ///
 /// Only `Held(Unavailable)` is a resume candidate. `GenerationExhausted`
 /// cannot be resumed by construction, every other phase is not a hold, and
@@ -715,35 +698,71 @@ pub(crate) async fn recover_targeted_deletions(
 /// non-retryable holds or other unfinished operations is still reached on a
 /// later call instead of being starved. The walk position is scheduling state
 /// only: every offered resume re-derives its premise in the store's write
-/// transaction.
-async fn resume_retryable_holds(store: &Store, limit: u32) -> Result<(), CoreError> {
+/// transaction. `schedule`/`tick` are pacing only.
+async fn resume_hold_page(
+    store: &Store,
+    limit: u32,
+    schedule: &mut HeldRetrySchedule,
+    tick: u64,
+) -> Result<(), CoreError> {
     let mut walk = UnfinishedWalk::open(store, DeletionWalk::RetryableHold).await?;
     let page = walk.page(store, limit).await?;
     let page_len = page.len();
-    for record in page {
+    let retryable: HashSet<DeletionOperationId> = page
+        .iter()
+        .filter(|record| is_retryable_hold(record.phase, record.hold))
+        .map(|record| record.current.operation)
+        .collect();
+    schedule.retain_only(&retryable);
+    for record in &page {
         walk.examined(record.current.operation);
-        if is_retryable_hold(record.phase, record.hold) {
-            // The store re-checks the phase, sweep, and hold class inside its
-            // write transaction; a refusal (another writer moved the
-            // operation, or the durable state cannot resume) leaves it for the
-            // bounded drive below without inventing an outcome here.
-            store
-                .change_deletion_lifecycle(record.current, DeletionLifecycleChange::Resume)
-                .await
-                .map_err(deletion_error)?;
+        if !retryable.contains(&record.current.operation)
+            || !schedule.eligible(record.current.operation, tick)
+        {
+            continue;
+        }
+        // The store re-checks the phase, sweep, and hold class inside its
+        // write transaction; a refusal (another writer moved the operation, or
+        // the durable state cannot resume) leaves it for the bounded drive
+        // below without inventing an outcome here.
+        match store
+            .change_deletion_lifecycle(record.current, DeletionLifecycleChange::Resume)
+            .await
+            .map_err(deletion_error)?
+        {
+            DeletionLifecycleOutcome::Applied(_) => {
+                schedule.record_resume(record.current.operation, tick);
+            }
+            // The durable state moved or refuses the resume; the next pass
+            // re-reads the phase instead of guessing.
+            DeletionLifecycleOutcome::Missing
+            | DeletionLifecycleOutcome::StaleSweep
+            | DeletionLifecycleOutcome::Completed
+            | DeletionLifecycleOutcome::Held(_)
+            | DeletionLifecycleOutcome::Finalizing => {}
         }
     }
     walk.advance(store, page_len < limit as usize).await?;
     Ok(())
 }
 
-#[derive(Debug, Default)]
+/// In-memory pacing for retrying `Held(Unavailable)` operations from the
+/// serving tick.
+///
+/// The driver retries a retryable hold by resuming it and driving the reopened
+/// operation; each consecutive unanswered retry doubles the number of ticks
+/// before the next attempt, up to `2^`[`HELD_RETRY_MAX_SKIP_SHIFT`] ticks. The
+/// schedule is pacing only and never authority: it decides no phase, stores no
+/// deletion condition, converts no hold into a completion, and a restart drops
+/// it (startup recovery resumes independently of it). Pruning entries that are
+/// no longer held keeps the map bounded by the unfinished-hold page.
+#[derive(Default)]
 pub(crate) struct HeldRetrySchedule {
     tick: u64,
     retries: HashMap<DeletionOperationId, HoldRetry>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct HoldRetry {
     attempts: u32,
     next_eligible_tick: u64,
@@ -822,39 +841,7 @@ pub(crate) async fn tick_targeted_deletion(
         )));
     }
     let tick = schedule.next_tick();
-    let mut walk = UnfinishedWalk::open(store, DeletionWalk::RetryableHold).await?;
-    let page = walk.page(store, pass.operation_limit).await?;
-    let page_len = page.len();
-    let retryable: HashSet<DeletionOperationId> = page
-        .iter()
-        .filter(|record| is_retryable_hold(record.phase, record.hold))
-        .map(|record| record.current.operation)
-        .collect();
-    schedule.retain_only(&retryable);
-    for record in &page {
-        walk.examined(record.current.operation);
-        if !retryable.contains(&record.current.operation)
-            || !schedule.eligible(record.current.operation, tick)
-        {
-            continue;
-        }
-        match store
-            .change_deletion_lifecycle(record.current, DeletionLifecycleChange::Resume)
-            .await
-            .map_err(deletion_error)?
-        {
-            DeletionLifecycleOutcome::Applied(_) => {
-                schedule.record_resume(record.current.operation, tick);
-            }
-            DeletionLifecycleOutcome::Missing
-            | DeletionLifecycleOutcome::StaleSweep
-            | DeletionLifecycleOutcome::Completed
-            | DeletionLifecycleOutcome::Held(_)
-            | DeletionLifecycleOutcome::Finalizing => {}
-        }
-    }
-    walk.advance(store, page_len < pass.operation_limit as usize)
-        .await?;
+    resume_hold_page(store, pass.operation_limit, schedule, tick).await?;
     drive_targeted_deletion(store, registry, pass).await
 }
 
@@ -888,8 +875,7 @@ mod tests {
         DeletionSweepGeneration, ErasureParticipant, MechanicalDeletionTarget,
         ParticipantCompletionFact, ParticipantCompletionStatus, ParticipantHoldClass,
         ParticipantOwnerRef, ParticipantProgress, StageTargetedDeletionRequestCommand,
-        StageTargetedDeletionRequestOutcome, StartTargetedDeletionCommand,
-        StartTargetedDeletionOutcome, TargetedDeletionTarget,
+        StageTargetedDeletionRequestOutcome, TargetedDeletionTarget,
     };
     use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
     use ene_task::{
@@ -1026,45 +1012,36 @@ mod tests {
         }
     }
 
-    fn admission(
-        text: &str,
-        participants: Vec<ParticipantOwnerRef>,
-    ) -> StartTargetedDeletionCommand {
-        StartTargetedDeletionCommand::new(
-            TargetedDeletionTarget {
-                mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
-                    text.into(),
-                )),
-                semantic_hints: vec![],
-            },
-            DeletionPurpose::Privacy,
-            WallClockWithTz::now(),
-            vec![],
-            participants,
-        )
-        .confirmed_for_tests()
-    }
-
+    /// Test fixture admission: the production stage/confirm path, then the
+    /// current sweep's bounded source walk driven to completion, matching the
+    /// durable shape the deleted direct admission seam committed. Tests that
+    /// pin the admission page itself use [`admit_first_party`] instead.
     async fn admit(
         handle: &HostHandle,
         text: &str,
         participants: Vec<ParticipantOwnerRef>,
     ) -> DeletionOperationRef {
-        match handle
-            .store
-            .start_targeted_deletion(admission(text, participants))
-            .await
-            .unwrap()
-        {
-            StartTargetedDeletionOutcome::Started(current) => current,
-            other => panic!("unexpected admission: {other:?}"),
+        let current = admit_first_party(handle, text, participants).await;
+        for _ in 0..64 {
+            match handle
+                .store
+                .reconcile_deletion_sources(current, DELETION_RECONCILIATION_PAGE_SIZE)
+                .await
+                .expect("a reconciliation step must answer")
+            {
+                DeletionReconciliationOutcome::Advanced => {}
+                DeletionReconciliationOutcome::Complete
+                | DeletionReconciliationOutcome::Finalizing
+                | DeletionReconciliationOutcome::Completed => break,
+                other => panic!("unexpected reconciliation step: {other:?}"),
+            }
         }
+        current
     }
 
     /// First-party request/confirmation: admission publishes only the first
     /// bounded identity page and leaves the durable reconciliation cursor
-    /// incomplete. The sealed [`admit`] path names its whole source scope up
-    /// front and must not be used to exercise page-late coverage.
+    /// incomplete, so page-late coverage stays observable.
     async fn admit_first_party(
         handle: &HostHandle,
         text: &str,
@@ -1221,10 +1198,7 @@ mod tests {
                 .drive_targeted_deletion(TargetedDeletionPass::new(100, 16))
                 .await
                 .expect("the fan-out must not fail");
-            let settled = outcome.held == 0
-                && outcome.unfinished == 0
-                && outcome.demands == 0
-                && outcome.reconciliation_pages == 0;
+            let settled = outcome.demands == 0 && outcome.reconciliation_pages == 0;
             total.accumulate(outcome);
             if settled {
                 return total;
@@ -1344,9 +1318,7 @@ mod tests {
             ParticipantOwnerRef::Learning,
         ];
         let current = admit(&handle, target, required.clone()).await;
-        let outcome = drive_until_settled(&handle).await;
-        assert_eq!(outcome.held, 0);
-        assert_eq!(outcome.unfinished, 0);
+        drive_until_settled(&handle).await;
         assert_eq!(
             handle
                 .store
@@ -1525,8 +1497,6 @@ mod tests {
             panic!("an unfinished operation keeps its material");
         };
         let outcome = drive_until_settled(&handle).await;
-        assert_eq!(outcome.held, 0, "semantic derived data must not hold");
-        assert_eq!(outcome.unfinished, 0);
         assert!(
             outcome.reconciliation_pages >= 1,
             "the walk needed a continuation page: {outcome:?}"
@@ -1667,8 +1637,7 @@ mod tests {
         };
         handle.store.wait_erasure_mutation_park_for_tests().await;
 
-        let outcome = drive_until_settled(&handle).await;
-        assert_eq!(outcome.held, 0);
+        drive_until_settled(&handle).await;
         assert_eq!(
             handle
                 .store
@@ -1776,8 +1745,7 @@ mod tests {
         };
         handle.store.wait_erasure_mutation_park_for_tests().await;
 
-        let outcome = drive_until_settled(&handle).await;
-        assert_eq!(outcome.held, 0);
+        drive_until_settled(&handle).await;
         assert_eq!(
             operation_record(&handle, current.operation).await.phase,
             DeletionOperationPhase::Completed
@@ -1866,8 +1834,7 @@ mod tests {
         };
         handle.store.wait_device_auth_file_park_for_tests().await;
 
-        let outcome = drive_until_settled(&handle).await;
-        assert_eq!(outcome.held, 0);
+        drive_until_settled(&handle).await;
         assert_eq!(
             operation_record(&handle, current.operation).await.phase,
             DeletionOperationPhase::Completed
@@ -1980,8 +1947,7 @@ mod tests {
             panic!("an unfinished operation keeps its material");
         };
 
-        let outcome = drive_until_settled(&handle).await;
-        assert_eq!(outcome.held, 0);
+        drive_until_settled(&handle).await;
         assert_eq!(
             handle
                 .store
@@ -2058,20 +2024,17 @@ mod tests {
         )
         .await;
         // One bounded demand per participant: the sweep cannot finish yet.
-        let first = handle
+        handle
             .drive_targeted_deletion(TargetedDeletionPass::new(100, 1))
             .await
             .expect("the fan-out must run");
-        assert!(first.unfinished > 0, "the sweep must still have work");
 
         // Restart: the durable operation and participant snapshot survive, the
         // in-memory continuation cursors do not, and the reopened composition
         // re-registers the built-in implementations.
         drop(handle);
         let reopened = reopen(dir.path()).await;
-        let outcome = drive_until_settled(&reopened).await;
-        assert_eq!(outcome.held, 0);
-        assert_eq!(outcome.unfinished, 0);
+        drive_until_settled(&reopened).await;
         assert_eq!(
             reopened
                 .store
@@ -2162,8 +2125,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome.verified, 0);
-        assert_eq!(outcome.held as usize, required.len());
-        assert_eq!(outcome.unfinished as usize, required.len());
         let rows = handle.store.unfinished_deletions(None, 100).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(
@@ -2235,7 +2196,7 @@ mod tests {
             .drive_targeted_deletion(TargetedDeletionPass::new(100, 1))
             .await
             .unwrap();
-        assert_eq!((first.verified, first.unfinished), (1, 1));
+        assert_eq!(first.verified, 1);
         assert_eq!(companion.calls(), 1);
         assert_eq!(learning.calls(), 1);
         // Crash: the handle (and the in-memory registry) drops; the durable
@@ -2335,7 +2296,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome.verified, 1);
-        assert_eq!(outcome.held, 1);
         assert!(
             client.correlation_only_observed(),
             "a Client-bound demand never carries the target body"
@@ -2393,7 +2353,6 @@ mod tests {
             .drive_targeted_deletion(TargetedDeletionPass::default())
             .await
             .unwrap();
-        assert_eq!(outcome.stale_reports, 1);
         assert_eq!(outcome.verified, 0);
         let rows = handle.store.unfinished_deletions(None, 100).await.unwrap();
         assert_eq!(rows.len(), 1);
@@ -2607,8 +2566,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            (first.demands, first.verified, first.unfinished, first.held),
-            (3, 3, 0, 0),
+            (first.demands, first.verified),
+            (3, 3),
             "all three owners complete their bounded pass in one demand"
         );
         assert_eq!(
@@ -2810,8 +2769,6 @@ mod tests {
         ];
         let current = admit(&handle, target, required.clone()).await;
         let settled = drive_until_settled(&handle).await;
-        assert_eq!(settled.held, 0);
-        assert_eq!(settled.unfinished, 0);
         assert_eq!(settled.finalized, 1, "the operation completes once");
         assert_eq!(
             handle
@@ -3489,7 +3446,6 @@ mod tests {
         .await;
         let outcome = drive_until_local_owners_verify(&handle, 3).await;
         assert_eq!(outcome.verified, 3);
-        assert_eq!(outcome.held, 0);
         for owner in [
             ParticipantOwnerRef::Task,
             ParticipantOwnerRef::Action,
@@ -3864,8 +3820,7 @@ mod tests {
                 )))
                 .unwrap();
         }
-        let held = handle.run_targeted_deletion_tick().await.unwrap();
-        assert_eq!(held.held as usize, required.len());
+        handle.run_targeted_deletion_tick().await.unwrap();
         drop(handle);
 
         let reopened = reopen(dir.path()).await;
@@ -4052,16 +4007,13 @@ mod tests {
             .unwrap();
 
         // Tick 1 drives the Active operation into the durable hold.
-        let first = handle.run_targeted_deletion_tick().await.unwrap();
-        assert_eq!(first.held, 1);
+        handle.run_targeted_deletion_tick().await.unwrap();
         assert_eq!(participant.calls(), 1);
         // Ticks 2 and 3 retry immediately after the first retry (skip 1 then
         // 2), then tick 4 must be skipped by the doubled backoff.
-        let second = handle.run_targeted_deletion_tick().await.unwrap();
-        assert_eq!(second.held, 1);
+        handle.run_targeted_deletion_tick().await.unwrap();
         assert_eq!(participant.calls(), 2);
-        let third = handle.run_targeted_deletion_tick().await.unwrap();
-        assert_eq!(third.held, 1);
+        handle.run_targeted_deletion_tick().await.unwrap();
         assert_eq!(participant.calls(), 3);
         let fourth = handle.run_targeted_deletion_tick().await.unwrap();
         assert_eq!(
@@ -4072,8 +4024,7 @@ mod tests {
         assert_eq!(participant.calls(), 3);
         // Tick 5 retries once more; ticks 6-8 are then inside the doubled
         // skip, and tick 9 retries again.
-        let fifth = handle.run_targeted_deletion_tick().await.unwrap();
-        assert_eq!(fifth.held, 1);
+        handle.run_targeted_deletion_tick().await.unwrap();
         assert_eq!(participant.calls(), 4);
         for _ in 0..3 {
             handle.run_targeted_deletion_tick().await.unwrap();
@@ -4084,7 +4035,6 @@ mod tests {
             "the skip doubles between consecutive retry attempts"
         );
         let ninth = handle.run_targeted_deletion_tick().await.unwrap();
-        assert_eq!(ninth.held, 1);
         assert_eq!(participant.calls(), 5);
         assert!(
             !format!("{ninth:?}").contains(target),
@@ -4501,11 +4451,10 @@ mod tests {
             admit(&handle, &format!("hold-rotation-{index}"), vec![owner]).await;
             participants.push(participant);
         }
-        let held = handle
+        handle
             .drive_targeted_deletion(TargetedDeletionPass::new(3, 1))
             .await
             .unwrap();
-        assert_eq!(held.held, 3, "all three operations hold after the drive");
         assert!(
             participants
                 .iter()

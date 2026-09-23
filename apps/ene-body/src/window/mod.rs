@@ -28,6 +28,25 @@ pub(crate) fn gpu_info(failure: RenderFailure) -> crate::ipc::GpuFailInfo {
     }
 }
 
+/// Reported when `try_gpu` is false: no adapter is ever attempted.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn gpu_disabled() -> crate::ipc::GpuFailInfo {
+    crate::ipc::GpuFailInfo {
+        reason: crate::ipc::GpuFailReason::NoAdapter,
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn gpu_status(
+    renderer: Option<&crate::render::SurfaceRenderer>,
+) -> crate::ipc::GpuInitStatus {
+    if renderer.is_some() {
+        crate::ipc::GpuInitStatus::Ok
+    } else {
+        crate::ipc::GpuInitStatus::Failed
+    }
+}
+
 /// Logical-pixel extent of the resize target, anchored to the rightmost
 /// visible character pixels in the bottom band (mirrors the Windows
 /// `WM_NCHITTEST` grip).
@@ -80,10 +99,6 @@ impl Overlay {
         }
     }
 
-    pub(crate) fn unavailable(reason: impl Into<String>) -> Self {
-        Self::Headless(HeadlessOverlay::unavailable(reason.into()))
-    }
-
     #[must_use]
     pub fn kind(&self) -> OverlayKind {
         match self {
@@ -126,23 +141,12 @@ impl Overlay {
         }
     }
 
-    #[must_use]
-    pub fn placement(&self) -> PlacementBox {
-        match self {
-            Self::Headless(inner) => inner.placement(),
-            #[cfg(target_os = "linux")]
-            Self::KdeLayerShell(inner) => inner.placement(),
-            #[cfg(target_os = "windows")]
-            Self::WindowsDwm(inner) => inner.placement(),
-        }
-    }
-
     /// Native backends report overlay-local drag/resize/hide as `LocalUiFact`;
     /// Headless never synthesizes them.
     #[must_use]
     pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
         match self {
-            Self::Headless(inner) => inner.take_local_ui(),
+            Self::Headless(_) => None,
             #[cfg(target_os = "linux")]
             Self::KdeLayerShell(inner) => inner.take_local_ui(),
             #[cfg(target_os = "windows")]

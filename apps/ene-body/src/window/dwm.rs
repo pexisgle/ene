@@ -31,7 +31,9 @@ mod imp {
         GpuFailInfo, GpuFailReason, GpuInitStatus, LocalUiFact, PlacementBox, PresentationFeedback,
     };
     use crate::render::{HitTestMask, RenderOutcome, SurfaceRenderer};
-    use crate::window::{DEFAULT_PLACEMENT, RESIZE_GRIP_LOGICAL_PX, gpu_info, physical};
+    use crate::window::{
+        DEFAULT_PLACEMENT, RESIZE_GRIP_LOGICAL_PX, gpu_disabled, gpu_info, physical,
+    };
 
     const CLASS_NAME: &[u16] = &[
         b'e' as u16,
@@ -179,9 +181,7 @@ mod imp {
                     }
                 }
             } else {
-                gpu_failure = Some(GpuFailInfo {
-                    reason: GpuFailReason::NoAdapter,
-                });
+                gpu_failure = Some(gpu_disabled());
                 None
             };
             Ok(Self {
@@ -194,11 +194,7 @@ mod imp {
         }
 
         pub fn gpu_status(&self) -> GpuInitStatus {
-            if self.renderer.is_some() {
-                GpuInitStatus::Ok
-            } else {
-                GpuInitStatus::Failed
-            }
+            crate::window::gpu_status(self.renderer.as_ref())
         }
 
         pub fn gpu_failure(&self) -> Option<GpuFailInfo> {
@@ -239,10 +235,6 @@ mod imp {
                 renderer.resize(physical_width, physical_height);
             }
             self.state.region_dirty = true;
-        }
-
-        pub fn placement(&self) -> PlacementBox {
-            self.state.placement
         }
 
         pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {

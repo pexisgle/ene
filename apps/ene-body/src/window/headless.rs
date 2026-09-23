@@ -1,29 +1,24 @@
-use crate::ipc::{LocalUiFact, PlacementBox};
+//! In-process overlay that records visibility and the placement box.
+//!
+//! Used when no OS compositor backend has been probe-adopted. Hide here is
+//! still not Companion stop.
+
+use crate::ipc::PlacementBox;
 
 #[derive(Debug)]
 pub struct HeadlessOverlay {
     visible: bool,
     placement: PlacementBox,
-    local_ui: Option<LocalUiFact>,
     unavailable_reason: Option<String>,
 }
 
 impl HeadlessOverlay {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn unavailable(reason: String) -> Self {
         Self {
             visible: false,
             placement: PlacementBox::default(),
-            local_ui: None,
-            unavailable_reason: None,
-        }
-    }
-
-    #[must_use]
-    pub fn unavailable(reason: String) -> Self {
-        Self {
             unavailable_reason: Some(reason),
-            ..Self::new()
         }
     }
 
@@ -43,25 +38,5 @@ impl HeadlessOverlay {
 
     pub fn set_placement(&mut self, placement: PlacementBox) {
         self.placement = placement;
-    }
-
-    #[must_use]
-    pub fn placement(&self) -> PlacementBox {
-        self.placement
-    }
-
-    pub fn push_local_ui(&mut self, fact: LocalUiFact) {
-        self.local_ui = Some(fact);
-    }
-
-    #[must_use]
-    pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
-        self.local_ui.take()
-    }
-}
-
-impl Default for HeadlessOverlay {
-    fn default() -> Self {
-        Self::new()
     }
 }

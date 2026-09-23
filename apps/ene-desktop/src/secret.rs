@@ -5,7 +5,8 @@
 
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-#[derive(Zeroize, ZeroizeOnDrop, Default)]
+/// Owner-typed secret held only while the credential field is open.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretIntake {
     buffer: String,
 }

@@ -1,3 +1,28 @@
+//! `ene-ctl` subcommands: wire-payload builders and rendering.
+//!
+//! Pure: builds `ene-api` DTOs and renders views to display strings; no I/O,
+//! sockets, or environment. Argument syntax lives in the `clap` command at
+//! the crate root; transport lives in [`crate::client`]; the routing helpers
+//! here map Host answers onto [`CliError`] outcome classes, and the crate
+//! root only maps those classes to exit codes.
+//!
+//! Wire-mapping decisions (all within the existing DTO shapes):
+//!
+//! * Setup intents use the shared setup-target grammar ([`credential_target`]
+//!   and [`consent_target`], never a CLI-local mini-language). The credential
+//!   key comes from the Host process environment over the Host-local path,
+//!   never this wire; assignment parameters travel in the consent target,
+//!   never in the rationale quote, and both rationales are provenance-only.
+//! * Both setup intents carry the display-revision mark of a freshly fetched
+//!   setup view as `base_view`, so staleness is checked against something the
+//!   CLI actually saw, never defaulted to unconstrained.
+//! * `watch --round ROUND` prints that round's items from a [`HistoryRequest`]
+//!   (same fetch as `history`, filtered by round); true stream-following needs
+//!   a live `send` in the same process because streams cannot resume, so that
+//!   follow mode is deferred (see [`Command::Watch`]).
+
+use crate::errors::CliError;
+
 use ene_api::v1::deletion::{
     DeletionParticipantReportWire, DeletionPurposeWire, DeletionStatusResponse, deletion_target,
 };
@@ -7,7 +32,7 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::refs::{
     BaseViewMark, ClientLocalId, CommandWireId, CompanionWireRef, ManagementTargetWire,
-    RoundWireId, TextLangWire, UsageCursorWire,
+    RoundWireId, TextLangWire,
 };
 use ene_api::v1::round::{
     HistoryItem, HistoryRequest, HistoryRole, PresentationStatus, RoundIntakeOutcomeWire,
@@ -23,6 +48,7 @@ use ene_api::v1::usage::{
     UsageCapConsumptionView, UsageMoneyView, UsageSummaryPage, UsageSummaryRequest,
     UsageSummaryResponse,
 };
+use ene_client::ClientError;
 
 pub const DEFAULT_HISTORY_LIMIT: u64 = 50;
 
@@ -93,7 +119,15 @@ pub enum Command {
         cursor: Option<String>,
         limit: Option<u32>,
     },
-    Usage(UsageArgs),
+    /// Read one bounded page of the first-party usage / cost summary plus
+    /// the current cap slots (`usage-cost-cap` §16). No body text, prompt,
+    /// output, or credential value crosses this path.
+    Usage(UsageSummaryRequest),
+    /// Set or update one provider/system daily/monthly usage cap
+    /// (`usage-cost-cap` §13/§17). The Client only proposes: the Host
+    /// re-checks the current authenticated connection, the base-view mark
+    /// from a read, and the cap revision before the permission-owned command
+    /// commits.
     UsageCap {
         scope: String,
         provider: Option<String>,
@@ -101,19 +135,6 @@ pub enum Command {
         currency: String,
         limit_micros: u64,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UsageArgs {
-    pub from: Option<String>,
-    pub to: Option<String>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub consumer: Option<String>,
-    pub purpose: Option<String>,
-    pub status: Option<String>,
-    pub cursor: Option<String>,
-    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -360,22 +381,41 @@ pub fn consent_target_for(capability: &str, provider: &str, model: &str) -> Mana
     consent_target(capability, provider, model, &credential_id_for(provider))
 }
 
-pub fn credential_intent(
+/// The shared management-intent shape: provenance-only rationale (origin, no
+/// quote) and never confirmed.
+fn intent(
     intent_id: CommandWireId,
-    base: &BaseViewMark,
-    provider: &str,
+    kind: ManagementIntentKind,
+    target: ManagementTargetWire,
+    base_view: BaseViewMark,
 ) -> ManagementIntent {
     ManagementIntent {
         intent_id,
-        kind: ManagementIntentKind::ConfigureCredentialIntent,
-        target: credential_target_for(provider),
-        base_view: base.clone(),
+        kind,
+        target,
+        base_view,
         rationale: IntentRationaleWire {
             origin: RationaleOrigin::ManagementSurface,
             quote: None,
         },
         confirmed: false,
     }
+}
+
+/// The Host sources the key from its own environment over the Host-local
+/// path, so this payload carries no secret; the rationale is provenance-only
+/// (origin, no quote).
+pub fn credential_intent(
+    intent_id: CommandWireId,
+    base: &BaseViewMark,
+    provider: &str,
+) -> ManagementIntent {
+    intent(
+        intent_id,
+        ManagementIntentKind::ConfigureCredentialIntent,
+        credential_target_for(provider),
+        base.clone(),
+    )
 }
 
 pub fn assignment_intent(
@@ -385,17 +425,12 @@ pub fn assignment_intent(
     provider: &str,
     model: &str,
 ) -> ManagementIntent {
-    ManagementIntent {
+    intent(
         intent_id,
-        kind: ManagementIntentKind::ManageRuleConsentCap,
-        target: consent_target_for(capability, provider, model),
-        base_view: base.clone(),
-        rationale: IntentRationaleWire {
-            origin: RationaleOrigin::ManagementSurface,
-            quote: None,
-        },
-        confirmed: false,
-    }
+        ManagementIntentKind::ManageRuleConsentCap,
+        consent_target_for(capability, provider, model),
+        base.clone(),
+    )
 }
 
 #[must_use]
@@ -405,22 +440,12 @@ pub fn deletion_intent(
     purpose: DeletionPurposeWire,
     exact_text: &str,
 ) -> ManagementIntent {
-    ManagementIntent {
+    intent(
         intent_id,
-        kind: ManagementIntentKind::RequestDeletionBackupRestoreReset,
-        target: deletion_target(purpose, exact_text),
-        base_view: BaseViewMark(base.to_string()),
-        rationale: IntentRationaleWire {
-            origin: RationaleOrigin::ManagementSurface,
-            quote: None,
-        },
-        confirmed: false,
-    }
-}
-
-#[must_use]
-pub fn deletion_purpose(token: &str) -> Option<DeletionPurposeWire> {
-    DeletionPurposeWire::from_name(token)
+        ManagementIntentKind::RequestDeletionBackupRestoreReset,
+        deletion_target(purpose, exact_text),
+        BaseViewMark(base.to_string()),
+    )
 }
 
 /// Renders the bounded deletion status page: the surface mark an intent builds
@@ -457,21 +482,11 @@ pub fn render_deletion_status(response: &DeletionStatusResponse) -> String {
     lines.join("\n")
 }
 
-#[must_use]
-pub fn usage_request(args: &UsageArgs) -> UsageSummaryRequest {
-    UsageSummaryRequest {
-        from: args.from.clone(),
-        to: args.to.clone(),
-        provider: args.provider.clone(),
-        model: args.model.clone(),
-        consumer: args.consumer.clone(),
-        purpose: args.purpose.clone(),
-        status: args.status.clone(),
-        cursor: args.cursor.clone().map(UsageCursorWire),
-        limit: args.limit,
-    }
-}
-
+/// Builds one cap set/update intent. The target grammar is shared with the
+/// Host (`usage_cap_target`, never a CLI-local mini-language); the base mark
+/// comes from a just-read [`UsageSummaryPage`], so the Host re-checks a
+/// revision the Owner actually saw. `quote` is never populated: the cap value
+/// travels in the typed target.
 #[must_use]
 pub fn usage_cap_intent(
     intent_id: CommandWireId,
@@ -481,17 +496,12 @@ pub fn usage_cap_intent(
     currency: &str,
     limit_micros: u64,
 ) -> ManagementIntent {
-    ManagementIntent {
+    intent(
         intent_id,
-        kind: ManagementIntentKind::ManageRuleConsentCap,
-        target: usage_cap_target(provider, window, currency, limit_micros),
-        base_view: BaseViewMark(base.to_string()),
-        rationale: IntentRationaleWire {
-            origin: RationaleOrigin::ManagementSurface,
-            quote: None,
-        },
-        confirmed: false,
-    }
+        ManagementIntentKind::ManageRuleConsentCap,
+        usage_cap_target(provider, window, currency, limit_micros),
+        BaseViewMark(base.to_string()),
+    )
 }
 
 #[must_use]
@@ -640,17 +650,12 @@ pub fn render_history(items: &[HistoryItem]) -> String {
         .join("\n")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IntakeAction {
-    Accepted { round: String },
-    Declined { message: String },
-}
-
-pub fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> IntakeAction {
+/// Intake-routing for a [`RoundIntakeOutcomeWire`]: the accepted round on
+/// success, a retryable `ServerOutcome` otherwise. Decline messages carry
+/// refs and generations only, never body text.
+pub fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> Result<String, CliError> {
     match outcome {
-        RoundIntakeOutcomeWire::AcceptedForRound { round } => IntakeAction::Accepted {
-            round: round.0.clone(),
-        },
+        RoundIntakeOutcomeWire::AcceptedForRound { round } => Ok(round.0.clone()),
         RoundIntakeOutcomeWire::StaleRound {
             current_round,
             current_generation,
@@ -662,181 +667,174 @@ pub fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> IntakeAction {
                 ),
                 None => format!("stale round; no round is open (generation {current_generation})"),
             };
-            IntakeAction::Declined { message }
+            Err(CliError::Client(ClientError::ServerOutcome(message)))
         }
-        RoundIntakeOutcomeWire::HeldForTransition => IntakeAction::Declined {
-            message: String::from(
+        RoundIntakeOutcomeWire::HeldForTransition => {
+            Err(CliError::Client(ClientError::ServerOutcome(String::from(
                 "held for a presence transition; retry after the transition settles",
-            ),
-        },
-        RoundIntakeOutcomeWire::NeedsRevalidation { reason } => IntakeAction::Declined {
-            message: format!("needs revalidation: {}", reason.0),
-        },
+            ))))
+        }
+        RoundIntakeOutcomeWire::NeedsRevalidation { reason } => Err(CliError::Client(
+            ClientError::ServerOutcome(format!("needs revalidation: {}", reason.0)),
+        )),
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AckAction {
-    Confirmed,
-    Retryable { message: String },
-}
-
-pub fn describe_ack(outcome: &UndeliveredAckOutcome) -> AckAction {
+/// ACK-routing for an [`UndeliveredAckOutcome`]: `Ok(())` only when the
+/// confirmation is recorded; retryable answers stay `ServerOutcome` instead
+/// of being shown as presented.
+pub fn describe_ack(outcome: &UndeliveredAckOutcome) -> Result<(), CliError> {
     match outcome {
-        UndeliveredAckOutcome::Presented { .. } => AckAction::Confirmed,
-        UndeliveredAckOutcome::AlreadyPresented => AckAction::Confirmed,
-        UndeliveredAckOutcome::ReturnedToPending { .. } => AckAction::Confirmed,
-        UndeliveredAckOutcome::KeptUnknown => AckAction::Confirmed,
-        UndeliveredAckOutcome::UnknownRef => AckAction::Retryable {
-            message: String::from("unknown receipt; re-query for a new receipt and retry"),
-        },
-        UndeliveredAckOutcome::StalePresentation => AckAction::Retryable {
-            message: String::from("stale presentation; re-query for a new receipt and retry"),
-        },
-        UndeliveredAckOutcome::StaleConnection => AckAction::Retryable {
-            message: String::from("stale connection; re-query on this connection and retry"),
-        },
-        UndeliveredAckOutcome::HeldForErasure => AckAction::Retryable {
-            message: String::from("items are under deletion; re-query after it settles"),
-        },
-        UndeliveredAckOutcome::Unavailable => AckAction::Retryable {
-            message: String::from("presentation confirmation is unavailable; retry later"),
-        },
+        UndeliveredAckOutcome::Presented { .. }
+        | UndeliveredAckOutcome::AlreadyPresented
+        | UndeliveredAckOutcome::ReturnedToPending { .. }
+        | UndeliveredAckOutcome::KeptUnknown => Ok(()),
+        UndeliveredAckOutcome::UnknownRef => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("unknown receipt; re-query for a new receipt and retry"),
+        ))),
+        UndeliveredAckOutcome::StalePresentation => {
+            Err(CliError::Client(ClientError::ServerOutcome(String::from(
+                "stale presentation; re-query for a new receipt and retry",
+            ))))
+        }
+        UndeliveredAckOutcome::StaleConnection => {
+            Err(CliError::Client(ClientError::ServerOutcome(String::from(
+                "stale connection; re-query on this connection and retry",
+            ))))
+        }
+        UndeliveredAckOutcome::HeldForErasure => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("items are under deletion; re-query after it settles"),
+        ))),
+        UndeliveredAckOutcome::Unavailable => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("presentation confirmation is unavailable; retry later"),
+        ))),
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResumeAction {
-    Resumed { detail: String },
-    Refused { message: String },
-    Retryable { message: String },
-}
-
-pub fn describe_resume(outcome: &ResumeTaskOutcomeWire) -> ResumeAction {
+/// Resume-routing for a [`ResumeTaskOutcomeWire`]: the resume detail on
+/// success; only `Resumed` is applied, refusals stay `ServerRejected` with
+/// zero Task writes, and `InFlight` / `Unavailable` are `ServerOutcome`.
+pub fn describe_resume(outcome: &ResumeTaskOutcomeWire) -> Result<String, CliError> {
     match outcome {
         ResumeTaskOutcomeWire::Resumed {
             revision,
             delegation,
             ..
-        } => ResumeAction::Resumed {
-            detail: format!("resumed at revision {revision} (delegation {delegation})"),
-        },
-        ResumeTaskOutcomeWire::StalePremise { current_revision } => ResumeAction::Refused {
-            message: format!("stale premise; current revision is {current_revision}"),
-        },
-        ResumeTaskOutcomeWire::Superseded => ResumeAction::Refused {
-            message: String::from("superseded by a newer Owner input"),
-        },
-        ResumeTaskOutcomeWire::TaskTerminal { progress } => ResumeAction::Refused {
-            message: format!("task is already {progress}"),
-        },
-        ResumeTaskOutcomeWire::AlreadyRunning => ResumeAction::Refused {
-            message: String::from("task is already running"),
-        },
-        ResumeTaskOutcomeWire::HeldByUnknownEffects => ResumeAction::Refused {
-            message: String::from("held by unknown effects; settle them first"),
-        },
-        ResumeTaskOutcomeWire::ResultAvailable => ResumeAction::Refused {
-            message: String::from("a sealed result is available to review first"),
-        },
-        ResumeTaskOutcomeWire::NeedsRevalidation { hold } => ResumeAction::Refused {
-            message: format!("needs revalidation: {hold}"),
-        },
-        ResumeTaskOutcomeWire::MissingTask => ResumeAction::Refused {
-            message: String::from("no such task"),
-        },
-        ResumeTaskOutcomeWire::RevisionExhausted => ResumeAction::Refused {
-            message: String::from("the task cannot take another change"),
-        },
-        ResumeTaskOutcomeWire::InFlight => ResumeAction::Retryable {
-            message: String::from("resume already in flight; retry for its outcome"),
-        },
-        ResumeTaskOutcomeWire::UnknownRef => ResumeAction::Retryable {
-            message: String::from("unknown task reference; re-list and retry"),
-        },
-        ResumeTaskOutcomeWire::StaleConnection => ResumeAction::Retryable {
-            message: String::from("stale sender epoch; re-prepare on this connection and retry"),
-        },
-        ResumeTaskOutcomeWire::Unavailable => ResumeAction::Retryable {
-            message: String::from("host unavailable; retry later"),
-        },
+        } => Ok(format!(
+            "resumed at revision {revision} (delegation {delegation})"
+        )),
+        ResumeTaskOutcomeWire::StalePremise { current_revision } => {
+            Err(CliError::Client(ClientError::ServerRejected(format!(
+                "stale premise; current revision is {current_revision}"
+            ))))
+        }
+        ResumeTaskOutcomeWire::Superseded => Err(CliError::Client(ClientError::ServerRejected(
+            String::from("superseded by a newer Owner input"),
+        ))),
+        ResumeTaskOutcomeWire::TaskTerminal { progress } => Err(CliError::Client(
+            ClientError::ServerRejected(format!("task is already {progress}")),
+        )),
+        ResumeTaskOutcomeWire::AlreadyRunning => Err(CliError::Client(
+            ClientError::ServerRejected(String::from("task is already running")),
+        )),
+        ResumeTaskOutcomeWire::HeldByUnknownEffects => Err(CliError::Client(
+            ClientError::ServerRejected(String::from("held by unknown effects; settle them first")),
+        )),
+        ResumeTaskOutcomeWire::ResultAvailable => {
+            Err(CliError::Client(ClientError::ServerRejected(String::from(
+                "a sealed result is available to review first",
+            ))))
+        }
+        ResumeTaskOutcomeWire::NeedsRevalidation { hold } => Err(CliError::Client(
+            ClientError::ServerRejected(format!("needs revalidation: {hold}")),
+        )),
+        ResumeTaskOutcomeWire::MissingTask => Err(CliError::Client(ClientError::ServerRejected(
+            String::from("no such task"),
+        ))),
+        ResumeTaskOutcomeWire::RevisionExhausted => Err(CliError::Client(
+            ClientError::ServerRejected(String::from("the task cannot take another change")),
+        )),
+        ResumeTaskOutcomeWire::InFlight => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("resume already in flight; retry for its outcome"),
+        ))),
+        ResumeTaskOutcomeWire::UnknownRef => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("unknown task reference; re-list and retry"),
+        ))),
+        ResumeTaskOutcomeWire::StaleConnection => {
+            Err(CliError::Client(ClientError::ServerOutcome(String::from(
+                "stale sender epoch; re-prepare on this connection and retry",
+            ))))
+        }
+        ResumeTaskOutcomeWire::Unavailable => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("host unavailable; retry later"),
+        ))),
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FetchAction {
-    Paint(UndeliveredSummary),
-    Retryable { message: String },
-}
-
-pub fn describe_fetch(response: UndeliveredResponse) -> FetchAction {
+/// Undelivered-fetch routing for an [`UndeliveredResponse`]: the summary to
+/// paint on success, a retryable `ServerOutcome` otherwise.
+pub fn describe_fetch(response: UndeliveredResponse) -> Result<UndeliveredSummary, CliError> {
     match response {
-        UndeliveredResponse::Summary(summary) => FetchAction::Paint(summary),
-        UndeliveredResponse::FrameTooLarge => FetchAction::Retryable {
-            message: String::from("frame too large; retry with a smaller limit"),
-        },
-        UndeliveredResponse::NoCurrentPresence => FetchAction::Retryable {
-            message: String::from("no current presence; summon first, then retry"),
-        },
-        UndeliveredResponse::UnknownCompanion => FetchAction::Retryable {
-            message: String::from("unknown companion; re-sync presence and retry"),
-        },
-        UndeliveredResponse::StaleBaseView { .. } => FetchAction::Retryable {
-            message: String::from("stale base view; re-query from the head"),
-        },
-        UndeliveredResponse::Unavailable => FetchAction::Retryable {
-            message: String::from("undelivered items are unavailable; retry later"),
-        },
+        UndeliveredResponse::Summary(summary) => Ok(summary),
+        UndeliveredResponse::FrameTooLarge => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("frame too large; retry with a smaller limit"),
+        ))),
+        UndeliveredResponse::NoCurrentPresence => {
+            Err(CliError::Client(ClientError::ServerOutcome(String::from(
+                "no current presence; summon first, then retry",
+            ))))
+        }
+        UndeliveredResponse::UnknownCompanion => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("unknown companion; re-sync presence and retry"),
+        ))),
+        UndeliveredResponse::StaleBaseView { .. } => Err(CliError::Client(
+            ClientError::ServerOutcome(String::from("stale base view; re-query from the head")),
+        )),
+        UndeliveredResponse::Unavailable => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("undelivered items are unavailable; retry later"),
+        ))),
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReportAction {
-    Show(TaskReportPage),
-    Retryable { message: String },
-}
-
-pub fn describe_report(response: TaskReportResponse) -> ReportAction {
+/// Report-fetch routing for a [`TaskReportResponse`]: the page on success, a
+/// retryable `ServerOutcome` otherwise.
+pub fn describe_report(response: TaskReportResponse) -> Result<TaskReportPage, CliError> {
     match response {
-        TaskReportResponse::Page(page) => ReportAction::Show(page),
-        TaskReportResponse::UnknownRef => ReportAction::Retryable {
-            message: String::from("unknown task reference; re-list and retry"),
-        },
-        TaskReportResponse::StaleBaseView { .. } => ReportAction::Retryable {
-            message: String::from("stale cursor; re-query from the head"),
-        },
-        TaskReportResponse::Unavailable => ReportAction::Retryable {
-            message: String::from("host unavailable; retry later"),
-        },
+        TaskReportResponse::Page(page) => Ok(page),
+        TaskReportResponse::UnknownRef => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("unknown task reference; re-list and retry"),
+        ))),
+        TaskReportResponse::StaleBaseView { .. } => Err(CliError::Client(
+            ClientError::ServerOutcome(String::from("stale cursor; re-query from the head")),
+        )),
+        TaskReportResponse::Unavailable => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("host unavailable; retry later"),
+        ))),
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ManagementAction {
-    Applied { detail: String },
-    Retryable { message: String },
-    Terminal { message: String },
-}
 
-pub fn describe_management(outcome: &ManagementOutcome) -> ManagementAction {
+/// Management-routing for a [`ManagementOutcome`]: the applied detail on
+/// success; retryable answers are `ServerOutcome` (exit 2) and terminal
+/// declines are `ServerRejected` (exit 1). Detail/message lines carry
+/// operational facts only, never bodies or secrets.
+pub fn describe_management(outcome: &ManagementOutcome) -> Result<String, CliError> {
     match outcome {
-        ManagementOutcome::AppliedAsOneTime => ManagementAction::Applied {
-            detail: String::from("applied as a one-time approval"),
-        },
-        ManagementOutcome::StoredAsRuleView { revision } => ManagementAction::Applied {
-            detail: format!("stored as a rule at revision {}", revision.0),
-        },
-        ManagementOutcome::NeedsClarification => ManagementAction::Retryable {
-            message: String::from("nothing was applied; the request needs clarification"),
-        },
-        ManagementOutcome::DeniedByBoundary => ManagementAction::Terminal {
-            message: String::from("denied by the control boundary"),
-        },
-        ManagementOutcome::StaleBaseView { current } => ManagementAction::Retryable {
-            message: format!("stale base view; current mark is {}", current.0),
-        },
-        ManagementOutcome::HeldByOperation => ManagementAction::Retryable {
-            message: String::from("held by a concurrent operation; retry later"),
-        },
+        ManagementOutcome::AppliedAsOneTime => Ok(String::from("applied as a one-time approval")),
+        ManagementOutcome::StoredAsRuleView { revision } => {
+            Ok(format!("stored as a rule at revision {}", revision.0))
+        }
+        ManagementOutcome::NeedsClarification => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("nothing was applied; the request needs clarification"),
+        ))),
+        ManagementOutcome::DeniedByBoundary => Err(CliError::Client(ClientError::ServerRejected(
+            String::from("denied by the control boundary"),
+        ))),
+        ManagementOutcome::StaleBaseView { current } => Err(CliError::Client(
+            ClientError::ServerOutcome(format!("stale base view; current mark is {}", current.0)),
+        )),
+        ManagementOutcome::HeldByOperation => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("held by a concurrent operation; retry later"),
+        ))),
     }
 }
 
@@ -849,6 +847,7 @@ mod tests {
     use ene_api::v1::refs::{RevalidationReasonWire, RoundWireId};
     use ene_api::v1::round::{HistoryItem, HistoryRole, RoundIntakeOutcomeWire};
 
+    use super::CliError;
     use super::{
         CAPABILITY_DIALOGUE, CAPABILITY_LEARNING, HOST_MEMORY_SECTION, HOST_SETUP_SECTIONS,
         SETUP_PROVIDER_OPENAI, assignment_intent, consent_target_for, credential_id_for,
@@ -856,7 +855,14 @@ mod tests {
         history_request, memory_view_request, new_local_id, render_history, render_view,
         round_history_request, setup_view_request, submit_input,
     };
-    use super::{IntakeAction, ManagementAction};
+    use ene_client::ClientError;
+
+    fn expect_outcome(error: CliError) -> String {
+        match error {
+            CliError::Client(ClientError::ServerOutcome(message)) => message,
+            other => panic!("expected a retryable server outcome, got {other:?}"),
+        }
+    }
 
     fn fixture_view() -> ManagementView {
         ManagementView {
@@ -939,104 +945,85 @@ mod tests {
 
     #[test]
     fn describe_intake_accepted_carries_the_round() {
-        let action = describe_intake(&RoundIntakeOutcomeWire::AcceptedForRound {
+        let round = describe_intake(&RoundIntakeOutcomeWire::AcceptedForRound {
             round: RoundWireId(String::from("round-3")),
-        });
+        })
+        .expect("acceptance must succeed");
         assert!(
-            action
-                == IntakeAction::Accepted {
-                    round: String::from("round-3"),
-                },
-            "acceptance must carry the round, got {action:?}"
+            round == "round-3",
+            "acceptance must carry the round, got {round:?}"
         );
     }
 
     #[test]
     fn describe_intake_decline_names_refs_not_bodies() {
-        let stale = describe_intake(&RoundIntakeOutcomeWire::StaleRound {
-            current_round: Some(RoundWireId(String::from("round-4"))),
-            current_generation: 9,
-        });
-        let IntakeAction::Declined { message } = stale else {
-            panic!("stale must decline, got {stale:?}")
-        };
-        assert!(
-            message.contains("round-4") && message.contains('9'),
-            "stale must name the current round and generation: {message:?}"
+        let stale = expect_outcome(
+            describe_intake(&RoundIntakeOutcomeWire::StaleRound {
+                current_round: Some(RoundWireId(String::from("round-4"))),
+                current_generation: 9,
+            })
+            .expect_err("stale must decline"),
         );
-        let empty = describe_intake(&RoundIntakeOutcomeWire::StaleRound {
-            current_round: None,
-            current_generation: 9,
-        });
         assert!(
-            matches!(empty, IntakeAction::Declined { .. }),
+            stale.contains("round-4") && stale.contains('9'),
+            "stale must name the current round and generation: {stale:?}"
+        );
+        assert!(
+            describe_intake(&RoundIntakeOutcomeWire::StaleRound {
+                current_round: None,
+                current_generation: 9,
+            })
+            .is_err(),
             "stale without a current round is still a decline"
         );
-        let held = describe_intake(&RoundIntakeOutcomeWire::HeldForTransition);
         assert!(
-            matches!(held, IntakeAction::Declined { .. }),
-            "held must decline, got {held:?}"
+            describe_intake(&RoundIntakeOutcomeWire::HeldForTransition).is_err(),
+            "held must decline"
         );
-        let revalidation = describe_intake(&RoundIntakeOutcomeWire::NeedsRevalidation {
-            reason: RevalidationReasonWire(String::from("reason-1")),
-        });
-        let IntakeAction::Declined { message } = revalidation else {
-            panic!("revalidation must decline, got {revalidation:?}")
-        };
+        let revalidation = expect_outcome(
+            describe_intake(&RoundIntakeOutcomeWire::NeedsRevalidation {
+                reason: RevalidationReasonWire(String::from("reason-1")),
+            })
+            .expect_err("revalidation must decline"),
+        );
         assert!(
-            message.contains("reason-1"),
-            "revalidation must name the reason code: {message:?}"
+            revalidation.contains("reason-1"),
+            "revalidation must name the reason code: {revalidation:?}"
         );
     }
 
     #[test]
     fn describe_management_splits_applied_retryable_terminal() {
         assert!(
-            matches!(
-                describe_management(&ManagementOutcome::AppliedAsOneTime),
-                ManagementAction::Applied { .. }
-            ),
+            describe_management(&ManagementOutcome::AppliedAsOneTime).is_ok(),
             "one-time approval is applied"
         );
-        let stored = describe_management(&ManagementOutcome::StoredAsRuleView {
+        let detail = describe_management(&ManagementOutcome::StoredAsRuleView {
             revision: ViewMarkWire(String::from("rev-2")),
-        });
-        let ManagementAction::Applied { detail } = stored else {
-            panic!("stored rule must be applied, got {stored:?}")
-        };
+        })
+        .expect("stored rule must be applied");
         assert!(
             detail.contains("rev-2"),
             "stored rule must name the revision: {detail:?}"
         );
+        for outcome in [
+            ManagementOutcome::StaleBaseView {
+                current: ViewMarkWire(String::from("rev-3")),
+            },
+            ManagementOutcome::HeldByOperation,
+            ManagementOutcome::NeedsClarification,
+        ] {
+            let error = describe_management(&outcome).expect_err("retryable");
+            assert!(
+                error.exit_code() == std::process::ExitCode::from(2),
+                "retryable outcomes must exit 2, got {error:?}"
+            );
+        }
+        let denied = describe_management(&ManagementOutcome::DeniedByBoundary)
+            .expect_err("denial is terminal");
         assert!(
-            matches!(
-                describe_management(&ManagementOutcome::StaleBaseView {
-                    current: ViewMarkWire(String::from("rev-3")),
-                }),
-                ManagementAction::Retryable { .. }
-            ),
-            "stale base is retryable"
-        );
-        assert!(
-            matches!(
-                describe_management(&ManagementOutcome::HeldByOperation),
-                ManagementAction::Retryable { .. }
-            ),
-            "held is retryable"
-        );
-        assert!(
-            matches!(
-                describe_management(&ManagementOutcome::NeedsClarification),
-                ManagementAction::Retryable { .. }
-            ),
-            "clarification is an Ok-side outcome, not a refusal"
-        );
-        assert!(
-            matches!(
-                describe_management(&ManagementOutcome::DeniedByBoundary),
-                ManagementAction::Terminal { .. }
-            ),
-            "denial is terminal"
+            denied.exit_code() == std::process::ExitCode::FAILURE,
+            "denial must exit 1, got {denied:?}"
         );
     }
 
@@ -1383,56 +1370,64 @@ mod tests {
             ResumeTaskOutcomeWire, TaskReportResponse, UndeliveredAckOutcome, UndeliveredResponse,
         };
 
-        assert!(matches!(
-            super::describe_ack(&UndeliveredAckOutcome::Presented { presented: 2 }),
-            super::AckAction::Confirmed
-        ));
-        assert!(matches!(
-            super::describe_ack(&UndeliveredAckOutcome::AlreadyPresented),
-            super::AckAction::Confirmed
-        ));
-        assert!(matches!(
-            super::describe_ack(&UndeliveredAckOutcome::StaleConnection),
-            super::AckAction::Retryable { .. }
-        ));
+        assert!(super::describe_ack(&UndeliveredAckOutcome::Presented { presented: 2 }).is_ok());
+        assert!(super::describe_ack(&UndeliveredAckOutcome::AlreadyPresented).is_ok());
+        let stale = super::describe_ack(&UndeliveredAckOutcome::StaleConnection)
+            .expect_err("stale connection is retryable");
+        assert!(
+            stale.exit_code() == std::process::ExitCode::from(2),
+            "retryable ack answers exit 2, got {stale:?}"
+        );
         let acked = super::undelivered_ack("r", PresentationStatus::Unknown);
         assert!(acked.status == PresentationStatus::Unknown);
 
-        assert!(matches!(
+        assert!(
             super::describe_resume(&ResumeTaskOutcomeWire::Resumed {
                 task: ene_api::v1::undelivered::TaskWireRef(String::from("t")),
                 revision: 3,
                 delegation: String::from("d"),
-            }),
-            super::ResumeAction::Resumed { .. }
-        ));
-        assert!(matches!(
-            super::describe_resume(&ResumeTaskOutcomeWire::StalePremise {
-                current_revision: 4
-            }),
-            super::ResumeAction::Refused { .. }
-        ));
-        assert!(matches!(
-            super::describe_resume(&ResumeTaskOutcomeWire::InFlight),
-            super::ResumeAction::Retryable { .. }
-        ));
-        assert!(matches!(
-            super::describe_resume(&ResumeTaskOutcomeWire::Unavailable),
-            super::ResumeAction::Retryable { .. }
-        ));
+            })
+            .is_ok()
+        );
+        let refused = super::describe_resume(&ResumeTaskOutcomeWire::StalePremise {
+            current_revision: 4,
+        })
+        .expect_err("stale premise is refused");
+        assert!(
+            refused.exit_code() == std::process::ExitCode::FAILURE,
+            "refusals exit 1, got {refused:?}"
+        );
+        assert!(
+            super::describe_resume(&ResumeTaskOutcomeWire::InFlight)
+                .expect_err("in flight is retryable")
+                .exit_code()
+                == std::process::ExitCode::from(2)
+        );
+        assert!(
+            super::describe_resume(&ResumeTaskOutcomeWire::Unavailable)
+                .expect_err("unavailable is retryable")
+                .exit_code()
+                == std::process::ExitCode::from(2)
+        );
 
-        assert!(matches!(
-            super::describe_fetch(UndeliveredResponse::FrameTooLarge),
-            super::FetchAction::Retryable { .. }
-        ));
-        assert!(matches!(
-            super::describe_fetch(UndeliveredResponse::NoCurrentPresence),
-            super::FetchAction::Retryable { .. }
-        ));
-        assert!(matches!(
-            super::describe_report(TaskReportResponse::UnknownRef),
-            super::ReportAction::Retryable { .. }
-        ));
+        assert!(
+            super::describe_fetch(UndeliveredResponse::FrameTooLarge)
+                .expect_err("frame too large is retryable")
+                .exit_code()
+                == std::process::ExitCode::from(2)
+        );
+        assert!(
+            super::describe_fetch(UndeliveredResponse::NoCurrentPresence)
+                .expect_err("no presence is retryable")
+                .exit_code()
+                == std::process::ExitCode::from(2)
+        );
+        assert!(
+            super::describe_report(TaskReportResponse::UnknownRef)
+                .expect_err("unknown ref is retryable")
+                .exit_code()
+                == std::process::ExitCode::from(2)
+        );
     }
 
     #[test]
@@ -1457,8 +1452,8 @@ mod tests {
         let parsed = parse_deletion_target(&intent.target).expect("the target must parse");
         assert_eq!(parsed.purpose(), DeletionPurposeWire::Security);
         assert_eq!(parsed.exact_text(), "leaked key");
-        assert!(super::deletion_purpose("privacy").is_some());
-        assert!(super::deletion_purpose("everything").is_none());
+        assert!(DeletionPurposeWire::from_name("privacy").is_some());
+        assert!(DeletionPurposeWire::from_name("everything").is_none());
     }
 
     #[test]
@@ -1503,9 +1498,7 @@ mod tests {
         UsageSummaryPage, UsageSummaryResponse, UsageSummaryRowView, UsageTokenUsageView,
     };
 
-    use super::{
-        UsageArgs, render_usage_page, usage_cap_intent, usage_cap_mark_for, usage_request,
-    };
+    use super::{render_usage_page, usage_cap_intent, usage_cap_mark_for};
 
     fn fixture_usage_page() -> UsageSummaryPage {
         UsageSummaryPage {
@@ -1588,30 +1581,6 @@ mod tests {
             ],
             evaluated_at: String::from("2026-09-17T00:00:00.000000000Z"),
         }
-    }
-
-    #[test]
-    fn usage_request_maps_filters_and_wraps_the_cursor() {
-        let args = UsageArgs {
-            from: Some(String::from("2026-09-01T00:00:00Z")),
-            to: None,
-            provider: Some(String::from("openai")),
-            model: None,
-            consumer: Some(String::from("companion_dialogue")),
-            purpose: None,
-            status: Some(String::from("reserved")),
-            cursor: Some(String::from("cursor-1")),
-            limit: Some(10),
-        };
-        let request = usage_request(&args);
-        assert_eq!(request.from.as_deref(), Some("2026-09-01T00:00:00Z"));
-        assert_eq!(request.to, None);
-        assert_eq!(request.provider.as_deref(), Some("openai"));
-        assert_eq!(request.limit, Some(10));
-        assert_eq!(
-            request.cursor,
-            Some(UsageCursorWire(String::from("cursor-1")))
-        );
     }
 
     #[test]

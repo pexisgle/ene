@@ -25,7 +25,6 @@ pub struct TargetedDeletionRequest {
     request: DeletionRequestId,
     target: TargetedDeletionTarget,
     purpose: DeletionPurpose,
-    requested_at: WallClockWithTz,
 }
 
 impl TargetedDeletionRequest {
@@ -34,13 +33,11 @@ impl TargetedDeletionRequest {
         request: DeletionRequestId,
         target: TargetedDeletionTarget,
         purpose: DeletionPurpose,
-        requested_at: WallClockWithTz,
     ) -> Self {
         Self {
             request,
             target,
             purpose,
-            requested_at,
         }
     }
 
@@ -64,6 +61,16 @@ impl TargetedDeletionRequest {
         material.expose_for_erasure()
     }
 
+    /// The admission command this staged request becomes once the Owner
+    /// confirmed it on the Host-local trusted surface.
+    ///
+    /// Returns [`None`] when `confirmation` names a different request: a
+    /// confirmation never transfers to another target, purpose, or request
+    /// identity. `admitted_at` is the commit-time premise the operation and
+    /// its current erasure condition open with.
+    /// `required_participants` is the current product surface's owner set the
+    /// Host composition decided on (lifecycle §8); the admission transaction
+    /// snapshots it durably with the operation.
     #[must_use]
     pub fn into_command(
         self,
@@ -203,7 +210,6 @@ mod tests {
             DeletionRequestId::from_raw(RawId::new()),
             target("private target"),
             DeletionPurpose::Privacy,
-            WallClockWithTz::now(),
         )
     }
 

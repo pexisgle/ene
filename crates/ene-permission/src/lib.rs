@@ -15,7 +15,7 @@ pub use action::{
 pub use erasure::{
     PermissionErasureOutcome, PermissionErasureParticipant, PermissionErasureRepository,
 };
-pub use intent::{AssignConsentIntent, BaseViewExpectation, assign_consent, base_view_expectation};
+pub use intent::{AssignConsentIntent, assign_consent};
 pub use usage_cap::{
     SetUsageCapCommand, SetUsageCapOutcome, UsageCap, UsageCapConsumption, UsageCapId, UsageCapRef,
     UsageCapRepository, UsageCapRevision, UsageCapScope, UsageCapStatus, UsageCapStatusQuery,
@@ -23,8 +23,15 @@ pub use usage_cap::{
     usage_cap_mark,
 };
 
+/// Single-use authorization token for one inference use.
+///
+/// Wraps a [`RawId`] rather than a bare UUID so the opaque-identity
+/// discipline of `ene-primitive` applies: no string rendering, no prefix
+/// matching, equality only within this newtype. A value is valid for one
+/// [`EvaluationTracker::consume`] call presenting the candidate it was minted
+/// for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PermissionEvaluationId(pub RawId);
+pub struct PermissionEvaluationId(RawId);
 
 /// Monotonic order of one consent identity's revisions.
 ///
@@ -144,7 +151,7 @@ pub struct InferenceUseCandidate {
 
 impl InferenceUseCandidate {
     #[must_use]
-    pub fn fingerprint(&self) -> EvalFingerprint {
+    fn fingerprint(&self) -> EvalFingerprint {
         EvalFingerprint(
             self.consumer,
             self.capability,
@@ -156,13 +163,7 @@ impl InferenceUseCandidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct EvalFingerprint(
-    pub ConsumerKind,
-    pub CapabilityKind,
-    pub String,
-    pub String,
-    pub PurposeKind,
-);
+struct EvalFingerprint(ConsumerKind, CapabilityKind, String, String, PurposeKind);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckLiveAuthorizationQuery {
@@ -373,9 +374,19 @@ impl EvaluationTracker {
         id
     }
 
-    pub fn consume(&mut self, id: &PermissionEvaluationId, expected: &EvalFingerprint) -> bool {
+    /// Consumes an id iff it is known, unused, and bound to `candidate`.
+    ///
+    /// Returns `false` for unknown ids, replays, and fingerprint mismatches.
+    /// Only a matching presentation burns the id — removing it, so a second
+    /// consume finds nothing — while a mismatch leaves the entry so the caller
+    /// can retry with the correct candidate.
+    pub fn consume(
+        &mut self,
+        id: &PermissionEvaluationId,
+        candidate: &InferenceUseCandidate,
+    ) -> bool {
         match self.issued.get(&id.0) {
-            Some(bound) if bound == expected => {
+            Some(bound) if bound == &candidate.fingerprint() => {
                 self.issued.remove(&id.0);
                 true
             }
@@ -455,10 +466,9 @@ pub fn check_live_authorization(
 #[cfg(test)]
 mod tests {
     use super::{
-        BaseViewExpectation, CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord,
-        ConsentRevision, ConsumerKind, DenyCode, EvaluationTracker, InferenceUseCandidate,
-        LiveAuthorizationDecision, PurposeKind, base_view_expectation, check_live_authorization,
-        consent_mark, consent_view_mark, parse_consent_mark,
+        CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord, ConsentRevision, ConsumerKind,
+        DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision, PurposeKind,
+        check_live_authorization, consent_mark, consent_view_mark, parse_consent_mark,
     };
 
     fn candidate() -> InferenceUseCandidate {
@@ -506,9 +516,8 @@ mod tests {
         let LiveAuthorizationDecision::AllowForThisUse(id) = decision else {
             return;
         };
-        let fingerprint = candidate().fingerprint();
-        assert!(tracker.consume(&id, &fingerprint));
-        assert!(!tracker.consume(&id, &fingerprint));
+        assert!(tracker.consume(&id, &candidate()));
+        assert!(!tracker.consume(&id, &candidate()));
     }
 
     #[test]
@@ -526,7 +535,7 @@ mod tests {
         };
         let mut fresh = EvaluationTracker::new();
         let other = fresh.mint(&candidate());
-        assert!(!tracker.consume(&other, &candidate().fingerprint()));
+        assert!(!tracker.consume(&other, &candidate()));
     }
 
     #[test]
@@ -544,8 +553,8 @@ mod tests {
         };
         let mut altered = candidate();
         altered.model = "other-model".to_owned();
-        assert!(!tracker.consume(&id, &altered.fingerprint()));
-        assert!(tracker.consume(&id, &candidate().fingerprint()));
+        assert!(!tracker.consume(&id, &altered));
+        assert!(tracker.consume(&id, &candidate()));
     }
 
     #[test]
@@ -632,11 +641,11 @@ mod tests {
             panic!("learning formation must be allowed, got {decision:?}");
         };
         assert!(
-            tracker.consume(&id, &learning_candidate().fingerprint()),
+            tracker.consume(&id, &learning_candidate()),
             "the learning evaluation is bound to the learning fingerprint"
         );
         assert!(
-            !tracker.consume(&id, &candidate().fingerprint()),
+            !tracker.consume(&id, &candidate()),
             "a dialogue fingerprint must not consume a learning evaluation"
         );
     }
@@ -719,11 +728,11 @@ mod tests {
             panic!("task agent turn must be allowed under the inherited consent, got {decision:?}");
         };
         assert!(
-            tracker.consume(&id, &task_agent_candidate().fingerprint()),
+            tracker.consume(&id, &task_agent_candidate()),
             "the task agent evaluation is bound to the task agent fingerprint"
         );
         assert!(
-            !tracker.consume(&id, &candidate().fingerprint()),
+            !tracker.consume(&id, &candidate()),
             "a dialogue fingerprint must not consume a task agent evaluation"
         );
     }
@@ -805,82 +814,6 @@ mod tests {
             assert_eq!(PurposeKind::from_name(purpose.as_str()), Some(purpose));
         }
         assert_eq!(PurposeKind::from_name("unknown"), None);
-    }
-
-    #[test]
-    fn base_view_expectation_covers_capability_marks_and_stale_faces() {
-        let dialogue = record();
-        let learning = record_for(CapabilityKind::Learning);
-        assert_eq!(
-            base_view_expectation(
-                CapabilityKind::Dialogue,
-                &consent_view_mark(None, None),
-                None
-            ),
-            BaseViewExpectation::ExpectEmpty
-        );
-        assert_eq!(
-            base_view_expectation(
-                CapabilityKind::Dialogue,
-                &consent_view_mark(Some(3), Some(1)),
-                Some(&dialogue)
-            ),
-            BaseViewExpectation::ExpectRevision(
-                String::from("consent-1"),
-                ConsentRevision::from_u64(3)
-            )
-        );
-        assert_eq!(
-            base_view_expectation(
-                CapabilityKind::Learning,
-                &consent_view_mark(Some(3), Some(1)),
-                Some(&learning)
-            ),
-            BaseViewExpectation::ExpectRevision(
-                String::from("consent-1"),
-                ConsentRevision::from_u64(1)
-            )
-        );
-        assert_eq!(
-            base_view_expectation(CapabilityKind::Dialogue, "consent-dialogue-none", None),
-            BaseViewExpectation::ExpectEmpty
-        );
-        assert_eq!(
-            base_view_expectation(
-                CapabilityKind::Dialogue,
-                "consent-dialogue-rev-3",
-                Some(&dialogue)
-            ),
-            BaseViewExpectation::ExpectRevision(
-                String::from("consent-1"),
-                ConsentRevision::from_u64(3)
-            )
-        );
-        assert_eq!(
-            base_view_expectation(
-                CapabilityKind::Learning,
-                "consent-dialogue-rev-3",
-                Some(&learning)
-            ),
-            BaseViewExpectation::FaceStale,
-            "a dialogue-qualified mark must never name learning"
-        );
-        assert_eq!(
-            base_view_expectation(CapabilityKind::Dialogue, "consent-dialogue-rev-2", None),
-            BaseViewExpectation::FaceStale
-        );
-        assert_eq!(
-            base_view_expectation(
-                CapabilityKind::Dialogue,
-                "consent-dialogue-rev-x",
-                Some(&dialogue)
-            ),
-            BaseViewExpectation::FaceStale
-        );
-        assert_eq!(
-            base_view_expectation(CapabilityKind::Dialogue, "garbage", Some(&dialogue)),
-            BaseViewExpectation::FaceStale
-        );
     }
 
     #[test]

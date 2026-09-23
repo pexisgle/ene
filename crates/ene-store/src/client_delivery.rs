@@ -96,9 +96,7 @@ impl Store {
         after: Option<RawId>,
         limit: u32,
     ) -> Result<Vec<RawId>, PreservationTechnicalError> {
-        if !(1..=100).contains(&limit) {
-            return Err(PreservationTechnicalError::InvalidLimit);
-        }
+        crate::preservation::check_page_limit(limit)?;
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let guard = lock_shared(&conn);

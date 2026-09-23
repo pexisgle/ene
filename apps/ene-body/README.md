@@ -54,20 +54,20 @@ offset 4  MessagePack body, at most 65536 bytes
 - `Placement { x, y, width, height, scale }` (`scale` HiDPI, finite and `> 0`; `width`/`height` `> 0`)
 - `PoseHint`: `Idle` / `Listening` / `Speaking` / `Working` / `Attention` (no joint angles, no blendshapes)
 - `AssetRef::Path { path }` or `AssetRef::BytesTemp { path }`
-- `MotionSet { clips: [{ pose, path }] }`: pose → `.vrma` assignment. At most 16
-  clips, paths at most 4096 bytes; unknown or duplicated poses are rejected. A
-  set replaces the previous assignment and never merges into it
+- `MotionSet { clips: [{ pose, path }] }`: pose → `.vrma` assignment. One clip
+  per pose hint, paths at most 4096 bytes; unknown or duplicated poses are
+  rejected. A set replaces the previous assignment and never merges into it
 - `Shutdown`
 
 `BodyToParent` (body → desktop):
 
-- `Ready { overlay, gpu, expressions, spring_bone }`
+- `Ready { overlay, gpu }`
 - `GpuFail { reason }` after Ready when wgpu adapter/device/surface operation failed
 - `OverlayUnavailable { requested, reason }` when native overlay creation fails; Headless is not success
 - `AssetReady { primitives, expressions, spring_chains }` only after strict VRM/runtime validation
 - `AssetFail { reason, detail }` for a missing, invalid, or incomplete VRM (process stays up)
 - `MotionFail { reason, detail }` for a rejected motion set (process stays up, previous assignment stays live)
-- `HealthTick { seq, visible, pose, gpu_ok, overlay, expressions, spring_bone, motion }` at 4 Hz (not a present-FPS proof)
+- `HealthTick { motion }` at 4 Hz (not a present-FPS proof)
 - `LocalUi`: `Drag { x, y }` / `Resize { width, height }` / `Hide` (overlay-local; not a Host write)
 - `Presentation`: a correlated Wayland surface submission followed by `Presented`, `Discarded`, or `Missing`; frame callbacks are never FPS evidence
 - `CleanExit` then process exit 0. A kill/abort is a disconnect without `CleanExit`.

@@ -23,8 +23,7 @@ const LEN_PREFIX_LEN: usize = 4;
 
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
-pub const MAX_MOTION_CLIPS: usize = 16;
-
+/// Maximum accepted byte length of one clip path.
 pub const MAX_MOTION_PATH_BYTES: usize = 4096;
 
 pub const HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -140,23 +139,13 @@ impl MotionSetInfo {
     ///
     /// # Errors
     ///
-    /// [`MotionFailReason::EmptySet`], [`MotionFailReason::TooManyClips`],
-    /// [`MotionFailReason::DuplicatePose`], [`MotionFailReason::EmptyPath`],
-    /// or [`MotionFailReason::PathTooLong`].
+    /// [`MotionFailReason::EmptySet`], [`MotionFailReason::DuplicatePose`],
+    /// [`MotionFailReason::EmptyPath`], or [`MotionFailReason::PathTooLong`].
     pub fn validate(&self) -> Result<(), MotionFailInfo> {
         if self.clips.is_empty() {
             return Err(MotionFailInfo::new(
                 MotionFailReason::EmptySet,
                 "motion set carries no clips",
-            ));
-        }
-        if self.clips.len() > MAX_MOTION_CLIPS {
-            return Err(MotionFailInfo::new(
-                MotionFailReason::TooManyClips,
-                std::format!(
-                    "motion set carries {} clips; the cap is {MAX_MOTION_CLIPS}",
-                    self.clips.len()
-                ),
             ));
         }
         let mut seen: Vec<PoseHint> = Vec::with_capacity(self.clips.len());
@@ -212,8 +201,6 @@ pub enum FeatureSupport {
 pub struct ReadyInfo {
     pub overlay: OverlayKind,
     pub gpu: GpuInitStatus,
-    pub expressions: FeatureSupport,
-    pub spring_bone: FeatureSupport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -261,7 +248,6 @@ pub struct AssetFailInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MotionFailReason {
     EmptySet,
-    TooManyClips,
     DuplicatePose,
     EmptyPath,
     PathTooLong,
@@ -298,16 +284,8 @@ pub struct AssetReadyInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthTick {
-    pub seq: u64,
-    pub visible: bool,
-    pub pose: PoseHint,
-    pub gpu_ok: bool,
-    pub overlay: OverlayKind,
-    pub expressions: FeatureSupport,
-    pub spring_bone: FeatureSupport,
     /// Whether at least one validated clip is loaded. Layout capability and
-    /// per-pose coverage are not claimed here; use `motion_poses` for which
-    /// hints have a clip.
+    /// per-pose coverage are not claimed here.
     pub motion: FeatureSupport,
 }
 
@@ -341,6 +319,11 @@ pub enum PresentationOutcome {
     },
 }
 
+/// Encode a parent→body command for projection IPC.
+///
+/// # Errors
+///
+/// Returns [`IpcError::EncodeFailed`] or [`IpcError::FrameTooLarge`].
 pub fn encode_parent(message: &ParentToBody) -> Result<Vec<u8>, IpcError> {
     encode_named(message)
 }
@@ -428,8 +411,8 @@ fn decode_reason(error: &rmp_serde::decode::Error) -> String {
 mod tests {
     use super::{
         AssetFailInfo, AssetFailReason, AssetRef, BodyToParent, FeatureSupport, GpuFailInfo,
-        GpuFailReason, GpuInitStatus, HealthTick, IpcError, LocalUiFact, MAX_FRAME_BYTES,
-        MAX_MOTION_CLIPS, MAX_MOTION_PATH_BYTES, MotionFailInfo, MotionFailReason, MotionSetInfo,
+        GpuFailReason, GpuInitStatus, HEALTH_INTERVAL, HealthTick, IpcError, LocalUiFact,
+        MAX_FRAME_BYTES, MAX_MOTION_PATH_BYTES, MotionFailInfo, MotionFailReason, MotionSetInfo,
         OverlayKind, OverlayUnavailableInfo, ParentToBody, PlacementBox, PoseClip, PoseHint,
         PresentationFeedback, PresentationOutcome, ReadyInfo, decode_body, decode_parent,
         encode_body, encode_parent,
@@ -487,8 +470,6 @@ mod tests {
         roundtrip_body(BodyToParent::Ready(ReadyInfo {
             overlay: OverlayKind::Headless,
             gpu: GpuInitStatus::Failed,
-            expressions: FeatureSupport::Unsupported,
-            spring_bone: FeatureSupport::Unsupported,
         }));
         roundtrip_body(BodyToParent::GpuFail(GpuFailInfo {
             reason: GpuFailReason::NoAdapter,
@@ -506,13 +487,6 @@ mod tests {
             detail: String::from("fixture"),
         }));
         roundtrip_body(BodyToParent::HealthTick(HealthTick {
-            seq: 3,
-            visible: true,
-            pose: PoseHint::Working,
-            gpu_ok: false,
-            overlay: OverlayKind::Headless,
-            expressions: FeatureSupport::Unsupported,
-            spring_bone: FeatureSupport::Unsupported,
             motion: FeatureSupport::Available,
         }));
         roundtrip_body(BodyToParent::LocalUi(LocalUiFact::Hide));
@@ -614,6 +588,11 @@ mod tests {
     }
 
     #[test]
+    fn health_interval_is_a_few_hertz() {
+        assert_eq!(HEALTH_INTERVAL.as_millis(), 250);
+    }
+
+    #[test]
     fn motion_set_shape_is_checked_before_any_file_is_opened() {
         assert!(MotionSetInfo { clips: Vec::new() }.validate().is_err());
         assert_eq!(
@@ -622,18 +601,6 @@ mod tests {
                 .expect_err("empty set")
                 .reason,
             MotionFailReason::EmptySet
-        );
-        let too_many = MotionSetInfo {
-            clips: (0..=MAX_MOTION_CLIPS)
-                .map(|index| PoseClip {
-                    pose: PoseHint::Idle,
-                    path: std::format!("/tmp/{index}.vrma"),
-                })
-                .collect(),
-        };
-        assert_eq!(
-            too_many.validate().expect_err("cap").reason,
-            MotionFailReason::TooManyClips
         );
         let duplicated = MotionSetInfo {
             clips: vec![

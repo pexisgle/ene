@@ -1,6 +1,38 @@
 pub const CONFIRMATION_MODE_ENV: &str = "ENE_CONFIRMATION_CHANNEL";
 pub const CONFIRMATION_MODE_STDIO: &str = "stdio";
-pub const MAX_CONFIRMATION_FRAME_BYTES: u32 = 16 * 1024;
+
+/// Upper bound on one control frame, shared by the confirmation channel and
+/// the requester listener. The secret-bearing credential frame is the largest
+/// legal message; anything bigger is not this protocol.
+pub const MAX_CONTROL_FRAME_BYTES: u32 = 16 * 1024;
+
+/// Serializes one frame body and checks it against
+/// [`MAX_CONTROL_FRAME_BYTES`].
+///
+/// # Errors
+///
+/// Fails when the value cannot serialize or exceeds the bound.
+pub fn encode_body<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
+    let body = serde_json::to_vec(value)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if body.len() > MAX_CONTROL_FRAME_BYTES as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "control frame exceeds the bound",
+        ));
+    }
+    Ok(body)
+}
+
+/// Decodes one frame body, mapping a decode failure to `InvalidData`.
+///
+/// # Errors
+///
+/// Returns `InvalidData` when the body does not decode.
+pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> std::io::Result<T> {
+    serde_json::from_slice(body)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChannelEvent {
@@ -11,17 +43,14 @@ pub enum ChannelEvent {
 
 use crate::{FromConfirmation, ToConfirmation};
 
+/// Encodes one frame as a `u32` big-endian length followed by JSON.
+///
+/// # Errors
+///
+/// Fails when the value cannot serialize or exceeds
+/// [`MAX_CONTROL_FRAME_BYTES`].
 pub fn encode_frame<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
-    let body = zeroize::Zeroizing::new(
-        serde_json::to_vec(value)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
-    );
-    if body.len() > MAX_CONFIRMATION_FRAME_BYTES as usize {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "confirmation frame exceeds the bound",
-        ));
-    }
+    let body = zeroize::Zeroizing::new(encode_body(value)?);
     let mut out = Vec::with_capacity(body.len() + 4);
     out.extend_from_slice(&(body.len() as u32).to_be_bytes());
     out.extend_from_slice(&body);
@@ -31,7 +60,7 @@ pub fn encode_frame<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> 
 /// Reads one framed message.
 ///
 /// `Ok(None)` is terminal for the channel and means the peer closed or the
-/// length prefix was zero or over [`MAX_CONFIRMATION_FRAME_BYTES`].
+/// length prefix was zero or over [`MAX_CONTROL_FRAME_BYTES`].
 ///
 /// # Errors
 ///
@@ -50,14 +79,12 @@ where
         Err(error) => return Err(error),
     }
     let length = u32::from_be_bytes(prefix);
-    if length == 0 || length > MAX_CONFIRMATION_FRAME_BYTES {
+    if length == 0 || length > MAX_CONTROL_FRAME_BYTES {
         return Ok(None);
     }
     let mut body = zeroize::Zeroizing::new(vec![0_u8; length as usize]);
     reader.read_exact(&mut body)?;
-    serde_json::from_slice(&body)
-        .map(Some)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    decode_body(&body).map(Some)
 }
 
 pub fn write_frame<W, T>(writer: &mut W, value: &T) -> std::io::Result<()>
@@ -334,3 +361,43 @@ mod platform {
 }
 
 pub use platform::{ChildHandles, GuiChannel, HostChannel};
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_CONTROL_FRAME_BYTES, encode_frame, read_frame, write_frame};
+    use crate::ToConfirmation;
+
+    /// A frame that is too large is refused, never truncated.
+    #[test]
+    fn an_oversize_frame_is_refused() {
+        let huge = "x".repeat(MAX_CONTROL_FRAME_BYTES as usize + 1);
+        assert!(encode_frame(&huge).is_err());
+    }
+
+    /// Frames round-trip through the encoder, so both ends agree on shape.
+    #[test]
+    fn frames_round_trip() {
+        let mut buffer = Vec::new();
+        let frame = ToConfirmation::SessionComplete {
+            session_id: uuid::Uuid::nil(),
+            nonce: String::from("n"),
+        };
+        write_frame(&mut buffer, &frame).expect("encode");
+        let mut cursor = std::io::Cursor::new(buffer);
+        let decoded: Option<ToConfirmation> = read_frame(&mut cursor).expect("decode");
+        assert_eq!(decoded, Some(frame));
+    }
+
+    /// A frame whose declared length is not there ends the channel rather than
+    /// guessing at partial content. A truncated body is a transport failure,
+    /// not a message: the reader reports it and the caller closes the channel.
+    #[test]
+    fn a_truncated_frame_ends_the_channel() {
+        let mut cursor = std::io::Cursor::new(vec![0_u8, 0, 0, 8, b'x']);
+        let decoded: Result<Option<ToConfirmation>, _> = read_frame(&mut cursor);
+        assert!(
+            decoded.is_err(),
+            "a truncated body must surface as a failure, got {decoded:?}"
+        );
+    }
+}

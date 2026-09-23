@@ -27,7 +27,6 @@ use ene_api::v1::undelivered::{
     GetReportSource, GetTaskReport, ListTasks, PresentationReceiptWireRef, ReportSourceWireRef,
     ResumeTask, SelectTask, TaskWireRef, UndeliveredAck, UndeliveredRequest,
 };
-use ene_client::pairing_proof_hex;
 use ene_companion::{CompanionRepository as _, UndeliveredRepository as _};
 use ene_inference::fake::FakeProviderTransport;
 use ene_presence::{

@@ -29,6 +29,12 @@ use super::session::{
 #[cfg(unix)]
 use super::socket_path;
 
+/// Connected, handshaked Host session: the stream, the sender identity
+/// pairing and authentication fill in, and the observed session state.
+/// Unix dials `ene.sock`; Windows opens the data directory's named pipe
+/// (see `pipe_name`). Everything after the dial — pairing poll, capability,
+/// provision, capability, challenge authentication, and request/response
+/// correlation — is shared.
 #[cfg(any(unix, windows))]
 pub struct Client {
     stream: Stream,
@@ -277,8 +283,8 @@ impl Client {
     /// Answers one authentication challenge using the session secret, storing
     /// the accepted connection key into the sender (for all later frames).
     /// [`Client::connect`] calls this for the
-    /// post-negotiation challenge; call it only with a Host-minted
-    /// [`AuthChallenge`].
+    /// post-negotiation challenge, the only challenge the Host sends on a
+    /// connection.
     ///
     /// # Errors
     ///
@@ -287,7 +293,7 @@ impl Client {
     /// secret is available or the Host rejects the proof (both require a fresh
     /// pairing); and [`ClientError::ServerRejected`] when the Host answers
     /// with an unexpected payload kind.
-    pub async fn authenticate(&mut self, challenge: &AuthChallenge) -> Result<(), ClientError> {
+    async fn authenticate(&mut self, challenge: &AuthChallenge) -> Result<(), ClientError> {
         let Some(secret) = self.state.pairing_secret() else {
             return Err(ClientError::ServerOutcome(missing_secret_guidance()));
         };
@@ -332,19 +338,17 @@ impl Client {
     /// Sends one prepared request and returns the answer correlated by
     /// `reply_to`, absorbing pipelined presence facts and deferring other
     /// out-of-order frames on the way. The deferred queue only buffers
-    /// auto-presented summaries drained by
-    /// [`super::session::SessionState::take_undelivered`]; the answer itself
+    /// auto-presented summaries drained by the session's `take_undelivered`;
+    /// the answer itself
     /// is read from the socket, so this loops until the correlated answer
-    /// arrives (the streaming form of
-    /// [`super::session::decide_frame`]). A
+    /// arrives (the streaming form of `session::decide_frame`). A
     /// [`StaleRound`](ene_api::v1::round::RoundIntakeOutcomeWire::StaleRound)
     /// answer refreshes the session generation; mismatches are never returned
     /// as answers and never silently dropped.
     ///
     /// Message and request ids go fresh per attempt while the prepared command
-    /// identity travels unchanged, so calling this again through
-    /// [`Client::retry`] replays one logical command rather than minting a
-    /// second one.
+    /// identity travels unchanged, so calling this again on the same retained
+    /// handle replays one logical command rather than minting a second one.
     ///
     /// # Errors
     ///
@@ -356,14 +360,18 @@ impl Client {
         &mut self,
         prepared: &PreparedRequest,
     ) -> Result<WirePayload, ClientError> {
-        self.roundtrip(prepared.frame(self.sender, self.state.generation()))
+        self.pump(prepared.frame(self.sender, self.state.generation()))
             .await
     }
 
-    pub async fn retry(&mut self, prepared: &PreparedRequest) -> Result<WirePayload, ClientError> {
-        self.execute(prepared).await
-    }
-
+    /// One-shot convenience for [`Client::prepare`] plus
+    /// [`Client::execute`]. Prefer that pair when the caller must retain the
+    /// command identity to re-execute a lost reply; this form mints or takes
+    /// the identity but never exposes it.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Client::execute`].
     pub async fn request(&mut self, payload: WirePayload) -> Result<WirePayload, ClientError> {
         let prepared = self.prepare(payload);
         self.execute(&prepared).await
@@ -379,21 +387,12 @@ impl Client {
         use ene_api::v1::refs::RequestWireId;
 
         let mut frame = observed_frame(payload, self.sender, generation, round);
-        let own_message_id = frame.envelope.message_id;
         frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
-        self.pump(frame, own_message_id).await
+        self.pump(frame).await
     }
 
-    async fn roundtrip(&mut self, frame: WireFrame) -> Result<WirePayload, ClientError> {
+    async fn pump(&mut self, frame: WireFrame) -> Result<WirePayload, ClientError> {
         let own_message_id = frame.envelope.message_id;
-        self.pump(frame, own_message_id).await
-    }
-
-    async fn pump(
-        &mut self,
-        frame: WireFrame,
-        own_message_id: WireMessageId,
-    ) -> Result<WirePayload, ClientError> {
         write_frame(&mut self.stream, &frame).await?;
         loop {
             let incoming = read_frame(&mut self.stream).await?;
@@ -574,7 +573,7 @@ fn require_reply_to(
 /// Unsupported-platform placeholder: connection and I/O methods return
 /// [`ClientError::UnsupportedPlatform`] (transport needs a Unix-domain socket
 /// or a Windows named pipe); state-only accessors report the empty/default
-/// value. The supported-only helpers (`prepare`/`execute`/`retry`/
+/// value. The supported-only helpers (`prepare`/`execute`/
 /// `request_observed`/`take_undelivered`) are not available on this platform.
 #[cfg(not(any(unix, windows)))]
 pub struct Client {
@@ -623,10 +622,6 @@ impl Client {
     }
 
     pub async fn request(&mut self, _payload: WirePayload) -> Result<WirePayload, ClientError> {
-        Err(ClientError::UnsupportedPlatform("no supported transport"))
-    }
-
-    pub async fn authenticate(&mut self, _challenge: &AuthChallenge) -> Result<(), ClientError> {
         Err(ClientError::UnsupportedPlatform("no supported transport"))
     }
 

@@ -6,7 +6,7 @@ use hmac::{Hmac, KeyInit as _, Mac as _};
 use sha2::Sha256;
 
 #[must_use]
-pub fn pairing_proof_hex(secret: &str, nonce: &str) -> String {
+pub(crate) fn pairing_proof_hex(secret: &str, nonce: &str) -> String {
     encode_hex_lower(&compute_pairing_mac(secret, nonce))
 }
 

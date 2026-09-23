@@ -82,6 +82,12 @@ fn main() -> ExitCode {
 
 fn run() -> Result<bool, CliError> {
     let args = parse_args(std::env::args().skip(1))?;
+    let body_pid = args
+        .targets
+        .iter()
+        .find(|target| target.role == ProcessRole::Body)
+        .map(|target| target.pid)
+        .ok_or(CliError::Usage)?;
     let wayland_offset = args
         .wayland_feedback
         .as_deref()
@@ -92,7 +98,7 @@ fn run() -> Result<bool, CliError> {
         .as_deref()
         .map(trace_offset)
         .transpose()?;
-    let mut presentmon = start_presentmon(&args)?;
+    let mut presentmon = start_presentmon(&args, body_pid)?;
     let sampled = sample_idle(
         &args.targets,
         args.duration,
@@ -128,12 +134,6 @@ fn run() -> Result<bool, CliError> {
             supplied.events,
         )?);
     } else if let Some(path) = args.presentmon_csv {
-        let body_pid = args
-            .targets
-            .iter()
-            .find(|target| target.role == ProcessRole::Body)
-            .map(|target| target.pid)
-            .ok_or(CliError::Usage)?;
         let fps = import_presentmon_csv(
             &path,
             body_pid,
@@ -145,12 +145,6 @@ fn run() -> Result<bool, CliError> {
             record.fps = Some(fps);
         }
     } else if let Some(path) = args.wayland_feedback {
-        let body_pid = args
-            .targets
-            .iter()
-            .find(|target| target.role == ProcessRole::Body)
-            .map(|target| target.pid)
-            .ok_or(CliError::Usage)?;
         let feedback = read_wayland_feedback(
             &path,
             wayland_offset.unwrap_or(0),
@@ -192,7 +186,7 @@ fn run() -> Result<bool, CliError> {
     Ok(record.claims_pass())
 }
 
-fn start_presentmon(args: &Args) -> Result<Option<std::process::Child>, CliError> {
+fn start_presentmon(args: &Args, body_pid: u32) -> Result<Option<std::process::Child>, CliError> {
     let Some(executable) = &args.presentmon_exe else {
         return Ok(None);
     };
@@ -202,12 +196,6 @@ fn start_presentmon(args: &Args) -> Result<Option<std::process::Child>, CliError
             value: String::from("PresentMon capture is Windows-only"),
         });
     }
-    let body_pid = args
-        .targets
-        .iter()
-        .find(|target| target.role == ProcessRole::Body)
-        .map(|target| target.pid)
-        .ok_or(CliError::Usage)?;
     let output = args.presentmon_csv.as_ref().ok_or(CliError::Usage)?;
     let child = std::process::Command::new(executable)
         .arg("--process_id")

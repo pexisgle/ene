@@ -63,6 +63,14 @@ pub(crate) fn outgoing_frame(
     WireFrame { envelope, payload }
 }
 
+/// Builds one typed `StaleConnection` rejection answering `frame`.
+///
+/// A superseded connection keeps its socket (IPC §11.3): the frame's
+/// attribution was verifiable, so the honest typed outcome is sent instead of
+/// a drop. Whether the rejection reveals the connection id follows
+/// [`reject_frame`]'s rule: a rejection built from a pre-auth or
+/// superseded-phase snapshot hides it, while one built from an authenticated
+/// intake snapshot keeps it. It is never a retry signal.
 pub(crate) fn stale_reject(frame: &WireFrame, live: &LiveInput, detail: &str) -> WireFrame {
     reject_frame(frame, live, RejectKind::StaleConnection, detail.to_string())
 }

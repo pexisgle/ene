@@ -510,11 +510,13 @@ async fn second_host_cannot_create_the_same_pipe() {
         .await
         .expect("the first Host must bind and serve the pipe");
 
-    let name = conn_pipe::pipe_name(&dir);
+    // The pipe name is data-directory scoped (FNV-1a over the directory's
+    // string form), never a fixed name every Host would share.
+    let name = ene_plugin_ipc::pipe_name(&dir);
     assert!(name.contains("pipe"), "the name is a pipe name: {name}");
     assert_ne!(
         name,
-        conn_pipe::pipe_name(Path::new("another-data-directory")),
+        ene_plugin_ipc::pipe_name(Path::new("another-data-directory")),
         "distinct data directories use distinct pipes"
     );
 
@@ -661,7 +663,9 @@ async fn reconnect_reauths_without_restoring_presence_and_a_fresh_summon_serves(
 #[tokio::test]
 async fn os_peer_token_check_admits_a_same_user_pipe_client() {
     let temp = tempfile::TempDir::new().unwrap();
-    let pipe = conn_pipe::pipe_name(&temp.path().join("peer-check"));
+    // A name only this test derives: the data-directory hash of a path this
+    // test owns, so no Host and no other test shares the instance.
+    let pipe = ene_plugin_ipc::pipe_name(&temp.path().join("peer-check"));
     let server = conn_pipe::create_first_server(&pipe).expect("the pipe must create");
     let client = ClientOptions::new()
         .open(&pipe)

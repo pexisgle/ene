@@ -489,7 +489,7 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
         .await
         .unwrap();
     assert!(
-        matches!(refused, AttemptBeginOutcome::HeldByCap(_)),
+        matches!(refused, AttemptBeginOutcome::HeldByCap),
         "the held status matches the admission, got {refused:?}"
     );
 }

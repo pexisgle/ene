@@ -1,4 +1,11 @@
-use std::path::{Path, PathBuf};
+//! Machine-readable VRM runtime probe.
+//!
+//! Usage: `ene-body-asset-probe PATH.vrm [MOTION_DIR]`
+//!
+//! This validates runtime capability only. It does not claim that the avatar
+//! was displayed by a real compositor or accepted as the official `ene`.
+
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use ene_body::ipc::{AssetReadyInfo, AssetRef, FeatureSupport, MotionSetInfo, PoseHint};
@@ -64,9 +71,10 @@ fn run() -> Result<ProbeReport, String> {
         .ok_or_else(|| String::from("runtime did not retain asset statistics"))?;
     let mut pose_motions = Vec::new();
     if let Some(dir) = motion_dir.as_deref() {
-        let set = pose_motion_set(dir)?;
         session
-            .set_motions(&set)
+            .set_motions(&MotionSetInfo {
+                clips: pose_clips_in(dir),
+            })
             .map_err(|error| std::format!("{:?}: {}", error.reason, error.detail))?;
         pose_motions = session
             .motion_poses()
@@ -120,15 +128,4 @@ fn run() -> Result<ProbeReport, String> {
         stats,
         note: "runtime probe only; real compositor and official ene acceptance are separate",
     })
-}
-
-fn pose_motion_set(dir: &Path) -> Result<MotionSetInfo, String> {
-    let clips = pose_clips_in(dir);
-    if clips.is_empty() {
-        return Err(std::format!(
-            "no bundled clip files found in {}",
-            dir.display()
-        ));
-    }
-    Ok(MotionSetInfo { clips })
 }

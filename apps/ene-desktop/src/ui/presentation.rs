@@ -41,6 +41,8 @@ pub struct SurfaceSnapshot {
     pub ready: bool,
     pub credential: bool,
     pub consent: bool,
+    /// The Host's durable model assignment, not the wizard draft.
+    pub assigned_model: String,
     pub step: i32,
     pub status: String,
     pub body_available: bool,
@@ -75,16 +77,15 @@ pub(crate) fn tr(locale: Locale, ja: &str, en: &str) -> String {
 pub(crate) fn state(locale: Locale, value: &str) -> String {
     let (ja, en) = match value {
         "unknown" => ("不明・結果を確認できません", "Unknown · result unavailable"),
-        "running" | "active" | "in_progress" => ("進行中", "In progress"),
-        "completed" | "done" => ("完了", "Completed"),
+        "started" => ("開始済み", "Started"),
+        "active" | "in_progress" => ("進行中", "In progress"),
+        "completed" => ("完了", "Completed"),
         "held" => ("保留中・確認が必要", "On hold · needs attention"),
         "finalizing" => ("最終処理中", "Finalizing"),
         "reported" => ("確定", "Reported"),
         "reserved" => ("予約中・未確定", "Reserved · unsettled"),
-        "interrupted" => ("中断", "Interrupted"),
-        "cancelled" | "canceled" => ("中止", "Cancelled"),
+        "cancelled" => ("中止", "Cancelled"),
         "failed" => ("失敗", "Failed"),
-        "pending" => ("待機中", "Pending"),
         _ => ("状態を確認してください", "Review status"),
     };
     tr(locale, ja, en)

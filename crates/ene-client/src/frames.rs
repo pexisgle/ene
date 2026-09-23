@@ -43,9 +43,9 @@ pub fn auth_rejected_guidance(reason: &str) -> String {
 }
 
 /// A logical send prepared before I/O: the payload plus the command identity a
-/// transport retry must reuse. Prepare through [`super::Client::prepare`] and
-/// keep the handle; [`super::Client::execute`] and [`super::Client::retry`]
-/// send it without rebuilding the identity.
+/// transport attempt must reuse. Prepare through [`super::Client::prepare`] and
+/// keep the handle; [`super::Client::execute`]
+/// sends it without rebuilding the identity.
 ///
 /// The command identity is [`None`] for a pure request/response payload
 /// (`HistoryRequest`, `ManagementViewRequest`): those pair by `request_id` and

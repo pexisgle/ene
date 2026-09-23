@@ -102,6 +102,18 @@ pub fn detach_serve(data_dir: &Path, host_bin: &Path) -> Result<DetachedHost, La
     Ok(DetachedHost { pid })
 }
 
+/// Reuses a serving Host, otherwise starts one. The launcher and the GUI share
+/// this one bootstrap policy; `Command::spawn` never returns pid 0, so the
+/// detached pid is not re-checked here.
+pub fn ensure_serving(data_dir: &Path) -> Result<(), LaunchError> {
+    if host_is_serving(data_dir) {
+        return Ok(());
+    }
+    let binary = locate_host_binary().ok_or(LaunchError::MissingBinary)?;
+    let _detached = detach_serve(data_dir, &binary)?;
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::detach_serve;

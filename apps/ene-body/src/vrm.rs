@@ -50,7 +50,6 @@ struct MaterialTexture {
 }
 
 pub struct VrmSession {
-    current: Option<AssetRef>,
     runtime: Option<vrm_runtime::AvatarRuntime>,
     motions: [Option<Arc<VrmAnimation>>; POSE_ORDER.len()],
     playing: Option<PoseHint>,
@@ -65,7 +64,6 @@ impl std::fmt::Debug for VrmSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("VrmSession")
-            .field("current", &self.current)
             .field("runtime_loaded", &self.runtime.is_some())
             .field("pose", &self.pose)
             .field("motion_poses", &self.motion_poses())
@@ -85,7 +83,6 @@ impl VrmSession {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            current: None,
             runtime: None,
             motions: std::array::from_fn(|_| None),
             playing: None,
@@ -98,23 +95,8 @@ impl VrmSession {
     }
 
     #[must_use]
-    pub const fn expressions(&self) -> FeatureSupport {
-        FeatureSupport::Available
-    }
-
-    #[must_use]
-    pub const fn spring_bone(&self) -> FeatureSupport {
-        FeatureSupport::Available
-    }
-
-    #[must_use]
     pub fn pose(&self) -> PoseHint {
         self.pose
-    }
-
-    #[must_use]
-    pub fn current(&self) -> Option<&AssetRef> {
-        self.current.as_ref()
     }
 
     #[must_use]
@@ -122,11 +104,8 @@ impl VrmSession {
         self.stats
     }
 
-    #[must_use]
-    pub fn loaded(&self) -> bool {
-        self.runtime.is_some()
-    }
-
+    /// Changes the Body-local activity projection. Runtime controls are
+    /// applied on the next fixed-rate update.
     pub fn set_pose(&mut self, pose: PoseHint) {
         self.pose = pose;
     }
@@ -244,7 +223,6 @@ impl VrmSession {
                 format!("initial runtime evaluation failed: {error}"),
             )
         })?;
-        self.current = Some(asset);
         self.runtime = Some(runtime);
         self.playing = None;
         self.elapsed_secs = 0.0;
@@ -574,5 +552,359 @@ fn apply_procedural_pose(
             vrm_runtime::HumanBone::Spine,
             glam::Quat::from_rotation_z(staging.spine_roll * phase.sin()),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VrmSession;
+    use crate::ipc::{
+        AssetFailReason, AssetRef, FeatureSupport, MotionFailReason, MotionSetInfo, PoseClip,
+        PoseHint,
+    };
+    use crate::testing::{MotionFixture, write_generated_vrm, write_generated_vrma};
+    use std::io::Write as _;
+
+    /// A rotating clip: the head turns 120 degrees over half a second.
+    const HEAD_TURN: MotionFixture = MotionFixture {
+        bone: "head",
+        yaw_degrees: 120.0,
+        duration_secs: 0.5,
+    };
+
+    /// A clip on a different bone, so which clip plays changes the frame and
+    /// not only its timing.
+    const SPINE_TURN: MotionFixture = MotionFixture {
+        bone: "spine",
+        yaw_degrees: -120.0,
+        duration_secs: 0.5,
+    };
+
+    #[test]
+    fn runtime_capabilities_are_adopted() {
+        let session = VrmSession::new();
+        assert_eq!(session.motion(), FeatureSupport::Unsupported);
+        assert!(session.motion_poses().is_empty());
+        assert_eq!(session.pose(), PoseHint::Idle);
+    }
+
+    #[test]
+    fn pose_order_lists_every_hint_once() {
+        let order = super::POSE_ORDER;
+        let mut unique = order.to_vec();
+        unique.sort_by_key(|pose| super::pose_index(*pose));
+        unique.dedup();
+        assert_eq!(unique.len(), 5, "every hint must own exactly one slot");
+        let mut slots = order
+            .iter()
+            .map(|pose| super::pose_index(*pose))
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        assert_eq!(slots, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn generated_vrm_1_fixture_loads_and_evaluates_every_pose() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("generated-runtime-probe.vrm");
+        write_generated_vrm(&path).expect("fixture");
+        let mut session = VrmSession::new();
+        session
+            .set_asset(AssetRef::Path {
+                path: path.to_string_lossy().into_owned(),
+            })
+            .expect("strict VRM fixture load");
+        let stats = session.stats().expect("stats");
+        assert_eq!(stats.primitives, 1);
+        assert!(stats.expressions >= 5);
+        assert_eq!(stats.spring_chains, 1);
+        for pose in [
+            PoseHint::Idle,
+            PoseHint::Listening,
+            PoseHint::Speaking,
+            PoseHint::Working,
+            PoseHint::Attention,
+        ] {
+            session.set_pose(pose);
+            let meshes = session.update(1.0 / 30.0).expect("runtime update");
+            assert_eq!(meshes.len(), 1);
+            assert_eq!(meshes[0].mesh.positions.len(), 3);
+            assert_eq!(meshes[0].texcoords.len(), 3);
+            let texture = meshes[0].texture.as_ref().expect("base-color texture");
+            assert_eq!((texture.width, texture.height), (1, 1));
+            assert_eq!(&*texture.rgba, &[80, 160, 240, 255]);
+        }
+    }
+
+    #[test]
+    fn invalid_asset_does_not_replace_current_runtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = dir.path().join("good.vrm");
+        write_generated_vrm(&good).expect("good");
+        let bad = dir.path().join("bad.vrm");
+        std::fs::File::create(&bad)
+            .expect("create")
+            .write_all(b"not VRM")
+            .expect("write");
+        let mut session = VrmSession::new();
+        session
+            .set_asset(AssetRef::Path {
+                path: good.to_string_lossy().into_owned(),
+            })
+            .expect("good load");
+        let previous = session.stats();
+        let error = session
+            .set_asset(AssetRef::Path {
+                path: bad.to_string_lossy().into_owned(),
+            })
+            .expect_err("bad load");
+        assert_eq!(error.reason, AssetFailReason::InvalidVrm);
+        assert_eq!(session.stats(), previous);
+    }
+
+    #[test]
+    fn missing_asset_is_a_domain_failure() {
+        let mut session = VrmSession::new();
+        let error = session
+            .set_asset(AssetRef::Path {
+                path: "/no/such/ene-body-asset.vrm".into(),
+            })
+            .expect_err("missing");
+        assert_eq!(error.reason, AssetFailReason::Missing);
+        assert!(!error.detail.is_empty());
+    }
+
+    #[test]
+    fn assigned_clip_replaces_the_hand_authored_pose() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut plain = loaded_session(dir.path(), "plain", &[]);
+        let mut clipped = loaded_session(dir.path(), "clipped", &[(PoseHint::Idle, HEAD_TURN)]);
+        assert_eq!(clipped.motion(), FeatureSupport::Available);
+        assert_eq!(clipped.motion_poses(), vec![PoseHint::Idle]);
+        assert_eq!(plain.motion(), FeatureSupport::Unsupported);
+        assert_ne!(
+            first_frame(&mut plain),
+            first_frame(&mut clipped),
+            "an assigned clip must drive the pose instead of the staged sway"
+        );
+    }
+
+    #[test]
+    fn expressions_stay_hand_authored_while_a_clip_plays() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The same clip on two hints: the clip and the spring state are equal,
+        // so a differing frame shows the expression staging is still applied.
+        let mut idle = loaded_session(dir.path(), "idle", &[(PoseHint::Idle, HEAD_TURN)]);
+        let mut attention =
+            loaded_session(dir.path(), "attention", &[(PoseHint::Attention, HEAD_TURN)]);
+        attention.set_pose(PoseHint::Attention);
+        assert_ne!(first_frame(&mut idle), first_frame(&mut attention));
+    }
+
+    #[test]
+    fn switching_hint_plays_that_hints_clip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = loaded_session(
+            dir.path(),
+            "both",
+            &[
+                (PoseHint::Idle, HEAD_TURN),
+                (PoseHint::Speaking, SPINE_TURN),
+            ],
+        );
+        assert_eq!(
+            session.motion_poses(),
+            vec![PoseHint::Idle, PoseHint::Speaking]
+        );
+        let idle_frame = first_frame(&mut session);
+        session.set_pose(PoseHint::Speaking);
+        let speaking_frame = first_frame(&mut session);
+        assert_ne!(idle_frame, speaking_frame);
+        // Hints without a clip keep producing frames next to clipped ones.
+        session.set_pose(PoseHint::Listening);
+        let listening_frame = first_frame(&mut session);
+        assert!(
+            listening_frame
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
+        );
+        assert_ne!(listening_frame, speaking_frame);
+    }
+
+    #[test]
+    fn clip_playback_advances_across_updates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = loaded_session(dir.path(), "advance", &[(PoseHint::Idle, HEAD_TURN)]);
+        let first = first_frame(&mut session);
+        for _ in 0..8 {
+            let _frame = session.update(1.0 / 30.0).expect("runtime update");
+        }
+        let later = first_frame(&mut session);
+        assert_ne!(first, later, "a looping clip must keep moving");
+    }
+
+    #[test]
+    fn replacing_the_asset_restarts_the_clip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let asset = dir.path().join("restart.vrm");
+        write_generated_vrm(&asset).expect("vrm fixture");
+        let clip = dir.path().join("restart.vrma");
+        write_generated_vrma(&clip, HEAD_TURN).expect("clip");
+        let motion_set = MotionSetInfo {
+            clips: vec![PoseClip {
+                pose: PoseHint::Idle,
+                path: clip.to_string_lossy().into_owned(),
+            }],
+        };
+        let reference = {
+            let mut fresh = VrmSession::new();
+            fresh
+                .set_asset(AssetRef::Path {
+                    path: asset.to_string_lossy().into_owned(),
+                })
+                .expect("asset");
+            fresh.set_motions(&motion_set).expect("motions");
+            first_frame(&mut fresh)
+        };
+        let mut session = VrmSession::new();
+        session
+            .set_asset(AssetRef::Path {
+                path: asset.to_string_lossy().into_owned(),
+            })
+            .expect("asset");
+        session.set_motions(&motion_set).expect("motions");
+        for _ in 0..10 {
+            let _frame = session.update(1.0 / 30.0).expect("runtime update");
+        }
+        session
+            .set_asset(AssetRef::Path {
+                path: asset.to_string_lossy().into_owned(),
+            })
+            .expect("asset replacement");
+        assert_eq!(
+            reference,
+            first_frame(&mut session),
+            "a replaced avatar must not inherit the previous clip time"
+        );
+    }
+
+    #[test]
+    fn a_rejected_motion_set_keeps_the_previous_assignment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = dir.path().join("good.vrma");
+        write_generated_vrma(&good, HEAD_TURN).expect("clip");
+        let good_path = good.to_string_lossy().into_owned();
+        let mut session = loaded_session(dir.path(), "kept", &[(PoseHint::Idle, HEAD_TURN)]);
+        let previous = session.motion_poses();
+
+        let missing = session
+            .set_motions(&MotionSetInfo {
+                clips: vec![PoseClip {
+                    pose: PoseHint::Idle,
+                    path: dir
+                        .path()
+                        .join("absent.vrma")
+                        .to_string_lossy()
+                        .into_owned(),
+                }],
+            })
+            .expect_err("missing clip");
+        assert_eq!(missing.reason, MotionFailReason::Missing);
+
+        let corrupt = dir.path().join("corrupt.vrma");
+        std::fs::File::create(&corrupt)
+            .expect("create")
+            .write_all(b"not a vrma")
+            .expect("write");
+        let invalid = session
+            .set_motions(&MotionSetInfo {
+                clips: vec![PoseClip {
+                    pose: PoseHint::Idle,
+                    path: corrupt.to_string_lossy().into_owned(),
+                }],
+            })
+            .expect_err("corrupt clip");
+        assert_eq!(invalid.reason, MotionFailReason::InvalidVrma);
+
+        // A valid glTF that is not a VRMA document must fail the same way.
+        let avatar = dir.path().join("avatar-not-clip.vrma");
+        write_generated_vrm(&avatar).expect("vrm bytes");
+        let wrong_profile = session
+            .set_motions(&MotionSetInfo {
+                clips: vec![PoseClip {
+                    pose: PoseHint::Idle,
+                    path: avatar.to_string_lossy().into_owned(),
+                }],
+            })
+            .expect_err("VRM is not a clip");
+        assert_eq!(wrong_profile.reason, MotionFailReason::InvalidVrma);
+
+        let duplicated = session
+            .set_motions(&MotionSetInfo {
+                clips: vec![
+                    PoseClip {
+                        pose: PoseHint::Idle,
+                        path: good_path.clone(),
+                    },
+                    PoseClip {
+                        pose: PoseHint::Idle,
+                        path: good_path,
+                    },
+                ],
+            })
+            .expect_err("duplicate pose");
+        assert_eq!(duplicated.reason, MotionFailReason::DuplicatePose);
+
+        assert_eq!(session.motion(), FeatureSupport::Available);
+        assert_eq!(
+            session.motion_poses(),
+            previous,
+            "a rejected set must not clear playback"
+        );
+    }
+
+    /// A session holding the generated avatar plus the given pose → clip pairs.
+    fn loaded_session(
+        dir: &std::path::Path,
+        name: &str,
+        clips: &[(PoseHint, MotionFixture)],
+    ) -> VrmSession {
+        let asset = dir.join(std::format!("{name}.vrm"));
+        write_generated_vrm(&asset).expect("vrm fixture");
+        let mut session = VrmSession::new();
+        session
+            .set_asset(AssetRef::Path {
+                path: asset.to_string_lossy().into_owned(),
+            })
+            .expect("asset load");
+        if clips.is_empty() {
+            return session;
+        }
+        let motion_set = MotionSetInfo {
+            clips: clips
+                .iter()
+                .enumerate()
+                .map(|(index, (pose, fixture))| {
+                    let path = dir.join(std::format!("{name}-{index}.vrma"));
+                    write_generated_vrma(&path, *fixture).expect("vrma fixture");
+                    PoseClip {
+                        pose: *pose,
+                        path: path.to_string_lossy().into_owned(),
+                    }
+                })
+                .collect(),
+        };
+        session.set_motions(&motion_set).expect("motion set");
+        session
+    }
+
+    /// Advances one frame and returns the generated primitive's vertices.
+    fn first_frame(session: &mut VrmSession) -> Vec<[f32; 3]> {
+        let meshes = session.update(1.0 / 30.0).expect("runtime update");
+        meshes
+            .first()
+            .map(|mesh| mesh.mesh.positions.clone())
+            .expect("one generated primitive")
     }
 }

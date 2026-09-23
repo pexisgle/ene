@@ -307,7 +307,11 @@ pub(crate) fn consumed_in_window(
 pub(crate) enum ReservationAdmission {
     NoCap,
     Reserved,
-    Held(UsageCapRef),
+    /// A current cap would be exceeded: no attempt, no reservation, and no
+    /// provider byte.
+    Held,
+    /// A cap applies but a finite safe upper bound cannot be established:
+    /// no attempt, no reservation, and no provider byte.
     Indeterminate,
 }
 
@@ -350,7 +354,7 @@ pub(crate) fn admit_reservation(
             return Ok(ReservationAdmission::Indeterminate);
         };
         if total.micros() > cap.limit().micros() {
-            return Ok(ReservationAdmission::Held(cap.reference()));
+            return Ok(ReservationAdmission::Held);
         }
     }
     let reservation = UsageReservationRef(RawId::new());

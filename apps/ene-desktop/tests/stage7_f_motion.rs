@@ -14,7 +14,7 @@ fn the_bundled_motion_pack_is_projected_to_the_body() {
     write_generated_vrm(&asset).expect("vrm fixture");
     let clip = dir
         .path()
-        .join(ene_desktop::BUNDLED_MOTION_DIR)
+        .join(ene_desktop::motion::BUNDLED_MOTION_DIR)
         .join("VRMA_06.vrma");
     write_generated_vrma(
         &clip,
@@ -28,7 +28,6 @@ fn the_bundled_motion_pack_is_projected_to_the_body() {
 
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
     let plan = desktop.motion_plan();
-    assert_eq!(plan.source, clip.parent().map(std::path::Path::to_path_buf));
     assert_eq!(plan.clips.len(), 1);
     assert_eq!(plan.clips[0].pose, PoseHint::Idle);
     assert_eq!(plan.set().expect("assignment").clips.len(), 1);

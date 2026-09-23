@@ -37,12 +37,13 @@ use ene_action::{
     CertaintyUpdateOutcome, EffectGrounds,
 };
 use ene_api::v1::refs::ConnectionWireId;
+use ene_companion::ActionCertaintyWire;
 use ene_companion::CompanionId;
 use ene_companion::RecordResumeActivityCommand;
 use ene_companion::ResumeActivityOutcome;
 use ene_companion::dialogue::{
     DialogueTaskCommand, DialogueTaskControlPort, DialogueTaskControlReply, ProposeSteeringCommand,
-    ProposeTaskCommand, TaskReport, TaskReportAttempt, TaskReportCertainty,
+    ProposeTaskCommand, TaskReport, TaskReportAttempt,
 };
 use ene_primitive::RawId;
 use ene_task::{
@@ -1048,11 +1049,11 @@ impl HostHandle {
     }
 }
 
-fn report_certainty(certainty: ActionCertainty) -> TaskReportCertainty {
+fn report_certainty(certainty: ActionCertainty) -> ActionCertaintyWire {
     match certainty {
-        ActionCertainty::ConfirmedSuccess => TaskReportCertainty::ConfirmedSuccess,
-        ActionCertainty::ConfirmedFailure => TaskReportCertainty::ConfirmedFailure,
-        ActionCertainty::Unknown => TaskReportCertainty::Unknown,
+        ActionCertainty::ConfirmedSuccess => ActionCertaintyWire::ConfirmedSuccess,
+        ActionCertainty::ConfirmedFailure => ActionCertaintyWire::ConfirmedFailure,
+        ActionCertainty::Unknown => ActionCertaintyWire::Unknown,
     }
 }
 

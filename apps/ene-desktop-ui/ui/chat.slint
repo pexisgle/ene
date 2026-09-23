@@ -23,6 +23,7 @@ export component ChatWindow inherits Window {
     in-out property <string> notice;
     in property <bool> notice-error: true;
     in-out property <string> task-notice;
+    in property <bool> task-notice-error: false;
     in property <bool> busy: false;
     in property <bool> task-busy: false;
     in property <bool> connected: false;
@@ -115,8 +116,6 @@ export component ChatWindow inherits Window {
                                 horizontal-stretch: 1;
                                 text <=> root.draft;
                                 placeholder-text: root.japanese ? "ene にメッセージ…" : "Message ene…";
-                                font-size: 14px;
-                                enabled: true;
                                 accepted => { if !root.busy && root.connected && root.draft != "" { root.send(root.draft); } }
                             }
                             Action {
@@ -146,7 +145,7 @@ export component ChatWindow inherits Window {
                         content-width: self.width;
                         VerticalLayout {
                             spacing: 12px; alignment: start;
-                            if root.task-notice != "": Notice { text: root.task-notice; error: root.notice-error; }
+                            if root.task-notice != "": Notice { text: root.task-notice; error: root.task-notice-error; }
                             if root.tasks.length == 0: EmptyState {
                                 title: root.japanese ? "まだ作業はありません" : "No tasks yet";
                                 description: root.japanese ? "会話で依頼した作業の進捗や結果を、ここで確認できます。" : "Tasks delegated in conversation will appear here.";

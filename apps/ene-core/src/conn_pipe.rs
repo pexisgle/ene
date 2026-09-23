@@ -1,7 +1,26 @@
+//! Windows named-pipe transport (IPC §10.1).
+//!
+//! Same-machine Clients dial [`ene_plugin_ipc::pipe_name`] (one pipe per Host data
+//! directory). The listener in [`crate::conn`] creates the exclusive first
+//! server instance with `FILE_FLAG_FIRST_PIPE_INSTANCE` (a second Host for
+//! the same directory fails to create, like the Unix singleton probe),
+//! `PIPE_REJECT_REMOTE_CLIENTS` (remote machines cannot connect at the OS
+//! layer), and an explicit DACL limited to this process's logon SID (see
+//! `LogonSidAttrs`). Every accepted connection additionally passes
+//! [`peer_same_user`] — the OS peer token check — before a single frame is
+//! read: an unprovable peer is dropped without a byte, exactly like the Unix
+//! uid-mismatch path. Frames, the `ConnectionTable`,
+//! and [`HostHandle::handle_frame`](crate::serve::HostHandle::handle_frame)
+//! are shared with the Unix socket path, so authentication, currentness, and
+//! the connection phase machine are identical on both transports.
+//!
+//! Shared listener regressions exercise this transport on Windows and Unix
+//! sockets on Unix. [`CoreError::Bind`]
+//! reports every creation failure; nothing silently falls back.
+
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::RawHandle;
-use std::path::Path;
 
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
@@ -25,18 +44,6 @@ use crate::serve::CoreError;
 /// `Win32_System_SystemServices` feature, which this crate does not enable,
 /// so it is redeclared here and kept equal to the SDK value.
 const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
-
-#[must_use]
-pub fn pipe_name(data_dir: &Path) -> String {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0100_0000_01b3;
-    let mut tag = FNV_OFFSET;
-    for byte in data_dir.as_os_str().as_encoded_bytes() {
-        tag ^= u64::from(*byte);
-        tag = tag.wrapping_mul(FNV_PRIME);
-    }
-    format!(r"\\.\pipe\ene-{tag:016x}")
-}
 
 fn wide_null(text: &str) -> Vec<u16> {
     OsStr::new(text)

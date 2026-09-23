@@ -37,7 +37,9 @@ mod imp {
         PresentationOutcome,
     };
     use crate::render::{HitTestMask, RenderOutcome, SurfaceRenderer};
-    use crate::window::{DEFAULT_PLACEMENT, RESIZE_GRIP_LOGICAL_PX, gpu_info, physical};
+    use crate::window::{
+        DEFAULT_PLACEMENT, RESIZE_GRIP_LOGICAL_PX, gpu_disabled, gpu_info, physical,
+    };
 
     const LEFT_BUTTON: u32 = 0x110;
     const RIGHT_BUTTON: u32 = 0x111;
@@ -79,11 +81,11 @@ mod imp {
             let connection = Connection::connect_to_env().map_err(|error| error.to_string())?;
             let (globals, mut event_queue) =
                 registry_queue_init(&connection).map_err(|error| error.to_string())?;
-            require_kde_layer_shell(&globals)?;
             let qh = event_queue.handle();
             let compositor =
                 CompositorState::bind(&globals, &qh).map_err(|error| error.to_string())?;
-            let layer_shell = LayerShell::bind(&globals, &qh).map_err(|error| error.to_string())?;
+            let layer_shell = LayerShell::bind(&globals, &qh)
+                .map_err(|_| String::from("zwlr_layer_shell_v1 is unavailable"))?;
             // Optional protocol: KWin, GNOME and wlroots compositors expose
             // it. Drag and resize use its accelerated deltas (the cursor
             // vector the user sees), with the unaccelerated delta only as a
@@ -174,9 +176,7 @@ mod imp {
                     }
                 }
             } else {
-                gpu_failure = Some(GpuFailInfo {
-                    reason: GpuFailReason::NoAdapter,
-                });
+                gpu_failure = Some(gpu_disabled());
                 None
             };
             Ok(Self {
@@ -194,11 +194,7 @@ mod imp {
         }
 
         pub fn gpu_status(&self) -> GpuInitStatus {
-            if self.renderer.is_some() {
-                GpuInitStatus::Ok
-            } else {
-                GpuInitStatus::Failed
-            }
+            crate::window::gpu_status(self.renderer.as_ref())
         }
 
         pub fn gpu_failure(&self) -> Option<GpuFailInfo> {
@@ -251,14 +247,8 @@ mod imp {
             if !self.render_frame(&[], true) {
                 return false;
             }
-            // The transparent frame commits the previous visible frame's mask;
-            // set_input_region is double-buffered, so apply the empty region
-            // with a second state-only commit.
-            let wanted_size = (
-                physical(self.state.size.0, self.state.scale as f32),
-                physical(self.state.size.1, self.state.scale as f32),
-            );
-            self.refresh_input_region(&[], wanted_size);
+            // The presented hide frame already set the empty input region as
+            // double-buffered surface state; this state-only commit publishes it.
             self.state.layer.commit();
             true
         }
@@ -293,14 +283,6 @@ mod imp {
             }
         }
 
-        pub fn placement(&self) -> PlacementBox {
-            let mut placement = self.placement;
-            placement.scale = self.state.scale as f32;
-            placement.width = self.state.size.0;
-            placement.height = self.state.size.1;
-            placement
-        }
-
         pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
             self.state
                 .events
@@ -331,6 +313,15 @@ mod imp {
                     reason: GpuFailReason::DeviceLost,
                 });
                 return;
+            }
+            // A compositor-closed layer surface is terminal (it is never
+            // committed or presented again), so report it like the DWM surface
+            // failure instead of leaving `gpu_status` Ok while nothing renders.
+            if self.state.closed && self.renderer.is_some() {
+                self.renderer = None;
+                self.gpu_failure = Some(GpuFailInfo {
+                    reason: GpuFailReason::Surface,
+                });
             }
             self.placement.scale = self.state.scale as f32;
             self.placement.width = self.state.size.0;
@@ -488,18 +479,8 @@ mod imp {
         }
     }
 
-    fn require_kde_layer_shell(globals: &GlobalList) -> Result<(), String> {
-        let has_layer_shell = globals.contents().with_list(|list| {
-            list.iter()
-                .any(|global| global.interface == "zwlr_layer_shell_v1")
-        });
-        if has_layer_shell {
-            Ok(())
-        } else {
-            Err(String::from("zwlr_layer_shell_v1 is unavailable"))
-        }
-    }
-
+    /// Replaces the surface input region with the given surface-local
+    /// rectangles. Empty input makes the whole surface click-through.
     fn set_input_region(
         compositor: &CompositorState,
         qh: &QueueHandle<State>,
@@ -981,22 +962,17 @@ mod imp {
         }
     }
 
-    #[derive(Debug, Default)]
-    struct FeedbackInner {
-        output: String,
-    }
-
     #[derive(Debug, Clone)]
     struct FeedbackData {
         correlation_id: u64,
-        inner: Arc<Mutex<FeedbackInner>>,
+        inner: Arc<Mutex<String>>,
     }
 
     impl FeedbackData {
         fn new(correlation_id: u64) -> Self {
             Self {
                 correlation_id,
-                inner: Arc::new(Mutex::new(FeedbackInner::default())),
+                inner: Arc::new(Mutex::new(String::new())),
             }
         }
     }
@@ -1029,7 +1005,7 @@ mod imp {
                 wp_presentation_feedback::Event::SyncOutput { output } => {
                     let output_name = output_name(&state.output_state, &output);
                     if let Ok(mut inner) = data.inner.lock() {
-                        inner.output = output_name;
+                        *inner = output_name;
                     }
                 }
                 wp_presentation_feedback::Event::Presented {
@@ -1049,7 +1025,7 @@ mod imp {
                     let sync_output = data
                         .inner
                         .lock()
-                        .map(|inner| inner.output.clone())
+                        .map(|inner| inner.clone())
                         .unwrap_or_default();
                     let output = presentation_output(
                         &sync_output,

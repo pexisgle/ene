@@ -7,7 +7,7 @@
 //! Presentation output avoids the `print!` family (workspace-denied): all
 //! output goes through `writeln!`/`write!` on locked stdio handles with
 //! explicit flushes, so each write site states its destination and its
-//! failure becomes a [`CliError::Transport`].
+//! failure becomes a [`CliError::Client`] transport error.
 //!
 //! Stdout contract: view and history commands print their rendered lines (or
 //! nothing when empty). `send` prints `AcceptedForRound <round>`, then the
@@ -34,9 +34,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::refs::{BaseViewMark, CommandWireId, RoundWireId, StreamWireId};
+use ene_api::v1::refs::{BaseViewMark, CommandWireId, RoundWireId, StreamWireId, UsageCursorWire};
 use ene_api::v1::round::{ConfirmPresentationWire, PresentationStatus, StreamClose};
 use ene_api::v1::undelivered::{UndeliveredAck, UndeliveredResponse, UndeliveredSummary};
+use ene_api::v1::usage::UsageSummaryRequest;
+use ene_client::ClientError;
 use ene_config::paths::resolve_data_dir;
 use ene_config::typed::Config;
 
@@ -333,10 +335,7 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
         "status" => cmds::Command::Status,
         "send" => cmds::Command::Send(send_args(sub)?),
         "watch" => cmds::Command::Watch {
-            round: sub
-                .get_one::<String>("round")
-                .cloned()
-                .ok_or_else(|| usage_error("watch requires --round ROUND"))?,
+            round: sub.get_one::<String>("round").cloned().unwrap_or_default(),
         },
         "history" => cmds::Command::History {
             limit: sub
@@ -367,43 +366,29 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
             limit: sub.get_one::<u32>("limit").copied(),
         },
         "report" => cmds::Command::Report {
-            task: sub
-                .get_one::<String>("task")
-                .cloned()
-                .ok_or_else(|| usage_error("report requires --task REF"))?,
+            task: sub.get_one::<String>("task").cloned().unwrap_or_default(),
             cursor: sub.get_one::<String>("cursor").cloned(),
             limit: sub.get_one::<u32>("limit").copied(),
         },
         "source" => cmds::Command::Source {
-            source: sub
-                .get_one::<String>("source")
-                .cloned()
-                .ok_or_else(|| usage_error("source requires --source REF"))?,
+            source: sub.get_one::<String>("source").cloned().unwrap_or_default(),
             cursor: sub.get_one::<u64>("cursor").copied(),
             limit_bytes: sub.get_one::<u32>("limit-bytes").copied(),
         },
         "select-task" => cmds::Command::SelectTask {
-            task: sub
-                .get_one::<String>("task")
-                .cloned()
-                .ok_or_else(|| usage_error("select-task requires --task REF"))?,
+            task: sub.get_one::<String>("task").cloned().unwrap_or_default(),
         },
         "resume-task" => cmds::Command::ResumeTask {
-            task: sub
-                .get_one::<String>("task")
-                .cloned()
-                .ok_or_else(|| usage_error("resume-task requires --task REF"))?,
-            revision: *sub
-                .get_one::<u64>("revision")
-                .ok_or_else(|| usage_error("resume-task requires --revision N"))?,
+            task: sub.get_one::<String>("task").cloned().unwrap_or_default(),
+            revision: sub.get_one::<u64>("revision").copied().unwrap_or_default(),
             purpose: sub
                 .get_one::<String>("purpose")
                 .cloned()
-                .ok_or_else(|| usage_error("resume-task requires --purpose REF"))?,
+                .unwrap_or_default(),
             instruction: sub
                 .get_one::<String>("instruction")
                 .cloned()
-                .ok_or_else(|| usage_error("resume-task requires --instruction TEXT"))?,
+                .unwrap_or_default(),
         },
         "undelivered" => cmds::Command::Undelivered {
             cursor: sub.get_one::<String>("cursor").cloned(),
@@ -415,14 +400,12 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
                 .get_one::<String>("purpose")
                 .cloned()
                 .unwrap_or_else(|| String::from(DEFAULT_DELETION_PURPOSE));
-            let Some(purpose) = cmds::deletion_purpose(&purpose) else {
+            let Some(purpose) = ene_api::v1::deletion::DeletionPurposeWire::from_name(&purpose)
+            else {
                 return Err(usage_error("--purpose must be privacy or security"));
             };
             cmds::Command::Deletion {
-                text: sub
-                    .get_one::<String>("text")
-                    .cloned()
-                    .ok_or_else(|| usage_error("deletion requires --text TEXT"))?,
+                text: sub.get_one::<String>("text").cloned().unwrap_or_default(),
                 purpose,
             }
         }
@@ -430,7 +413,7 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
             cursor: sub.get_one::<String>("cursor").cloned(),
             limit: sub.get_one::<u32>("limit").copied(),
         },
-        "usage" => cmds::Command::Usage(cmds::UsageArgs {
+        "usage" => cmds::Command::Usage(UsageSummaryRequest {
             from: sub.get_one::<String>("from").cloned(),
             to: sub.get_one::<String>("to").cloned(),
             provider: sub.get_one::<String>("provider").cloned(),
@@ -438,7 +421,10 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
             consumer: sub.get_one::<String>("consumer").cloned(),
             purpose: sub.get_one::<String>("purpose").cloned(),
             status: sub.get_one::<String>("status").cloned(),
-            cursor: sub.get_one::<String>("cursor").cloned(),
+            cursor: sub
+                .get_one::<String>("cursor")
+                .cloned()
+                .map(UsageCursorWire),
             limit: sub.get_one::<u32>("limit").copied(),
         }),
         "usage-cap" => {
@@ -471,9 +457,10 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
                     .get_one::<String>("currency")
                     .cloned()
                     .unwrap_or_else(|| String::from(DEFAULT_USAGE_CAP_CURRENCY)),
-                limit_micros: *sub
+                limit_micros: sub
                     .get_one::<u64>("limit-micros")
-                    .ok_or_else(|| usage_error("usage-cap requires --limit-micros N"))?,
+                    .copied()
+                    .unwrap_or_default(),
             }
         }
         other => return Err(usage_error(format!("unknown command: {other}"))),
@@ -563,7 +550,10 @@ fn run() -> Result<(), CliError> {
             ) =>
         {
             error.print().map_err(|err| {
-                CliError::Transport(format!("stdout write failed: {}", err.kind()))
+                CliError::Client(ClientError::Transport(format!(
+                    "stdout write failed: {}",
+                    err.kind()
+                )))
             })?;
             return Ok(());
         }
@@ -573,14 +563,18 @@ fn run() -> Result<(), CliError> {
     let cfg = Config::load(cli.config.as_deref())?;
     let language = cfg.language.clone();
     let Some(data_dir) = resolve_data_dir(&cfg) else {
-        return Err(CliError::Transport(String::from(
+        return Err(CliError::Client(ClientError::Transport(String::from(
             "no data directory: set data_dir or the OS default",
-        )));
+        ))));
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|error| CliError::Transport(format!("runtime start failed: {error}")))?;
+        .map_err(|error| {
+            CliError::Client(ClientError::Transport(format!(
+                "runtime start failed: {error}"
+            )))
+        })?;
     runtime.block_on(run_command(&data_dir, &language, cli.command))
 }
 
@@ -674,17 +668,19 @@ async fn run_command(
             if let ene_api::v1::deletion::DeletionStatusResponse::Page(_) = response {
                 emit(&cmds::render_deletion_status(&response))
             } else {
-                Err(CliError::ServerOutcome(cmds::render_deletion_status(
-                    &response,
+                Err(CliError::Client(ClientError::ServerOutcome(
+                    cmds::render_deletion_status(&response),
                 )))
             }
         }
-        cmds::Command::Usage(args) => {
-            let response = request_usage(&mut session, &args).await?;
+        cmds::Command::Usage(request) => {
+            let response = request_usage(&mut session, &request).await?;
             if let ene_api::v1::usage::UsageSummaryResponse::Page(_) = response {
                 emit(&cmds::render_usage_page(&response))
             } else {
-                Err(CliError::ServerOutcome(cmds::render_usage_page(&response)))
+                Err(CliError::Client(ClientError::ServerOutcome(
+                    cmds::render_usage_page(&response),
+                )))
             }
         }
         cmds::Command::UsageCap {
@@ -714,12 +710,22 @@ async fn run_command(
 /// stays `ServerRejected`.
 fn answer(payload: WirePayload, operation: &str) -> Result<WirePayload, CliError> {
     match payload {
-        WirePayload::Reject(notice) => Err(CliError::ServerRejected(format!(
+        WirePayload::Reject(notice) => Err(CliError::Client(ClientError::ServerRejected(format!(
             "{operation} rejected: {}",
             notice.detail
-        ))),
+        )))),
         other => Ok(other),
     }
+}
+
+/// The one "unexpected payload" rejection shape: the operation and the
+/// expected payload kind are stated, and the actual kind comes from the wire
+/// type name only.
+fn unexpected_payload(payload: &WirePayload, operation: &str, expected: &str) -> CliError {
+    CliError::Client(ClientError::ServerRejected(format!(
+        "unexpected {} while {operation}; expected {expected}",
+        payload.message_type()
+    )))
 }
 
 /// One bounded usage summary read. `Reject` (a malformed filter the Host
@@ -727,19 +733,20 @@ fn answer(payload: WirePayload, operation: &str) -> Result<WirePayload, CliError
 /// from a stale cursor.
 async fn request_usage(
     session: &mut client::Client,
-    args: &cmds::UsageArgs,
+    request: &UsageSummaryRequest,
 ) -> Result<ene_api::v1::usage::UsageSummaryResponse, CliError> {
     match answer(
         session
-            .request(WirePayload::UsageSummaryRequest(cmds::usage_request(args)))
+            .request(WirePayload::UsageSummaryRequest(request.clone()))
             .await?,
         "usage request",
     )? {
         WirePayload::UsageSummaryResponse(response) => Ok(response),
-        unexpected => Err(CliError::ServerRejected(format!(
-            "unexpected {} while reading usage; expected UsageSummaryResponse",
-            unexpected.message_type()
-        ))),
+        unexpected => Err(unexpected_payload(
+            &unexpected,
+            "reading usage",
+            "UsageSummaryResponse",
+        )),
     }
 }
 
@@ -751,7 +758,7 @@ async fn run_usage_cap(
     currency: &str,
     limit_micros: u64,
 ) -> Result<(), CliError> {
-    let args = cmds::UsageArgs {
+    let request = UsageSummaryRequest {
         from: None,
         to: None,
         provider: provider.map(str::to_owned),
@@ -762,16 +769,16 @@ async fn run_usage_cap(
         cursor: None,
         limit: Some(1),
     };
-    let response = request_usage(session, &args).await?;
+    let response = request_usage(session, &request).await?;
     let ene_api::v1::usage::UsageSummaryResponse::Page(page) = response else {
-        return Err(CliError::ServerOutcome(String::from(
+        return Err(CliError::Client(ClientError::ServerOutcome(String::from(
             "usage is unavailable; cannot build a cap base view",
-        )));
+        ))));
     };
     let Some(base) = cmds::usage_cap_mark_for(&page, scope, provider, window) else {
-        return Err(CliError::ServerOutcome(String::from(
+        return Err(CliError::Client(ClientError::ServerOutcome(String::from(
             "the usage read did not name this cap slot; retry later",
-        )));
+        ))));
     };
     let intent = cmds::usage_cap_intent(
         CommandWireId(uuid::Uuid::new_v4()),
@@ -797,9 +804,9 @@ async fn run_deletion(
     }
     let status = request_deletion_status(session, None, Some(1)).await?;
     let ene_api::v1::deletion::DeletionStatusResponse::Page(page) = status else {
-        return Err(CliError::ServerOutcome(String::from(
+        return Err(CliError::Client(ClientError::ServerOutcome(String::from(
             "deletion status is unavailable; retry later",
-        )));
+        ))));
     };
     let intent = cmds::deletion_intent(
         CommandWireId(uuid::Uuid::new_v4()),
@@ -811,9 +818,11 @@ async fn run_deletion(
         Ok(detail) => emit(&format!(
             "{detail}; confirm it on the Host PC (`ene-core pending-deletions`)"
         )),
-        Err(CliError::ServerOutcome(message)) => Err(CliError::ServerOutcome(format!(
-            "{message}; confirm it on the Host PC (`ene-core pending-deletions`)"
-        ))),
+        Err(CliError::Client(ClientError::ServerOutcome(message))) => {
+            Err(CliError::Client(ClientError::ServerOutcome(format!(
+                "{message}; confirm it on the Host PC (`ene-core pending-deletions`)"
+            ))))
+        }
         Err(other) => Err(other),
     }
 }
@@ -836,10 +845,11 @@ async fn request_deletion_status(
         "deletion status",
     )? {
         WirePayload::DeletionStatusResponse(response) => Ok(response),
-        unexpected => Err(CliError::ServerRejected(format!(
-            "unexpected {} while reading the deletion status; expected DeletionStatusResponse",
-            unexpected.message_type()
-        ))),
+        unexpected => Err(unexpected_payload(
+            &unexpected,
+            "reading the deletion status",
+            "DeletionStatusResponse",
+        )),
     }
 }
 
@@ -847,13 +857,40 @@ fn emit(text: &str) -> Result<(), CliError> {
     if text.is_empty() {
         return Ok(());
     }
-    let mut stdout = std::io::stdout();
-    writeln!(stdout, "{text}")
-        .map_err(|error| CliError::Transport(format!("stdout write failed: {}", error.kind())))?;
-    stdout
-        .flush()
-        .map_err(|error| CliError::Transport(format!("stdout flush failed: {}", error.kind())))?;
-    Ok(())
+    stdout_line(&mut std::io::stdout(), text)
+}
+
+/// Writes one line and flushes explicitly so piped output is complete on
+/// return.
+fn stdout_line(stdout: &mut std::io::Stdout, text: &str) -> Result<(), CliError> {
+    writeln!(stdout, "{text}").map_err(|error| {
+        CliError::Client(ClientError::Transport(format!(
+            "stdout write failed: {}",
+            error.kind()
+        )))
+    })?;
+    stdout_flush(stdout)
+}
+
+/// Writes one fragment and flushes explicitly so piped output is complete on
+/// return.
+fn stdout_write(stdout: &mut std::io::Stdout, text: &str) -> Result<(), CliError> {
+    write!(stdout, "{text}").map_err(|error| {
+        CliError::Client(ClientError::Transport(format!(
+            "stdout write failed: {}",
+            error.kind()
+        )))
+    })?;
+    stdout_flush(stdout)
+}
+
+fn stdout_flush(stdout: &mut std::io::Stdout) -> Result<(), CliError> {
+    stdout.flush().map_err(|error| {
+        CliError::Client(ClientError::Transport(format!(
+            "stdout flush failed: {}",
+            error.kind()
+        )))
+    })
 }
 
 /// A setup/status view always carries the five Host setup sections when the
@@ -865,9 +902,9 @@ fn emit(text: &str) -> Result<(), CliError> {
 /// stale.
 fn require_setup_view(view: &ene_api::v1::management::ManagementView) -> Result<(), CliError> {
     if view.sections.is_empty() {
-        return Err(CliError::ServerOutcome(String::from(
+        return Err(CliError::Client(ClientError::ServerOutcome(String::from(
             "setup view is unavailable; retry later",
-        )));
+        ))));
     }
     Ok(())
 }
@@ -888,10 +925,11 @@ async fn request_view(
         "view request",
     )? {
         WirePayload::ManagementView(view) => Ok(view),
-        unexpected => Err(CliError::ServerRejected(format!(
-            "unexpected {} while reading a view; expected ManagementView",
-            unexpected.message_type()
-        ))),
+        unexpected => Err(unexpected_payload(
+            &unexpected,
+            "reading a view",
+            "ManagementView",
+        )),
     }
 }
 
@@ -901,14 +939,14 @@ fn history_items(
     use ene_api::v1::round::HistoryResponse;
     match response {
         HistoryResponse::Items(items) => Ok(items),
-        HistoryResponse::InvalidRequest => Err(CliError::ServerRejected(String::from(
-            "invalid history request; correct the request fields and retry",
+        HistoryResponse::InvalidRequest => Err(CliError::Client(ClientError::ServerRejected(
+            String::from("invalid history request; correct the request fields and retry"),
         ))),
-        HistoryResponse::Unavailable => Err(CliError::ServerOutcome(String::from(
-            "history is unavailable; retry later",
+        HistoryResponse::Unavailable => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("history is unavailable; retry later"),
         ))),
-        HistoryResponse::StaleCompanion => Err(CliError::ServerOutcome(String::from(
-            "companion projection is stale; re-sync presence and retry",
+        HistoryResponse::StaleCompanion => Err(CliError::Client(ClientError::ServerOutcome(
+            String::from("companion projection is stale; re-sync presence and retry"),
         ))),
     }
 }
@@ -930,10 +968,11 @@ async fn request_history(
         "history request",
     )? {
         WirePayload::HistoryResponse(response) => history_items(response),
-        unexpected => Err(CliError::ServerRejected(format!(
-            "unexpected {} while reading history; expected HistoryResponse",
-            unexpected.message_type()
-        ))),
+        unexpected => Err(unexpected_payload(
+            &unexpected,
+            "reading history",
+            "HistoryResponse",
+        )),
     }
 }
 
@@ -954,17 +993,18 @@ async fn request_task_list(
     )? {
         WirePayload::TaskListResponse(TaskListResponse::Page(page)) => Ok(page),
         WirePayload::TaskListResponse(TaskListResponse::StaleBaseView { .. }) => {
-            Err(CliError::ServerOutcome(String::from(
+            Err(CliError::Client(ClientError::ServerOutcome(String::from(
                 "stale task-list cursor; re-query from the head",
-            )))
+            ))))
         }
-        WirePayload::TaskListResponse(TaskListResponse::Unavailable) => Err(
-            CliError::ServerOutcome(String::from("task list is unavailable; retry later")),
-        ),
-        unexpected => Err(CliError::ServerRejected(format!(
-            "unexpected {} while listing tasks; expected TaskListResponse",
-            unexpected.message_type()
-        ))),
+        WirePayload::TaskListResponse(TaskListResponse::Unavailable) => Err(CliError::Client(
+            ClientError::ServerOutcome(String::from("task list is unavailable; retry later")),
+        )),
+        unexpected => Err(unexpected_payload(
+            &unexpected,
+            "listing tasks",
+            "TaskListResponse",
+        )),
     }
 }
 
@@ -986,16 +1026,14 @@ async fn request_task_report(
     )? {
         WirePayload::TaskReportResponse(response) => response,
         unexpected => {
-            return Err(CliError::ServerRejected(format!(
-                "unexpected {} while reading a task report; expected TaskReportResponse",
-                unexpected.message_type()
-            )));
+            return Err(unexpected_payload(
+                &unexpected,
+                "reading a task report",
+                "TaskReportResponse",
+            ));
         }
     };
-    match cmds::describe_report(response) {
-        cmds::ReportAction::Show(page) => Ok(page),
-        cmds::ReportAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
-    }
+    cmds::describe_report(response)
 }
 
 async fn request_report_source(
@@ -1017,17 +1055,20 @@ async fn request_report_source(
     )? {
         WirePayload::ReportSourceResponse(ReportSourceResponse::Page(page)) => Ok(page),
         WirePayload::ReportSourceResponse(ReportSourceResponse::UnknownRef) => {
-            Err(CliError::ServerOutcome(String::from(
+            Err(CliError::Client(ClientError::ServerOutcome(String::from(
                 "unknown report source; re-read the report and retry",
-            )))
+            ))))
         }
-        WirePayload::ReportSourceResponse(ReportSourceResponse::InputUnavailable) => Err(
-            CliError::ServerOutcome(String::from("report source is unavailable; retry later")),
-        ),
-        unexpected => Err(CliError::ServerRejected(format!(
-            "unexpected {} while reading a report source; expected ReportSourceResponse",
-            unexpected.message_type()
-        ))),
+        WirePayload::ReportSourceResponse(ReportSourceResponse::InputUnavailable) => {
+            Err(CliError::Client(ClientError::ServerOutcome(String::from(
+                "report source is unavailable; retry later",
+            ))))
+        }
+        unexpected => Err(unexpected_payload(
+            &unexpected,
+            "reading a report source",
+            "ReportSourceResponse",
+        )),
     }
 }
 
@@ -1043,16 +1084,17 @@ async fn request_select_task(
         "task selection request",
     )? {
         WirePayload::SelectTaskResponse(SelectTaskResponse::Selected(selected)) => Ok(selected),
-        WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef) => Err(
-            CliError::ServerOutcome(String::from("unknown task reference; re-list and retry")),
-        ),
-        WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable) => Err(
-            CliError::ServerOutcome(String::from("task selection is unavailable; retry later")),
-        ),
-        unexpected => Err(CliError::ServerRejected(format!(
-            "unexpected {} while selecting a task; expected SelectTaskResponse",
-            unexpected.message_type()
-        ))),
+        WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef) => Err(CliError::Client(
+            ClientError::ServerOutcome(String::from("unknown task reference; re-list and retry")),
+        )),
+        WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable) => Err(CliError::Client(
+            ClientError::ServerOutcome(String::from("task selection is unavailable; retry later")),
+        )),
+        unexpected => Err(unexpected_payload(
+            &unexpected,
+            "selecting a task",
+            "SelectTaskResponse",
+        )),
     }
 }
 
@@ -1078,17 +1120,14 @@ async fn run_resume_task(
     )? {
         WirePayload::ResumeTaskOutcome(outcome) => outcome,
         unexpected => {
-            return Err(CliError::ServerRejected(format!(
-                "unexpected {} while resuming a task; expected ResumeTaskOutcome",
-                unexpected.message_type()
-            )));
+            return Err(unexpected_payload(
+                &unexpected,
+                "resuming a task",
+                "ResumeTaskOutcome",
+            ));
         }
     };
-    match cmds::describe_resume(&outcome) {
-        cmds::ResumeAction::Resumed { detail } => emit(&detail),
-        cmds::ResumeAction::Refused { message } => Err(CliError::ServerRejected(message)),
-        cmds::ResumeAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
-    }
+    emit(&cmds::describe_resume(&outcome)?)
 }
 
 async fn run_undelivered(
@@ -1109,18 +1148,14 @@ async fn run_undelivered(
     )? {
         WirePayload::UndeliveredResponse(response) => response,
         unexpected => {
-            return Err(CliError::ServerRejected(format!(
-                "unexpected {} while fetching undelivered items; expected UndeliveredResponse",
-                unexpected.message_type()
-            )));
+            return Err(unexpected_payload(
+                &unexpected,
+                "fetching undelivered items",
+                "UndeliveredResponse",
+            ));
         }
     };
-    let summary = match cmds::describe_fetch(response) {
-        cmds::FetchAction::Paint(summary) => summary,
-        cmds::FetchAction::Retryable { message } => {
-            return Err(CliError::ServerOutcome(message));
-        }
-    };
+    let summary = cmds::describe_fetch(response)?;
     emit(&cmds::render_summary(&summary))?;
     if summary.items.is_empty() {
         return Ok(());
@@ -1152,16 +1187,14 @@ async fn ack_summary(
     )? {
         WirePayload::UndeliveredAckOutcome(outcome) => outcome,
         unexpected => {
-            return Err(CliError::ServerRejected(format!(
-                "unexpected {} while confirming presentation; expected UndeliveredAckOutcome",
-                unexpected.message_type()
-            )));
+            return Err(unexpected_payload(
+                &unexpected,
+                "confirming presentation",
+                "UndeliveredAckOutcome",
+            ));
         }
     };
-    match cmds::describe_ack(&outcome) {
-        cmds::AckAction::Confirmed => Ok(()),
-        cmds::AckAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
-    }
+    cmds::describe_ack(&outcome)
 }
 
 async fn apply_intent(
@@ -1176,17 +1209,14 @@ async fn apply_intent(
     )? {
         WirePayload::ManagementOutcome(outcome) => outcome,
         unexpected => {
-            return Err(CliError::ServerRejected(format!(
-                "unexpected {} while applying an intent; expected ManagementOutcome",
-                unexpected.message_type()
-            )));
+            return Err(unexpected_payload(
+                &unexpected,
+                "applying an intent",
+                "ManagementOutcome",
+            ));
         }
     };
-    match cmds::describe_management(&outcome) {
-        cmds::ManagementAction::Applied { detail } => Ok(detail),
-        cmds::ManagementAction::Retryable { message } => Err(CliError::ServerOutcome(message)),
-        cmds::ManagementAction::Terminal { message } => Err(CliError::ServerRejected(message)),
-    }
+    cmds::describe_management(&outcome)
 }
 
 async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Result<(), CliError> {
@@ -1242,12 +1272,7 @@ fn paint_auto(
 ) -> Result<(), CliError> {
     let text = cmds::render_summary(&summary);
     if !text.is_empty() {
-        writeln!(stdout, "{text}").map_err(|error| {
-            CliError::Transport(format!("stdout write failed: {}", error.kind()))
-        })?;
-        stdout.flush().map_err(|error| {
-            CliError::Transport(format!("stdout flush failed: {}", error.kind()))
-        })?;
+        stdout_line(stdout, &text)?;
     }
     if !summary.items.is_empty() {
         auto.push((
@@ -1281,21 +1306,16 @@ async fn run_send(
     )? {
         WirePayload::RoundIntakeOutcome(outcome) => outcome,
         unexpected => {
-            return Err(CliError::ServerRejected(format!(
-                "unexpected {} while submitting text; expected RoundIntakeOutcome",
-                unexpected.message_type()
-            )));
+            return Err(unexpected_payload(
+                &unexpected,
+                "submitting text",
+                "RoundIntakeOutcome",
+            ));
         }
     };
-    let round = match cmds::describe_intake(&outcome) {
-        cmds::IntakeAction::Accepted { round } => round,
-        cmds::IntakeAction::Declined { message } => {
-            return Err(CliError::ServerOutcome(message));
-        }
-    };
+    let round = cmds::describe_intake(&outcome)?;
     let mut stdout = std::io::stdout();
-    writeln!(stdout, "AcceptedForRound {round}")
-        .map_err(|error| CliError::Transport(format!("stdout write failed: {}", error.kind())))?;
+    stdout_line(&mut stdout, &format!("AcceptedForRound {round}"))?;
     // Backlog the Host auto-presented at attach (recovery/summon, no Owner
     // query): paint it before the new reply and ACK it with the stream's
     // presentation observation below. A stdio failure here sends no ACK, so
@@ -1321,12 +1341,7 @@ async fn run_send(
                 if stream.is_none() {
                     stream = Some(frame.stream);
                 }
-                write!(stdout, "{}", frame.delta).map_err(|error| {
-                    CliError::Transport(format!("stdout write failed: {}", error.kind()))
-                })?;
-                stdout.flush().map_err(|error| {
-                    CliError::Transport(format!("stdout flush failed: {}", error.kind()))
-                })?;
+                stdout_write(&mut stdout, &frame.delta)?;
                 shown = true;
             }
             WirePayload::TextStreamClose(close) => {
@@ -1349,18 +1364,15 @@ async fn run_send(
                 // route here; absorb them instead of failing the stream.
             }
             unexpected => {
-                return Err(CliError::ServerRejected(format!(
-                    "unexpected {} while streaming text; expected TextStreamFrame",
-                    unexpected.message_type()
-                )));
+                return Err(unexpected_payload(
+                    &unexpected,
+                    "streaming text",
+                    "TextStreamFrame",
+                ));
             }
         }
     };
-    writeln!(stdout)
-        .map_err(|error| CliError::Transport(format!("stdout write failed: {}", error.kind())))?;
-    stdout
-        .flush()
-        .map_err(|error| CliError::Transport(format!("stdout flush failed: {}", error.kind())))?;
+    stdout_line(&mut stdout, "")?;
     let (status, success) = observe_close(close_status, shown);
     session
         .notify(WirePayload::ConfirmPresentation(ConfirmPresentationWire {
@@ -1379,7 +1391,9 @@ async fn run_send(
     if success {
         Ok(())
     } else {
-        Err(CliError::ServerOutcome(format!("stream {close_status:?}")))
+        Err(CliError::Client(ClientError::ServerOutcome(format!(
+            "stream {close_status:?}"
+        ))))
     }
 }
 
@@ -1393,5 +1407,611 @@ fn observe_close(status: StreamClose, frames_shown: bool) -> (PresentationStatus
                 (PresentationStatus::Unknown, false)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{
+        CliError, ClientError, UsageCursorWire, UsageSummaryRequest, cli_from_matches,
+        ene_ctl_command,
+    };
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    fn parse(words: &[&str]) -> Result<super::Cli, CliError> {
+        let matches = ene_ctl_command()
+            .try_get_matches_from(std::iter::once(String::from("ene-ctl")).chain(args(words)))
+            .map_err(|error| CliError::Usage(error.to_string()))?;
+        cli_from_matches(matches)
+    }
+
+    fn clap_error(words: &[&str]) -> clap::error::ErrorKind {
+        match ene_ctl_command()
+            .try_get_matches_from(std::iter::once(String::from("ene-ctl")).chain(args(words)))
+        {
+            Ok(_) => panic!("{words:?} must fail"),
+            Err(error) => error.kind(),
+        }
+    }
+
+    #[test]
+    fn help_and_version_are_successful_clap_exits() {
+        assert!(matches!(
+            clap_error(&["--help"]),
+            clap::error::ErrorKind::DisplayHelp
+        ));
+        assert!(matches!(
+            clap_error(&["--version"]),
+            clap::error::ErrorKind::DisplayVersion
+        ));
+        // Subcommand help is standard too.
+        assert!(matches!(
+            clap_error(&["send", "--help"]),
+            clap::error::ErrorKind::DisplayHelp
+        ));
+    }
+
+    #[test]
+    fn missing_command_reports_usage() {
+        assert!(matches!(parse(&[]), Err(CliError::Usage(_))));
+        assert!(matches!(
+            parse(&["--config", "/tmp/ene.json"]),
+            Err(CliError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn config_is_global_and_keeps_the_last_value() {
+        let cli = parse(&["--config", "/tmp/ene.json", "status"]).expect("config plus status");
+        assert!(cli.config == Some(PathBuf::from("/tmp/ene.json")));
+        assert!(cli.command == super::cmds::Command::Status);
+        // `--config` after the subcommand is accepted as a global option.
+        let after = parse(&["status", "--config", "/tmp/ene.json"]).expect("config after status");
+        assert!(after.config == Some(PathBuf::from("/tmp/ene.json")));
+        let repeated = parse(&[
+            "--config",
+            "/tmp/a.json",
+            "--config",
+            "/tmp/b.json",
+            "status",
+        ])
+        .expect("a repeated --config keeps the last value");
+        assert!(repeated.config == Some(PathBuf::from("/tmp/b.json")));
+    }
+
+    #[test]
+    fn config_value_named_serve_stays_data() {
+        let cli = parse(&["--config", "serve", "status"]).expect("the value is not a command");
+        assert!(cli.config == Some(PathBuf::from("serve")));
+    }
+
+    #[test]
+    fn setup_forms_parse_and_invalid_combinations_report_usage() {
+        let show = parse(&["setup", "--show"]).expect("setup --show");
+        assert!(show.command == super::cmds::Command::Setup(super::cmds::SetupMode::Show));
+        let assign = parse(&["setup", "--provider", "openai", "--model", "gpt-x"])
+            .expect("setup assignment");
+        assert!(
+            assign.command
+                == super::cmds::Command::Setup(super::cmds::SetupMode::Assign {
+                    provider: String::from("openai"),
+                    model: String::from("gpt-x"),
+                    learning: false,
+                })
+        );
+        let learning = parse(&[
+            "setup",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-x",
+            "--learning",
+        ])
+        .expect("learning assignment");
+        assert!(matches!(
+            learning.command,
+            super::cmds::Command::Setup(super::cmds::SetupMode::Assign { learning: true, .. })
+        ));
+        for words in [
+            &["setup"][..],
+            &["setup", "--provider", "openai"][..],
+            &[
+                "setup",
+                "--show",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-x",
+            ][..],
+            &["setup", "--provider", "acme", "--model", "gpt-x"][..],
+            &["setup", "--provider", "openai", "--model", ""][..],
+            &["setup", "--unknown"][..],
+        ] {
+            assert!(
+                matches!(parse(words), Err(CliError::Usage(_))),
+                "{words:?} must be a usage error"
+            );
+        }
+    }
+
+    #[test]
+    fn send_forms_parse_and_end_of_options_carries_option_like_text() {
+        let joined = parse(&["send", "hello", "world"]).expect("send text");
+        assert!(
+            joined.command
+                == super::cmds::Command::Send(super::cmds::SendArgs {
+                    round: None,
+                    fresh: false,
+                    text: String::from("hello world"),
+                })
+        );
+        let literal = parse(&["send", "--", "--foo"]).expect("send -- --foo");
+        assert!(
+            literal.command
+                == super::cmds::Command::Send(super::cmds::SendArgs {
+                    round: None,
+                    fresh: false,
+                    text: String::from("--foo"),
+                }),
+            "`--` must carry option-like text, got {:?}",
+            literal.command
+        );
+        let round = parse(&["send", "--round", "round-7", "hi"]).expect("send --round");
+        assert!(matches!(
+            round.command,
+            super::cmds::Command::Send(super::cmds::SendArgs {
+                round: Some(_),
+                fresh: false,
+                ..
+            })
+        ));
+        let fresh = parse(&["send", "--new", "hi"]).expect("send --new");
+        assert!(matches!(
+            fresh.command,
+            super::cmds::Command::Send(super::cmds::SendArgs { fresh: true, .. })
+        ));
+        for words in [
+            &["send"][..],
+            &["send", "--new", "--round", "r", "hi"][..],
+            &["send", "--round"][..],
+            &["send", "--unknown", "hi"][..],
+        ] {
+            assert!(
+                matches!(parse(words), Err(CliError::Usage(_))),
+                "{words:?} must be a usage error"
+            );
+        }
+    }
+
+    #[test]
+    fn watch_history_and_memory_forms_parse() {
+        let watch = parse(&["watch", "--round", "round-7"]).expect("watch");
+        assert!(
+            watch.command
+                == super::cmds::Command::Watch {
+                    round: String::from("round-7")
+                }
+        );
+        assert!(matches!(parse(&["watch"]), Err(CliError::Usage(_))));
+        let default = parse(&["history"]).expect("history default");
+        assert!(
+            default.command
+                == super::cmds::Command::History {
+                    limit: super::cmds::DEFAULT_HISTORY_LIMIT
+                }
+        );
+        let limited = parse(&["history", "--limit", "7"]).expect("history --limit");
+        assert!(limited.command == super::cmds::Command::History { limit: 7 });
+        assert!(matches!(
+            parse(&["history", "--limit", "soon"]),
+            Err(CliError::Usage(_))
+        ));
+        let list = parse(&["memory", "--after", "memory-1"]).expect("memory page");
+        assert!(
+            list.command
+                == super::cmds::Command::Memory {
+                    after: Some(String::from("memory-1")),
+                    revisions: None,
+                    after_revision: None,
+                }
+        );
+        let detail = parse(&[
+            "memory",
+            "--revisions",
+            "memory-1",
+            "--after-revision",
+            "20",
+        ])
+        .expect("memory revisions");
+        assert!(
+            detail.command
+                == super::cmds::Command::Memory {
+                    after: None,
+                    revisions: Some(String::from("memory-1")),
+                    after_revision: Some(20),
+                }
+        );
+        for words in [
+            &["memory", "extra"][..],
+            &["memory", "--after", "a", "--revisions", "b"][..],
+            &["memory", "--after-revision", "3"][..],
+            &["memory", "--after"][..],
+        ] {
+            assert!(
+                matches!(parse(words), Err(CliError::Usage(_))),
+                "{words:?} must be a usage error"
+            );
+        }
+    }
+
+    #[test]
+    fn deletion_forms_parse() {
+        let request = parse(&["deletion", "--text", "leaked key"]).expect("deletion default");
+        assert!(
+            request.command
+                == super::cmds::Command::Deletion {
+                    text: String::from("leaked key"),
+                    purpose: ene_api::v1::deletion::DeletionPurposeWire::Privacy,
+                }
+        );
+        let security = parse(&["deletion", "--text", "-secret-", "--purpose", "security"])
+            .expect("deletion security");
+        assert!(
+            security.command
+                == super::cmds::Command::Deletion {
+                    text: String::from("-secret-"),
+                    purpose: ene_api::v1::deletion::DeletionPurposeWire::Security,
+                }
+        );
+        let status = parse(&[
+            "deletion-status",
+            "--cursor",
+            "deletion-status:x",
+            "--limit",
+            "7",
+        ])
+        .expect("deletion status");
+        assert!(
+            status.command
+                == super::cmds::Command::DeletionStatus {
+                    cursor: Some(String::from("deletion-status:x")),
+                    limit: Some(7),
+                }
+        );
+        for words in [
+            &["deletion"][..],
+            &["deletion", "--text", "x", "--purpose", "everything"][..],
+        ] {
+            assert!(
+                matches!(parse(words), Err(CliError::Usage(_))),
+                "{words:?} must be a usage error"
+            );
+        }
+    }
+
+    #[test]
+    fn task_and_undelivered_forms_parse() {
+        let tasks = parse(&["tasks"]).expect("tasks default");
+        assert!(
+            tasks.command
+                == super::cmds::Command::Tasks {
+                    cursor: None,
+                    limit: None,
+                }
+        );
+        let paged = parse(&["tasks", "--cursor", "c1", "--limit", "7"]).expect("tasks page");
+        assert!(
+            paged.command
+                == super::cmds::Command::Tasks {
+                    cursor: Some(String::from("c1")),
+                    limit: Some(7),
+                }
+        );
+        let report = parse(&["report", "--task", "task-1"]).expect("report");
+        assert!(
+            report.command
+                == super::cmds::Command::Report {
+                    task: String::from("task-1"),
+                    cursor: None,
+                    limit: None,
+                }
+        );
+        assert!(matches!(parse(&["report"]), Err(CliError::Usage(_))));
+        let source = parse(&["source", "--source", "s1", "--cursor", "9"]).expect("source");
+        assert!(
+            source.command
+                == super::cmds::Command::Source {
+                    source: String::from("s1"),
+                    cursor: Some(9),
+                    limit_bytes: None,
+                }
+        );
+        assert!(matches!(parse(&["source"]), Err(CliError::Usage(_))));
+        let select = parse(&["select-task", "--task", "task-2"]).expect("select-task");
+        assert!(
+            select.command
+                == super::cmds::Command::SelectTask {
+                    task: String::from("task-2")
+                }
+        );
+        let resume = parse(&[
+            "resume-task",
+            "--task",
+            "task-3",
+            "--revision",
+            "4",
+            "--purpose",
+            "task-3:4",
+            "--instruction",
+            "go on",
+        ])
+        .expect("resume-task");
+        assert!(
+            resume.command
+                == super::cmds::Command::ResumeTask {
+                    task: String::from("task-3"),
+                    revision: 4,
+                    purpose: String::from("task-3:4"),
+                    instruction: String::from("go on"),
+                }
+        );
+        assert!(matches!(
+            parse(&["resume-task", "--task", "t"]),
+            Err(CliError::Usage(_))
+        ));
+        let undelivered = parse(&["undelivered"]).expect("undelivered default");
+        assert!(
+            undelivered.command
+                == super::cmds::Command::Undelivered {
+                    cursor: None,
+                    limit: None,
+                    redisplay: false,
+                }
+        );
+        let rescan = parse(&["undelivered", "--redisplay", "--limit", "3"]).expect("redisplay");
+        assert!(
+            rescan.command
+                == super::cmds::Command::Undelivered {
+                    cursor: None,
+                    limit: Some(3),
+                    redisplay: true,
+                }
+        );
+    }
+
+    #[test]
+    fn unknown_flags_and_positionals_report_usage() {
+        assert!(matches!(
+            parse(&["tasks", "extra"]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            parse(&["status", "extra"]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            parse(&["status", "--verbose"]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(parse(&["frobnicate"]), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn exit_codes_split_outcome_from_failures() {
+        assert!(
+            CliError::Client(ClientError::ServerOutcome(String::from("stale"))).exit_code()
+                == std::process::ExitCode::from(2),
+            "server outcomes must exit 2"
+        );
+        for error in [
+            CliError::Usage(String::from("u")),
+            CliError::Client(ClientError::Transport(String::from("t"))),
+            CliError::Client(ClientError::Codec(String::from("c"))),
+            CliError::Client(ClientError::ServerRejected(String::from("r"))),
+            CliError::Client(ClientError::UnsupportedPlatform("p")),
+        ] {
+            assert!(
+                error.exit_code() == std::process::ExitCode::FAILURE,
+                "usage and technical failures must exit 1, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_failures_keep_distinct_meanings() {
+        use ene_api::v1::round::HistoryResponse;
+
+        assert!(
+            super::history_items(HistoryResponse::Items(Vec::new())).is_ok(),
+            "an empty read is a success"
+        );
+        for (response, expected, what) in [
+            (
+                HistoryResponse::InvalidRequest,
+                std::process::ExitCode::FAILURE,
+                "invalid request",
+            ),
+            (
+                HistoryResponse::Unavailable,
+                std::process::ExitCode::from(2),
+                "unavailable",
+            ),
+            (
+                HistoryResponse::StaleCompanion,
+                std::process::ExitCode::from(2),
+                "stale projection",
+            ),
+        ] {
+            let error = super::history_items(response)
+                .expect_err("a failure variant must not answer items");
+            assert!(
+                error.exit_code() == expected,
+                "{what} must keep its exit class, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn close_status_maps_presentation_and_success_separately() {
+        use ene_api::v1::round::PresentationStatus;
+        use ene_api::v1::round::StreamClose;
+
+        use super::observe_close;
+
+        for shown in [false, true] {
+            assert!(
+                observe_close(StreamClose::Completed, shown)
+                    == (PresentationStatus::Presented, true),
+                "completion always presents and succeeds, shown={shown}"
+            );
+        }
+        for status in [
+            StreamClose::Interrupted,
+            StreamClose::Cancelled,
+            StreamClose::Stale,
+        ] {
+            assert!(
+                observe_close(status, true) == (PresentationStatus::Presented, false),
+                "a shown-but-{status:?} stream observes presented yet fails"
+            );
+            assert!(
+                observe_close(status, false) == (PresentationStatus::Unknown, false),
+                "an unshown {status:?} stream observes unknown and fails"
+            );
+        }
+    }
+
+    #[test]
+    fn usage_forms_parse_into_filters_and_reject_misuse() {
+        use super::cmds::Command as Cmd;
+
+        let cli = parse(&[
+            "usage",
+            "--from",
+            "2026-09-01T00:00:00Z",
+            "--to",
+            "2026-09-02T00:00:00Z",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-x",
+            "--consumer",
+            "companion_dialogue",
+            "--purpose",
+            "dialogue_response",
+            "--status",
+            "reported",
+            "--cursor",
+            "cursor-1",
+            "--limit",
+            "10",
+        ])
+        .expect("the full usage form parses");
+        assert!(
+            cli.command
+                == Cmd::Usage(UsageSummaryRequest {
+                    from: Some(String::from("2026-09-01T00:00:00Z")),
+                    to: Some(String::from("2026-09-02T00:00:00Z")),
+                    provider: Some(String::from("openai")),
+                    model: Some(String::from("gpt-x")),
+                    consumer: Some(String::from("companion_dialogue")),
+                    purpose: Some(String::from("dialogue_response")),
+                    status: Some(String::from("reported")),
+                    cursor: Some(UsageCursorWire(String::from("cursor-1"))),
+                    limit: Some(10),
+                })
+        );
+        let bare = parse(&["usage"]).expect("a filter-less usage read parses");
+        assert!(
+            bare.command
+                == Cmd::Usage(UsageSummaryRequest {
+                    from: None,
+                    to: None,
+                    provider: None,
+                    model: None,
+                    consumer: None,
+                    purpose: None,
+                    status: None,
+                    cursor: None,
+                    limit: None,
+                })
+        );
+        assert!(matches!(
+            parse(&["usage", "--limit", "many"]),
+            Err(CliError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn usage_cap_forms_parse_and_validate_scope_pairing() {
+        use super::cmds::Command as Cmd;
+
+        let system = parse(&["usage-cap", "--limit-micros", "1000"])
+            .expect("the default system daily form parses");
+        assert!(
+            system.command
+                == Cmd::UsageCap {
+                    scope: String::from("system"),
+                    provider: None,
+                    window: String::from("daily_utc"),
+                    currency: String::from("USD"),
+                    limit_micros: 1_000,
+                }
+        );
+        let provider = parse(&[
+            "usage-cap",
+            "--scope",
+            "provider",
+            "--provider",
+            "openai",
+            "--window",
+            "monthly_utc",
+            "--currency",
+            "USD",
+            "--limit-micros",
+            "42",
+        ])
+        .expect("the provider monthly form parses");
+        assert!(
+            provider.command
+                == Cmd::UsageCap {
+                    scope: String::from("provider"),
+                    provider: Some(String::from("openai")),
+                    window: String::from("monthly_utc"),
+                    currency: String::from("USD"),
+                    limit_micros: 42,
+                }
+        );
+        // A scope/provider disagreement is a usage error, never a guessed
+        // slot.
+        assert!(matches!(
+            parse(&["usage-cap", "--scope", "provider", "--limit-micros", "1"]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            parse(&[
+                "usage-cap",
+                "--scope",
+                "system",
+                "--provider",
+                "openai",
+                "--limit-micros",
+                "1"
+            ]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            parse(&["usage-cap", "--scope", "global", "--limit-micros", "1"]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            parse(&["usage-cap", "--limit-micros", "many"]),
+            Err(CliError::Usage(_))
+        ));
     }
 }

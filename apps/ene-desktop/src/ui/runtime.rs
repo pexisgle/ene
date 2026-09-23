@@ -2,7 +2,6 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ene_api::v1::deletion::LocalErasureResult;
 use ene_api::v1::management::{ManagementOutcome, ManagementViewRequest};
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::StreamWireId;
@@ -17,7 +16,7 @@ use crate::body_supervise::{BodyStatus, BodySupervisor};
 use crate::control::ConfirmationClient;
 use crate::erasure::{self, GuiOwned};
 use crate::host_launch;
-use crate::i18n::{self, Locale};
+use crate::i18n::Locale;
 use crate::measure::WaylandFeedbackTraceLine;
 use crate::motion::{self, MotionEnvironment, MotionPlan};
 use crate::secret::SecretIntake;
@@ -47,10 +46,7 @@ pub struct DesktopRuntime {
     timeline: Vec<super::presentation::Message>,
     surface_erasure: Option<super::presentation::SurfaceErasure>,
     history: Vec<HistoryItem>,
-    deny_reason: String,
     facts: SetupFacts,
-    setup_completed: bool,
-    ui_ticks: u64,
     body: BodySupervisor,
     body_status: BodyStatus,
     body_placement: PlacementBox,
@@ -63,7 +59,6 @@ pub struct DesktopRuntime {
     usage: UsagePanel,
     deletion: DeletionPanel,
     search_draft: String,
-    last_erasure: Option<LocalErasureResult>,
     chat_receipt: Option<(String, Option<StreamWireId>)>,
 }
 
@@ -84,15 +79,12 @@ impl DesktopRuntime {
             timeline: Vec::new(),
             surface_erasure: None,
             history: Vec::new(),
-            deny_reason: String::new(),
             facts: SetupFacts {
                 credential_present: false,
                 consent_assigned: false,
                 model: None,
                 mark: String::new(),
             },
-            setup_completed: false,
-            ui_ticks: 0,
             body: BodySupervisor::new(),
             body_status: BodyStatus::Absent,
             body_placement: PlacementBox {
@@ -117,13 +109,11 @@ impl DesktopRuntime {
             usage: UsagePanel::default(),
             deletion: DeletionPanel::default(),
             search_draft: String::new(),
-            last_erasure: None,
             chat_receipt: None,
         }
     }
 
     pub fn tick(&mut self) {
-        self.ui_ticks = self.ui_ticks.saturating_add(1);
         self.body_status = self.body.poll();
         while let Some(fact) = self.body.take_local_ui() {
             match fact {
@@ -151,11 +141,6 @@ impl DesktopRuntime {
     }
 
     #[must_use]
-    pub fn ui_ticks(&self) -> u64 {
-        self.ui_ticks
-    }
-
-    #[must_use]
     pub fn snapshot(&self) -> GuiSnapshot {
         GuiSnapshot {
             locale: self.locale.as_tag().to_string(),
@@ -176,10 +161,8 @@ impl DesktopRuntime {
             composing: self.composer.composing(),
             tasks: self.tasks.list_lines(),
             task_detail: self.tasks.detail_text(),
-            deny_reason: self.deny_reason.clone(),
             body_status: format!("{:?}", self.body_status),
-            ui_ticks: self.ui_ticks,
-            setup_ready: self.facts.setup_ready() && self.setup_completed,
+            setup_ready: self.facts.setup_ready(),
             credential_present: self.facts.credential_present,
             consent_assigned: self.facts.consent_assigned,
             secret_visible: matches!(self.wizard_step, WizardStep::Credential),
@@ -380,29 +363,10 @@ impl DesktopRuntime {
         data_candidate
     }
 
-    pub fn ensure_host(&mut self, host_bin: Option<&Path>) -> Result<(), DesktopError> {
-        if host_launch::host_is_serving(&self.data_dir) {
-            return Ok(());
-        }
-        let binary = match host_bin
-            .map(Path::to_path_buf)
-            .or_else(host_launch::locate_host_binary)
-        {
-            Some(path) => path,
-            None => {
-                return Err(DesktopError::HostLaunch(String::from(
-                    "ene-core binary was not found",
-                )));
-            }
-        };
-        let detached = host_launch::detach_serve(&self.data_dir, &binary)
-            .map_err(|error| DesktopError::HostLaunch(error.to_string()))?;
-        if detached.pid == 0 {
-            return Err(DesktopError::HostLaunch(String::from(
-                "detached host reported pid 0",
-            )));
-        }
-        Ok(())
+    /// Detach `ene-core serve` when the Client listener is down.
+    pub fn ensure_host(&mut self) -> Result<(), DesktopError> {
+        host_launch::ensure_serving(&self.data_dir)
+            .map_err(|error| DesktopError::HostLaunch(error.to_string()))
     }
 
     pub fn attach_confirmation(
@@ -418,7 +382,6 @@ impl DesktopRuntime {
         match session::connect_or_pending(&self.data_dir, DESKTOP_DESCRIPTOR).await? {
             session::DesktopConnect::Paired(client) => {
                 self.adopt_client(*client);
-                self.deny_reason = String::new();
                 self.refresh_after_connect().await;
                 Ok(())
             }
@@ -486,6 +449,8 @@ impl DesktopRuntime {
 
     pub async fn begin_credential_put(&mut self) -> Result<(), DesktopError> {
         self.require_confirmation()?;
+        // Ordered before the empty check so a disconnected intake reports the
+        // transport state, not an empty-secret protocol error.
         self.ensure_client()?;
         if self.secret.is_empty() {
             return Err(DesktopError::Protocol(String::from(
@@ -545,7 +510,6 @@ impl DesktopRuntime {
                 tasks,
                 usage,
                 chat_receipt,
-                last_erasure,
                 surface_erasure,
                 ..
             } = self;
@@ -570,7 +534,6 @@ impl DesktopRuntime {
                     seat,
                     client.as_mut(),
                     &mut copies,
-                    last_erasure,
                     surface_erasure.as_ref(),
                 )
                 .await?
@@ -608,7 +571,6 @@ impl DesktopRuntime {
             }
             FromConfirmation::DeniedByBoundary => {
                 self.pending_pairing = None;
-                self.deny_reason = i18n::control_deny(self.locale, &reply);
                 self.page = Page::Wizard;
             }
             FromConfirmation::Outcome(
@@ -619,30 +581,15 @@ impl DesktopRuntime {
             )
             | FromConfirmation::Unavailable => {
                 self.pending_pairing = None;
-                self.deny_reason = i18n::control_deny(self.locale, &reply);
                 self.page = Page::Wizard;
             }
-            other => {
-                self.deny_reason = i18n::control_deny(self.locale, other);
-            }
+            _ => {}
         }
         self.flush_pending_erasure().await;
         Ok(reply)
     }
 
-    pub async fn send_confirmed_true_on_control(
-        &mut self,
-    ) -> Result<FromConfirmation, DesktopError> {
-        let seat = self.require_confirmation_mut()?;
-        let reply = seat.send_confirmed_true().await?;
-        if matches!(reply, FromConfirmation::DeniedByBoundary) {
-            self.deny_reason = i18n::control_deny(self.locale, &reply);
-        }
-        Ok(reply)
-    }
-
     pub async fn register_credential_intent(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
         let answer = {
@@ -660,7 +607,6 @@ impl DesktopRuntime {
         self.flush_pending_erasure().await;
         match answer {
             WirePayload::ManagementOutcome(outcome) => {
-                self.deny_reason = i18n::management_deny(self.locale, &outcome);
                 self.refresh_setup().await?;
                 Ok(outcome)
             }
@@ -672,7 +618,6 @@ impl DesktopRuntime {
     }
 
     pub async fn assign_model(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
         let model = self.model.clone();
@@ -694,7 +639,6 @@ impl DesktopRuntime {
                 "assignment did not return an outcome",
             )));
         };
-        self.deny_reason = i18n::management_deny(self.locale, &outcome);
         self.refresh_setup().await?;
         if matches!(outcome, ManagementOutcome::StoredAsRuleView { .. }) {
             let mark = self.facts.mark.clone();
@@ -712,13 +656,11 @@ impl DesktopRuntime {
             self.flush_pending_erasure().await;
             match complete_answer {
                 WirePayload::ManagementOutcome(complete) => {
-                    self.deny_reason = i18n::management_deny(self.locale, &complete);
-                    self.setup_completed = matches!(
+                    if !matches!(
                         complete,
                         ManagementOutcome::AppliedAsOneTime
                             | ManagementOutcome::StoredAsRuleView { .. }
-                    );
-                    if !self.setup_completed {
+                    ) {
                         return Ok(complete);
                     }
                 }
@@ -737,35 +679,6 @@ impl DesktopRuntime {
         Ok(outcome)
     }
 
-    pub async fn client_confirmed_true(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
-        self.refresh_setup().await?;
-        let mark = self.facts.mark.clone();
-        let answer = {
-            let client = self
-                .client
-                .as_mut()
-                .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
-            request_with_timeout(
-                client,
-                session::confirmed_true_intent(&mark),
-                Duration::from_secs(15),
-            )
-            .await?
-        };
-        self.flush_pending_erasure().await;
-        match answer {
-            WirePayload::ManagementOutcome(outcome) => {
-                self.deny_reason = i18n::management_deny(self.locale, &outcome);
-                Ok(outcome)
-            }
-            other => Err(DesktopError::Protocol(format!(
-                "expected ManagementOutcome, got {}",
-                other.message_type()
-            ))),
-        }
-    }
-
     pub fn take_client(&mut self) -> Option<Client> {
         self.tasks.reset_connection_state();
         self.client.take()
@@ -773,32 +686,6 @@ impl DesktopRuntime {
 
     pub fn restore_client(&mut self, client: Client) {
         self.adopt_client(client);
-    }
-
-    pub async fn reconnect(&mut self) -> Result<(), DesktopError> {
-        self.client = None;
-        self.tasks.reset_connection_state();
-        let mut attempts = 0_u8;
-        let client = loop {
-            match session::connect(&self.data_dir, DESKTOP_DESCRIPTOR).await {
-                Ok(client) => break client,
-                Err(ene_client::error::ClientError::Transport(error)) => {
-                    attempts = attempts.saturating_add(1);
-                    if attempts >= 80 {
-                        return Err(DesktopError::Client(
-                            ene_client::error::ClientError::Transport(error),
-                        ));
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                Err(error) => return Err(DesktopError::Client(error)),
-            }
-        };
-        self.adopt_client(client);
-        self.refresh_setup().await?;
-        self.refresh_history().await?;
-        self.refresh_tasks().await?;
-        Ok(())
     }
 
     pub async fn send_text(&mut self) -> Result<(), DesktopError> {
@@ -846,12 +733,13 @@ impl DesktopRuntime {
                     }
                 }
                 self.flush_pending_erasure().await;
-                self.refresh_history().await?;
+                // The round is committed and painted; a failed follow-up read
+                // must not report the accepted send as a failure.
+                let _result = self.refresh_history().await;
                 Ok(())
             }
             Err(error) => {
                 self.project_body_pose(PoseHint::Attention);
-                self.deny_reason = error.to_string();
                 self.timeline.push(super::presentation::Message {
                     owner: true,
                     text,
@@ -864,7 +752,6 @@ impl DesktopRuntime {
     }
 
     pub async fn refresh_history(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let history = {
             let client = self
                 .client
@@ -878,7 +765,6 @@ impl DesktopRuntime {
     }
 
     pub async fn refresh_setup(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let view = {
             let client = self
                 .client
@@ -935,7 +821,6 @@ impl DesktopRuntime {
         view_request: ManagementViewRequest,
         append: bool,
     ) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let view = {
             let client = self
                 .client
@@ -968,7 +853,6 @@ impl DesktopRuntime {
     }
 
     pub async fn refresh_tasks(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let result = {
             let client = self
                 .client
@@ -981,7 +865,6 @@ impl DesktopRuntime {
     }
 
     pub async fn select_listed_task(&mut self, index: usize) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let result = {
             let client = self
                 .client
@@ -997,7 +880,6 @@ impl DesktopRuntime {
         &mut self,
         path: &Path,
     ) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
         let result = {
@@ -1012,7 +894,6 @@ impl DesktopRuntime {
     }
 
     pub async fn cancel_displayed_task(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         self.refresh_setup().await?;
         let mark = self.facts.mark.clone();
         let result = {
@@ -1034,7 +915,6 @@ impl DesktopRuntime {
         &mut self,
         instruction: String,
     ) -> Result<ene_api::v1::undelivered::ResumeTaskOutcomeWire, DesktopError> {
-        self.ensure_client()?;
         let result = {
             let client = self
                 .client
@@ -1047,7 +927,6 @@ impl DesktopRuntime {
     }
 
     pub async fn present_task_undelivered(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         let result = {
             let client = self
                 .client
@@ -1062,7 +941,6 @@ impl DesktopRuntime {
     pub async fn ack_presented_tasks(
         &mut self,
     ) -> Result<ene_api::v1::undelivered::UndeliveredAckOutcome, DesktopError> {
-        self.ensure_client()?;
         let result = {
             let client = self
                 .client
@@ -1090,7 +968,6 @@ impl DesktopRuntime {
     }
 
     pub async fn refresh_usage(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         {
             let client = self
                 .client
@@ -1103,7 +980,6 @@ impl DesktopRuntime {
     }
 
     pub async fn next_usage_page(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         {
             let client = self
                 .client
@@ -1153,7 +1029,6 @@ impl DesktopRuntime {
     }
 
     pub async fn apply_usage_cap(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         let outcome = {
             let client = self
                 .client
@@ -1161,7 +1036,6 @@ impl DesktopRuntime {
                 .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.usage.apply_cap(client).await?
         };
-        self.deny_reason = i18n::management_deny(self.locale, &outcome);
         self.flush_pending_erasure().await;
         Ok(outcome)
     }
@@ -1176,7 +1050,6 @@ impl DesktopRuntime {
     }
 
     pub async fn request_deletion(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         let outcome = {
             let client = self
                 .client
@@ -1184,14 +1057,12 @@ impl DesktopRuntime {
                 .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.deletion.request(client).await?
         };
-        self.deny_reason = i18n::management_deny(self.locale, &outcome);
         self.page = Page::Deletion;
         self.flush_pending_erasure().await;
         Ok(outcome)
     }
 
     pub async fn deletion_confirmed_true(&mut self) -> Result<ManagementOutcome, DesktopError> {
-        self.ensure_client()?;
         let outcome = {
             let client = self
                 .client
@@ -1199,13 +1070,11 @@ impl DesktopRuntime {
                 .ok_or_else(|| DesktopError::Transport(String::from("client is not connected")))?;
             self.deletion.request_confirmed_true(client).await?
         };
-        self.deny_reason = i18n::management_deny(self.locale, &outcome);
         self.flush_pending_erasure().await;
         Ok(outcome)
     }
 
     pub async fn refresh_deletion(&mut self) -> Result<(), DesktopError> {
-        self.ensure_client()?;
         {
             let client = self
                 .client
@@ -1244,7 +1113,6 @@ impl DesktopRuntime {
             tasks,
             usage,
             chat_receipt,
-            last_erasure,
             surface_erasure,
             ..
         } = self;
@@ -1269,14 +1137,9 @@ impl DesktopRuntime {
                         deletion,
                         chat_receipt,
                     };
-                    let reply = pump_while_pending(
-                        resume,
-                        client,
-                        &mut copies,
-                        last_erasure,
-                        surface_erasure.as_ref(),
-                    )
-                    .await?;
+                    let reply =
+                        pump_while_pending(resume, client, &mut copies, surface_erasure.as_ref())
+                            .await?;
                     copies.deletion.note_resume(&reply);
                     reply
                 }
@@ -1305,11 +1168,6 @@ impl DesktopRuntime {
         self.deletion.has_operations()
     }
 
-    #[must_use]
-    pub fn last_erasure(&self) -> Option<&LocalErasureResult> {
-        self.last_erasure.as_ref()
-    }
-
     pub fn set_search_draft(&mut self, text: String) {
         self.search_draft = text;
     }
@@ -1326,7 +1184,6 @@ impl DesktopRuntime {
 
     async fn refresh_after_connect(&mut self) {
         if self.refresh_setup().await.is_ok() && self.facts.setup_ready() {
-            self.setup_completed = true;
             self.page = Page::Chat;
         }
         match self.refresh_history().await {
@@ -1352,13 +1209,7 @@ impl DesktopRuntime {
             deletion: &mut self.deletion,
             chat_receipt: &mut self.chat_receipt,
         };
-        apply_pending_erasure(
-            client,
-            &mut copies,
-            &mut self.last_erasure,
-            self.surface_erasure.as_ref(),
-        )
-        .await;
+        apply_pending_erasure(client, &mut copies, self.surface_erasure.as_ref()).await;
     }
 
     fn ensure_client(&self) -> Result<(), DesktopError> {
@@ -1375,7 +1226,6 @@ impl DesktopRuntime {
 async fn apply_pending_erasure(
     client: &mut Client,
     copies: &mut GuiOwned<'_>,
-    last_erasure: &mut Option<LocalErasureResult>,
     surface: Option<&super::presentation::SurfaceErasure>,
 ) {
     loop {
@@ -1388,7 +1238,6 @@ async fn apply_pending_erasure(
         {
             result.unverified.append(&mut result.wiped);
         }
-        *last_erasure = Some(result.clone());
         match client.report_local_erasure(result).await {
             Ok(()) | Err(_) => {}
         }
@@ -1399,14 +1248,13 @@ async fn complete_pending_pumping(
     seat: &mut ConfirmationClient,
     client: Option<&mut Client>,
     copies: &mut GuiOwned<'_>,
-    last_erasure: &mut Option<LocalErasureResult>,
     surface: Option<&super::presentation::SurfaceErasure>,
 ) -> Result<FromConfirmation, DesktopError> {
     let Some(client) = client else {
         return seat.complete_pending().await;
     };
     let complete = seat.complete_pending();
-    pump_while_pending(complete, client, copies, last_erasure, surface).await
+    pump_while_pending(complete, client, copies, surface).await
 }
 
 /// Drives one Client's frame pump while a seat-confirmation future is
@@ -1416,7 +1264,6 @@ async fn pump_while_pending<F>(
     pump: F,
     client: &mut Client,
     copies: &mut GuiOwned<'_>,
-    last_erasure: &mut Option<LocalErasureResult>,
     surface: Option<&super::presentation::SurfaceErasure>,
 ) -> F::Output
 where
@@ -1430,7 +1277,7 @@ where
                 match copies.deletion.refresh(client).await {
                     Ok(()) | Err(_) => {}
                 }
-                apply_pending_erasure(client, copies, last_erasure, surface).await;
+                apply_pending_erasure(client, copies, surface).await;
             }
         }
     }
@@ -1482,8 +1329,9 @@ impl DesktopRuntime {
                 .cloned(),
         );
         SurfaceSnapshot {
-            japanese: locale == Locale::Ja, connected: self.client.is_some(), ready: self.facts.setup_ready() && self.setup_completed,
+            japanese: locale == Locale::Ja, connected: self.client.is_some(), ready: self.facts.setup_ready(),
             credential: self.facts.credential_present, consent: self.facts.consent_assigned,
+            assigned_model: self.facts.model.clone().unwrap_or_else(|| String::from(DEFAULT_MODEL)),
             step: match self.wizard_step { WizardStep::Language => 0, WizardStep::BundledEne => 1, WizardStep::CloudCost => 2, WizardStep::Credential => 3, WizardStep::Assignment => 4 },
             status: if self.client.is_some() { tr(locale, "接続済み", "Connected") } else { tr(locale, "未接続 · セットアップを確認してください", "Disconnected · review setup") },
             body_available: self.body_status == BodyStatus::Spawned && self.body.available(),
@@ -1576,6 +1424,5 @@ mod tests {
             "the Owner's text must stay in the timeline: {:?}",
             snapshot.timeline
         );
-        assert!(!snapshot.deny_reason.is_empty());
     }
 }

@@ -5,7 +5,7 @@
 //! device pairs first while retaining its original connection, then
 //! advertises capability; a run with a stored device skips pairing and
 //! resolves its DeviceWireId at capability time, never by descriptor (#1389).
-//! Device identity and secret provisioning live in [`crate::device`].
+//! Device identity and secret provisioning live in the `device` module.
 //!
 //! A first run sends [`ene_api::v1::handshake::PairingRequest`]
 //! (display descriptor, pre-pairing sender with no device ID), which must
@@ -24,11 +24,11 @@
 //! Authentication ([`ene_api::v1::handshake::AuthChallenge`] /
 //! [`ene_api::v1::handshake::AuthProof`] /
 //! [`ene_api::v1::handshake::AuthResult`]) runs inside `connect`: after the negotiated terms arrive,
-//! the Host sends a challenge, this side answers with [`frames::proof_frame`] (the
-//! proof names the paired device, never the connection), and
-//! [`session::decide_auth`] plus [`Client::authenticate`] store the accepted
-//! connection key into the sender for all later frames. The trailing presence
-//! fact is consumed as the
+//! the Host sends a challenge, this side answers with `frames::proof_frame` (the
+//! proof names the paired device, never the connection), and the pure
+//! `session::decide_auth` step classifies the answer while the accepted
+//! connection key is stored into the sender for all later frames. The trailing
+//! presence fact is consumed as the
 //! session's first attribution before returning.
 //!
 //! Identity: pure requests ([`ene_api::v1::management::ManagementViewRequest`],
@@ -37,7 +37,7 @@
 //! ([`ene_api::v1::round::SubmitTextInput`] mints one, a
 //! [`ManagementIntent`](ene_api::v1::management::ManagementIntent) keeps its
 //! `intent_id`). [`Client::prepare`] retains that command identity caller-side
-//! so a lost reply is re-sent through [`Client::retry`] as the same command
+//! so a lost reply is re-sent through [`Client::execute`] as the same command
 //! with fresh message/request ids; [`Client::request`] is the one-shot
 //! convenience that does not expose the identity.
 //!
@@ -47,13 +47,13 @@
 //! accepted-connection answer appends the current presence fact, then any
 //! absence backlog), so `request` loops: an incoming frame whose `reply_to`
 //! matches is the answer and returns without further I/O; presence facts are
-//! absorbed into the [`session::SessionState`] and reading continues; any
+//! absorbed into the session state and reading continues; any
 //! other non-fact frame is pushed to the deferred queue (cap
-//! [`session::DEFERRED_CAP`], oldest-drop), which only buffers
-//! auto-presented summaries for [`session::SessionState::take_undelivered`],
-//! and reading continues — mismatches are never returned as answers, and
-//! auto-presented summaries are never silently dropped from the deferred
-//! queue. [`session::decide_frame`] is the pure per-frame step of that loop;
+//! `session::DEFERRED_CAP`, oldest-drop), which only buffers
+//! auto-presented summaries for the session's `take_undelivered`, and reading
+//! continues — mismatches are never returned as answers, and auto-presented
+//! summaries are never silently dropped from the deferred queue.
+//! `session::decide_frame` is the pure per-frame step of that loop;
 //! the deferred queue holds the rest.
 //!
 //! A pairing first answers
@@ -84,17 +84,16 @@
 
 use std::path::{Path, PathBuf};
 
-pub mod device;
+pub(crate) mod device;
 pub mod error;
-pub mod frames;
-pub mod incarnation;
+pub(crate) mod frames;
+pub(crate) mod incarnation;
 mod pairing;
-pub mod session;
+pub(crate) mod session;
 mod transport;
 
 pub use error::ClientError;
 pub use frames::PreparedRequest;
-pub use pairing::pairing_proof_hex;
 pub use transport::{Client, ConnectProgress, PendingPairingClient};
 
 pub const DEFAULT_COMPANION_REF: &str = "default";

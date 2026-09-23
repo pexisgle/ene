@@ -62,7 +62,6 @@ pub struct MemoryPage {
     revisions: Vec<MemoryRevisionRow>,
     next_revision_after: Option<u64>,
     notice: Option<String>,
-    last_request: Option<ManagementViewRequest>,
 }
 
 impl MemoryPage {
@@ -112,7 +111,6 @@ impl MemoryPage {
             self.next_revision_after = None;
             apply_list_body(self, body, false);
         }
-        self.last_request = Some(request);
     }
 
     #[must_use]
@@ -145,11 +143,8 @@ impl MemoryPage {
         self.notice.as_deref()
     }
 
-    #[must_use]
-    pub fn last_request(&self) -> Option<&ManagementViewRequest> {
-        self.last_request.as_ref()
-    }
-
+    /// Drops every Host-projected Memory copy this page holds. Old cursors
+    /// and revision views are invalid after this.
     pub fn wipe(&mut self) {
         *self = Self::default();
     }
@@ -364,4 +359,126 @@ fn parse_revision_line(line: &str) -> Option<MemoryRevisionRow> {
         grounds_summary: None,
         grounds: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HOST_MEMORY_SECTION, MemoryPage};
+    use ene_api::v1::management::{ManagementView, ViewSection};
+    use ene_api::v1::refs::ViewMarkWire;
+
+    fn view(body: &str) -> ManagementView {
+        ManagementView {
+            mark: ViewMarkWire(String::from("mark")),
+            sections: vec![ViewSection {
+                kind: String::from(HOST_MEMORY_SECTION),
+                title: String::from("Memory"),
+                body: body.to_owned(),
+            }],
+        }
+    }
+
+    #[test]
+    fn list_request_pages_at_the_host_cursor() {
+        let first = MemoryPage::list_request(None);
+        assert_eq!(first.sections, vec![String::from(HOST_MEMORY_SECTION)]);
+        assert!(first.memory_after.is_none());
+        assert!(first.memory_revisions_of.is_none());
+        assert!(first.memory_revisions_after.is_none());
+        let next = MemoryPage::list_request(Some("memory-1"));
+        assert_eq!(next.memory_after.as_deref(), Some("memory-1"));
+        assert!(next.memory_revisions_of.is_none());
+    }
+
+    #[test]
+    fn revision_request_is_not_a_list_scan() {
+        let request = MemoryPage::revisions_request("memory-2", Some(20));
+        assert_eq!(request.memory_revisions_of.as_deref(), Some("memory-2"));
+        assert_eq!(request.memory_revisions_after, Some(20));
+        assert!(request.memory_after.is_none());
+        assert_eq!(request.sections, vec![String::from(HOST_MEMORY_SECTION)]);
+    }
+
+    #[test]
+    fn list_page_projects_scope_importance_created_at_and_content() {
+        let mut page = MemoryPage::default();
+        page.apply_host_view(
+            &view(
+                "memory 11111111-1111-1111-1111-111111111111 scope=companion importance=4 temporal=enduring recall=active revision=1 updated=2026-09-19T05:00:00+00:00\ncontent: The owner prefers jasmine tea in the morning.\nnext: 22222222-2222-2222-2222-222222222222\n",
+            ),
+            MemoryPage::list_request(None),
+            false,
+        );
+        assert_eq!(page.rows().len(), 1);
+        let row = &page.rows()[0];
+        assert_eq!(row.scope, "companion");
+        assert_eq!(row.importance, "4");
+        assert_eq!(row.created_at, "2026-09-19T05:00:00+00:00");
+        assert_eq!(row.content, "The owner prefers jasmine tea in the morning.");
+        assert_eq!(
+            page.next_after(),
+            Some("22222222-2222-2222-2222-222222222222")
+        );
+        assert!(
+            !page.panel().contains("rev1") && !page.panel().contains("grounds summary"),
+            "the list page stays current recognition: {}",
+            page.panel()
+        );
+        let debug = format!("{row:?}");
+        assert!(
+            !debug.contains("jasmine"),
+            "row Debug redacts content: {debug}"
+        );
+    }
+
+    #[test]
+    fn older_page_appends_the_host_page_it_asked_for() {
+        let mut page = MemoryPage::default();
+        page.apply_host_view(
+            &view(
+                "memory 11111111-1111-1111-1111-111111111111 scope=companion importance=3 temporal=enduring recall=active revision=1 updated=2026-09-19T05:00:00+00:00\ncontent: newest\nnext: older-id\n",
+            ),
+            MemoryPage::list_request(None),
+            false,
+        );
+        page.apply_host_view(
+            &view(
+                "memory 22222222-2222-2222-2222-222222222222 scope=companion importance=3 temporal=enduring recall=active revision=1 updated=2026-09-19T04:00:00+00:00\ncontent: older\n",
+            ),
+            MemoryPage::list_request(Some("older-id")),
+            true,
+        );
+        assert_eq!(page.rows().len(), 2);
+        assert_eq!(page.rows()[1].content, "older");
+        assert!(page.next_after().is_none());
+    }
+
+    #[test]
+    fn revision_page_projects_history_and_grounds() {
+        let mut page = MemoryPage::default();
+        page.apply_host_view(
+            &view(
+                "  rev1 initial at=2026-09-19T05:00:00+00:00 content: The owner prefers jasmine tea in the morning.\n  grounds summary abcdef12: The owner prefers jasmine tea in the morning.\n  rev2 corrected-initially-wrong at=2026-09-19T06:00:00+00:00 content: The owner never liked jasmine tea.\n  grounds summary 34567890: The owner corrected the earlier memory.\nnext-revision: 2\n",
+            ),
+            MemoryPage::revisions_request("11111111-1111-1111-1111-111111111111", None),
+            false,
+        );
+        assert_eq!(page.revisions().len(), 2);
+        assert_eq!(page.revisions()[0].change, "initial");
+        assert_eq!(
+            page.revisions()[0].grounds.as_deref(),
+            Some("The owner prefers jasmine tea in the morning.")
+        );
+        assert_eq!(page.revisions()[1].change, "corrected-initially-wrong");
+        assert_eq!(page.next_revision_after(), Some(2));
+    }
+
+    #[test]
+    fn empty_host_list_is_a_notice_not_a_local_scan() {
+        let mut page = MemoryPage::default();
+        page.apply_host_view(&view("(none)"), MemoryPage::list_request(None), false);
+        assert!(page.rows().is_empty());
+        assert_eq!(page.notice(), Some("(none)"));
+        assert_eq!(page.panel(), "(none)");
+    }
 }

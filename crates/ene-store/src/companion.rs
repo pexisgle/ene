@@ -30,12 +30,11 @@ const SQL_FIND_COMPANION: &str = "SELECT companion_id FROM companion LIMIT 1";
 const SQL_INSERT_COMPANION: &str =
     "INSERT INTO companion (companion_id, lifecycle, created_at) VALUES (?1, ?2, ?3)";
 
-const SQL_SELECT_LIFECYCLE: &str = "SELECT lifecycle FROM companion WHERE companion_id = ?1";
-
 /// The companion lifecycle read for the Task resume commit (AU17): the same
 /// row the History appends compare, read inside the resume transaction so
 /// the `Running` requirement linearizes with the revision forward.
-pub(crate) const SQL_SELECT_COMPANION_LIFECYCLE: &str = SQL_SELECT_LIFECYCLE;
+pub(crate) const SQL_SELECT_LIFECYCLE: &str =
+    "SELECT lifecycle FROM companion WHERE companion_id = ?1";
 
 pub(crate) const SQL_SELECT_HISTORY_PREMISE: &str =
     "SELECT role, companion_id FROM history_message WHERE message_id = ?1";
@@ -106,18 +105,31 @@ const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, c
 const SQL_UPDATE_UNDELIVERED_STATUS: &str =
     "UPDATE undelivered SET status = ?1 WHERE undelivered_id = ?2";
 
-const SQL_UNPRESENTED_COLUMNS: &str = "row_seq, undelivered_id, companion_id, source_kind, source_id, source_phase, status, round_id, presence_generation, created_at";
-
-fn sql_select_unpresented() -> String {
-    format!(
-        "SELECT {SQL_UNPRESENTED_COLUMNS} FROM undelivered WHERE companion_id = ?1 AND status IN (?2, ?3) AND row_seq > ?4 AND row_seq <= ?5 ORDER BY row_seq ASC LIMIT ?6"
-    )
+/// The unpresented row projection shared by the paged and exact-identity
+/// reads, so both decode through [`RawUndelivered`] without drift.
+macro_rules! unpresented_projection {
+    () => {
+        "row_seq, undelivered_id, companion_id, source_kind, source_id, source_phase, status, round_id, presence_generation, created_at"
+    };
 }
+
+/// The bounded unpresented page: `Pending` and `PresentationUnknown` only,
+/// keyset over the non-reused insertion sequence, with the pass upper bound
+/// keeping rows registered while the pass runs out of it.
+const SQL_SELECT_UNPRESENTED: &str = concat!(
+    "SELECT ",
+    unpresented_projection!(),
+    " FROM undelivered WHERE companion_id = ?1 AND status IN (?2, ?3) AND row_seq > ?4 AND row_seq <= ?5 ORDER BY row_seq ASC LIMIT ?6"
+);
 
 fn sql_select_undelivered_by_ids(count: usize) -> String {
     let placeholders: Vec<String> = (0..count).map(|index| format!("?{}", index + 2)).collect();
     format!(
-        "SELECT {SQL_UNPRESENTED_COLUMNS} FROM undelivered WHERE companion_id = ?1 AND undelivered_id IN ({})",
+        concat!(
+            "SELECT ",
+            unpresented_projection!(),
+            " FROM undelivered WHERE companion_id = ?1 AND undelivered_id IN ({})"
+        ),
         placeholders.join(", ")
     )
 }
@@ -133,6 +145,16 @@ const SQL_EXCERPT_RESULT: &str = "SELECT length(CAST(body AS BLOB)), substr(CAST
 const SQL_EXCERPT_ATTEMPT: &str = "SELECT length(CAST(real_target AS BLOB)), substr(CAST(real_target AS BLOB), 1, ?2) FROM action_attempt WHERE attempt_id = ?1";
 
 const SQL_EXCERPT_ACTIVITY: &str = "SELECT length(CAST(body AS BLOB)), substr(CAST(body AS BLOB), 1, ?2) FROM activity_record WHERE activity_id = ?1";
+
+fn read_excerpt(
+    conn: &Connection,
+    sql: &str,
+    values: &[&dyn rusqlite::ToSql],
+) -> Result<Option<(i64, Vec<u8>)>, UndeliveredTechnicalError> {
+    conn.query_row(sql, values, |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()
+        .map_err(|error| undelivered_unavailable(error.to_string()))
+}
 
 /// Byte-bounded excerpt of one undelivered source's canonical body.
 ///
@@ -840,7 +862,7 @@ impl UndeliveredRepository for Store {
             let after_raw = encode_u64(after).map_err(undelivered_unavailable)?;
             let upper_raw = encode_u64(upper).map_err(undelivered_unavailable)?;
             let mut statement = guard
-                .prepare(&sql_select_unpresented())
+                .prepare(SQL_SELECT_UNPRESENTED)
                 .map_err(|error| undelivered_unavailable(error.to_string()))?;
             let rows = statement
                 .query_map(
@@ -865,11 +887,7 @@ impl UndeliveredRepository for Store {
             let next = (entries.len() == usize::try_from(cap).unwrap_or(usize::MAX)
                 && last_seq < upper)
                 .then(|| UndeliveredCursor::begin(last_seq, upper));
-            Ok(UndeliveredPage {
-                entries,
-                next,
-                pass_upper_bound: upper,
-            })
+            Ok(UndeliveredPage { entries, next })
         })
         .await
     }
@@ -941,57 +959,31 @@ impl Store {
             let cap = i64::from(max_bytes.max(1));
             let guard = lock_shared(&conn);
             let found: Option<(i64, Vec<u8>)> = match source {
-                UndeliveredSource::HistoryMessage(message) => guard
-                    .query_row(
-                        SQL_EXCERPT_HISTORY,
-                        params![encode_id(message), cap],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                UndeliveredSource::HistoryMessage(message) => {
+                    read_excerpt(&guard, SQL_EXCERPT_HISTORY, &[&encode_id(message), &cap])?
+                }
                 UndeliveredSource::TaskRecord {
                     fact: TaskFact::TaskRevision { task, revision },
                     ..
-                } => guard
-                    .query_row(
+                } => {
+                    let revision_raw = encode_u64(revision).map_err(undelivered_unavailable)?;
+                    read_excerpt(
+                        &guard,
                         SQL_EXCERPT_TASK_REVISION,
-                        params![
-                            encode_id(task),
-                            encode_u64(revision).map_err(undelivered_unavailable)?,
-                            cap
-                        ],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                        &[&encode_id(task), &revision_raw, &cap],
+                    )?
+                }
                 UndeliveredSource::TaskRecord {
                     fact: TaskFact::ResultRecorded(result) | TaskFact::ResultAdopted(result),
                     ..
-                } => guard
-                    .query_row(SQL_EXCERPT_RESULT, params![encode_id(result), cap], |row| {
-                        Ok((row.get(0)?, row.get(1)?))
-                    })
-                    .optional()
-                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                } => read_excerpt(&guard, SQL_EXCERPT_RESULT, &[&encode_id(result), &cap])?,
                 UndeliveredSource::TaskRecord {
                     fact: TaskFact::ActionAttempt { attempt, .. },
                     ..
-                } => guard
-                    .query_row(
-                        SQL_EXCERPT_ATTEMPT,
-                        params![encode_id(attempt), cap],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
-                UndeliveredSource::ActivityRecord(activity) => guard
-                    .query_row(
-                        SQL_EXCERPT_ACTIVITY,
-                        params![encode_id(activity), cap],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(|error| undelivered_unavailable(error.to_string()))?,
+                } => read_excerpt(&guard, SQL_EXCERPT_ATTEMPT, &[&encode_id(attempt), &cap])?,
+                UndeliveredSource::ActivityRecord(activity) => {
+                    read_excerpt(&guard, SQL_EXCERPT_ACTIVITY, &[&encode_id(activity), &cap])?
+                }
                 UndeliveredSource::TaskRecord {
                     fact: TaskFact::Delegation(_) | TaskFact::Terminal { .. },
                     ..
@@ -1018,7 +1010,7 @@ const SQL_INSERT_ACTIVITY: &str = "INSERT INTO activity_record (activity_id, com
 
 const SQL_SELECT_ACTIVITY: &str = "SELECT companion_id, kind, task_id, task_revision, purpose_adopted_revision, body, created_at FROM activity_record WHERE activity_id = ?1";
 
-const SQL_SELECT_ACTIVITY_BY_COMMAND: &str = "SELECT activity_id, companion_id, kind, task_id, task_revision, purpose_adopted_revision, body, created_at FROM activity_record WHERE command_id = ?1";
+const SQL_SELECT_ACTIVITY_BY_COMMAND: &str = "SELECT companion_id, kind, task_id, task_revision, purpose_adopted_revision, body, created_at, activity_id FROM activity_record WHERE command_id = ?1";
 
 pub(crate) const SQL_SELECT_ACTIVITY_PREMISE: &str = "SELECT companion_id, kind, task_id, task_revision, purpose_adopted_revision FROM activity_record WHERE activity_id = ?1";
 
@@ -1036,6 +1028,20 @@ struct StoredActivityRow {
     purpose_adopted_revision: Option<i64>,
     body: String,
     created_at: String,
+}
+
+impl StoredActivityRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            companion_text: row.get(0)?,
+            kind_text: row.get(1)?,
+            task_text: row.get(2)?,
+            task_revision: row.get(3)?,
+            purpose_adopted_revision: row.get(4)?,
+            body: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    }
 }
 
 fn decode_activity_row(
@@ -1112,20 +1118,7 @@ fn record_resume_activity_locked(
         .query_row(
             SQL_SELECT_ACTIVITY_BY_COMMAND,
             params![command_text],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    StoredActivityRow {
-                        companion_text: row.get(1)?,
-                        kind_text: row.get(2)?,
-                        task_text: row.get(3)?,
-                        task_revision: row.get(4)?,
-                        purpose_adopted_revision: row.get(5)?,
-                        body: row.get(6)?,
-                        created_at: row.get(7)?,
-                    },
-                ))
-            },
+            |row| Ok((row.get(7)?, StoredActivityRow::from_row(row)?)),
         )
         .optional()
         .map_err(|error| activity_unavailable(error.to_string()))?;
@@ -1179,17 +1172,7 @@ impl ActivityRepository for Store {
                 .query_row(
                     SQL_SELECT_ACTIVITY,
                     params![encode_id(activity.as_raw())],
-                    |row| {
-                        Ok(StoredActivityRow {
-                            companion_text: row.get(0)?,
-                            kind_text: row.get(1)?,
-                            task_text: row.get(2)?,
-                            task_revision: row.get(3)?,
-                            purpose_adopted_revision: row.get(4)?,
-                            body: row.get(5)?,
-                            created_at: row.get(6)?,
-                        })
-                    },
+                    StoredActivityRow::from_row,
                 )
                 .optional()
                 .map_err(|error| activity_unavailable(error.to_string()))?;

@@ -2,72 +2,6 @@ import { ScrollView, AboutSlint } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Action, NavItem, Heading, Caption, BodyText, Field, Notice, EmptyState, RowCard, StaticRowCard, Item } from "components.slint";
 
-component SetupPane inherits Rectangle {
-    in property <bool> japanese;
-    in-out property <int> step;
-    in property <bool> busy;
-    in-out property <string> model;
-    in-out property <string> secret-draft;
-    callback next();
-    callback back();
-    callback language(bool);
-    callback credential(string);
-    callback assign(string);
-    VerticalLayout {
-        spacing: 24px; alignment: start;
-        Caption { text: root.japanese ? "はじめの設定 · " + (root.step + 1) + " / 5" : "GETTING STARTED · " + (root.step + 1) + " / 5"; }
-        HorizontalLayout {
-            spacing: 6px; height: 3px;
-            for n in 5: Rectangle { height: 3px; border-radius: 2px; background: n <= root.step ? Theme.accent : Theme.border; }
-        }
-        Heading { text:
-            root.step == 0 ? (root.japanese ? "使いやすい言語で。" : "Make yourself at home.") :
-            root.step == 1 ? (root.japanese ? "あなたのパートナー、ene。" : "Meet your partner, ene.") :
-            root.step == 2 ? (root.japanese ? "送信するデータと費用" : "Your data and costs") :
-            root.step == 3 ? (root.japanese ? "AI に接続する準備" : "Connect your AI provider") :
-            (root.japanese ? "会話に使うモデル" : "Choose a model for conversation");
-        }
-        BodyText { text:
-            root.step == 0 ? (root.japanese ? "表示言語は、あとから設定で変更できます。" : "You can change the display language in Settings at any time.") :
-            root.step == 1 ? (root.japanese ? "ene と会話したり、作業を頼んだりできます。アバターが利用できなくても、会話と設定は使えます。" : "Talk with ene and ask for a hand with your work. Chat and settings work even without an avatar.") :
-            root.step == 2 ? (root.japanese ? "会話には OpenAI を使用します。メッセージや必要な会話の文脈がクラウドに送られ、利用に応じた料金が発生します。API キーの登録だけでは送信されません。" : "Conversation uses OpenAI. Your messages and necessary context are sent to the cloud and usage incurs a cost. Registering a key alone does not send a request.") :
-            root.step == 3 ? (root.japanese ? "OpenAI API キーを登録します。保存に対応していない環境では、登録できないことをお知らせします。" : "Register your OpenAI API key. If protected storage is unavailable, registration cannot complete.") :
-            (root.japanese ? "モデル名を確認してください。割り当てを確定すると、このモデルを会話に利用することに同意します。" : "Check the model name. Assigning it authorizes this model for conversation.");
-        }
-        if root.step == 0: HorizontalLayout {
-            spacing: 12px;
-            Action { text: "日本語"; selected: root.japanese; clicked => { root.language(true); } }
-            Action { text: "English"; selected: !root.japanese; clicked => { root.language(false); } }
-        }
-        if root.step == 3: Field {
-            height: 76px;
-            value <=> root.secret-draft;
-            label: "OpenAI API key"; hint: "sk-…"; password: true; enabled: !root.busy;
-        }
-        if root.step == 4: Field { label: root.japanese ? "モデル名" : "Model name"; hint: "gpt-5.6-luna"; value <=> root.model; enabled: !root.busy; }
-        HorizontalLayout {
-            spacing: 12px;
-            Action { text: root.japanese ? "戻る" : "Back"; enabled: root.step > 0 && !root.busy; clicked => { root.secret-draft = ""; root.back(); } }
-            Rectangle { horizontal-stretch: 1; }
-            Action {
-                text: root.busy ? (root.japanese ? "処理中…" : "Working…") :
-                    root.step == 3 ? (root.japanese ? "キーを登録" : "Register key") :
-                    root.step == 4 ? (root.japanese ? "同意して割り当て" : "Agree and assign") : (root.japanese ? "次へ" : "Continue");
-                primary: true;
-                // Credential presence in the setup view describes the assigned
-                // route. Before the first assignment it is false even after
-                // registration; the Host validates the selected credential.
-                enabled: !root.busy && (root.step != 3 || root.secret-draft != "") && (root.step != 4 || root.model != "");
-                clicked => {
-                    if root.step == 3 { root.credential(root.secret-draft); root.secret-draft = ""; }
-                    else if root.step == 4 { root.assign(root.model); }
-                    else { root.next(); }
-                }
-            }
-        }
-    }
-}
-
 export component ManagementWindow inherits Window {
     title: japanese ? "ene — 設定・管理" : "ene — Settings";
     preferred-width: 1000px; preferred-height: 720px;
@@ -87,6 +21,8 @@ export component ManagementWindow inherits Window {
     in property <bool> setup-ready;
     in property <bool> credential-present;
     in property <bool> consent-assigned;
+    /// The Host's durable model assignment; the wizard draft is `model`.
+    in property <string> assigned-model;
     in property <bool> avatar-available;
     in property <bool> avatar-visible;
     in property <bool> memory-more;
@@ -177,16 +113,59 @@ export component ManagementWindow inherits Window {
                     if root.page == 6: ScrollView {
                       content-width: self.width;
                       VerticalLayout { alignment: start;
-                       SetupPane {
-                        secret-draft <=> root.secret-draft;
+                       VerticalLayout {
+                        spacing: 24px; alignment: start;
                         max-width: 560px; horizontal-stretch: 1;
-                        japanese: root.japanese; step: root.step; busy: root.busy;
-                        model <=> root.model;
-                        next => { root.wizard-next(); }
-                        back => { root.wizard-back(); }
-                        language(ja) => { root.language(ja); }
-                        credential(value) => { root.register-secret(value); }
-                        assign(value) => { root.assign-model(value); }
+                        Caption { text: root.japanese ? "はじめの設定 · " + (root.step + 1) + " / 5" : "GETTING STARTED · " + (root.step + 1) + " / 5"; }
+                        HorizontalLayout {
+                            spacing: 6px; height: 3px;
+                            for n in 5: Rectangle { height: 3px; border-radius: 2px; background: n <= root.step ? Theme.accent : Theme.border; }
+                        }
+                        Heading { text:
+                            root.step == 0 ? (root.japanese ? "使いやすい言語で。" : "Make yourself at home.") :
+                            root.step == 1 ? (root.japanese ? "あなたのパートナー、ene。" : "Meet your partner, ene.") :
+                            root.step == 2 ? (root.japanese ? "送信するデータと費用" : "Your data and costs") :
+                            root.step == 3 ? (root.japanese ? "AI に接続する準備" : "Connect your AI provider") :
+                            (root.japanese ? "会話に使うモデル" : "Choose a model for conversation");
+                        }
+                        BodyText { text:
+                            root.step == 0 ? (root.japanese ? "表示言語は、あとから設定で変更できます。" : "You can change the display language in Settings at any time.") :
+                            root.step == 1 ? (root.japanese ? "ene と会話したり、作業を頼んだりできます。アバターが利用できなくても、会話と設定は使えます。" : "Talk with ene and ask for a hand with your work. Chat and settings work even without an avatar.") :
+                            root.step == 2 ? (root.japanese ? "会話には OpenAI を使用します。メッセージや必要な会話の文脈がクラウドに送られ、利用に応じた料金が発生します。API キーの登録だけでは送信されません。" : "Conversation uses OpenAI. Your messages and necessary context are sent to the cloud and usage incurs a cost. Registering a key alone does not send a request.") :
+                            root.step == 3 ? (root.japanese ? "OpenAI API キーを登録します。保存に対応していない環境では、登録できないことをお知らせします。" : "Register your OpenAI API key. If protected storage is unavailable, registration cannot complete.") :
+                            (root.japanese ? "モデル名を確認してください。割り当てを確定すると、このモデルを会話に利用することに同意します。" : "Check the model name. Assigning it authorizes this model for conversation.");
+                        }
+                        if root.step == 0: HorizontalLayout {
+                            spacing: 12px;
+                            Action { text: "日本語"; selected: root.japanese; clicked => { root.language(true); } }
+                            Action { text: "English"; selected: !root.japanese; clicked => { root.language(false); } }
+                        }
+                        if root.step == 3: Field {
+                            height: 76px;
+                            value <=> root.secret-draft;
+                            label: root.japanese ? "OpenAI API キー" : "OpenAI API key"; hint: "sk-…"; password: true; enabled: !root.busy;
+                        }
+                        if root.step == 4: Field { label: root.japanese ? "モデル名" : "Model name"; hint: "gpt-5.6-luna"; value <=> root.model; enabled: !root.busy; }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Action { text: root.japanese ? "戻る" : "Back"; enabled: root.step > 0 && !root.busy; clicked => { root.secret-draft = ""; root.wizard-back(); } }
+                            Rectangle { horizontal-stretch: 1; }
+                            Action {
+                                text: root.busy ? (root.japanese ? "処理中…" : "Working…") :
+                                    root.step == 3 ? (root.japanese ? "キーを登録" : "Register key") :
+                                    root.step == 4 ? (root.japanese ? "同意して割り当て" : "Agree and assign") : (root.japanese ? "次へ" : "Continue");
+                                primary: true;
+                                // Credential presence in the setup view describes the assigned
+                                // route. Before the first assignment it is false even after
+                                // registration; the Host validates the selected credential.
+                                enabled: !root.busy && (root.step != 3 || root.secret-draft != "") && (root.step != 4 || root.model != "");
+                                clicked => {
+                                    if root.step == 3 { root.register-secret(root.secret-draft); root.secret-draft = ""; }
+                                    else if root.step == 4 { root.assign-model(root.model); }
+                                    else { root.wizard-next(); }
+                                }
+                            }
+                        }
                        }
                       }
                     }
@@ -219,7 +198,7 @@ export component ManagementWindow inherits Window {
                                 Caption { text: root.japanese ? "接続と登録の状態" : "Connection and registration"; }
                                 StaticRowCard { item: { title: "OpenAI", body: root.japanese ? "会話に使う AI プロバイダー" : "AI provider for conversation", state: root.connected ? (root.japanese ? "接続済み" : "Connected") : (root.japanese ? "未接続" : "Disconnected") }; }
                                 StaticRowCard { item: { title: root.japanese ? "API キー" : "API key", body: root.japanese ? "キーの値はここには表示されません。" : "Your key is never displayed here.", state: root.credential-present ? (root.japanese ? "登録済み" : "Registered") : (root.japanese ? "未登録" : "Not registered") }; }
-                                StaticRowCard { item: { title: root.japanese ? "モデルの割り当て" : "Model assignment", body: root.model, state: root.consent-assigned ? (root.japanese ? "同意済み" : "Authorized") : (root.japanese ? "未設定" : "Not configured") }; }
+                                StaticRowCard { item: { title: root.japanese ? "モデルの割り当て" : "Model assignment", body: root.assigned-model, state: root.consent-assigned ? (root.japanese ? "同意済み" : "Authorized") : (root.japanese ? "未設定" : "Not configured") }; }
                                 Action { text: root.japanese ? "セットアップを開く" : "Open setup"; primary: true; clicked => { root.navigate(6); } }
                             }
                             if root.page == 2: VerticalLayout {

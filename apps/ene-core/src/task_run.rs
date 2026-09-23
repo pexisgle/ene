@@ -559,7 +559,7 @@ fn completed_observation(effect: &ObservedEffect, fact_recorded: bool) -> String
             }
             listing
         }
-        (ActionCertainty::ConfirmedSuccess, Some(ene_action::ActionOutput::Created { .. })) => {
+        (ActionCertainty::ConfirmedSuccess, Some(ene_action::ActionOutput::Created)) => {
             String::from("create ok")
         }
         (ActionCertainty::ConfirmedSuccess, Some(ene_action::ActionOutput::Updated)) => {
@@ -754,9 +754,10 @@ mod launcher_tests {
     struct NoProvider;
 
     impl ProviderTransport for NoProvider {
-        fn complete(
-            &self,
+        fn complete_streaming<'a>(
+            &'a self,
             _request: ene_inference::ProviderRequest,
+            _sink: &'a mut (dyn ene_inference::DeltaSink + Send),
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<
@@ -765,7 +766,7 @@ mod launcher_tests {
                             ene_inference::InferenceTechnicalError,
                         >,
                     > + Send
-                    + '_,
+                    + 'a,
             >,
         > {
             Box::pin(std::future::pending())

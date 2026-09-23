@@ -355,13 +355,29 @@ pub enum PreservationTechnicalError {
     UnknownOperation,
 }
 
+/// Canonical persistence boundary. Admission publishes operation, protected
+/// material, initial condition, known source correlations, and the required
+/// participant snapshot atomically before returning Started. No participant
+/// effects occur within these methods. On the first-party request path the
+/// known source correlations are enumerated from the owner's durable identity
+/// rows whose text carries the confirmed exact target (lifecycle §4.1 point
+/// 4).
+///
+/// Source-correlation invariant for the erasure-currentness hot path: an
+/// unfinished operation keeps `erasure_condition_source` rows only in its
+/// current sweep, and a completed operation keeps zero source rows. The
+/// completion boundary (A5; A1 exposes no completion authority) must close
+/// the current condition and delete the operation's material, hints, and all
+/// source rows atomically — historical `erasure_condition` rows may remain,
+/// but no source copy is kept for audit/history. Any remaining source row for
+/// a completed operation is canonical corruption and fails closed.
+///
+/// Participant invariant (same canonical store, no second registry): every
+/// operation carries a non-empty required participant snapshot from admission;
+/// every participant row tracks the operation's current sweep; a completed
+/// operation has every participant `Verified` for that sweep. Any other shape
+/// is canonical corruption and fails closed.
 pub trait PreservationRepository: Send + Sync {
-    fn start_targeted_deletion(
-        &self,
-        command: StartTargetedDeletionCommand,
-    ) -> impl std::future::Future<
-        Output = Result<StartTargetedDeletionOutcome, PreservationTechnicalError>,
-    > + Send;
     fn change_deletion_lifecycle(
         &self,
         expected: DeletionOperationRef,
@@ -454,6 +470,24 @@ pub trait PreservationRepository: Send + Sync {
     ) -> impl std::future::Future<
         Output = Result<ConfirmTargetedDeletionOutcome, PreservationTechnicalError>,
     > + Send;
+    /// Canonical admission for a request whose Owner confirmation is already
+    /// durable (crash recovery, and the intent path observing a confirmed
+    /// request). Adds no authority: without the durable confirmation row this
+    /// answers [`StartTargetedDeletionOutcome::ConfirmationRequired`].
+    ///
+    /// The admission transaction writes the operation, its protected material,
+    /// the initial condition, the required participant snapshot, and a durable
+    /// reconciliation cursor per known identity table, then publishes the
+    /// first bounded pages of the source correlations already known at
+    /// admission (lifecycle §4.1 point 4): the implementation enumerates the
+    /// owner's durable identity rows whose stored text carries the confirmed
+    /// exact target, in bounded pages, and associates the already-claimed uses
+    /// each page covers. A Client, model output, or caller never names a
+    /// source on this path. The page bound is a work bound, not a correctness
+    /// bound: the durable cursor lets
+    /// [`Self::reconcile_deletion_sources`] walk every remaining covered
+    /// identity to its end, and global completion refuses while that walk is
+    /// incomplete.
     fn start_confirmed_targeted_deletion(
         &self,
         request: DeletionRequestId,

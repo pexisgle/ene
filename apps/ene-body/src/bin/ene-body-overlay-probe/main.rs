@@ -59,9 +59,6 @@ async fn run() -> Result<(), ProbeError> {
     if std::env::var_os("ENE_BODY_SKIP_GPU").is_some() {
         options.try_gpu = false;
     }
-    if std::env::var_os("ENE_BODY_HEADLESS").is_some() {
-        options.try_native_overlay = false;
-    }
     let placement = initial_placement()?;
 
     let (mut to_body, body_reader) = tokio::io::duplex(64 * 1024);
@@ -86,7 +83,6 @@ async fn run() -> Result<(), ProbeError> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut frame = Vec::new();
     let mut chunk = [0_u8; 4096];
-    let mut body_done = false;
     loop {
         tokio::select! {
             line = lines.next_line() => {
@@ -105,28 +101,16 @@ async fn run() -> Result<(), ProbeError> {
                     eprintln!("probe: body closed its event stream");
                     break;
                 }
-                frame.extend_from_slice(&chunk[..read]);
-                while let Ok((event, used)) = decode_body(&frame) {
-                    frame.drain(..used);
-                    emit(&event)?;
-                    if matches!(event, BodyToParent::CleanExit) {
-                        frame.clear();
-                    }
-                }
+                absorb(&mut frame, &chunk[..read])?;
             }
             result = &mut body_future => {
-                body_done = true;
                 if let Err(error) = result {
                     return Err(ProbeError::Body(error));
                 }
                 eprintln!("probe: body exited");
-                break;
+                return Ok(());
             }
         }
-    }
-    if body_done {
-        drop(to_body);
-        return Ok(());
     }
     if let Err(error) = send(&mut to_body, &ParentToBody::Shutdown).await {
         eprintln!("probe: shutdown send failed: {error}");
@@ -143,11 +127,7 @@ async fn run() -> Result<(), ProbeError> {
                     if read == 0 {
                         break;
                     }
-                    frame.extend_from_slice(&chunk[..read]);
-                    while let Ok((event, used)) = decode_body(&frame) {
-                        frame.drain(..used);
-                        emit(&event)?;
-                    }
+                    absorb(&mut frame, &chunk[..read])?;
                 }
                 result = &mut body_future => {
                     // Drain the events the runtime wrote before it dropped its
@@ -157,11 +137,7 @@ async fn run() -> Result<(), ProbeError> {
                         if read == 0 {
                             break;
                         }
-                        frame.extend_from_slice(&chunk[..read]);
-                        while let Ok((event, used)) = decode_body(&frame) {
-                            frame.drain(..used);
-                            emit(&event)?;
-                        }
+                        absorb(&mut frame, &chunk[..read])?;
                     }
                     return result.map_err(ProbeError::Body);
                 }
@@ -295,6 +271,18 @@ async fn command(line: &str, writer: &mut tokio::io::DuplexStream) -> Result<boo
         send(writer, &message).await?;
     }
     Ok(true)
+}
+
+fn absorb(frame: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ProbeError> {
+    frame.extend_from_slice(bytes);
+    while let Ok((event, used)) = decode_body(frame) {
+        frame.drain(..used);
+        emit(&event)?;
+        if matches!(event, BodyToParent::CleanExit) {
+            frame.clear();
+        }
+    }
+    Ok(())
 }
 
 fn emit(event: &BodyToParent) -> Result<(), ProbeError> {
