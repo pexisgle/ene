@@ -51,7 +51,7 @@ Stage 5 のためだけに次を新設しません。
 
 - #1384 / #1385 / #1387 / #1389 は Stage 5 の実装と regression 確認で解消しました。
 - 設計間の不一致は [#1561](https://github.com/pexisgle/ene/issues/1561) で整理しました。
-- #1390（unknown wire variant）、#1508（learning correction interface）、#1530（`ScrubbedText` 構築境界）は Stage 5 の scope 外の follow-up として切り分けました。現在状態は GitHub Issue を source of truth とします。
+- unknown wire variant と learning correction interface は Stage 5 の scope 外の後続作業として切り分け、[基盤計画](../follow-ups/foundation.md)と [Learning 計画](../follow-ups/learning.md)で扱います。`ScrubbedText` 構築境界は独立した後続課題として扱います。
 
 ## 完了条件
 
