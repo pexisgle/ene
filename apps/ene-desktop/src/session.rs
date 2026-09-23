@@ -180,12 +180,12 @@ pub async fn submit_and_collect(
     lang: &str,
 ) -> Result<ChatTurn, DesktopError> {
     let companion = client.companion_ref();
+    let target = client.round_target();
     let send = request_with_timeout(
         client,
         WirePayload::SubmitTextInput(SubmitTextInput {
             companion: CompanionWireRef(companion),
-            round: None,
-            fresh: false,
+            target,
             local_id: ClientLocalId(uuid::Uuid::new_v4().to_string()),
             body: TextBodyWire {
                 text: text.to_string(),

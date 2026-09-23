@@ -4,8 +4,8 @@ use ene_api::v1::refs::{CommandWireId, RoundWireId, StreamWireId};
 use ene_api::v1::refs::{ConnectionWireId, RevalidationReasonWire};
 use ene_api::v1::round::{
     ConfirmPresentationWire, HISTORY_LIMIT_MAX, HistoryItem, HistoryRequest, HistoryResponse,
-    HistoryRole as HistoryRoleWire, PresentationStatus, RoundIntakeOutcomeWire, StreamClose,
-    SubmitTextInput, TextStreamClose, TextStreamFrameWire, TextStreamOpen,
+    HistoryRole as HistoryRoleWire, PresentationStatus, RoundIntakeOutcomeWire, RoundTarget,
+    StreamClose, SubmitTextInput, TextStreamClose, TextStreamFrameWire, TextStreamOpen,
 };
 use ene_companion::dialogue::{
     AcceptedDialogueInput, DialogueBegin, DialogueOutcome, ReplayClassification,
@@ -53,15 +53,11 @@ fn canonical_round_intent(
     submit: &SubmitTextInput,
     round_view: Option<&RoundWireId>,
 ) -> Option<RoundIntentMark> {
-    if submit.fresh {
-        return (submit.round.is_none() && round_view.is_none()).then_some(RoundIntentMark::New);
-    }
-    match (&submit.round, round_view) {
-        (None, None) => Some(RoundIntentMark::Auto),
-        (Some(round), view) if view.is_none_or(|view| view == round) => {
-            Some(RoundIntentMark::Existing(round.0.clone()))
+    match &submit.target {
+        RoundTarget::New => round_view.is_none().then_some(RoundIntentMark::New),
+        RoundTarget::Existing(round) => {
+            (round_view == Some(round)).then_some(RoundIntentMark::Existing(round.0.clone()))
         }
-        _ => None,
     }
 }
 
@@ -1256,5 +1252,69 @@ impl DeltaSink for StreamGate<'_> {
             self.seq += 1;
             DeltaFlow::Continue
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ene_api::v1::refs::{ClientLocalId, CompanionWireRef, RoundWireId, TextLangWire};
+    use ene_api::v1::round::{RoundTarget, SubmitTextInput, TextBodyWire};
+    use ene_companion::RoundIntentMark;
+
+    use super::canonical_round_intent;
+
+    fn submit(target: RoundTarget) -> SubmitTextInput {
+        SubmitTextInput {
+            companion: CompanionWireRef(String::from("companion-1")),
+            target,
+            local_id: ClientLocalId(String::from("local-1")),
+            body: TextBodyWire {
+                text: String::from("hello"),
+                lang: TextLangWire(String::from("en")),
+            },
+        }
+    }
+
+    fn round(name: &str) -> RoundWireId {
+        RoundWireId(String::from(name))
+    }
+
+    #[test]
+    fn round_targets_resolve_only_with_a_matching_observed_view() {
+        assert_eq!(
+            canonical_round_intent(&submit(RoundTarget::New), None),
+            Some(RoundIntentMark::New),
+            "New without an observed round starts one"
+        );
+        assert_eq!(
+            canonical_round_intent(
+                &submit(RoundTarget::Existing(round("r1"))),
+                Some(&round("r1"))
+            ),
+            Some(RoundIntentMark::Existing(String::from("r1"))),
+            "Existing joins the observed round"
+        );
+    }
+
+    #[test]
+    fn a_contradicted_observed_round_is_stale_instead_of_resolved() {
+        assert_eq!(
+            canonical_round_intent(&submit(RoundTarget::New), Some(&round("r1"))),
+            None,
+            "New cannot carry an observed round"
+        );
+        assert_eq!(
+            canonical_round_intent(&submit(RoundTarget::Existing(round("r1"))), None),
+            None,
+            "Existing must carry its own observed round"
+        );
+        assert_eq!(
+            canonical_round_intent(
+                &submit(RoundTarget::Existing(round("r1"))),
+                Some(&round("r2"))
+            ),
+            None,
+            "Existing cannot borrow a different observed round"
+        );
     }
 }

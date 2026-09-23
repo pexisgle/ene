@@ -269,7 +269,7 @@ mod tests {
         WireMessageType,
     };
     use ene_api::v1::reject::RejectKind;
-    use ene_api::v1::round::{SubmitTextInput, TextBodyWire};
+    use ene_api::v1::round::{RoundTarget, SubmitTextInput, TextBodyWire};
     use serde::Serialize;
 
     fn sample_frame() -> WireFrame {
@@ -288,8 +288,7 @@ mod tests {
         );
         let payload = WirePayload::SubmitTextInput(SubmitTextInput {
             companion: CompanionWireRef(String::from("companion-1")),
-            round: None,
-            fresh: false,
+            target: RoundTarget::New,
             local_id: ClientLocalId(String::from("local-1")),
             body: TextBodyWire {
                 text: String::from("hello"),
