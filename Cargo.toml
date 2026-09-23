@@ -8,7 +8,6 @@ edition = "2024"
 license = "MIT"
 publish = false
 
-# External dependency version policy for workspace crates.
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4.6", default-features = false, features = ["std", "help", "usage", "error-context"] }
@@ -22,24 +21,14 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 rmp-serde = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
-# Real OS credential store adapter for the first-party GUI setup path
-# (Windows Credential Manager, Linux Secret Service). Provisional per
-# first-party-desktop §7.4; the port and its fault-injection tests stay
-# independent of it.
 keyring = { version = "4", default-features = false, features = ["v1"] }
-# Provisional preferred text GUI for `apps/ene-desktop` only (winit,
-# Royalty-free Desktop + AboutSlint). Not a Host or Body dependency.
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "renderer-software", "unstable-winit-030", "accessibility"] }
 slint-build = "1.18"
 hmac = "0.13"
 sha2 = "0.11"
 subtle = "2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
-# Windows-only volume identity for the Action filesystem boundary, plus the
-# Stage 5 named-pipe transport (explicit DACL, peer token check).
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
-# Stage 7 D: Body is the only process that owns a GPU device. OS overlay
-# dependencies remain confined to that package.
 wgpu = "30"
 libc = "0.2"
 glam = "0.29"
@@ -65,18 +54,12 @@ let_underscore_must_use = "deny"
 todo = "deny"
 unimplemented = "deny"
 
-# Skip full debuginfo in the default dev profile. Line tables keep usable
-# backtraces; dependency crates do not need even that. This is the compile and
-# link cost that otherwise dominates a cold `cargo test --workspace`.
 [profile.dev]
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
 
-# The avatar runtime performs CPU skinning and alpha-aware hit-test
-# rasterization every frame. Unoptimized code regularly crosses Body's 100 ms
-# overload threshold and makes development builds pause rendering for a second.
 [profile.dev.package.ene-body]
 opt-level = 2
 
