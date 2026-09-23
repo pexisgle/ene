@@ -5110,13 +5110,7 @@ impl WssClient {
         Self::connect_with(dir, None, None, false, None).await
     }
 
-    async fn connect_with(
-        dir: &Path,
-        token: Option<&str>,
-        pin: Option<&str>,
-        origin: bool,
-        generation: Option<&str>,
-    ) -> Result<Self, String> {
+    async fn load_runtime(dir: &Path) -> Result<HostRuntimeInfo, String> {
         let runtime_path = dir.join(HOST_RUNTIME_FILE_NAME);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while !runtime_path.exists() {
@@ -5127,14 +5121,39 @@ impl WssClient {
         }
         let bytes =
             std::fs::read(&runtime_path).map_err(|error| format!("runtime read: {error}"))?;
-        let runtime: HostRuntimeInfo =
-            serde_json::from_slice(&bytes).map_err(|error| format!("runtime parse: {error}"))?;
+        serde_json::from_slice(&bytes).map_err(|error| format!("runtime parse: {error}"))
+    }
+
+    async fn connect_with(
+        dir: &Path,
+        token: Option<&str>,
+        pin: Option<&str>,
+        origin: bool,
+        generation: Option<&str>,
+    ) -> Result<Self, String> {
+        let runtime = Self::load_runtime(dir).await?;
         let port = runtime
             .local_port()
             .ok_or("runtime is not a local wss url")?;
         let tcp = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
             .await
             .map_err(|error| format!("connect: {error}"))?;
+        Self::handshake_on(&runtime, tcp, token, pin, origin, generation).await
+    }
+
+    /// Drives TLS and the WebSocket upgrade over an already-connected stream,
+    /// so a test can hold the stream between TCP connect and handshake.
+    async fn handshake_on(
+        runtime: &HostRuntimeInfo,
+        tcp: tokio::net::TcpStream,
+        token: Option<&str>,
+        pin: Option<&str>,
+        origin: bool,
+        generation: Option<&str>,
+    ) -> Result<Self, String> {
+        let port = runtime
+            .local_port()
+            .ok_or("runtime is not a local wss url")?;
         let expected_pin = pin.unwrap_or(&runtime.host_pin).to_owned();
         let config = ClientConfig::builder()
             .dangerous()
@@ -5288,6 +5307,142 @@ async fn raw_dial(dir: &Path) -> WssClient {
         .await
         .expect("the dial must finish")
         .expect("a same-machine client with the current token must upgrade")
+}
+
+#[tokio::test]
+async fn a_stalled_pre_auth_connection_does_not_delay_the_next_client() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+
+    let runtime = WssClient::load_runtime(dir.path())
+        .await
+        .expect("runtime must publish");
+    let port = runtime.local_port().expect("a local wss url");
+    // Client A completes the TCP handshake and then never speaks TLS, so its
+    // server-side upgrade stalls for the whole production upgrade timeout.
+    let stalled = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .expect("the stalled client must connect");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Client B must not pay Client A's upgrade timeout (production: 10s).
+    let connected = tokio::time::timeout(Duration::from_secs(5), WssClient::connect(dir.path()))
+        .await
+        .expect("the next client must not wait for the stalled upgrade")
+        .expect("the next client must upgrade");
+    drop(connected);
+
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+    drop(stalled);
+}
+
+#[tokio::test]
+async fn an_upgrade_in_progress_survives_unrelated_select_activity() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+
+    let runtime = WssClient::load_runtime(dir.path())
+        .await
+        .expect("runtime must publish");
+    let port = runtime.local_port().expect("a local wss url");
+    let tcp = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .expect("the slow client must connect");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Unrelated branches of the serving loop fire while that upgrade is in
+    // flight: other connections are accepted, upgraded, served and closed,
+    // and the control listener takes a requester that immediately leaves.
+    for _ in 0..3 {
+        let other = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .expect("another client must connect");
+        drop(other);
+    }
+    drop(
+        tokio::time::timeout(Duration::from_secs(5), WssClient::connect(dir.path()))
+            .await
+            .expect("the other client must not hang either")
+            .expect("another client must upgrade"),
+    );
+    drop(
+        ene_core::host_control::ControlClient::connect(dir.path())
+            .await
+            .expect("the control listener must answer"),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The slow client now finishes its handshake: the in-flight upgrade must
+    // have survived every unrelated branch firing in the meantime.
+    let finished = tokio::time::timeout(
+        Duration::from_secs(5),
+        WssClient::handshake_on(&runtime, tcp, None, None, false, None),
+    )
+    .await
+    .expect("the in-flight upgrade must complete")
+    .expect("the in-flight upgrade must succeed");
+    drop(finished);
+
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn shutdown_joins_a_stalled_pre_auth_upgrade() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+
+    let runtime = WssClient::load_runtime(dir.path())
+        .await
+        .expect("runtime must publish");
+    let port = runtime.local_port().expect("a local wss url");
+    let stalled = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .expect("the stalled client must connect");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    stop.send_replace(true);
+    // Shutdown must stop the stalled upgrade task instead of waiting out its
+    // production timeout.
+    let joined = tokio::time::timeout(Duration::from_secs(6), server)
+        .await
+        .expect("shutdown must not wait out the upgrade timeout")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+    drop(stalled);
 }
 
 #[tokio::test]

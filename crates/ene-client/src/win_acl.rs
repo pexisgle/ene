@@ -8,7 +8,7 @@ use std::os::windows::io::FromRawHandle as _;
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::{
-    GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    CloseHandle, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -76,19 +76,36 @@ unsafe fn sid_to_string(sid: PSID) -> Option<String> {
     Some(owned)
 }
 
-fn current_user_sid_string() -> std::io::Result<String> {
-    let mut token: HANDLE = std::ptr::null_mut();
-    // SAFETY: `token` is an out-parameter the API initializes on success.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-        return Err(last_error("OpenProcessToken"));
+struct ProcessToken(HANDLE);
+
+impl ProcessToken {
+    fn open() -> std::io::Result<Self> {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: `token` is an out-parameter the API initializes on success.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(last_error("OpenProcessToken"));
+        }
+        Ok(Self(token))
     }
+}
+
+impl Drop for ProcessToken {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from a successful OpenProcessToken and is
+        // closed exactly once here, on every exit path.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn current_user_sid_string() -> std::io::Result<String> {
+    let token = ProcessToken::open()?;
     let mut buffer = vec![0_u8; 128];
     let mut returned = 0_u32;
     // SAFETY: `buffer` is large enough for TOKEN_USER plus its SID header;
     // on failure we return instead of reading it.
     if unsafe {
         GetTokenInformation(
-            token,
+            token.0,
             TokenUser,
             buffer.as_mut_ptr().cast::<c_void>(),
             buffer.len() as u32,
@@ -235,4 +252,37 @@ pub(crate) fn owner_only_ok(path: &Path) -> std::io::Result<bool> {
         unsafe { LocalFree(descriptor.cast::<c_void>()) };
     }
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use windows_sys::Win32::System::Threading::GetProcessHandleCount;
+
+    use super::*;
+
+    fn handle_count() -> u32 {
+        let mut count = 0_u32;
+        // SAFETY: `count` is an out-parameter the API fills on success.
+        assert!(
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) } != 0,
+            "the process handle count must be readable"
+        );
+        count
+    }
+
+    #[test]
+    fn repeated_sid_lookups_do_not_leak_token_handles() {
+        for _ in 0..20 {
+            current_user_sid_string().expect("the user sid must read");
+        }
+        let before = handle_count();
+        for _ in 0..1000 {
+            current_user_sid_string().expect("the user sid must read");
+        }
+        let growth = handle_count().saturating_sub(before);
+        assert!(
+            growth < 500,
+            "1000 token reads must not grow the handle table; it grew by {growth}"
+        );
+    }
 }

@@ -239,13 +239,47 @@ pub(crate) fn remove_runtime(data_dir: &Path) -> Result<(), CoreError> {
     }
 }
 
-pub(crate) enum Accepted {
-    Ready {
-        socket: Box<HostWebSocket>,
-        class: crate::conn::TransportClass,
-        permit: OwnedSemaphorePermit,
-    },
-    Rejected,
+/// An admitted TCP connection holding its `MAX_CONNECTIONS` permit while its
+/// own TLS handshake and WebSocket upgrade run, independent of the accept
+/// loop and of every other connection.
+pub(crate) struct PendingUpgrade {
+    stream: tokio::net::TcpStream,
+    permit: OwnedSemaphorePermit,
+    acceptor: tokio_rustls::TlsAcceptor,
+    token: String,
+    startup_generation: String,
+}
+
+impl PendingUpgrade {
+    /// Completes this connection's handshake under the production upgrade
+    /// timeout. `None` releases the admission permit without ever reaching
+    /// the connection table; success transfers the permit onward.
+    pub(crate) async fn finish(self) -> Option<(HostWebSocket, OwnedSemaphorePermit)> {
+        let Self {
+            stream,
+            permit,
+            acceptor,
+            token,
+            startup_generation,
+        } = self;
+        let check = UpgradeCheck {
+            token,
+            startup_generation,
+        };
+        let upgraded = tokio::time::timeout(UPGRADE_TIMEOUT, async move {
+            let tls = acceptor.accept(stream).await.ok()?;
+            let socket =
+                tokio_tungstenite::accept_hdr_async_with_config(tls, check, Some(ws_config()))
+                    .await
+                    .ok()?;
+            Some(socket)
+        })
+        .await;
+        match upgraded {
+            Ok(Some(socket)) => Some((socket, permit)),
+            Ok(None) | Err(_) => None,
+        }
+    }
 }
 
 pub(crate) struct WssListener {
@@ -288,37 +322,26 @@ impl WssListener {
         })
     }
 
-    pub(crate) async fn accept(&self) -> Result<Accepted, CoreError> {
+    /// Takes the next TCP connection and admits it under a bounded permit.
+    /// Cancel-safe: while pending only the listener is held, and an accepted
+    /// connection is returned in the same poll it arrives; `Ok(None)` means
+    /// the connection limit refused it without queueing.
+    pub(crate) async fn accept(&self) -> Result<Option<PendingUpgrade>, CoreError> {
         let (stream, _) = self
             .listener
             .accept()
             .await
             .map_err(|error| CoreError::Bind(format!("accept on the WSS listener: {error}")))?;
-        let permit = match Arc::clone(&self.connections).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => return Ok(Accepted::Rejected),
+        let Ok(permit) = Arc::clone(&self.connections).try_acquire_owned() else {
+            return Ok(None);
         };
-        let check = UpgradeCheck {
+        Ok(Some(PendingUpgrade {
+            stream,
+            permit,
+            acceptor: self.acceptor.clone(),
             token: self.token.clone(),
             startup_generation: self.startup_generation.clone(),
-        };
-        let upgraded = tokio::time::timeout(UPGRADE_TIMEOUT, async {
-            let tls = self.acceptor.accept(stream).await.map_err(|_| ())?;
-            let socket =
-                tokio_tungstenite::accept_hdr_async_with_config(tls, check, Some(ws_config()))
-                    .await
-                    .map_err(|_| ())?;
-            Ok::<_, ()>(socket)
-        })
-        .await;
-        match upgraded {
-            Ok(Ok(socket)) => Ok(Accepted::Ready {
-                socket: Box::new(socket),
-                class: crate::conn::TransportClass::SameMachine,
-                permit,
-            }),
-            Ok(Err(())) | Err(_) => Ok(Accepted::Rejected),
-        }
+        }))
     }
 }
 

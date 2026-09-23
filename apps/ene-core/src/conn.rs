@@ -724,16 +724,24 @@ where
             accepted = wss.accept() => {
                 match accepted {
                     Err(error) => break Err(error),
-                    Ok(wss::Accepted::Rejected) => {}
-                    Ok(wss::Accepted::Ready { socket, class, permit }) => {
-                        let socket = *socket;
-                        let connection = table.note_accept(class);
+                    Ok(None) => {}
+                    Ok(Some(pending)) => {
+                        let mut stop = composition.handlers.stop.subscribe();
                         let handle = Arc::clone(&handle);
                         let transport = Arc::clone(&transport);
                         let table = Arc::clone(&table);
-                        let stop = composition.handlers.stop.subscribe();
                         composition.handlers.tasks.spawn(async move {
-                            serve_connection(socket, connection, handle, transport, table, stop, permit).await;
+                            let upgraded = tokio::select! {
+                                biased;
+                                () = wait_for_shutdown(&mut stop) => None,
+                                upgraded = pending.finish() => upgraded,
+                            };
+                            let Some((socket, permit)) = upgraded else {
+                                return;
+                            };
+                            let connection = table.note_accept(TransportClass::SameMachine);
+                            serve_connection(socket, connection, handle, transport, table, stop, permit)
+                                .await;
                         });
                     }
                 }
