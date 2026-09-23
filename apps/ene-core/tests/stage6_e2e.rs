@@ -62,6 +62,12 @@ use tokio_rustls::TlsConnector;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+// Mirrors `crate::wss::{AUTH_DEADLINE, MAX_PENDING_PAIRINGS}`; integration
+// tests cannot name pub(crate) items, so a drift breaks these tests instead
+// of silently weakening production.
+const MIRRORED_AUTH_DEADLINE: Duration = Duration::from_secs(15);
+const MIRRORED_MAX_PENDING_PAIRINGS: usize = 8;
+
 const DESCRIPTOR: &str = "stage6 e2e";
 const MODEL: &str = "gpt-4o-mini";
 const TARGET: &str = "TS6-DELETION-CANARY-9137";
@@ -5101,7 +5107,7 @@ struct WssClient {
 
 impl WssClient {
     async fn connect(dir: &Path) -> Result<Self, String> {
-        Self::connect_with(dir, None, None, false).await
+        Self::connect_with(dir, None, None, false, None).await
     }
 
     async fn connect_with(
@@ -5109,6 +5115,7 @@ impl WssClient {
         token: Option<&str>,
         pin: Option<&str>,
         origin: bool,
+        generation: Option<&str>,
     ) -> Result<Self, String> {
         let runtime_path = dir.join(HOST_RUNTIME_FILE_NAME);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -5143,6 +5150,7 @@ impl WssClient {
             .await
             .map_err(|error| format!("tls: {error}"))?;
         let presented_token = token.unwrap_or(&runtime.local_token);
+        let presented_generation = generation.unwrap_or(&runtime.startup_generation).to_owned();
         let mut request = format!("wss://127.0.0.1:{port}/")
             .into_client_request()
             .map_err(|error| format!("build request: {error}"))?;
@@ -5150,8 +5158,7 @@ impl WssClient {
             .parse::<tokio_tungstenite::tungstenite::http::HeaderValue>()
             .map_err(|error| format!("token header: {error}"))?;
         request.headers_mut().insert("authorization", authorization);
-        let generation = runtime
-            .startup_generation
+        let generation = presented_generation
             .parse::<tokio_tungstenite::tungstenite::http::HeaderValue>()
             .map_err(|error| format!("generation header: {error}"))?;
         request
@@ -5382,7 +5389,7 @@ async fn the_host_refuses_an_upgrade_without_the_current_local_token() {
     ));
     let refusal = match tokio::time::timeout(
         Duration::from_secs(15),
-        WssClient::connect_with(dir.path(), Some("not-the-token"), None, false),
+        WssClient::connect_with(dir.path(), Some("not-the-token"), None, false, None),
     )
     .await
     {
@@ -5416,7 +5423,7 @@ async fn the_host_refuses_an_upgrade_that_carries_an_origin() {
     ));
     let refusal = match tokio::time::timeout(
         Duration::from_secs(15),
-        WssClient::connect_with(dir.path(), None, None, true),
+        WssClient::connect_with(dir.path(), None, None, true, None),
     )
     .await
     {
@@ -5476,6 +5483,11 @@ async fn the_runtime_information_is_published_while_serving_and_removed_on_grace
     let path = dir.path().join(HOST_RUNTIME_FILE_NAME);
     let bytes = std::fs::read(&path).expect("runtime information must be published");
     let runtime: HostRuntimeInfo = serde_json::from_slice(&bytes).expect("runtime must parse");
+    let rendered = format!("{runtime:?}");
+    assert!(
+        !rendered.contains(&runtime.local_token),
+        "runtime Debug must redact the local token: {rendered}"
+    );
     assert!(
         runtime.local_port().is_some(),
         "the published url is a local wss endpoint: {}",
@@ -5676,4 +5688,307 @@ async fn reconnect_reauths_without_restoring_presence_and_a_fresh_summon_serves(
     );
     drop(c2);
     served.stop().await;
+}
+
+#[tokio::test]
+async fn the_host_refuses_a_stale_startup_generation() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let refusal = match tokio::time::timeout(
+        Duration::from_secs(15),
+        WssClient::connect_with(dir.path(), None, None, false, Some("stale-generation")),
+    )
+    .await
+    {
+        Ok(Ok(_)) => panic!("a stale startup generation must be refused"),
+        Ok(Err(refusal)) => refusal,
+        Err(_) => panic!("the refusal must finish in time"),
+    };
+    assert!(
+        refusal.contains("403"),
+        "the refusal is a forbidden response: {refusal}"
+    );
+    let runtime: HostRuntimeInfo = serde_json::from_slice(
+        &std::fs::read(dir.path().join(HOST_RUNTIME_FILE_NAME)).expect("runtime must read"),
+    )
+    .expect("runtime must parse");
+    assert!(
+        !refusal.contains(&runtime.local_token),
+        "the refusal must not echo the local token: {refusal}"
+    );
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn text_and_malformed_frames_close_the_connection() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    for attempt in 0..2_u8 {
+        let mut client = raw_dial(dir.path()).await;
+        use futures_util::{SinkExt as _, StreamExt as _};
+        if attempt == 0 {
+            client
+                .socket
+                .send(Message::Text("not part of the wire".into()))
+                .await
+                .expect("text must send");
+        } else {
+            client
+                .socket
+                .send(Message::Binary(vec![0xC1_u8, 0x01, 0xAA].into()))
+                .await
+                .expect("malformed body must send");
+        }
+        let closed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match client.socket.next().await {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                    Some(Ok(_)) => continue,
+                }
+            }
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "the Host must close the connection after a {} frame",
+            if attempt == 0 { "text" } else { "malformed" }
+        );
+    }
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn a_pre_auth_connection_that_never_negotiates_is_closed_at_the_machine_deadline() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let mut silent = raw_dial(dir.path()).await;
+    // Freeze only the clock to cross the machine deadline; every socket
+    // operation stays on the real clock.
+    tokio::time::pause();
+    tokio::time::advance(MIRRORED_AUTH_DEADLINE + Duration::from_secs(5)).await;
+    tokio::time::resume();
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        use futures_util::StreamExt as _;
+        loop {
+            match silent.socket.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "a machine-controlled pre-auth stall must be closed at the deadline"
+    );
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn owner_confirmation_may_exceed_the_machine_deadline() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let pending = dial_until_pending(dir.path())
+        .await
+        .expect("the first pairing must pend");
+    // The owner reads the confirmation for longer than the machine deadline.
+    tokio::time::pause();
+    tokio::time::advance(MIRRORED_AUTH_DEADLINE + Duration::from_secs(30)).await;
+    tokio::time::resume();
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let approved = handle
+        .approve_device(pending.pending_id())
+        .await
+        .expect("approval must succeed");
+    assert!(approved.is_some(), "approval must pair");
+    let mut client = pending
+        .complete()
+        .await
+        .expect("the connection must survive an owner wait longer than the machine deadline");
+    let companion = client.companion_ref();
+    let answer = ask(
+        &mut client,
+        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
+        "post-approval history",
+    )
+    .await
+    .expect("the approved connection must answer");
+    assert!(
+        matches!(answer, WirePayload::HistoryResponse(_)),
+        "got {answer:?}"
+    );
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn an_idle_client_keeps_one_connection_alive_past_the_liveness_window() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let pending = dial_until_pending(dir.path())
+        .await
+        .expect("the first pairing must pend");
+    let approved = handle
+        .approve_device(pending.pending_id())
+        .await
+        .expect("approval must succeed");
+    assert!(approved.is_some(), "approval must pair");
+    let mut client = pending
+        .complete()
+        .await
+        .expect("provision must authenticate");
+    // Idle far past the host's liveness window: only the clock moves, and
+    // the transport's background pump keeps answering the Host's pings.
+    tokio::time::pause();
+    for _ in 0..12 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+    tokio::time::resume();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let companion = client.companion_ref();
+    let answer = ask(
+        &mut client,
+        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
+        "history after idle",
+    )
+    .await
+    .expect("the same connection must still answer after more than the liveness window of idling");
+    assert!(
+        matches!(answer, WirePayload::HistoryResponse(_)),
+        "got {answer:?}"
+    );
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn pending_pairings_are_capped_with_a_typed_denial() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let mut held: Vec<WssClient> = Vec::new();
+    let mut denied = false;
+    for index in 0..=MIRRORED_MAX_PENDING_PAIRINGS {
+        let mut client = raw_dial(dir.path()).await;
+        let mut pairing = WireFrame {
+            envelope: crafted_envelope("PairingRequest"),
+            payload: WirePayload::PairingRequest(PairingRequest {
+                device_descriptor: format!("pending-{index}"),
+            }),
+        };
+        pairing.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
+        client.send_wire(&pairing).await;
+        let reply = client.recv_wire().await;
+        match reply.payload {
+            WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation { .. }) => {
+                assert!(
+                    !denied,
+                    "the cap must only refuse once the limit is reached"
+                );
+                held.push(client);
+            }
+            WirePayload::PairingResult(PairingResult::Denied { reason }) => {
+                assert_eq!(
+                    index, MIRRORED_MAX_PENDING_PAIRINGS,
+                    "only the connection past the cap is refused"
+                );
+                assert!(
+                    reason.contains("too many pending pairings"),
+                    "the refusal names the bound: {reason}"
+                );
+                denied = true;
+            }
+            other => panic!(
+                "pairing must answer pending or denied, got {}",
+                other.message_type()
+            ),
+        }
+    }
+    assert!(
+        denied,
+        "the {MIRRORED_MAX_PENDING_PAIRINGS}th pending pairing must be refused"
+    );
+    drop(held);
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
 }

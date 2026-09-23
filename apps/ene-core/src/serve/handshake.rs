@@ -31,6 +31,7 @@ impl HostHandle {
         if descriptor.is_empty() {
             return vec![denied_pairing(frame, live, "blank device descriptor")];
         }
+        let _creation = self.pairing_creation.lock().await;
         if let Some(resend) = self.pairing_deliveries.resend_match(
             &live.connection_id,
             frame.envelope.correlation.request_id,
@@ -52,10 +53,19 @@ impl HostHandle {
             };
         }
         let origin = live.connection_id.0.as_hyphenated().to_string();
+        match DevicePairingRepository::list_pending(&self.store).await {
+            Ok(pending) if pending.len() >= crate::wss::MAX_PENDING_PAIRINGS => {
+                return vec![denied_pairing(frame, live, "too many pending pairings")];
+            }
+            Ok(_) => {}
+            Err(_) => return vec![denied_pairing(frame, live, "pairing store unavailable")],
+        }
         match DevicePairingRepository::request_pairing(&self.store, descriptor.clone(), origin)
             .await
         {
             Ok(pending) => {
+                live.authority
+                    .note_awaiting_owner_confirmation(&live.connection_id);
                 if !self.pairing_deliveries.bind_pending(
                     &live.connection_id,
                     &pending.pending_id,

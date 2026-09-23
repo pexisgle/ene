@@ -946,6 +946,7 @@ fn ene_client_manifest_stays_a_client_library() {
 
 mod wss_session {
     use std::path::Path;
+    use std::time::Duration;
 
     use ene_api::codec::{DecodedFrame, WireFrame, decode_frame, encode_frame};
     use ene_api::runtime::{HOST_RUNTIME_FILE_NAME, HostRuntimeInfo};
@@ -1012,17 +1013,12 @@ mod wss_session {
             ),
         };
         let json = serde_json::to_vec(&runtime).expect("runtime encodes");
-        let path = dir.join(HOST_RUNTIME_FILE_NAME);
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&path).expect("runtime file must open");
-        std::io::Write::write_all(&mut file, &json).expect("runtime must write");
-        file.sync_all().expect("runtime must flush");
+        crate::runtime_info::write_protected_file(
+            &dir.join(HOST_RUNTIME_FILE_NAME),
+            &json,
+            "mini-host runtime",
+        )
+        .expect("runtime must publish");
         MiniHost {
             listener,
             acceptor: tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)),
@@ -1287,6 +1283,111 @@ mod wss_session {
     }
 
     #[tokio::test]
+    async fn a_probe_confirms_the_serving_host_and_trusts_nothing_new() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let host = start_host(dir.path()).await;
+        let dir_path = dir.path().to_path_buf();
+        let responder = tokio::spawn(async move {
+            loop {
+                let _upgrade = host.accept_upgrade().await;
+            }
+        });
+        let probe_dir = dir_path.clone();
+        let confirmed =
+            tokio::task::spawn_blocking(move || crate::probe::probe_serving_host(&probe_dir))
+                .await
+                .expect("probe task must not panic");
+        assert!(confirmed, "the serving mini-host must probe as serving");
+        assert!(
+            !dir_path.join(crate::host_pin::HOST_PIN_FILE_NAME).exists(),
+            "probing must never adopt or write trust of its own"
+        );
+        responder.abort();
+    }
+
+    #[tokio::test]
+    async fn a_stale_runtime_with_an_unrelated_listener_is_not_serving() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let stray = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("stray listener binds");
+        let port = stray.local_addr().expect("stray address").port();
+        let dropper = tokio::spawn(async move {
+            loop {
+                if stray.accept().await.is_err() {
+                    break;
+                }
+                // Dropping the accepted socket ends any handshake at once.
+            }
+        });
+        let stale = HostRuntimeInfo {
+            url: format!("wss://127.0.0.1:{port}"),
+            host_pin: String::from(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            startup_generation: String::from("stale-generation"),
+            local_token: String::from("stale-token-marker-xyz"),
+        };
+        let json = serde_json::to_vec(&stale).expect("stale runtime encodes");
+        crate::runtime_info::write_protected_file(
+            &dir.path().join(HOST_RUNTIME_FILE_NAME),
+            &json,
+            "stale runtime",
+        )
+        .expect("stale runtime must publish");
+        let probe_dir = dir.path().to_path_buf();
+        let serving =
+            tokio::task::spawn_blocking(move || crate::probe::probe_serving_host(&probe_dir))
+                .await
+                .expect("probe task must not panic");
+        assert!(
+            !serving,
+            "a stale runtime file over an unrelated listener is not serving"
+        );
+        dropper.abort();
+    }
+
+    #[tokio::test]
+    async fn a_host_certificate_outside_the_trusted_pin_is_refused_at_connect() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let host = start_host(dir.path()).await;
+        let other_pin =
+            String::from("1111111111111111111111111111111111111111111111111111111111111111");
+        let runtime = HostRuntimeInfo {
+            host_pin: other_pin,
+            ..host.runtime.clone()
+        };
+        let json = serde_json::to_vec(&runtime).expect("runtime encodes");
+        crate::runtime_info::write_protected_file(
+            &dir.path().join(HOST_RUNTIME_FILE_NAME),
+            &json,
+            "pin swap",
+        )
+        .expect("runtime must rewrite");
+        let dir_path = dir.path().to_path_buf();
+        let responder = tokio::spawn(async move {
+            loop {
+                let _upgrade = host.accept_upgrade().await;
+            }
+        });
+        let attempt = tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::Client::begin_connect(dir_path.as_path(), "fake host", "test"),
+        )
+        .await
+        .expect("the attempt must finish");
+        match attempt {
+            Err(crate::error::ClientError::Transport(reason)) => assert!(
+                reason.contains("TLS handshake with the Host failed"),
+                "the pin mismatch surfaces as a TLS refusal: {reason}"
+            ),
+            Err(other) => panic!("expected a TLS transport refusal, got {other:?}"),
+            Ok(_) => panic!("a certificate outside the trusted pin must be refused"),
+        }
+        responder.abort();
+    }
+
+    #[tokio::test]
     async fn an_oversize_host_message_is_refused_by_the_frame_cap() {
         let dir = tempfile::tempdir().expect("test dir");
         let device = DeviceWireId(uuid::Uuid::new_v4());
@@ -1326,5 +1427,135 @@ mod wss_session {
             ),
             other => panic!("the receive cap must refuse at the transport layer, got {other:?}"),
         }
+    }
+}
+
+mod runtime_protection {
+    use ene_api::runtime::{HOST_RUNTIME_FILE_NAME, HostRuntimeInfo};
+
+    use crate::error::ClientError;
+
+    fn sample_runtime() -> HostRuntimeInfo {
+        HostRuntimeInfo {
+            url: String::from("wss://127.0.0.1:9"),
+            host_pin: String::from("b0b0"),
+            startup_generation: String::from("generation-1"),
+            local_token: String::from("secret-token-marker-zzz9"),
+        }
+    }
+
+    fn write_runtime(dir: &std::path::Path, runtime: &HostRuntimeInfo) {
+        let json = serde_json::to_vec(runtime).expect("runtime encodes");
+        crate::runtime_info::write_protected_file(
+            &dir.join(HOST_RUNTIME_FILE_NAME),
+            &json,
+            "test runtime",
+        )
+        .expect("runtime must publish");
+    }
+
+    #[derive(serde::Serialize)]
+    struct StoredPin {
+        pin: String,
+    }
+
+    fn write_stored_pin(dir: &std::path::Path, pin: &str) {
+        let json = serde_json::to_vec(&StoredPin {
+            pin: pin.to_owned(),
+        })
+        .expect("pin encodes");
+        crate::runtime_info::write_protected_file(
+            &dir.join(crate::host_pin::HOST_PIN_FILE_NAME),
+            &json,
+            "test pin",
+        )
+        .expect("pin must store");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_runtime_is_refused_without_leaking_the_token() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("test dir");
+        let runtime = sample_runtime();
+        let path = dir.path().join(HOST_RUNTIME_FILE_NAME);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&runtime).expect("runtime encodes"),
+        )
+        .expect("runtime must write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+            .expect("chmod must apply");
+        let error = crate::runtime_info::load_host_runtime(dir.path())
+            .expect_err("a world-readable runtime file must be refused");
+        let text = error.to_string();
+        assert!(
+            text.contains("owner"),
+            "the refusal names the protection: {text}"
+        );
+        assert!(
+            !text.contains(&runtime.local_token),
+            "no token leaks: {text}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_default_acl_runtime_is_refused_without_leaking_the_token() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let runtime = sample_runtime();
+        let path = dir.path().join(HOST_RUNTIME_FILE_NAME);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&runtime).expect("runtime encodes"),
+        )
+        .expect("runtime must write");
+        let error = crate::runtime_info::load_host_runtime(dir.path())
+            .expect_err("a default-ACL runtime file must be refused");
+        let text = error.to_string();
+        assert!(
+            text.contains("owner"),
+            "the refusal names the protection: {text}"
+        );
+        assert!(
+            !text.contains(&runtime.local_token),
+            "no token leaks: {text}"
+        );
+    }
+
+    #[test]
+    fn a_changed_host_pin_is_refused_until_the_owner_re_trusts_it() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let runtime = sample_runtime();
+        write_runtime(dir.path(), &runtime);
+        write_stored_pin(dir.path(), "aaaa");
+
+        let error = crate::host_pin::establish_host_pin(dir.path(), &runtime)
+            .expect_err("a changed pin must refuse the connection");
+        match &error {
+            ClientError::HostPinMismatch { stored, offered } => {
+                assert_eq!(stored, "aaaa", "the refusal reports the trusted pin");
+                assert_eq!(offered, &runtime.host_pin, "and the offered one");
+            }
+            other => panic!("expected HostPinMismatch, got {other:?}"),
+        }
+        assert!(
+            !error.to_string().contains(&runtime.local_token),
+            "no token leaks: {error}"
+        );
+
+        let wrong = crate::host_pin::trust_host_pin(dir.path(), "cccc")
+            .expect_err("a confirmation that is not the offered pin must change nothing");
+        assert!(
+            wrong.to_string().contains("does not match"),
+            "the refusal explains the mismatch: {wrong}"
+        );
+        let trusted = crate::host_pin::trust_host_pin(dir.path(), &runtime.host_pin)
+            .expect("the owner confirmed the offered pin");
+        assert_eq!(trusted, runtime.host_pin);
+        let accepted = crate::host_pin::establish_host_pin(dir.path(), &runtime)
+            .expect("the confirmed pin now matches");
+        assert_eq!(accepted, runtime.host_pin);
     }
 }

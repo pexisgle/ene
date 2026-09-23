@@ -3,9 +3,7 @@ use std::path::PathBuf;
 
 #[cfg(unix)]
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio_tungstenite::tungstenite::Message;
@@ -91,6 +89,8 @@ pub(crate) enum InstallOutcome {
 struct ConnectionRecord {
     class: TransportClass,
     phase: ConnectionPhase,
+    preauth_deadline: tokio::time::Instant,
+    awaiting_owner_confirmation: bool,
     paired_device: Option<String>,
     incarnation: Option<ClientIncarnationId>,
     negotiated: Option<NegotiatedConnection>,
@@ -129,6 +129,8 @@ impl ConnectionTable {
             ConnectionRecord {
                 class,
                 phase: ConnectionPhase::Accepted,
+                preauth_deadline: tokio::time::Instant::now() + wss::AUTH_DEADLINE,
+                awaiting_owner_confirmation: false,
                 paired_device: None,
                 incarnation: None,
                 negotiated: None,
@@ -149,7 +151,36 @@ impl ConnectionTable {
         }
         record.paired_device = Some(device_wire.to_string());
         record.phase = ConnectionPhase::Paired;
+        // The owner already confirmed; only the machine-controlled
+        // capability/auth exchange may still stall.
+        record.preauth_deadline = tokio::time::Instant::now() + wss::AUTH_DEADLINE;
         true
+    }
+
+    /// The first pairing request on this connection switches the pre-auth
+    /// bound from a machine handshake timeout to the owner-confirmation
+    /// limit (IPC §10.2); later resends of the same pending never extend it.
+    pub(crate) fn note_awaiting_owner_confirmation(&self, id: &ConnectionWireId) {
+        let mut table = crate::lock_unpoison(&self.inner);
+        let Some(record) = table.records.get_mut(id) else {
+            return;
+        };
+        if record.awaiting_owner_confirmation {
+            return;
+        }
+        record.awaiting_owner_confirmation = true;
+        record.preauth_deadline = tokio::time::Instant::now() + wss::OWNER_CONFIRMATION_LIMIT;
+    }
+
+    pub(crate) fn preauth_expired(&self, id: &ConnectionWireId) -> bool {
+        let table = crate::lock_unpoison(&self.inner);
+        let Some(record) = table.records.get(id) else {
+            return false;
+        };
+        matches!(
+            record.phase,
+            ConnectionPhase::Accepted | ConnectionPhase::Paired | ConnectionPhase::Challenged
+        ) && tokio::time::Instant::now() > record.preauth_deadline
     }
 
     pub(crate) fn note_challenged(
@@ -765,7 +796,7 @@ async fn read_ws_frames(
     mut stream: HostStream,
     frames: tokio::sync::mpsc::Sender<DecodedFrame>,
     peer_pings: tokio::sync::mpsc::Sender<Vec<u8>>,
-    last_activity: Arc<AtomicU64>,
+    last_activity: Arc<StdMutex<tokio::time::Instant>>,
 ) {
     while let Some(message) = stream.next().await {
         match message {
@@ -790,19 +821,17 @@ async fn read_ws_frames(
     }
 }
 
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+/// Liveness uses the tokio clock so the monitor and paused-time tests read
+/// the same timeline; a transport pong only refreshes this stamp and never
+/// counts as presence or a presentation acknowledgement.
+fn touch_activity(last_activity: &StdMutex<tokio::time::Instant>) {
+    let mut stamp = crate::lock_unpoison(last_activity);
+    *stamp = tokio::time::Instant::now();
 }
 
-fn touch_activity(last_activity: &AtomicU64) {
-    last_activity.store(now_millis(), Ordering::Relaxed);
-}
-
-fn activity_idle(last_activity: &AtomicU64) -> std::time::Duration {
-    let last = last_activity.load(Ordering::Relaxed);
-    std::time::Duration::from_millis(now_millis().saturating_sub(last))
+fn activity_idle(last_activity: &StdMutex<tokio::time::Instant>) -> std::time::Duration {
+    let stamp = *crate::lock_unpoison(last_activity);
+    tokio::time::Instant::now().saturating_duration_since(stamp)
 }
 
 #[derive(Clone, Copy)]
@@ -918,7 +947,7 @@ async fn serve_connection<T>(
     let (frames_tx, mut frames_rx) =
         tokio::sync::mpsc::channel::<DecodedFrame>(STREAM_BUFFER_FRAMES);
     let (peer_ping_tx, mut peer_ping_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
-    let last_activity = Arc::new(AtomicU64::new(now_millis()));
+    let last_activity = Arc::new(StdMutex::new(tokio::time::Instant::now()));
     let reader = AbortOnDrop {
         task: Some(tokio::spawn(read_ws_frames(
             read_half,
@@ -927,8 +956,7 @@ async fn serve_connection<T>(
             Arc::clone(&last_activity),
         ))),
     };
-    let born = Instant::now();
-    let mut last_ping = Instant::now();
+    let mut next_ping = tokio::time::Instant::now() + wss::PING_INTERVAL;
     let mut suspected = false;
     let mut held: std::collections::VecDeque<DecodedFrame> = std::collections::VecDeque::new();
     let mut monitor = tokio::time::interval(wss::MONITOR_TICK);
@@ -1135,19 +1163,11 @@ async fn serve_connection<T>(
                     // presentation ACK or presence, and a suspected connection
                     // holds new inbound work in `held` instead of dispatching it.
                     suspected = idle >= wss::SUSPECT_AFTER;
-                    if matches!(
-                        table.phase_of(&connection),
-                        Some(
-                            ConnectionPhase::Accepted
-                                | ConnectionPhase::Paired
-                                | ConnectionPhase::Challenged
-                        )
-                    ) && born.elapsed() >= wss::AUTH_DEADLINE
-                    {
+                    if table.preauth_expired(&connection) {
                         break 'connection;
                     }
-                    if last_ping.elapsed() >= wss::PING_INTERVAL {
-                        last_ping = Instant::now();
+                    if tokio::time::Instant::now() >= next_ping {
+                        next_ping = tokio::time::Instant::now() + wss::PING_INTERVAL;
                         if !send_transport_message(
                             &mut write_half,
                             Message::Ping(Default::default()),
@@ -1194,4 +1214,116 @@ async fn drain_learning(
         }
     }
     failure
+}
+
+#[cfg(test)]
+mod connection_deadline_tests {
+    use std::time::Duration;
+
+    use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender, new_outgoing_envelope};
+    use ene_api::v1::handshake::NegotiatedConnection;
+    use ene_api::v1::refs::{ClientIncarnationId, WireMessageType};
+
+    use super::{ChallengeOutcome, ConnectionTable, InstallOutcome, LiveDecision, TransportClass};
+    use crate::wss::{AUTH_DEADLINE, OWNER_CONFIRMATION_LIMIT};
+
+    fn envelope() -> WireEnvelope {
+        new_outgoing_envelope(
+            ProtocolVersion::V1,
+            WireSender {
+                device_id: None,
+                incarnation_id: ClientIncarnationId {
+                    counter: 1,
+                    random: 2,
+                },
+                connection_id: None,
+            },
+            WireMessageType(String::from("TestMessage")),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_machine_deadline_bounds_pre_auth_until_the_owner_confirms() {
+        let table = ConnectionTable::default();
+
+        let stalled = table.note_accept(TransportClass::SameMachine);
+        assert!(!table.preauth_expired(&stalled));
+        tokio::time::advance(AUTH_DEADLINE + Duration::from_millis(1)).await;
+        assert!(
+            table.preauth_expired(&stalled),
+            "a silent machine handshake must expire at the auth deadline"
+        );
+
+        let waiting = table.note_accept(TransportClass::SameMachine);
+        table.note_awaiting_owner_confirmation(&waiting);
+        tokio::time::advance(AUTH_DEADLINE + Duration::from_millis(1)).await;
+        assert!(
+            !table.preauth_expired(&waiting),
+            "owner confirmation outlives the machine deadline"
+        );
+        table.note_awaiting_owner_confirmation(&waiting);
+        tokio::time::advance(OWNER_CONFIRMATION_LIMIT).await;
+        assert!(
+            table.preauth_expired(&waiting),
+            "the owner wait is still bounded, and resends never extend it"
+        );
+
+        let approved = table.note_accept(TransportClass::SameMachine);
+        table.note_awaiting_owner_confirmation(&approved);
+        assert!(table.note_paired(&approved, "device-1"));
+        tokio::time::advance(AUTH_DEADLINE + Duration::from_millis(1)).await;
+        assert!(
+            table.preauth_expired(&approved),
+            "after the owner confirms, only the machine exchange may stall"
+        );
+
+        let authed = table.note_accept(TransportClass::SameMachine);
+        assert!(matches!(
+            table.note_challenged(
+                &authed,
+                Some("device-2"),
+                NegotiatedConnection {
+                    version: ProtocolVersion::V1
+                },
+                String::from("nonce")
+            ),
+            ChallengeOutcome::Challenged
+        ));
+        assert!(matches!(
+            table.install_authenticated(&authed),
+            InstallOutcome::Installed { .. }
+        ));
+        tokio::time::advance(OWNER_CONFIRMATION_LIMIT).await;
+        assert!(
+            !table.preauth_expired(&authed),
+            "authenticated connections leave the pre-auth bound"
+        );
+    }
+
+    #[test]
+    fn a_closed_connection_carries_no_liveness_or_deadline_into_the_next_one() {
+        let table = std::sync::Arc::new(ConnectionTable::default());
+        let first = table.note_accept(TransportClass::SameMachine);
+        assert!(matches!(
+            table.live_for(&first, &envelope()),
+            LiveDecision::Ready(live) if live.peer_uid_ok
+        ));
+        assert_eq!(table.note_closed(&first, |_| {}), None);
+        assert!(matches!(
+            table.live_for(&first, &envelope()),
+            LiveDecision::Invalid
+        ));
+        assert!(!table.preauth_expired(&first));
+
+        let second = table.note_accept(TransportClass::SameMachine);
+        assert_ne!(first, second, "every accept is its own connection record");
+        assert!(matches!(
+            table.live_for(&second, &envelope()),
+            LiveDecision::Ready(live) if live.peer_uid_ok
+        ));
+        assert!(
+            !table.preauth_expired(&second),
+            "the closing connection's elapsed deadline never leaks to the next one"
+        );
+    }
 }

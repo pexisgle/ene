@@ -25,6 +25,13 @@ pub(crate) const PING_INTERVAL: std::time::Duration = std::time::Duration::from_
 pub(crate) const SUSPECT_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 pub(crate) const LIVENESS_LIMIT: std::time::Duration = std::time::Duration::from_secs(90);
 pub(crate) const MONITOR_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+// IPC §10.2 bounds the device-authentication wait; the design fixes the
+// limit, not the number, and IPC §9.3 keeps a pending pairing bound to its
+// originating connection's lifetime.
+pub(crate) const OWNER_CONFIRMATION_LIMIT: std::time::Duration =
+    std::time::Duration::from_secs(600);
+// IPC §10.2 bounds the number of pending pairings; the value is chosen here.
+pub(crate) const MAX_PENDING_PAIRINGS: usize = 8;
 
 const HOST_TLS_CRED_PROVIDER: &str = "host";
 const HOST_TLS_CRED_LABEL: &str = "tls-key";
@@ -165,6 +172,27 @@ fn header_matches(request: &Request, name: &str, expected: &str) -> bool {
         .is_some_and(|value| bool::from(value.as_bytes().ct_eq(expected.as_bytes())))
 }
 
+#[cfg(unix)]
+fn stage_runtime_file(staged: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    options.open(staged)
+}
+
+#[cfg(windows)]
+fn stage_runtime_file(staged: &Path) -> std::io::Result<std::fs::File> {
+    crate::win_acl::create_owner_only(staged)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stage_runtime_file(staged: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    options.open(staged)
+}
+
 fn publish_runtime(data_dir: &Path, runtime: &HostRuntimeInfo) -> Result<(), CoreError> {
     let json = serde_json::to_vec(runtime)
         .map_err(|error| CoreError::RuntimeInfo(format!("encode runtime information: {error}")))?;
@@ -178,14 +206,7 @@ fn publish_runtime(data_dir: &Path, runtime: &HostRuntimeInfo) -> Result<(), Cor
         std::process::id()
     ));
     let result = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&staged).map_err(|error| {
+        let mut file = stage_runtime_file(&staged).map_err(|error| {
             CoreError::RuntimeInfo(format!("stage runtime information: {error}"))
         })?;
         std::io::Write::write_all(&mut file, &json).map_err(|error| {

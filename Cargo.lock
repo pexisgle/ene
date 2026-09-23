@@ -1477,6 +1477,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "uuid",
+ "windows-sys 0.61.2",
  "x509-parser 0.16.0",
  "zeroize",
 ]

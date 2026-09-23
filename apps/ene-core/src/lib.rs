@@ -16,6 +16,8 @@ pub mod task_control;
 pub mod task_run;
 pub mod transient_erasure;
 pub mod usage;
+#[cfg(windows)]
+mod win_acl;
 pub(crate) mod wss;
 
 use std::sync::{Mutex as StdMutex, MutexGuard};

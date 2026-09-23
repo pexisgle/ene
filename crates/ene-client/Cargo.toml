@@ -22,6 +22,9 @@ uuid.workspace = true
 x509-parser.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 rcgen.workspace = true
 tempfile.workspace = true

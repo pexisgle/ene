@@ -41,39 +41,10 @@ fn pins_equal(left: &str, right: &str) -> bool {
     bool::from(left.as_bytes().ct_eq(right.as_bytes()))
 }
 
-fn verify_owner_only(path: &Path, data_dir: &Path) -> Result<(), ClientError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-
-        let metadata = std::fs::metadata(path).map_err(|error| {
-            ClientError::Transport(format!("inspect the stored Host pin: {}", error.kind()))
-        })?;
-        if metadata.mode() & 0o077 != 0 {
-            return Err(ClientError::Transport(String::from(
-                "the stored Host pin is readable by more than its owner; refuse to trust it",
-            )));
-        }
-        let directory = std::fs::metadata(data_dir).map_err(|error| {
-            ClientError::Transport(format!("inspect the data directory: {}", error.kind()))
-        })?;
-        if metadata.uid() != directory.uid() {
-            return Err(ClientError::Transport(String::from(
-                "the stored Host pin is not owned with the data directory; refuse to trust it",
-            )));
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, data_dir);
-    }
-    Ok(())
-}
-
 fn read_stored_pin(path: &Path, data_dir: &Path) -> Result<Option<String>, ClientError> {
     match std::fs::read(path) {
         Ok(bytes) => {
-            verify_owner_only(path, data_dir)?;
+            crate::runtime_info::verify_owner_only(path, data_dir, "stored Host pin")?;
             let stored: StoredHostPin = serde_json::from_slice(&bytes).map_err(|_| {
                 ClientError::Transport(String::from(
                     "the stored Host pin is malformed; remove it and re-trust the Host after verifying the offered pin",
@@ -99,7 +70,7 @@ fn write_pin(path: &Path, pin: &str) -> Result<(), ClientError> {
         pin: pin.to_owned(),
     })
     .map_err(|_| ClientError::Transport(String::from("encode the Host pin")))?;
-    crate::device::atomic_replace(path, &bytes, Some(0o600), "host pin store failed")
+    crate::runtime_info::write_protected_file(path, &bytes, "host pin store failed")
 }
 
 /// First trust comes from the protected runtime file; a differing stored pin is
