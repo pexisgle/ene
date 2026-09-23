@@ -280,27 +280,7 @@ mod tests {
 
     use super::*;
 
-    fn security_sddl(path: &Path) -> String {
-        let mut owner: PSID = std::ptr::null_mut();
-        let mut group: PSID = std::ptr::null_mut();
-        let mut dacl: *mut ACL = std::ptr::null_mut();
-        let mut sacl: *mut ACL = std::ptr::null_mut();
-        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        // SAFETY: all out-pointers are live locals; the returned descriptor
-        // owns the owner and DACL pointers and is freed exactly once below.
-        let status = unsafe {
-            GetNamedSecurityInfoW(
-                wide_path(path).as_ptr(),
-                SE_FILE_OBJECT,
-                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-                &mut owner,
-                &mut group,
-                &mut dacl,
-                &mut sacl,
-                &mut descriptor,
-            )
-        };
-        assert_eq!(status, 0, "the descriptor must be readable");
+    fn stringify_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> String {
         let mut text: windows_sys::core::PWSTR = std::ptr::null_mut();
         let mut length = 0_u32;
         // SAFETY: `descriptor` is valid and `text` is an out-parameter the
@@ -328,6 +308,51 @@ mod tests {
             LocalFree(descriptor.cast::<c_void>());
         }
         String::from_utf16_lossy(&chars)
+    }
+
+    fn security_sddl(path: &Path) -> String {
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut group: PSID = std::ptr::null_mut();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut sacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: all out-pointers are live locals; the returned descriptor
+        // owns the owner and DACL pointers and is freed by `stringify_descriptor`.
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                wide_path(path).as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                &mut group,
+                &mut dacl,
+                &mut sacl,
+                &mut descriptor,
+            )
+        };
+        assert_eq!(status, 0, "the descriptor must be readable");
+        stringify_descriptor(descriptor)
+    }
+
+    /// Serializes a hand-written descriptor through the same two APIs that
+    /// read it back, so well-known SID aliases compare structurally instead
+    /// of by their two different textual spellings.
+    fn normalized_sddl(sddl: &str) -> String {
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let mut length = 0_u32;
+        // SAFETY: `sddl` is our own wide string and `descriptor` is an
+        // out-parameter the conversion allocates on success; it is freed by
+        // `stringify_descriptor`.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide(sddl).as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                &mut length,
+            )
+        };
+        assert_eq!(ok, 1, "the expected descriptor must parse");
+        stringify_descriptor(descriptor)
     }
 
     fn owner_only_sddl(sid: &str) -> String {
@@ -360,14 +385,15 @@ mod tests {
             "an existing parent must keep the descriptor it already had"
         );
         let sid = current_user_sid_string().expect("the user sid must read");
+        let expected = owner_only_sddl(&sid);
         assert_eq!(
             security_sddl(&data_dir),
-            owner_only_sddl(&sid),
+            normalized_sddl(&expected),
             "the created data directory must be owner-only"
         );
         assert_eq!(
             security_sddl(&nested),
-            owner_only_sddl(&sid),
+            normalized_sddl(&expected),
             "every created component must be owner-only"
         );
 
@@ -375,7 +401,7 @@ mod tests {
             .expect("an existing data directory must stay usable");
         assert_eq!(
             security_sddl(&data_dir),
-            owner_only_sddl(&sid),
+            normalized_sddl(&expected),
             "an existing data directory keeps its verify-and-repair contract"
         );
     }
