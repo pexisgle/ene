@@ -73,14 +73,15 @@ impl ScriptedTransport {
 }
 
 impl ProviderTransport for ScriptedTransport {
-    fn complete(
-        &self,
+    fn complete_streaming<'a>(
+        &'a self,
         req: ProviderRequest,
+        sink: &'a mut (dyn ene_inference::DeltaSink + Send),
     ) -> Pin<
         Box<
             dyn Future<Output = Result<ProviderResponse, ene_inference::InferenceTechnicalError>>
                 + Send
-                + '_,
+                + 'a,
         >,
     > {
         Box::pin(async move {
@@ -89,10 +90,18 @@ impl ProviderTransport for ScriptedTransport {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(req.input);
-            Ok(ProviderResponse {
+            let response = ProviderResponse {
                 text: self.reply.clone(),
                 usage: None,
-            })
+            };
+            match sink.push_delta(&response.text).await {
+                ene_inference::DeltaFlow::Continue => Ok(response),
+                ene_inference::DeltaFlow::Abort(reason) => {
+                    Err(ene_inference::InferenceTechnicalError::StreamAborted {
+                        reason: reason.to_owned(),
+                    })
+                }
+            }
         })
     }
 }

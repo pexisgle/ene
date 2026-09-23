@@ -24,7 +24,7 @@ mod imp {
         LayerSurfaceConfigure,
     };
     use smithay_client_toolkit::{delegate_dispatch2, delegate_registry, registry_handlers};
-    use wayland_client::globals::{GlobalList, registry_queue_init};
+    use wayland_client::globals::registry_queue_init;
     use wayland_client::protocol::{wl_output, wl_pointer, wl_region, wl_seat, wl_surface};
     use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
     use wayland_protocols::wp::presentation_time::client::{
