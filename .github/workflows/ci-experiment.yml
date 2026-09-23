@@ -2,9 +2,10 @@ name: CI runner experiment
 
 # Temporary workflow for the Windows test-runner comparison PR. It runs the
 # same suite several times under each candidate runner so timings and
-# intermittent failures can be compared on identical hardware. Removed before
-# the PR leaves draft. Do not add concurrency cancellation: a push while a
-# measurement is running would otherwise discard it.
+# intermittent failures can be compared on identical hardware. The nextest
+# commands append `cargo test --doc` because nextest does not run doctests.
+# Removed before the PR leaves draft. Do not add concurrency cancellation: a
+# push while a measurement is running would otherwise discard it.
 
 on:
   workflow_dispatch:
@@ -19,7 +20,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  REPEATS: '3'
+  REPEATS: '5'
 
 jobs:
   windows-runner:
@@ -35,9 +36,9 @@ jobs:
           - config: cargo-serial
             command: cargo test --locked --workspace --no-fail-fast -- --test-threads=1
           - config: nextest-parallel
-            command: cargo nextest run --locked --workspace --no-fail-fast
+            command: cargo nextest run --locked --workspace --no-fail-fast && cargo test --locked --workspace --doc
           - config: nextest-isolated
-            command: cargo nextest run --locked --workspace --no-fail-fast --profile isolated
+            command: cargo nextest run --locked --workspace --no-fail-fast --profile isolated && cargo test --locked --workspace --doc
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
