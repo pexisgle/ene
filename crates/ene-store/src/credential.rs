@@ -17,7 +17,7 @@ use crate::Store;
 use crate::codec::{
     SQL_INSERT_CREDENTIAL_PENDING_IGNORE, SQL_SELECT_CREDENTIAL, credential_pair_is_blank,
     credential_unavailable, decode_device_record, decode_pending_credential,
-    decode_pending_pairing, encode_id, insert_decided_row_tx, lock_shared, select_intent_row_tx,
+    decode_pending_pairing, encode_id, insert_decided_row_tx, lock_shared, select_intent_row,
 };
 use crate::erasure::{ERASURE_BATCH_ROWS, erasure_count};
 use crate::preservation::condition_is_current;
@@ -326,25 +326,12 @@ impl DevicePairingRepository for Store {
                 params![fresh, descriptor, requested_text, origin_connection],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
-            let stored: Option<(String, String, String, String)> = tx
-                .query_row(SQL_SELECT_PENDING_BY_ID, params![fresh], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let Some((stored_id, stored_descriptor, stored_requested, stored_origin)) = stored
-            else {
-                return Err(credential_unavailable(String::from(
-                    "pairing request vanished after insert",
-                )));
+            let pending = PendingPairing {
+                pending_id: fresh,
+                descriptor,
+                requested_at: requested,
+                origin_connection,
             };
-            let pending = decode_pending_pairing(
-                stored_id,
-                stored_descriptor,
-                &stored_requested,
-                stored_origin,
-            )
-            .map_err(credential_unavailable)?;
             tx.commit()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(pending)
@@ -565,7 +552,10 @@ impl CredentialIntentRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            if select_intent_row_tx(&tx, &journal.intent_id)
+            // Write-once claim first: an existing row decides without
+            // touching credential state; the caller answers from the
+            // journal.
+            if select_intent_row(&tx, &journal.intent_id)
                 .map_err(credential_unavailable)?
                 .is_some()
             {

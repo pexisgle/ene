@@ -57,20 +57,22 @@ pub(crate) fn decode_id(text: &str) -> Result<RawId, String> {
     let parsed = text
         .parse()
         .map_err(|_| String::from("malformed identity text"))?;
-    Ok(RawId::from_uuid(parsed))
+    let raw = RawId::from_uuid(parsed);
+    // Only the canonical rendering `encode_id` writes is readable: another
+    // spelling (simple, braced, urn, uppercase) would be a second durable key
+    // for one identity, so it is an unreadable row.
+    if encode_id(raw) != text {
+        return Err(String::from("malformed identity text"));
+    }
+    Ok(raw)
 }
 
-pub(crate) fn encode_pricing_reference(reference: PricingSnapshotRef) -> String {
-    reference.to_text()
-}
-
+/// Pricing references have a text form by design: the durable row is what
+/// historical cost facts join on. Malformed text never becomes a fresh or
+/// default reference.
 pub(crate) fn decode_pricing_reference(text: &str) -> Result<PricingSnapshotRef, String> {
     PricingSnapshotRef::from_text(text)
         .ok_or_else(|| String::from("malformed pricing snapshot reference"))
-}
-
-pub(crate) fn encode_currency(currency: CurrencyCode) -> &'static str {
-    currency.as_str()
 }
 
 pub(crate) fn decode_currency(text: &str) -> Result<CurrencyCode, String> {
@@ -402,16 +404,8 @@ pub(crate) fn decode_usage_source(text: &str) -> Result<UsageSource, String> {
 
 /// Consumer/purpose storage vocabulary is owned by `ene-permission`; unknown
 /// stored names are unreadable rows and fail closed on decode.
-pub(crate) fn encode_consumer(consumer: ConsumerKind) -> &'static str {
-    consumer.as_str()
-}
-
 pub(crate) fn decode_consumer(text: &str) -> Result<ConsumerKind, String> {
     ConsumerKind::from_name(text).ok_or_else(|| String::from("unknown inference consumer"))
-}
-
-pub(crate) fn encode_purpose(purpose: PurposeKind) -> &'static str {
-    purpose.as_str()
 }
 
 pub(crate) fn decode_purpose(text: &str) -> Result<PurposeKind, String> {
@@ -594,11 +588,11 @@ pub(crate) fn decode_intent_outcome_row(
     })
 }
 
-pub(crate) fn select_intent_row_tx(
-    tx: &Transaction<'_>,
+pub(crate) fn select_intent_row(
+    conn: &Connection,
     intent_id: &str,
 ) -> Result<Option<IntentOutcomeRecord>, String> {
-    let found: Option<IntentOutcomeRow> = tx
+    let found: Option<IntentOutcomeRow> = conn
         .query_row(SQL_SELECT_INTENT_OUTCOME, params![intent_id], |row| {
             Ok((
                 row.get(0)?,

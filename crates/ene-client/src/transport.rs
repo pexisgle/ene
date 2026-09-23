@@ -101,18 +101,6 @@ type Stream = tokio::net::UnixStream;
 #[cfg(windows)]
 type Stream = tokio::net::windows::named_pipe::NamedPipeClient;
 
-#[cfg(any(test, windows))]
-fn pipe_name(data_dir: &Path) -> String {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0100_0000_01b3;
-    let mut tag = FNV_OFFSET;
-    for byte in data_dir.as_os_str().as_encoded_bytes() {
-        tag ^= u64::from(*byte);
-        tag = tag.wrapping_mul(FNV_PRIME);
-    }
-    format!(r"\\.\pipe\ene-{tag:016x}")
-}
-
 #[cfg(any(unix, windows))]
 impl Client {
     pub async fn connect(
@@ -147,7 +135,7 @@ impl Client {
         };
         #[cfg(windows)]
         let mut stream = {
-            let pipe = pipe_name(data_dir);
+            let pipe = ene_plugin_ipc::pipe_name(data_dir);
             tokio::net::windows::named_pipe::ClientOptions::new()
                 .open(&pipe)
                 .map_err(|error| {
@@ -648,32 +636,5 @@ impl Client {
 
     pub fn companion_ref(&self) -> String {
         String::from(crate::DEFAULT_COMPANION_REF)
-    }
-}
-
-#[cfg(test)]
-mod pipe_tests {
-    use super::pipe_name;
-
-    #[test]
-    fn pipe_name_is_stable_and_directory_scoped() {
-        assert_eq!(
-            pipe_name(std::path::Path::new("/tmp/ene-data")),
-            String::from(r"\\.\pipe\ene-2c2d8a5218b804b9"),
-            "the pinned vector pins the shared algorithm"
-        );
-        let first = pipe_name(std::path::Path::new("/tmp/ene-data"));
-        assert!(
-            first.starts_with(r"\\.\pipe\ene-"),
-            "the pipe lives in the machine namespace: {first:?}"
-        );
-        assert!(
-            first == pipe_name(std::path::Path::new("/tmp/ene-data")),
-            "the name is stable across processes: {first:?}"
-        );
-        assert!(
-            first != pipe_name(std::path::Path::new("/tmp/other-data")),
-            "distinct directories use distinct pipes"
-        );
     }
 }

@@ -15,9 +15,9 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use crate::Store;
 use crate::codec::{
     decode_consumer, decode_currency, decode_id, decode_pricing_reference, decode_purpose,
-    decode_u64, decode_usage_source, decode_wall_clock, encode_consumer, encode_currency,
-    encode_id, encode_optional_count, encode_pricing_reference, encode_purpose, encode_u64,
-    encode_usage_source, encode_wall_clock, inference_unavailable, lock_shared, select_consent,
+    decode_u64, decode_usage_source, decode_wall_clock, encode_id, encode_optional_count,
+    encode_u64, encode_usage_source, encode_wall_clock, inference_unavailable, lock_shared,
+    select_consent,
 };
 use crate::credential::SQL_SELECT_SET_REV;
 use crate::run_blocking;
@@ -171,8 +171,8 @@ impl InferenceAttemptRepository for Store {
                 params![
                     ticket_text,
                     attempt.capability.as_str(),
-                    encode_consumer(attempt.consumer),
-                    encode_purpose(attempt.purpose),
+                    attempt.consumer.as_str(),
+                    attempt.purpose.as_str(),
                     attempt.expected_consent.0,
                     rev_raw,
                     credential_set_raw,
@@ -478,7 +478,7 @@ fn publish_pricing_snapshot(
     snapshot: &PricingSnapshot,
 ) -> Result<String, InferenceTechnicalError> {
     let revision = encode_u64(snapshot.source_revision.as_u64()).map_err(inference_unavailable)?;
-    let reference = encode_pricing_reference(snapshot.reference());
+    let reference = snapshot.reference().to_text();
     let stored: Option<RawPricing> = tx
         .query_row(
             SQL_SELECT_PRICING_BY_ROUTE,
@@ -494,7 +494,7 @@ fn publish_pricing_snapshot(
                 reference,
                 snapshot.provider,
                 snapshot.model,
-                encode_currency(snapshot.currency),
+                snapshot.currency.as_str(),
                 encode_u64(snapshot.input_rate.micros_per_million())
                     .map_err(inference_unavailable)?,
                 encode_u64(snapshot.cached_input_rate.micros_per_million())
@@ -596,7 +596,7 @@ fn load_pricing_snapshot(
     let stored: Option<RawPricing> = conn
         .query_row(
             SQL_SELECT_PRICING_BY_ID,
-            params![encode_pricing_reference(reference)],
+            params![reference.to_text()],
             raw_pricing_row,
         )
         .optional()

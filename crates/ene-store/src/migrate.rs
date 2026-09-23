@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-pub(crate) const CURRENT_VERSION: i64 = 40;
+pub(crate) const CURRENT_VERSION: i64 = 41;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -527,10 +527,11 @@ CREATE INDEX idx_erasure_condition_source_source ON erasure_condition_source (so
 -- correlation rows.
 CREATE INDEX idx_inference_attempt_data_use_source ON inference_attempt_data_use (source);
 CREATE INDEX idx_history_message_companion ON history_message (companion_id);
-CREATE INDEX idx_history_message_companion_at ON history_message (companion_id, at_utc);
+-- The round lookup reads one (companion, wire) row; the composite index
+-- keeps that a bounded seek instead of a companion-history scan.
+CREATE INDEX idx_history_message_companion_wire ON history_message (companion_id, round_wire);
 CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
 CREATE INDEX idx_history_message_companion_role ON history_message (companion_id, role);
-CREATE INDEX idx_history_message_round ON history_message (round_id);
 CREATE INDEX idx_inference_attempt_delegation ON inference_attempt (delegation_id);
 -- Bounded first-party usage summary (usage-cost-cap §16): the newest-first
 -- keyset page reads this index, so the SQL LIMIT bounds the rows read and no
@@ -544,7 +545,6 @@ CREATE INDEX idx_learning_memory_term_memory ON learning_memory_term (memory_id)
 -- transaction; the composite primary key cannot seek on `term` alone, so this
 -- index keeps that probe a bounded lookup instead of a whole-table walk.
 CREATE INDEX idx_learning_memory_term_term ON learning_memory_term (term);
-CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
 CREATE UNIQUE INDEX idx_paired_device_wire ON paired_device (wire);
 CREATE INDEX idx_task_context_entry_task ON task_context_entry (task_id, revision);
 CREATE INDEX idx_task_result_task ON task_result (task_id, result_id);
@@ -692,7 +692,7 @@ mod tests {
             7
         );
         for version in [
-            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
         ] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());

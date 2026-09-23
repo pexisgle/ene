@@ -8,21 +8,18 @@ use ene_permission::{
     parse_consent_mark,
 };
 use ene_preservation::ErasureConditionRef;
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Transaction, TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{
-    IntentOutcomeRow, SQL_SELECT_INTENT_OUTCOME, decode_intent_outcome_row, encode_u64,
-    insert_decided_row_tx, lock_shared, permission_unavailable, replay_or_conflict, select_consent,
-    select_intent_row_tx,
+    encode_u64, insert_decided_row_tx, lock_shared, permission_unavailable, replay_or_conflict,
+    select_consent, select_intent_row,
 };
 use crate::erasure::{ERASURE_BATCH_ROWS, erasure_count};
 use crate::preservation::condition_is_current;
 use crate::run_blocking;
 
-const SQL_INSERT_CONSENT: &str = "INSERT INTO consent_record (capability, id, rev, provider, model, credential_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
-
-const SQL_UPDATE_CONSENT: &str = "UPDATE consent_record SET id = ?2, rev = ?3, provider = ?4, model = ?5, credential_id = ?6 WHERE capability = ?1";
+const SQL_UPSERT_CONSENT: &str = "INSERT INTO consent_record (capability, id, rev, provider, model, credential_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (capability) DO UPDATE SET id = excluded.id, rev = excluded.rev, provider = excluded.provider, model = excluded.model, credential_id = excluded.credential_id";
 
 /// Used by the intent-atomic assign so the premise check and the write
 /// cannot drift apart. The row is selected and written under the record's
@@ -43,33 +40,18 @@ fn compare_and_save_row(
     if !matches {
         return Ok(ConsentCommitOutcome::StaleCurrent { current });
     }
-    if current.is_none() {
-        tx.execute(
-            SQL_INSERT_CONSENT,
-            params![
-                record.capability.as_str(),
-                record.id,
-                rev_raw,
-                record.provider,
-                record.model,
-                record.credential_id
-            ],
-        )
-        .map_err(|error| error.to_string())?;
-    } else {
-        tx.execute(
-            SQL_UPDATE_CONSENT,
-            params![
-                record.capability.as_str(),
-                record.id,
-                rev_raw,
-                record.provider,
-                record.model,
-                record.credential_id
-            ],
-        )
-        .map_err(|error| error.to_string())?;
-    }
+    tx.execute(
+        SQL_UPSERT_CONSENT,
+        params![
+            record.capability.as_str(),
+            record.id,
+            rev_raw,
+            record.provider,
+            record.model,
+            record.credential_id
+        ],
+    )
+    .map_err(|error| error.to_string())?;
     Ok(ConsentCommitOutcome::Committed {
         record: record.clone(),
     })
@@ -100,7 +82,8 @@ impl IntentOutcomeRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| permission_unavailable(error.to_string()))?;
-            if let Some(stored) = select_intent_row_tx(&tx, &record.fingerprint.intent_id)
+            // Write-once claim first: an existing row is never rewritten.
+            if let Some(stored) = select_intent_row(&tx, &record.fingerprint.intent_id)
                 .map_err(permission_unavailable)?
             {
                 return Ok(replay_or_conflict(stored, &record.fingerprint));
@@ -122,25 +105,7 @@ impl IntentOutcomeRepository for Store {
         let intent_id = intent_id.to_owned();
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            let found: Option<IntentOutcomeRow> = guard
-                .query_row(SQL_SELECT_INTENT_OUTCOME, params![intent_id], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                    ))
-                })
-                .optional()
-                .map_err(|error| permission_unavailable(error.to_string()))?;
-            match found {
-                Some(row) => decode_intent_outcome_row(&intent_id, row).map(Some),
-                None => Ok(None),
-            }
-            .map_err(permission_unavailable)
+            select_intent_row(&guard, &intent_id).map_err(permission_unavailable)
         })
         .await
     }
@@ -158,7 +123,7 @@ impl IntentOutcomeRepository for Store {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| permission_unavailable(error.to_string()))?;
             if let Some(stored) =
-                select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
+                select_intent_row(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
             {
                 return Ok(replay_or_conflict(stored, &fingerprint));
             }
@@ -197,7 +162,7 @@ impl IntentOutcomeRepository for Store {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| permission_unavailable(error.to_string()))?;
             if let Some(stored) =
-                select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
+                select_intent_row(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
             {
                 return Ok(replay_or_conflict(stored, &fingerprint));
             }
@@ -242,7 +207,7 @@ impl IntentOutcomeRepository for Store {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| permission_unavailable(error.to_string()))?;
             if let Some(stored) =
-                select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
+                select_intent_row(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
             {
                 return Ok(replay_or_conflict(stored, &fingerprint));
             }

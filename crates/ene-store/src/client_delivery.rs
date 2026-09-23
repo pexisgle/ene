@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ene_preservation::PreservationTechnicalError;
 use ene_primitive::{RawId, WallClockWithTz};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 
 use crate::codec::{decode_id, encode_id, lock_shared};
 use crate::{Store, run_blocking};
@@ -22,22 +22,20 @@ impl Store {
     ) -> Result<(), PreservationTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(storage)?;
+            let guard = lock_shared(&conn);
             let at = WallClockWithTz::now().to_rfc3339();
-            tx.execute(
-                "INSERT INTO client_delivery_evidence
+            guard
+                .execute(
+                    "INSERT INTO client_delivery_evidence
                      (incarnation_id,delivery_seq,first_delivered_at,last_delivered_at)
                  VALUES (?1,1,?2,?2)
                  ON CONFLICT(incarnation_id) DO UPDATE SET
                      delivery_seq=delivery_seq+1,
                      last_delivered_at=?2",
-                params![encode_id(incarnation), at],
-            )
-            .map_err(storage)?;
-            tx.commit().map_err(storage)
+                    params![encode_id(incarnation), at],
+                )
+                .map_err(storage)?;
+            Ok(())
         })
         .await
     }
@@ -74,18 +72,14 @@ impl Store {
         let expected = i64::try_from(expected_seq).map_err(|_| corrupt())?;
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(storage)?;
-            let cleared = tx
+            let guard = lock_shared(&conn);
+            let cleared = guard
                 .execute(
                     "DELETE FROM client_delivery_evidence
                      WHERE incarnation_id=?1 AND delivery_seq=?2",
                     params![encode_id(incarnation), expected],
                 )
                 .map_err(storage)?;
-            tx.commit().map_err(storage)?;
             Ok(cleared == 1)
         })
         .await

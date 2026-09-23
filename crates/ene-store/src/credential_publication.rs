@@ -10,7 +10,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use crate::Store;
 use crate::codec::{credential_unavailable, lock_shared};
 use crate::credential::{
-    SQL_SELECT_SET_REV, SQL_UPSERT_CREDENTIAL, advance_credential_set, sweep_registered_secret,
+    SQL_UPSERT_CREDENTIAL, advance_credential_set, current_set_revision, sweep_registered_secret,
 };
 use crate::run_blocking;
 
@@ -32,7 +32,7 @@ const SQL_SELECT_ACTIVE: &str =
 /// version can only stop being active once.
 const SQL_ENQUEUE_RETIRED: &str = "INSERT INTO credential_retired (provider, label, version, mutation_id, retired_at) VALUES (?1, ?2, ?3, ?4, ?5)";
 
-const SQL_PENDING_RETIRED: &str = "SELECT provider, label, version, mutation_id FROM credential_retired ORDER BY retired_at ASC, rowid ASC LIMIT ?1";
+const SQL_PENDING_RETIRED: &str = "SELECT provider, label, version, mutation_id FROM credential_retired ORDER BY rowid ASC LIMIT ?1";
 
 const SQL_DELETE_RETIRED: &str =
     "DELETE FROM credential_retired WHERE provider = ?1 AND label = ?2 AND version = ?3";
@@ -176,14 +176,17 @@ impl CredentialPublicationRepository for Store {
                 ],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
-            let created: Option<ene_credential::CredentialMutation> = tx
-                .query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
-                    mutation_from_row(mutation_id.clone(), row)
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?
-                .flatten();
-            let created = created.ok_or_else(|| credential_unavailable("mutation read back"))?;
+            let created = ene_credential::CredentialMutation {
+                mutation_id,
+                kind,
+                provider,
+                label,
+                expected_revision,
+                candidate_version,
+                phase: MutationPhase::Prepared,
+                outcome: None,
+                decided_revision: None,
+            };
             tx.commit()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(created)
@@ -199,11 +202,8 @@ impl CredentialPublicationRepository for Store {
         let conn = Arc::clone(&self.conn);
         let mutation_id = mutation_id.to_owned();
         run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let changed = tx
+            let guard = lock_shared(&conn);
+            let changed = guard
                 .execute(
                     SQL_MARK_STAGED,
                     params![
@@ -219,8 +219,6 @@ impl CredentialPublicationRepository for Store {
                     "the mutation is already decided or unknown",
                 ));
             }
-            tx.commit()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(())
         })
         .await
@@ -262,11 +260,7 @@ impl CredentialPublicationRepository for Store {
             if mutation.phase != MutationPhase::Staged {
                 return Ok(ActivationOutcome::Missing);
             }
-            let current: i64 = tx
-                .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let current = u64::try_from(current)
-                .map_err(|_| credential_unavailable("credential set revision out of range"))?;
+            let current = current_set_revision(&tx)?.as_u64();
             if let Some(expected) = mutation.expected_revision
                 && expected != current
             {
@@ -402,11 +396,7 @@ impl CredentialPublicationRepository for Store {
             if mutation.kind != MutationKind::Revoke || mutation.phase != MutationPhase::Prepared {
                 return Ok(ActivationOutcome::Missing);
             }
-            let current: i64 = tx
-                .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let current = u64::try_from(current)
-                .map_err(|_| credential_unavailable("credential set revision out of range"))?;
+            let current = current_set_revision(&tx)?.as_u64();
             if let Some(expected) = mutation.expected_revision
                 && expected != current
             {
@@ -516,21 +506,17 @@ impl CredentialPublicationRepository for Store {
         let conn = Arc::clone(&self.conn);
         let mutation_id = mutation_id.to_owned();
         run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            tx.execute(
-                SQL_DECIDE_MUTATION,
-                params![
-                    mutation_id,
-                    MutationPhase::Abandoned.as_str(),
-                    outcome_text(&uncommitted_outcome(outcome)),
-                    Option::<i64>::None,
-                ],
-            )
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-            tx.commit()
+            let guard = lock_shared(&conn);
+            guard
+                .execute(
+                    SQL_DECIDE_MUTATION,
+                    params![
+                        mutation_id,
+                        MutationPhase::Abandoned.as_str(),
+                        outcome_text(&uncommitted_outcome(outcome)),
+                        Option::<i64>::None,
+                    ],
+                )
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             Ok(())
         })

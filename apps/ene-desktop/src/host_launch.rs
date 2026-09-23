@@ -40,7 +40,7 @@ pub fn host_is_serving(data_dir: &Path) -> bool {
 
 #[cfg(windows)]
 fn probe_windows_client_pipe(data_dir: &Path) -> bool {
-    let pipe = crate::session::client_pipe_name(data_dir);
+    let pipe = ene_plugin_ipc::pipe_name(data_dir);
     std::fs::metadata(pipe).is_ok()
 }
 
