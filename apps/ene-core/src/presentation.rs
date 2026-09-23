@@ -162,7 +162,6 @@ pub(crate) struct PresentationState {
     resume: HashMap<Uuid, ResumeSlot>,
     resume_seq: u64,
     frame_budget: usize,
-    receipt_ttl: Duration,
 }
 
 impl Default for PresentationState {
@@ -178,7 +177,6 @@ impl Default for PresentationState {
             resume: HashMap::new(),
             resume_seq: 0,
             frame_budget: PRESENTATION_FRAME_BUDGET,
-            receipt_ttl: RECEIPT_TTL,
         }
     }
 }
@@ -825,17 +823,20 @@ impl HostHandle {
                         state.cursors.remove(&(conn.to_string(), wire));
                     }
                 }
+                // A cursor-less request is the next logical page: an undrained
+                // pass continues first (its rows are bounded to the captured
+                // upper, so mid-pass arrivals wait), then new arrivals, then an
+                // explicit head re-display. `Redisplay` forces the head pass;
+                // `Push` serves only a continuation or new arrivals and stays
+                // silent otherwise (a push is never a new presence).
                 let continuation = (trigger != PassTrigger::Redisplay)
                     .then_some(sub.resume.as_ref())
                     .flatten()
-                    .filter(|_| sub.companion == companion.as_raw())
                     .map(|(cursor, pending_only, saved, wire)| {
                         (*cursor, *pending_only, *saved, wire.clone())
                     });
-                let arrivals = trigger != PassTrigger::Redisplay
-                    && sub.drained_once
-                    && sub.scan_floor < bound
-                    && sub.companion == companion.as_raw();
+                let arrivals =
+                    trigger != PassTrigger::Redisplay && sub.drained_once && sub.scan_floor < bound;
                 let plan = if let Some((cursor, pending_only, saved, wire)) = continuation {
                     from_cursor = Some(wire);
                     Some(PlanStart::Continued {
@@ -1098,7 +1099,11 @@ impl HostHandle {
                     state.carried.remove(&(conn.to_string(), item.reference.0));
                 }
                 let receipt_id = Uuid::new_v4().as_hyphenated().to_string();
-                let ttl = state.receipt_ttl;
+                // The carried prefix IS the fetched prefix (the fetch bound shrank
+                // instead), so the store cursor resumes exactly: a fetched
+                // continuation pages next, a bound-reaching fetch drains the floor.
+                // The round projection is minted inside the section: a stale
+                // attempt leaves no round wire behind either.
                 let round_wire = RoundWireId(RawId::new().as_uuid().to_string());
                 crate::lock_unpoison(&rounds).insert(round_wire.0.clone(), round);
                 let receipt = Receipt {
@@ -1111,7 +1116,7 @@ impl HostHandle {
                     round_wire: round_wire.0.clone(),
                     generation,
                     selected,
-                    expires_at: Instant::now() + ttl,
+                    expires_at: Instant::now() + RECEIPT_TTL,
                 };
                 Self::take_cursor(state, conn, from_cursor);
                 // One receipt per Companion: installing supersedes any leftover.
@@ -1263,12 +1268,10 @@ impl HostHandle {
             let Ok(Some(record)) = self.store.load_task(task).await else {
                 continue;
             };
-            let details = record.task.adopted_result.is_some()
-                || self
-                    .store
-                    .list_task_report_rows_after(task, None, 1)
-                    .await
-                    .is_ok_and(|rows| !rows.is_empty());
+            let details = self
+                .task_details_available(task, record.task.adopted_result.is_some())
+                .await
+                .unwrap_or(false);
             loaded.push((
                 task,
                 record.task.reference.revision.as_u64(),
@@ -1297,6 +1300,20 @@ impl HostHandle {
             }
             None => false,
         }
+    }
+
+    /// Whether a paged `GetTaskReport` has detail rows for `task`; `None`
+    /// when the bounded read failed. `adopted` is the loaded Task's
+    /// adopted-result shortcut.
+    async fn task_details_available(&self, task: TaskId, adopted: bool) -> Option<bool> {
+        if adopted {
+            return Some(true);
+        }
+        self.store
+            .list_task_report_rows_after(task, None, 1)
+            .await
+            .ok()
+            .map(|rows| !rows.is_empty())
     }
 
     /// Records one drained scan floor under the ownership section and consumes
@@ -1933,18 +1950,17 @@ impl HostHandle {
         // commit: a store failure answers `Unavailable` (documented as
         // side-effect-free) while the projection is still untouched, never
         // after the connection already selected the Task.
-        let details = if record.task.adopted_result.is_some() {
-            true
-        } else {
-            match self.store.list_task_report_rows_after(task, None, 1).await {
-                Ok(rows) => !rows.is_empty(),
-                Err(_) => {
-                    return vec![outgoing_frame(
-                        frame,
-                        live,
-                        WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable),
-                    )];
-                }
+        let details = match self
+            .task_details_available(task, record.task.adopted_result.is_some())
+            .await
+        {
+            Some(details) => details,
+            None => {
+                return vec![outgoing_frame(
+                    frame,
+                    live,
+                    WirePayload::SelectTaskResponse(SelectTaskResponse::Unavailable),
+                )];
             }
         };
         let selected = self

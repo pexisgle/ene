@@ -108,8 +108,9 @@ impl TransientErasureFence {
         self.epoch.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn invalidate(&self) -> u64 {
-        self.epoch.fetch_add(1, Ordering::SeqCst) + 1
+    /// Invalidates every in-flight transient payload.
+    pub(crate) fn invalidate(&self) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -269,6 +270,11 @@ struct ArrivalPublishState {
     /// set before wrapping; rewinding to the head here would re-classify the
     /// same page forever while arrivals keep arriving and starve the tail.
     after: Option<DeletionOperationId>,
+    /// The queue mutation generation the outstanding page-chain classified
+    /// its pages against, recorded where the chain started at the head. A
+    /// chain that crosses a live-remainder change cannot prove the head pages
+    /// were classified against that remainder and restarts at the head.
+    chain_generation: Option<u64>,
 }
 
 impl ArrivalPublishState {
@@ -389,14 +395,15 @@ async fn experience_covers_operation(
         DeletionMaterialOutcome::Missing | DeletionMaterialOutcome::Destroyed => return Ok(false),
     };
     let exact = exact_text(material.target()).to_owned();
-    for experience in experiences {
-        let identities = experience_identities(experience);
-        let covered = store
-            .erasure_sources_covered(current.condition(), identities.clone())
-            .await?;
-        if experience_covered(experience, &exact, &covered, &identities) {
-            return Ok(true);
-        }
+    let identities: Vec<RawId> = experiences.iter().flat_map(experience_identities).collect();
+    let covered = store
+        .erasure_sources_covered(current.condition(), identities.clone())
+        .await?;
+    if experiences
+        .iter()
+        .any(|experience| experience_covered(experience, &exact, &covered, &identities))
+    {
+        return Ok(true);
     }
     Ok(false)
 }
@@ -441,6 +448,7 @@ pub(crate) async fn publish_owed_learning_arrivals(
         return;
     }
     let after = crate::lock_unpoison(&arrival.publish).after;
+    let started_at_head = after.is_none();
     let page = match store
         .unfinished_deletions(after, HOST_TRANSIENT_ARRIVAL_PAGE)
         .await
@@ -451,7 +459,7 @@ pub(crate) async fn publish_owed_learning_arrivals(
             return;
         }
     };
-    let (experiences, _) = snapshot_learning_remainder(queue);
+    let (experiences, generation) = snapshot_learning_remainder(queue);
     if experiences.is_empty() {
         *crate::lock_unpoison(&arrival.publish) = ArrivalPublishState::default();
         return;
@@ -489,9 +497,20 @@ pub(crate) async fn publish_owed_learning_arrivals(
     }
     let mut state = crate::lock_unpoison(&arrival.publish);
     if page_len < HOST_TRANSIENT_ARRIVAL_PAGE as usize {
+        // Only a chain whose head page saw this live remainder can read
+        // clean; a chain resumed past the head that observed a different
+        // generation restarts at the head instead of clearing.
+        let one_remainder = match state.chain_generation {
+            Some(chain_generation) => chain_generation == generation,
+            None => started_at_head,
+        };
         state.after = None;
-        state.scan_incomplete = !state.owed.is_empty();
+        state.chain_generation = None;
+        state.scan_incomplete = !state.owed.is_empty() || !one_remainder;
     } else {
+        if started_at_head {
+            state.chain_generation = Some(generation);
+        }
         state.scan_incomplete = true;
         state.after = last;
     }
@@ -648,6 +667,15 @@ impl ErasureParticipant for HostTransientParticipant {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>>
     {
         Box::pin(async move {
+            // Process-memory mutation cannot share the Immediate writer with
+            // the canonical row. The currentness predicate durable
+            // participants re-check inside their erase transaction is read
+            // before the classification snapshot and before any drop, so a
+            // condition already closed here does not discard a fresh
+            // post-closure premise. A condition that closes during the awaits
+            // below is caught by the post-drop read, which refuses Verified
+            // but cannot roll back the drop. Unreadable currentness fails
+            // closed (no mutation, not Verified).
             #[cfg(any(test, feature = "test-support"))]
             self.store.pause_erasure_mutation_if_armed_for_tests().await;
             let current = match self
@@ -882,7 +910,9 @@ enum ClientErasureWait {
 }
 
 pub(crate) struct ClientTransientRegistry {
-    inner: std::sync::Mutex<ClientTransientInner>,
+    /// At most one outstanding demand per incarnation.
+    inner: std::sync::Mutex<HashMap<RawId, PendingDemand>>,
+    /// Wakes connection loops to deliver a pending demand.
     delivery_wake: Notify,
     result_wake: Notify,
     table: OnceLock<Arc<ConnectionTable>>,
@@ -890,16 +920,11 @@ pub(crate) struct ClientTransientRegistry {
     wait_limit: std::sync::Mutex<Option<Duration>>,
 }
 
-#[derive(Default)]
-struct ClientTransientInner {
-    pending: HashMap<RawId, PendingDemand>,
-}
-
 impl ClientTransientRegistry {
     #[must_use]
     pub(crate) fn new(store: Store) -> Self {
         Self {
-            inner: std::sync::Mutex::new(ClientTransientInner::default()),
+            inner: std::sync::Mutex::new(HashMap::new()),
             delivery_wake: Notify::new(),
             result_wake: Notify::new(),
             table: OnceLock::new(),
@@ -938,25 +963,26 @@ impl ClientTransientRegistry {
         &self.delivery_wake
     }
 
-    fn begin(
-        &self,
-        identity: RawId,
-        condition: ErasureConditionRef,
-        connection: ConnectionWireId,
-    ) -> String {
+    /// Begins one bounded demand for an incarnation.
+    ///
+    /// A demand for the same `(condition, connection)` reuses the outstanding
+    /// one instead of minting a new id: a bounded pass that yielded before the
+    /// Client answered must still match the Client's answer, and a Client
+    /// answer is never orphaned by a later retry of the same condition. Any
+    /// older demand with a different condition (or a different connection) is
+    /// replaced, and its waiter observes [`ClientErasureWait::Abandoned`]
+    /// instead of adopting a foreign answer.
+    fn begin(&self, identity: RawId, condition: ErasureConditionRef, connection: ConnectionWireId) {
         let mut inner = crate::lock_unpoison(&self.inner);
-        let id = match inner.pending.get(&identity) {
+        match inner.get(&identity) {
             Some(existing)
-                if existing.condition == condition && existing.connection == connection =>
-            {
-                existing.id.clone()
-            }
+                if existing.condition == condition && existing.connection == connection => {}
             _ => {
                 let id = Uuid::new_v4().as_hyphenated().to_string();
-                inner.pending.insert(
+                inner.insert(
                     identity,
                     PendingDemand {
-                        id: id.clone(),
+                        id,
                         condition,
                         connection,
                         delivered: false,
@@ -964,13 +990,11 @@ impl ClientTransientRegistry {
                         state: PendingState::Awaiting,
                     },
                 );
-                id
             }
-        };
+        }
         drop(inner);
         self.delivery_wake.notify_waiters();
         self.delivery_wake.notify_one();
-        id
     }
 
     fn delivered(
@@ -980,7 +1004,7 @@ impl ClientTransientRegistry {
         connection: ConnectionWireId,
     ) -> bool {
         let inner = crate::lock_unpoison(&self.inner);
-        inner.pending.get(&identity).is_some_and(|pending| {
+        inner.get(&identity).is_some_and(|pending| {
             pending.connection == connection && pending.condition == condition && pending.delivered
         })
     }
@@ -994,7 +1018,7 @@ impl ClientTransientRegistry {
     ) -> Option<DeletionDemand> {
         let identity = Self::identity_for(counter, random);
         let mut inner = crate::lock_unpoison(&self.inner);
-        let pending = inner.pending.get_mut(&identity)?;
+        let pending = inner.get_mut(&identity)?;
         if pending.connection != connection {
             return None;
         }
@@ -1023,7 +1047,7 @@ impl ClientTransientRegistry {
     ) -> Option<AcceptedClientErasure> {
         let identity = Self::identity_for(counter, random);
         let mut inner = crate::lock_unpoison(&self.inner);
-        let pending = inner.pending.get_mut(&identity)?;
+        let pending = inner.get_mut(&identity)?;
         if pending.connection != connection || pending.id != result.demand.0 {
             return None;
         }
@@ -1048,7 +1072,7 @@ impl ClientTransientRegistry {
     pub(crate) fn note_connection_ended(&self, connection: &ConnectionWireId) {
         let mut inner = crate::lock_unpoison(&self.inner);
         let mut abandoned = false;
-        inner.pending.retain(|_, pending| {
+        inner.retain(|_, pending| {
             if pending.connection == *connection {
                 abandoned = true;
                 false
@@ -1067,9 +1091,9 @@ impl ClientTransientRegistry {
         loop {
             let ready = {
                 let mut inner = crate::lock_unpoison(&self.inner);
-                match inner.pending.get(&identity) {
+                match inner.get(&identity) {
                     Some(pending) if pending.condition == condition => match &pending.state {
-                        PendingState::Answered(_) => inner.pending.remove(&identity),
+                        PendingState::Answered(_) => inner.remove(&identity),
                         PendingState::Awaiting => None,
                     },
                     Some(_) | None => return ClientErasureWait::Abandoned,

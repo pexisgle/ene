@@ -98,17 +98,14 @@ pub struct EffectSettlementOutcome {
     pub adoption_error: Option<TaskControlError>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ReconciliationSummary {
-    pub evaluated: u64,
-    pub adopted: u64,
-    pub withheld: u64,
-    pub recorded_to_original_only: u64,
-    pub missing: u64,
-    pub unavailable: u64,
-    pub first_error: Option<TaskTechnicalError>,
-}
-
+/// Transient conversation projection of the Task one dialogue is working on.
+///
+/// In-memory only, keyed by Companion, and never durable authority: it lets a
+/// task-less companion directive resolve to the Task the conversation most
+/// recently created, while every operation still goes through the Task
+/// owner's durable compare. The projection is dropped on restart, so a
+/// post-restart directive answers "no active task" instead of guessing;
+/// restart continuation is Stage 5.
 #[derive(Default)]
 pub(crate) struct ConversationTaskProjection {
     current: StdMutex<HashMap<CompanionId, ConversationTask>>,
@@ -319,9 +316,7 @@ impl<'a> HostTaskControl<'a> {
     }
 
     fn no_active_task() -> DialogueTaskControlReply {
-        DialogueTaskControlReply::Answered(String::from(
-            "There is no active task in this conversation.",
-        ))
+        DialogueTaskControlReply::Answered(String::from(NO_ACTIVE_TASK))
     }
 
     async fn propose(&self, purpose: String, origin: RawId) -> DialogueTaskControlReply {
@@ -421,10 +416,7 @@ impl<'a> HostTaskControl<'a> {
             Ok(Some(record)) => record,
         };
         if record.task.progress.is_terminal() {
-            return DialogueTaskControlReply::Answered(format!(
-                "That task is already {}.",
-                progress_label(record.task.progress)
-            ));
+            return DialogueTaskControlReply::Answered(already_text(record.task.progress));
         }
         let command = ProposeSteeringCommand {
             premise: SteeringPremiseRef {
@@ -497,10 +489,7 @@ impl<'a> HostTaskControl<'a> {
                 DialogueTaskControlReply::Answered(String::from("The task was already cancelled."))
             }
             Ok(TaskCancelOutcome::TaskTerminal { progress, .. }) => {
-                DialogueTaskControlReply::Answered(format!(
-                    "That task is already {}.",
-                    progress_label(progress)
-                ))
+                DialogueTaskControlReply::Answered(already_text(progress))
             }
             Ok(TaskCancelOutcome::MissingTask { .. }) => Self::no_active_task(),
         }
@@ -575,6 +564,12 @@ fn progress_label(progress: TaskProgress) -> String {
     progress.as_str().replace('_', "-")
 }
 
+fn already_text(progress: TaskProgress) -> String {
+    format!("That task is already {}.", progress_label(progress))
+}
+
+const NO_ACTIVE_TASK: &str = "There is no active task in this conversation.";
+
 fn task_outcome_text(outcome: &TaskProposalOutcome) -> String {
     match outcome {
         TaskProposalOutcome::AcceptedAsTask(_) | TaskProposalOutcome::AcceptedAsSteering(_) => {
@@ -584,12 +579,8 @@ fn task_outcome_text(outcome: &TaskProposalOutcome) -> String {
             "The task moved on; nothing was applied (current revision {}).",
             current.revision.as_u64()
         ),
-        TaskProposalOutcome::TaskTerminal { progress, .. } => {
-            format!("That task is already {}.", progress_label(*progress))
-        }
-        TaskProposalOutcome::MissingTask { .. } => {
-            String::from("There is no active task in this conversation.")
-        }
+        TaskProposalOutcome::TaskTerminal { progress, .. } => already_text(*progress),
+        TaskProposalOutcome::MissingTask { .. } => String::from(NO_ACTIVE_TASK),
         TaskProposalOutcome::RevisionExhausted { .. } => {
             String::from("The task cannot take another change.")
         }
@@ -609,9 +600,7 @@ fn resume_outcome_text(outcome: &TaskResumeOutcome) -> String {
             "The task moved on; nothing was resumed (current revision {}).",
             current.revision.as_u64()
         ),
-        TaskResumeOutcome::TaskTerminal { progress, .. } => {
-            format!("That task is already {}.", progress_label(*progress))
-        }
+        TaskResumeOutcome::TaskTerminal { progress, .. } => already_text(*progress),
         TaskResumeOutcome::AlreadyRunning { .. } => {
             String::from("That task is already running; nothing was resumed.")
         }
@@ -641,9 +630,7 @@ fn resume_outcome_text(outcome: &TaskResumeOutcome) -> String {
                 "No runner is available to continue the task; nothing was resumed."
             }
         }),
-        TaskResumeOutcome::MissingTask { .. } => {
-            String::from("There is no active task in this conversation.")
-        }
+        TaskResumeOutcome::MissingTask { .. } => String::from(NO_ACTIVE_TASK),
         TaskResumeOutcome::RevisionExhausted { .. } => {
             String::from("The task cannot take another change.")
         }
@@ -660,12 +647,8 @@ fn delegation_outcome_text(outcome: &DelegationOutcome) -> String {
             "The task moved on again; the latest instruction was not executed (current revision {}).",
             current.revision.as_u64()
         ),
-        DelegationOutcome::TaskTerminal { progress, .. } => {
-            format!("That task is already {}.", progress_label(*progress))
-        }
-        DelegationOutcome::MissingTask { .. } => {
-            String::from("There is no active task in this conversation.")
-        }
+        DelegationOutcome::TaskTerminal { progress, .. } => already_text(*progress),
+        DelegationOutcome::MissingTask { .. } => String::from(NO_ACTIVE_TASK),
     }
 }
 
@@ -926,10 +909,32 @@ impl HostHandle {
         ))
     }
 
-    pub async fn reconcile_sealed_results(
-        &self,
-    ) -> Result<ReconciliationSummary, TaskTechnicalError> {
-        let mut summary = ReconciliationSummary::default();
+    /// Re-evaluates the reconciliation candidate set, one bounded page at a
+    /// time, without materializing every candidate.
+    ///
+    /// This is the explicit recovery producer for results that were durably
+    /// recorded (AU15a) but whose adoption commit (AU15b) did not run before
+    /// a stop, and for withheld results whose blocking facts settled while
+    /// nothing was listening. The candidate predicate is canonical-facts
+    /// only: `adopted_revision IS NULL` and re-adoption is still possible (the
+    /// Task is non-terminal and its current revision is the relied revision).
+    /// A result that can only answer `RecordedToOriginalOnly` is not a
+    /// candidate, so permanent history is not re-evaluated on every startup;
+    /// no pending flag, retry queue, or second adoption state exists. The walk
+    /// uses keyset pages over `(recorded_at, result_id)`, so every candidate
+    /// is visited once per pass and a candidate already passed is never
+    /// re-read from the front. Each page read is bounded by
+    /// [`RECONCILIATION_PAGE_SIZE`]. Each candidate goes through the same
+    /// [`ene_task::reevaluate_result_adoption`] path, so a still-blocked
+    /// result keeps its existing semantics. An execution is never resumed and
+    /// no provider call or filesystem Action is replayed.
+    ///
+    /// # Errors
+    ///
+    /// [`TaskTechnicalError`] when a candidate page cannot be read. A
+    /// per-candidate failure is neither completion nor withheld and does not
+    /// stop the remaining candidates or wedge startup.
+    pub async fn reconcile_sealed_results(&self) -> Result<(), TaskTechnicalError> {
         let mut cursor = None;
         loop {
             let page = self
@@ -942,33 +947,15 @@ impl HostHandle {
             cursor = Some(*last);
             let full_page = page.len() as u64 == RECONCILIATION_PAGE_SIZE;
             for candidate in page {
-                summary.evaluated += 1;
-                match reevaluate_result_adoption(&self.store, candidate.result).await {
-                    Ok(TaskResultAcceptance::AdoptedAsCompletion(_)) => summary.adopted += 1,
-                    Ok(TaskResultAcceptance::WithheldByEffectFacts { .. }) => {
-                        summary.withheld += 1;
-                    }
-                    Ok(TaskResultAcceptance::RecordedToOriginalOnly) => {
-                        summary.recorded_to_original_only += 1;
-                    }
-                    Ok(
-                        TaskResultAcceptance::MissingResult { .. }
-                        | TaskResultAcceptance::MissingDelegation { .. }
-                        | TaskResultAcceptance::MissingTask { .. },
-                    ) => summary.missing += 1,
-                    Err(error) => {
-                        summary.unavailable += 1;
-                        if summary.first_error.is_none() {
-                            summary.first_error = Some(error);
-                        }
-                    }
-                }
+                // Fail-soft: a per-candidate failure is neither completion nor
+                // withheld, and the remaining candidates are still evaluated.
+                let _adoption = reevaluate_result_adoption(&self.store, candidate.result).await;
             }
             if !full_page {
                 break;
             }
         }
-        Ok(summary)
+        Ok(())
     }
 
     pub async fn task_report(

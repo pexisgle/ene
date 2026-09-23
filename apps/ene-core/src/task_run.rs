@@ -88,7 +88,7 @@ impl TaskExecutionRegistry {
     /// row is somehow also present. An `Unreserved` delegation never starts
     /// provider calls or Actions — after a restart, only a new explicit
     /// commit reserves again. The returned registration removes its own
-    /// running entry on drop, exactly like [`Self::take_reservation`].
+    /// running entry on drop.
     pub fn take_reservation(
         &self,
         delegation: ene_task::DelegationId,

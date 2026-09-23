@@ -387,45 +387,34 @@ pub async fn drive_targeted_deletion(
     }
     let mut outcome = TargetedDeletionPassOutcome::default();
     let mut walk = UnfinishedWalk::open(store, DeletionWalk::FanOut).await?;
-    let mut reached_end = false;
-    while (outcome.operations as usize) < pass.operation_limit as usize {
-        let remaining = pass.operation_limit - outcome.operations;
-        let limit = remaining.min(100);
-        let page = walk.page(store, limit).await?;
-        if page.is_empty() {
-            reached_end = true;
-            break;
-        }
-        let page_len = page.len();
-        for record in page {
-            walk.examined(record.current.operation);
-            outcome.operations += 1;
-            match record.phase {
-                DeletionOperationPhase::Active => {
-                    let progressed = drive_operation(
-                        store,
-                        registry,
-                        record.current,
-                        pass.demands_per_participant,
-                        &mut outcome,
-                    )
-                    .await?;
-                    if !progressed {
-                        break;
-                    }
-                }
-                DeletionOperationPhase::Finalizing => {
-                    settle_finalizing(store, registry, record.current, &mut outcome).await?;
-                }
-                DeletionOperationPhase::Held | DeletionOperationPhase::Completed => {}
+    let limit = pass.operation_limit;
+    let page = walk.page(store, limit).await?;
+    let page_len = page.len();
+    for record in page {
+        walk.examined(record.current.operation);
+        outcome.operations += 1;
+        match record.phase {
+            DeletionOperationPhase::Active => {
+                drive_operation(
+                    store,
+                    registry,
+                    record.current,
+                    pass.demands_per_participant,
+                    &mut outcome,
+                )
+                .await?;
             }
-        }
-        if page_len < limit as usize {
-            reached_end = true;
-            break;
+            // A crash between the finalizing marker and the completion
+            // commit resumes here; the operation identity, the current
+            // condition, and the participant statuses come from durable
+            // state, never from memory defaults (§14).
+            DeletionOperationPhase::Finalizing => {
+                settle_finalizing(store, registry, record.current, &mut outcome).await?;
+            }
+            DeletionOperationPhase::Held | DeletionOperationPhase::Completed => {}
         }
     }
-    walk.advance(store, reached_end).await?;
+    walk.advance(store, page_len < limit as usize).await?;
     Ok(outcome)
 }
 
@@ -489,15 +478,24 @@ async fn settle_finalizing(
     Ok(())
 }
 
+/// Drives one active operation. A concurrent lifecycle transition (a new sweep
+/// or a completion/phase change) ends this operation's work for the pass; the
+/// other records on the pass's page are still driven.
 async fn drive_operation(
     store: &Store,
     registry: &ErasureParticipantRegistry,
     current: DeletionOperationRef,
     demand_budget: u32,
     outcome: &mut TargetedDeletionPassOutcome,
-) -> Result<bool, CoreError> {
+) -> Result<(), CoreError> {
     let condition = current.condition();
-    let mut advanced_any = false;
+    // Phase 1: exhaust the covered-source reconciliation before the first
+    // participant demand. The identity bodies carrying the target are the
+    // evidence the already-claimed in-flight-use correspondence is derived
+    // from, and the owner sweeps redact them; publishing and associating
+    // first is what keeps the correspondence complete regardless of how many
+    // covered identities exist. The page budget bounds one pass; the durable
+    // cursor resumes the walk on the next pass or after a restart.
     let mut reconciled = false;
     for _ in 0..RECONCILIATION_PAGES_PER_PASS {
         match store
@@ -507,21 +505,20 @@ async fn drive_operation(
         {
             DeletionReconciliationOutcome::Advanced => {
                 outcome.reconciliation_pages += 1;
-                advanced_any = true;
             }
             DeletionReconciliationOutcome::Complete => {
                 reconciled = true;
                 break;
             }
             DeletionReconciliationOutcome::Finalizing
-            | DeletionReconciliationOutcome::Completed => return Ok(advanced_any),
+            | DeletionReconciliationOutcome::Completed => return Ok(()),
             DeletionReconciliationOutcome::Missing | DeletionReconciliationOutcome::StaleSweep => {
-                return Ok(advanced_any);
+                return Ok(());
             }
         }
     }
     if !reconciled {
-        return Ok(advanced_any);
+        return Ok(());
     }
     let mut held = false;
     let mut after = None;
@@ -555,7 +552,7 @@ async fn drive_operation(
                     ParticipantDemandOutcome::StaleSweep
                     | ParticipantDemandOutcome::Missing
                     | ParticipantDemandOutcome::Completed
-                    | ParticipantDemandOutcome::NotRequired => return Ok(false),
+                    | ParticipantDemandOutcome::NotRequired => return Ok(()),
                 }
                 outcome.demands += 1;
                 let material = match store
@@ -565,7 +562,7 @@ async fn drive_operation(
                 {
                     DeletionMaterialOutcome::Material(material) => material,
                     DeletionMaterialOutcome::Missing | DeletionMaterialOutcome::Destroyed => {
-                        return Ok(false);
+                        return Ok(());
                     }
                 };
                 let command = DemandLocalErasureCommand::new(
@@ -575,7 +572,7 @@ async fn drive_operation(
                 );
                 let fact = registry.demand(command).await;
                 if fact.condition() != condition || fact.participant() != record.participant.owner {
-                    return Ok(false);
+                    return Ok(());
                 }
                 let fact_status = fact.status();
                 match registry
@@ -600,7 +597,7 @@ async fn drive_operation(
                     ParticipantCompletionOutcome::StaleSweep
                     | ParticipantCompletionOutcome::Missing
                     | ParticipantCompletionOutcome::Completed
-                    | ParticipantCompletionOutcome::NotRequired => return Ok(false),
+                    | ParticipantCompletionOutcome::NotRequired => return Ok(()),
                 }
             }
             if verified {
@@ -619,10 +616,10 @@ async fn drive_operation(
             .change_deletion_lifecycle(current, DeletionLifecycleChange::Hold)
             .await
             .map_err(deletion_error)?;
-        return Ok(true);
+        return Ok(());
     }
     settle_finalizing(store, registry, current, outcome).await?;
-    Ok(true)
+    Ok(())
 }
 
 /// Drives bounded passes until a pass advances no durable work or the budget
@@ -638,19 +635,19 @@ async fn drive_operation(
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::Deletion`] for an invalid pass or budget and when the
+/// Returns [`CoreError::Deletion`] for an invalid budget and when the
 /// canonical store refuses.
 pub(crate) async fn drive_targeted_deletion_until_settled(
     store: &Store,
     registry: &ErasureParticipantRegistry,
-    pass: TargetedDeletionPass,
     pass_budget: u32,
 ) -> Result<TargetedDeletionPassOutcome, CoreError> {
-    if !valid_pass(pass) || pass_budget == 0 {
+    if pass_budget == 0 {
         return Err(CoreError::Deletion(String::from(
             "invalid targeted deletion drive parameters",
         )));
     }
+    let pass = TargetedDeletionPass::default();
     let mut total = TargetedDeletionPassOutcome::default();
     for _ in 0..pass_budget {
         let outcome = drive_targeted_deletion(store, registry, pass).await?;
@@ -663,17 +660,29 @@ pub(crate) async fn drive_targeted_deletion_until_settled(
     Ok(total)
 }
 
+/// Restores unfinished Targeted Deletion operations at startup (lifecycle
+/// §14).
+///
+/// A `Held(Unavailable)` operation is retryable and a Host restart is a
+/// recovery decision: the hold is resumed so the reopened composition can
+/// re-drive the stored participant snapshot. This only reads the durable
+/// phase and applies the canonical [`DeletionLifecycleChange::Resume`]; a
+/// `Held(GenerationExhausted)` operation is left untouched (fail closed — no
+/// generation can be reused or invented) and an `Active` / `Finalizing`
+/// operation is left for the bounded drive below. Every operation identity,
+/// sweep, and participant row comes from durable state; nothing is reset to a
+/// memory default, and a restart is never taken as completion evidence.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Deletion`] for an invalid budget and when the
+/// canonical store refuses.
 pub(crate) async fn recover_targeted_deletions(
     store: &Store,
     registry: &ErasureParticipantRegistry,
-    pass: TargetedDeletionPass,
     pass_budget: u32,
 ) -> Result<TargetedDeletionPassOutcome, CoreError> {
-    if !valid_pass(pass) || pass_budget == 0 {
-        return Err(CoreError::Deletion(String::from(
-            "invalid targeted deletion recovery parameters",
-        )));
-    }
+    let pass = TargetedDeletionPass::default();
     // Startup recovery is a fresh schedule: the empty retry map makes every
     // retryable hold eligible, so the page is offered whole.
     resume_hold_page(
@@ -683,7 +692,7 @@ pub(crate) async fn recover_targeted_deletions(
         1,
     )
     .await?;
-    drive_targeted_deletion_until_settled(store, registry, pass, pass_budget).await
+    drive_targeted_deletion_until_settled(store, registry, pass_budget).await
 }
 
 /// Offers one bounded page of retryable-hold resumes.
@@ -827,19 +836,13 @@ impl HeldRetrySchedule {
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::Deletion`] for an invalid pass and when the canonical
-/// store refuses.
+/// Returns [`CoreError::Deletion`] when the canonical store refuses.
 pub(crate) async fn tick_targeted_deletion(
     store: &Store,
     registry: &ErasureParticipantRegistry,
-    pass: TargetedDeletionPass,
     schedule: &mut HeldRetrySchedule,
 ) -> Result<TargetedDeletionPassOutcome, CoreError> {
-    if !valid_pass(pass) {
-        return Err(CoreError::Deletion(String::from(
-            "invalid targeted deletion pass parameters",
-        )));
-    }
+    let pass = TargetedDeletionPass::default();
     let tick = schedule.next_tick();
     resume_hold_page(store, pass.operation_limit, schedule, tick).await?;
     drive_targeted_deletion(store, registry, pass).await

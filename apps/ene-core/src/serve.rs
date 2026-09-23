@@ -958,13 +958,8 @@ impl HostHandle {
         let _drive = self.targeted_deletion_drive.lock().await;
         let registry = crate::lock_unpoison(&self.targeted_deletion).clone();
         let mut schedule = self.deletion_hold_retry.lock().await;
-        crate::targeted_deletion::tick_targeted_deletion(
-            &self.store,
-            &registry,
-            crate::targeted_deletion::TargetedDeletionPass::default(),
-            &mut schedule,
-        )
-        .await
+        crate::targeted_deletion::tick_targeted_deletion(&self.store, &registry, &mut schedule)
+            .await
     }
 
     pub(crate) async fn recover_targeted_deletion_on_startup(&self) -> Result<(), CoreError> {
@@ -973,7 +968,6 @@ impl HostHandle {
         crate::targeted_deletion::recover_targeted_deletions(
             &self.store,
             &registry,
-            crate::targeted_deletion::TargetedDeletionPass::default(),
             crate::targeted_deletion::BOUNDED_DRIVE_PASS_BUDGET,
         )
         .await?;
@@ -986,7 +980,6 @@ impl HostHandle {
         let _drive_outcome = crate::targeted_deletion::drive_targeted_deletion_until_settled(
             &self.store,
             &registry,
-            crate::targeted_deletion::TargetedDeletionPass::default(),
             crate::targeted_deletion::BOUNDED_DRIVE_PASS_BUDGET,
         )
         .await;
@@ -1037,7 +1030,7 @@ impl HostHandle {
             }
         };
         let executor = HostInference::new(&self.store, &self.cred_store, &self.tracker, transport);
-        let inference = TaskAgentInferenceAdapter::new(&executor, Some(&registration.cancellation));
+        let inference = TaskAgentInferenceAdapter::new(&executor, &registration.cancellation);
         let instructions = OwnerInstructionSource::new(&self.store);
         let scrubber = CredentialScrubber {
             refs: &self.store,

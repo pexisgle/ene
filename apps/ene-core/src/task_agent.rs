@@ -15,14 +15,20 @@ use ene_task::{
     TaskInstructionSourceRecord,
 };
 
+/// Adapts one [`InferenceExecutor`] to the Task Agent port.
+///
+/// `abort` is the running execution's local cooperative stop token: the
+/// adapter forwards it into the dispatch boundary, which owns the post-claim
+/// accounting, so an abort stops the provider wait without losing the
+/// attempt's usage fact.
 pub struct TaskAgentInferenceAdapter<'a, I> {
     executor: &'a I,
-    abort: Option<&'a DispatchAbort>,
+    abort: &'a DispatchAbort,
 }
 
 impl<'a, I> TaskAgentInferenceAdapter<'a, I> {
     #[must_use]
-    pub fn new(executor: &'a I, abort: Option<&'a DispatchAbort>) -> Self {
+    pub fn new(executor: &'a I, abort: &'a DispatchAbort) -> Self {
         Self { executor, abort }
     }
 }
@@ -54,7 +60,7 @@ impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, 
         let mut sink = DiscardSink;
         match self
             .executor
-            .dispatch(*authorized, premise.prompt, &mut sink, self.abort)
+            .dispatch(*authorized, premise.prompt, &mut sink, Some(self.abort))
             .await
         {
             Ok(InferenceDispatchOutcome::Completed { arrival, adopted }) => {

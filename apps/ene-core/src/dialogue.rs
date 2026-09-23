@@ -113,20 +113,30 @@ fn command_id_for(envelope: &ene_api::v1::envelope::WireEnvelope) -> Option<Comm
     Some(CommandId(ene_primitive::RawId::from_uuid(id)))
 }
 
-enum RoundPremise {
-    Auto,
-    Existing(String),
-}
-
-fn canonical_round_premise(
+/// Canonical client round premise of one [`SubmitTextInput`] send.
+///
+/// The payload names the premise (`SubmitTextInput.round`); the envelope
+/// `round_view` is the mirror the Client relied on (IPC §5: comparison
+/// material, not a claim) and must agree with it once populated. A
+/// disagreement means two different round premises: neither side is adopted
+/// — the caller answers stale with current values and the Client re-syncs.
+///
+/// A force-new request is the design's round-less new-round request
+/// (IPC §13.1: `round = None`, `round_view = None`), so it names no premise
+/// at all. A force-new frame carrying a premise in either carrier is
+/// self-contradictory and is rejected here, never silently reinterpreted as
+/// the flag or joined on the hint.
+fn canonical_round_intent(
     submit: &SubmitTextInput,
     round_view: Option<&RoundWireId>,
-) -> Option<RoundPremise> {
+) -> Option<RoundIntentMark> {
+    if submit.fresh {
+        return (submit.round.is_none() && round_view.is_none()).then_some(RoundIntentMark::New);
+    }
     match (&submit.round, round_view) {
-        (None, None) => Some(RoundPremise::Auto),
-        (Some(round), None) if !submit.fresh => Some(RoundPremise::Existing(round.0.clone())),
-        (Some(round), Some(view)) if !submit.fresh && view == round => {
-            Some(RoundPremise::Existing(round.0.clone()))
+        (None, None) => Some(RoundIntentMark::Auto),
+        (Some(round), view) if view.is_none_or(|view| view == round) => {
+            Some(RoundIntentMark::Existing(round.0.clone()))
         }
         _ => None,
     }
@@ -276,12 +286,9 @@ impl HostHandle {
         connection_live: bool,
         expected_state: PresenceState,
         expected_generation: PresenceGeneration,
+        companion: CompanionId,
     ) -> AttachOutcome {
         let client = device_client(device_wire);
-        let companion = match self.store.ensure_running_companion().await {
-            Ok(companion) => companion,
-            Err(_) => return AttachOutcome::Raced,
-        };
         let store = self.store.clone();
         let expected = PresenceCheckRef {
             expected_generation,
@@ -412,8 +419,11 @@ impl HostHandle {
                 ),
             );
         };
-        let Some(round_premise) =
-            canonical_round_premise(submit, frame.envelope.observed.round_view.as_ref())
+        // Canonical round premise first: the two carriers must agree before
+        // anything else is judged, so a contradictory frame is declined
+        // stale with current values instead of adopting one side.
+        let Some(round_intent) =
+            canonical_round_intent(submit, frame.envelope.observed.round_view.as_ref())
         else {
             return emit_end(
                 sink,
@@ -429,14 +439,9 @@ impl HostHandle {
         };
         let credential_set = scrubbed.credential_set();
         let text = scrubbed.into_text();
-        let round_intent = if submit.fresh {
-            RoundIntentMark::New
-        } else {
-            match &round_premise {
-                RoundPremise::Auto => RoundIntentMark::Auto,
-                RoundPremise::Existing(reference) => RoundIntentMark::Existing(reference.clone()),
-            }
-        };
+        // The request fingerprint is the immutable client semantics: role,
+        // body, language, sending incarnation, and the canonical round
+        // intent derived above.
         let incoming_fingerprint = RequestFingerprint {
             role: HistoryRole::Owner,
             text: text.clone(),
@@ -500,6 +505,7 @@ impl HostHandle {
                     live.connection_live,
                     attribution.state,
                     attribution.generation,
+                    companion,
                 )
                 .await
             {
@@ -565,9 +571,8 @@ impl HostHandle {
                 }
             }
         }
-        let requested = match &round_premise {
-            RoundPremise::Auto => None,
-            RoundPremise::Existing(reference) => match self.round_for(reference) {
+        let requested = match &round_intent {
+            RoundIntentMark::Existing(reference) => match self.round_for(reference) {
                 Some(round) => Some(round),
                 None => {
                     return emit_end(
@@ -581,11 +586,15 @@ impl HostHandle {
                     );
                 }
             },
+            RoundIntentMark::Auto | RoundIntentMark::New => None,
         };
-        let intent = if submit.fresh {
-            RoundIntent::New
-        } else {
-            requested.map_or(RoundIntent::Auto, RoundIntent::Existing)
+        // One meaning per value, matching the fingerprint's round intent:
+        // force-new mints and never joins; a resolved premise joins that
+        // round; no premise joins-or-mints.
+        let intent = match (&round_intent, requested) {
+            (RoundIntentMark::New, _) => RoundIntent::New,
+            (RoundIntentMark::Existing(_), Some(round)) => RoundIntent::Existing(round),
+            _ => RoundIntent::Auto,
         };
         let Ok(lifecycle) = self.store.load_lifecycle(companion).await else {
             return emit_end(sink, held_frame(frame, live));
@@ -694,11 +703,10 @@ impl HostHandle {
             gate.pause().await;
         }
         let store = self.store.clone();
-        let commit_input = input.clone();
         let committed = self
             .with_current_connection_blocking(live, move || {
                 begin_turn_committed(
-                    commit_input,
+                    input,
                     prompt,
                     authorized,
                     |owner| store.append_message_sync(owner),
@@ -934,9 +942,9 @@ impl HostHandle {
         request: &HistoryRequest,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let coverage = self.current_coverage().await;
         let response = match self.read_history(request).await {
             HistoryResponse::Items(items) => {
+                let coverage = self.current_coverage().await;
                 let had_body = items.iter().any(|item| !item.text.is_empty());
                 let items: Vec<_> = items
                     .into_iter()
@@ -1419,7 +1427,7 @@ impl DeltaSink for StreamGate<'_> {
             // (dropped on any refusal) so the bounded channel paces the
             // provider while still refusing a stale delta.
             if !self.opened || !self.connection_current() {
-                // CCT §9.3: a refused install or a replacement before
+                // CCT §10.4: a refused install or a replacement before
                 // publication opens no wire stream and sends no close, but
                 // the accepted turn's dispatch/adoption contract still runs.
                 // Only a moved durable premise aborts.
