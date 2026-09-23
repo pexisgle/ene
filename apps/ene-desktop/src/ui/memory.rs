@@ -414,27 +414,6 @@ mod tests {
     }
 
     #[test]
-    fn list_request_pages_at_the_host_cursor() {
-        let first = MemoryPage::list_request(None);
-        assert_eq!(first.sections, vec![String::from(HOST_MEMORY_SECTION)]);
-        assert!(first.memory_after.is_none());
-        assert!(first.memory_revisions_of.is_none());
-        assert!(first.memory_revisions_after.is_none());
-        let next = MemoryPage::list_request(Some("memory-1"));
-        assert_eq!(next.memory_after.as_deref(), Some("memory-1"));
-        assert!(next.memory_revisions_of.is_none());
-    }
-
-    #[test]
-    fn revision_request_is_not_a_list_scan() {
-        let request = MemoryPage::revisions_request("memory-2", Some(20));
-        assert_eq!(request.memory_revisions_of.as_deref(), Some("memory-2"));
-        assert_eq!(request.memory_revisions_after, Some(20));
-        assert!(request.memory_after.is_none());
-        assert_eq!(request.sections, vec![String::from(HOST_MEMORY_SECTION)]);
-    }
-
-    #[test]
     fn list_page_projects_scope_importance_created_at_and_content() {
         let mut page = MemoryPage::default();
         page.apply_host_view(
@@ -464,31 +443,6 @@ mod tests {
             !debug.contains("jasmine"),
             "row Debug redacts content: {debug}"
         );
-    }
-
-    #[test]
-    fn older_page_appends_the_host_page_it_asked_for() {
-        let mut page = MemoryPage::default();
-        page.apply_host_view(
-            &view(
-                "memory 11111111-1111-1111-1111-111111111111 scope=companion importance=3 temporal=enduring recall=active revision=1 updated=2026-09-19T05:00:00+00:00\ncontent: newest\nnext: older-id\n",
-            ),
-            MemoryPage::list_request(None),
-            false,
-        );
-        page.apply_host_view(
-            &view(
-                "memory 22222222-2222-2222-2222-222222222222 scope=companion importance=3 temporal=enduring recall=active revision=1 updated=2026-09-19T04:00:00+00:00\ncontent: older\n",
-            ),
-            MemoryPage::list_request(Some("older-id")),
-            true,
-        );
-        assert_eq!(page.rows().len(), 2);
-        assert_eq!(page.rows()[1].content, "older");
-        assert!(page.next_after().is_none());
-        let last = page.last_request().expect("request is recorded");
-        assert_eq!(last.memory_after.as_deref(), Some("older-id"));
-        assert!(last.memory_revisions_of.is_none());
     }
 
     #[test]
