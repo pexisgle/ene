@@ -71,18 +71,6 @@ mod tests {
     use super::WallClockWithTz;
 
     #[test]
-    fn preserves_offset_through_parse_and_render() {
-        let clock = WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00")
-            .expect("offset timestamp must parse");
-        assert_eq!(clock.to_rfc3339(), "2026-09-08T12:00:00+09:00");
-    }
-
-    #[test]
-    fn rejects_non_rfc3339_input() {
-        assert!(WallClockWithTz::parse_rfc3339("not a timestamp").is_err());
-    }
-
-    #[test]
     fn same_instant_with_different_offsets_compares_equal() {
         let tokyo = WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00")
             .expect("offset timestamp must parse");

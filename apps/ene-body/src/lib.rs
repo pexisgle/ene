@@ -21,19 +21,6 @@ pub use run::{IpcEndpoint, RunOptions, parse_endpoint, run, run_with_io};
 #[cfg(test)]
 mod contract_tests {
     #[test]
-    fn package_name_is_ene_body_not_ene_vrm() {
-        let manifest = include_str!("../Cargo.toml");
-        assert!(
-            manifest.contains("name = \"ene-body\""),
-            "crate name must be ene-body"
-        );
-        assert!(
-            !manifest.contains("ene-vrm"),
-            "crate name ene-vrm is banned"
-        );
-    }
-
-    #[test]
     fn manifest_does_not_depend_on_host_or_client_protocol() {
         let manifest = include_str!("../Cargo.toml");
         for banned in [

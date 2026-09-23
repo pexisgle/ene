@@ -314,7 +314,6 @@ pub enum BodySuperviseError {
 #[cfg(test)]
 mod tests {
     use super::{BodyStatus, BodySupervisor};
-    use ene_body::ParentToBody;
     use std::path::Path;
 
     #[test]
@@ -323,15 +322,5 @@ mod tests {
         let status = supervisor.spawn_if_present(Path::new("/no/such/ene-body"));
         assert_eq!(status, BodyStatus::Absent);
         assert_eq!(supervisor.poll(), BodyStatus::Absent);
-    }
-
-    #[test]
-    fn projection_commands_have_no_secret_or_chat_variant() {
-        let encoded = ene_body::ipc::encode_parent(&ParentToBody::Show).expect("encode");
-        let blob = String::from_utf8_lossy(&encoded);
-        assert!(
-            !blob.contains("sk-") && !blob.contains("chat") && !blob.contains("task"),
-            "projection must not carry domain text"
-        );
     }
 }

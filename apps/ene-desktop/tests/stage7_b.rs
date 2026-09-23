@@ -509,11 +509,3 @@ async fn ime_and_about_slint_and_missing_body() {
         "wizard steps must not invent consent"
     );
 }
-
-#[test]
-fn the_seat_comes_from_the_host_spawn_not_from_a_connection() {
-    // Compile-time reminder: a public connection can no longer take a seat.
-    // The spawn-derived seat and its generation rules are covered by
-    // stage7_a1; B reuses the Host-spawned registration path.
-    let _ = host_control::seat_test_gui_for_tests;
-}

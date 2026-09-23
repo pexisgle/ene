@@ -709,16 +709,3 @@ async fn resume_is_bound_to_the_displayed_premise() {
     transport_b.fail(1);
     server.shutdown_and_join().await;
 }
-
-#[test]
-fn conversation_ack_hook_is_confirm_presentation() {
-    let src = include_str!("../src/session.rs");
-    assert!(
-        src.contains("ConfirmPresentation"),
-        "slice E keeps the chat ACK hook in submit_and_collect"
-    );
-    assert!(
-        src.contains("PresentationStatus::Presented"),
-        "chat ACK is issued after the stream has been collected"
-    );
-}

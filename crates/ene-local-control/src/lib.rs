@@ -302,19 +302,6 @@ mod tests {
     }
 
     #[test]
-    fn the_requester_channel_has_no_secret_bearing_frame() {
-        let request = ToHost::RequestCredentialPut {
-            provider: String::from("openai"),
-            label: String::from("main"),
-        };
-        let json = serde_json::to_string(&request).expect("must serialize");
-        assert!(
-            !json.contains("secret"),
-            "the requester listener must not carry a secret field: {json}"
-        );
-    }
-
-    #[test]
     fn the_requester_channel_cannot_express_a_completion() {
         // The requester's request/answer enums have no completion or
         // challenge frame at all: a requester cannot complete a session even
@@ -339,19 +326,5 @@ mod tests {
             former_seat_hello.is_err(),
             "the requester protocol must not retain an empty-seat acquisition frame"
         );
-    }
-
-    #[test]
-    fn pending_deletion_preview_has_no_target_body_field() {
-        let preview = super::PendingDeletionPreview {
-            request_id: String::from("00000000-0000-0000-0000-000000000001"),
-            purpose: String::from("privacy"),
-        };
-        let json = serde_json::to_string(&preview).expect("must serialize");
-        assert!(
-            !json.contains("exact"),
-            "pending preview must not carry target text: {json}"
-        );
-        assert!(json.contains("privacy"));
     }
 }

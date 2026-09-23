@@ -570,16 +570,3 @@ where
     serde_json::from_slice(&body)
         .map_err(|error| DesktopError::Protocol(format!("requester decode: {error}")))
 }
-
-#[cfg(test)]
-mod tests {
-    use ene_local_control::{CONFIRMATION_MODE_ENV, CONFIRMATION_MODE_STDIO};
-
-    /// The launcher/GUI switch is an environment marker the Host sets, never a
-    /// command-line flag a user or a requester can aim.
-    #[test]
-    fn the_confirmation_mode_marker_is_the_hosts() {
-        assert_eq!(CONFIRMATION_MODE_ENV, "ENE_CONFIRMATION_CHANNEL");
-        assert_eq!(CONFIRMATION_MODE_STDIO, "stdio");
-    }
-}

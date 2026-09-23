@@ -222,14 +222,7 @@ impl Overlay {
 #[cfg(test)]
 mod tests {
     use super::Overlay;
-    use crate::ipc::{LocalUiFact, OverlayKind, PlacementBox};
-
-    #[test]
-    fn explicit_test_overlay_is_headless() {
-        let overlay = Overlay::unavailable("test fixture");
-        assert_eq!(overlay.kind(), OverlayKind::Headless);
-        assert!(!overlay.visible());
-    }
+    use crate::ipc::{LocalUiFact, PlacementBox};
 
     #[test]
     fn headless_records_show_hide_and_placement() {

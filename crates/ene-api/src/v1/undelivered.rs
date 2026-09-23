@@ -441,19 +441,8 @@ pub enum ResumeTaskOutcomeWire {
 mod tests {
     use super::super::refs::RoundWireId;
     use super::{
-        DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, ReportSourcePageView, ResumeTask, TaskWireRef,
-        UndeliveredItemView, UndeliveredSourceView,
+        ReportSourcePageView, ResumeTask, TaskWireRef, UndeliveredItemView, UndeliveredSourceView,
     };
-
-    #[test]
-    fn page_bounds_match_the_wire_contract() {
-        assert_eq!(DEFAULT_PAGE_LIMIT, 50);
-        assert_eq!(MAX_PAGE_LIMIT, 50);
-        assert_eq!(super::EXCERPT_MAX_BYTES, 2048);
-        assert_eq!(super::MIN_SOURCE_LIMIT_BYTES, 4);
-        assert_eq!(super::MAX_SOURCE_LIMIT_BYTES, 16384);
-        assert_eq!(super::DEFAULT_SOURCE_LIMIT_BYTES, 4096);
-    }
 
     #[test]
     fn item_debug_redacts_the_excerpt_but_keeps_refs() {

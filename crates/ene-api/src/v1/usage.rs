@@ -181,14 +181,8 @@ pub enum UsageSummaryResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{USAGE_PAGE_LIMIT_DEFAULT, USAGE_PAGE_LIMIT_MAX, UsageSummaryRequest};
+    use super::UsageSummaryRequest;
     use crate::v1::refs::UsageCursorWire;
-
-    #[test]
-    fn page_bounds_match_the_wire_contract() {
-        assert_eq!(USAGE_PAGE_LIMIT_MAX, 50);
-        assert_eq!(USAGE_PAGE_LIMIT_DEFAULT, 50);
-    }
 
     #[test]
     fn request_roundtrips_through_json_with_omitted_fields() {

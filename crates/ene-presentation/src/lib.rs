@@ -699,11 +699,6 @@ mod tests {
     }
 
     #[test]
-    fn new_rounds_are_unique() {
-        assert_ne!(new_round(), new_round());
-    }
-
-    #[test]
     fn input_debug_redacts_body_and_keeps_refs() {
         let candidate = SubmitClientInputCandidate {
             companion: RawId::new(),

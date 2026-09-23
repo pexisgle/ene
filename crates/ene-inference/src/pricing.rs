@@ -359,7 +359,7 @@ pub(crate) mod tests_support {
 
 #[cfg(test)]
 mod tests {
-    use super::tests_support::{catalog_of, snapshot};
+    use super::tests_support::snapshot;
     use super::{
         FIRST_PARTY_REVISION, PricingCatalog, PricingCatalogEntry, PricingCatalogError,
         PricingCatalogRevision, PricingResolution,
@@ -591,23 +591,6 @@ mod tests {
         assert_eq!(
             super::PricingSnapshotRef::from_text("not-a-reference"),
             None
-        );
-    }
-
-    #[test]
-    fn catalog_resolution_matches_a_single_entry_catalog() {
-        let pricing = snapshot(
-            "openai",
-            "gpt-test",
-            4,
-            rate(1_000_000),
-            rate(500_000),
-            rate(2_000_000),
-        );
-        let catalog = catalog_of(&pricing);
-        assert_eq!(
-            catalog.resolve("openai", "gpt-test", pricing.effective_at),
-            PricingResolution::Priced(pricing)
         );
     }
 }

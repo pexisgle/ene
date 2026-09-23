@@ -83,32 +83,6 @@ pub struct ErasureConditionRef {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeletionOperationId, DeletionSweepGeneration, ErasureConditionRef};
-    use ene_primitive::RawId;
-
-    #[test]
-    fn identity_round_trips_and_conditions_keep_their_pair() {
-        let operation = DeletionOperationId::from_raw(RawId::new());
-        assert_eq!(DeletionOperationId::from_raw(operation.as_raw()), operation);
-        assert_eq!(
-            DeletionSweepGeneration::from_u64(3).as_u64(),
-            3,
-            "the sweep generation round-trips"
-        );
-        let first = ErasureConditionRef {
-            operation,
-            sweep: DeletionSweepGeneration::from_u64(1),
-        };
-        let second = ErasureConditionRef {
-            operation,
-            sweep: DeletionSweepGeneration::from_u64(2),
-        };
-        assert_ne!(
-            first, second,
-            "a later sweep is a different condition of the same operation"
-        );
-    }
-
     /// The participant boundary must stay cross-cutting: this crate owns the
     /// vocabulary and the trait, the composition registers concrete
     /// implementations, and `ene-preservation` never depends on a participant

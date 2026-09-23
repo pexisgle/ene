@@ -464,15 +464,13 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
-    fn default_endpoint_is_stdio() {
-        let endpoint = parse_endpoint(["ene-body"]).expect("parse");
-        assert_eq!(endpoint, IpcEndpoint::Stdio);
-    }
-
-    #[test]
-    fn stdio_flag_is_accepted() {
-        let endpoint = parse_endpoint(["ene-body", "--ipc-stdio"]).expect("parse");
-        assert_eq!(endpoint, IpcEndpoint::Stdio);
+    fn default_and_explicit_stdio_use_the_same_endpoint() {
+        for args in [&["ene-body"][..], &["ene-body", "--ipc-stdio"][..]] {
+            assert_eq!(
+                parse_endpoint(args.iter().copied()).unwrap(),
+                IpcEndpoint::Stdio
+            );
+        }
     }
 
     #[cfg(unix)]

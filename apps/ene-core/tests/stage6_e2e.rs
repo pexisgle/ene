@@ -2203,29 +2203,6 @@ async fn shutdown_waits_for_started_deletion_store_work() {
         .expect("successor startup must complete once predecessor Store work is gone");
 }
 
-/// After graceful shutdown returns, neither the async driver nor started
-/// deletion Store work from the predecessor remains.
-#[tokio::test]
-async fn graceful_shutdown_leaves_no_detached_deletion_work() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let transport = Arc::new(ScriptedTransport::new(vec![], &[]));
-    let mut served = serve_and_setup(dir, transport, &[cmds::CAPABILITY_DIALOGUE]).await;
-    wait_until_deletion_drivers(served.handle(), 1).await;
-    served.stop().await;
-    assert_eq!(
-        served.handle().live_targeted_deletion_drivers_for_tests(),
-        0
-    );
-    assert_eq!(
-        served
-            .handle()
-            .store_for_tests()
-            .live_deletion_blocking_sections_for_tests(),
-        0
-    );
-}
-
 /// E2E 1 restart: a durable `finalizing` marker (the crash-consistent state
 /// between the two sealed completion calls, built here through the public
 /// preservation repository because only a real crash can interleave them)

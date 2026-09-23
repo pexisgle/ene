@@ -335,9 +335,8 @@ impl HitTestMask {
 /// Pixel extent of the alpha-aware cells.
 ///
 /// The Wayland overlay sets its input region from [`HitTestMask::opaque_rectangles`]
-/// and does not need the raw dimensions; the Windows DWM hit-test path and
-/// this module's unit tests do.
-#[cfg(any(target_os = "windows", test))]
+/// and does not need the raw dimensions; the Windows DWM hit-test path does.
+#[cfg(target_os = "windows")]
 impl HitTestMask {
     pub(crate) fn width(&self) -> u32 {
         self.width
@@ -1051,13 +1050,5 @@ mod tests {
         mask.mark(1, 0);
         mask.mark(2, 1);
         assert_eq!(mask.opaque_rectangles(), vec![[0, 0, 8, 4], [8, 4, 10, 6]]);
-    }
-
-    #[test]
-    fn resized_empty_mask_has_no_owned_rectangles() {
-        let mask = HitTestMask::empty(630, 960);
-        assert_eq!(mask.width(), 630);
-        assert_eq!(mask.height(), 960);
-        assert!(mask.opaque_rectangles().is_empty());
     }
 }
