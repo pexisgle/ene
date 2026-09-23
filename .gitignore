@@ -3,5 +3,4 @@
 .direnv
 .idea
 .vscode
-# Install assets placed locally (the VRoid motion pack): never committed.
 /assets/motions/
