@@ -10,7 +10,10 @@
 
 通常 Host–Client 通信の WSS 統一は**設計済み・未実装**です。旧 transport の検証を WSS の合格に読み替えません。
 
-既存の [Windows 11 D/F runtime / platform acceptance](reports/stage-7-windows-df-acceptance-2026-09-22.md) と [KDE Wayland / Linux Secret Service / Linux Performance Gate probe](reports/stage-7-kde-wayland-probe-2026-09-22.md) は、各報告の tip・環境・アセット・transport に限る証拠です。KDE 上の motion pack 最小実描画は Seed-san で確認済みです。公式 `ene`、物理 HiDPI、最終統合 tip・正式 NixOS 対象の合格ではありません。
+過去の実機検証は次の範囲に限る。詳細な当時の記録は [Git 履歴](https://github.com/pexisgle/ene/tree/1f9cbfac0e74e237449c87364304bc317ce28181/docs/implementation/reports) にある。
+
+- **Windows 11（2026-09-22）**: build 26200、Seed-san、`5bc0b12818b65ea800a43aa9b0de1beafdf53fb2` を base とする修正 tree で D/F の表示・入力・性能を検証。公式 `ene` と後発の WSS を含む統合 tip の合格ではない。
+- **KDE Wayland（2026-09-22）**: NixOS 26.11 開発版、Seed-san、`24dd163cd1b62a6eb5efc7b6065e09a8d00a6091` を base とする修正 tree で overlay、Linux Secret Service、IME、性能と motion pack の最小実描画を probe。物理 display scale=2、公式 `ene`、正式 NixOS 26.11、後発の WSS は未検証。
 
 ## 完了したステージ
 

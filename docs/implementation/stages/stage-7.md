@@ -84,7 +84,7 @@ NixOS 26.11 は Support Matrix の Linux 対象です。指定された正式リ
 
 **A0 design gate**: 要件の本人による直接確認を維持する。要求接続と確認 channel、Host による GUI 起動由来、OS・インストール完全性の保証前提、秘密の有効化時点と復旧を確定する。CM / IPC / IB / PR / CCT に同じ契約を反映する。provisional 依存と未実施 probe を合格扱いしない。
 
-probe の完了と未実施は報告と進捗 index で管理し、ここに古い未実施一覧を重複して残しません。
+probe の範囲と未実施は進捗 index で管理し、ここに古い未実施一覧を重複して残しません。
 
 ## 4. PR 分割と各 slice の gate
 
@@ -253,4 +253,4 @@ protocol / currentness / failure は、実 Host・store・Client transport と b
 | 後続計画 / PRs | 個別不足と作業順は [後続計画](../README.md#43-後続作業の実装計画)、probe 結果と exact tip は報告・PR に記録する。pass / fail / 未実施を区別する |
 | `PROGRESS.md` | current / completed / blocker / next の短い index のみ |
 
-報告は実施当時の記録として保持し、現在の残件一覧に流用しません。証拠の入口は [Linux 初期検証](../reports/stage-7-linux-2026-09-19.md)、[D/F 実装報告](../reports/stage-7-df-implementation-2026-09-21.md)、[Windows D/F acceptance](../reports/stage-7-windows-df-acceptance-2026-09-22.md)、[KDE Wayland probe](../reports/stage-7-kde-wayland-probe-2026-09-22.md) です。古い「未実施」記述だけで現在の残件を判定せず、統合 tip の証拠と進捗 index を確認します。
+過去の検証範囲は [進捗 index](../PROGRESS.md) に短く記し、元の詳細は Git 履歴から確認できます。最終 acceptance は統合 tip の OS・言語・アセット・transport と測定生データを新たに記録し、古い probe の結果を流用しません。
