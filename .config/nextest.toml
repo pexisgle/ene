@@ -4,3 +4,15 @@
 [profile.default]
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# Experiment profile: the Windows process tests that miss IPC deadlines while
+# several CPU-heavy fixtures overlap get the whole worker pool. Kept separate
+# from `default` so the comparison can measure both concurrency settings.
+[[profile.isolated.overrides]]
+filter = '''
+test(dummy_parent_receives_ready_and_clean_exit_on_shutdown)
+| test(stage6_management_view_memory_body_is_a_required_client_participant)
+| test(stage6_deletion_races_provider_wait_and_delayed_result)
+'''
+platform = { host = 'cfg(windows)' }
+threads-required = "num-test-threads"
