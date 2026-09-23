@@ -1,11 +1,3 @@
-//! Bounded first-party usage summary and cap status reads
-//! (`usage-cost-cap` §16).
-//!
-//! The fixtures use the production claim/settlement path so the read sees
-//! exactly the rows the pipeline writes. Keyset paging is asserted on
-//! deliberately identical `started_at` values, so the `(started_at, ticket)`
-//! tiebreak is what keeps the walk lossless.
-
 use ene_inference::cost::{CurrencyCode, TokenRate, UsageCostFact, UsageEstimate};
 use ene_inference::pricing::{PricingCatalogRevision, PricingSnapshot};
 use ene_inference::{
@@ -26,7 +18,6 @@ fn at(value: &str) -> WallClockWithTz {
     WallClockWithTz::parse_rfc3339(value).expect("the fixture instant parses")
 }
 
-/// 1 micro per input token, 0.1 per cached input, 2 per output.
 fn pricing(revision: u64) -> PricingSnapshot {
     PricingSnapshot {
         provider: PROVIDER.to_owned(),
@@ -148,8 +139,6 @@ async fn claim_learning(store: &Store) -> InferenceTicketId {
             model: MODEL,
             pricing: None,
             estimate: None,
-            // A Learning formation always names at least the messages its
-            // prompt read; an empty correlation is refused at the claim.
             data_use: vec![RawId::new()],
             task_agent: None,
         },
@@ -289,7 +278,6 @@ async fn summary_attributes_dialogue_learning_and_task_agent() {
             output_tokens: 500,
         })
     );
-    // non_cached 800 at 1 micro + cached 200 at 0.1 + output 500 at 2.
     let Some(UsageCostFact::Reported(cost)) = &dialogue_row.cost else {
         panic!("the reported row must project its cost");
     };
@@ -312,8 +300,6 @@ async fn summary_attributes_dialogue_learning_and_task_agent() {
         })
     );
 
-    // The consumer filter narrows to exactly one attribution group, and the
-    // provider/model filters narrow the same rows.
     let filtered = store
         .query_usage_summary(UsageSummaryQuery {
             from: at("2026-01-01T00:00:00Z"),
@@ -362,8 +348,6 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
             .await,
         );
     }
-    // One reported settlement (actual cost 100: 100 input at 1 micro),
-    // one unknown settlement (keeps its 200 upper bound), one still reserved.
     assert_eq!(
         store
             .record_usage(reported_fact(claims[0], 100, 0, 0))
@@ -423,8 +407,6 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
     assert_eq!(*remaining, Money::from_micros(CurrencyCode::Usd, 498));
     assert!(!held, "502 of 1000 is not held");
 
-    // The status and the admission agree: under this consumption a new
-    // 201-micro reservation fits (703 <= 1000) ...
     let fitting = claim(
         &store,
         ClaimSpec {
@@ -444,8 +426,6 @@ async fn cap_status_breaks_down_consumption_and_reflects_admission() {
         fitting, claims[0],
         "a distinct ticket claims under the headroom"
     );
-    // ... and once the cap is lowered below the current consumption, the
-    // status is held with zero remaining and admission refuses.
     let current = store
         .load_usage_cap_status(UsageCapStatusQuery {
             provider: None,

@@ -1,11 +1,3 @@
-//! D-gate fragment: a dummy parent survives `ene-body` death.
-//!
-//! Full chat/settings survival is `ene-desktop`'s job. This test only proves
-//! the overlay child can die without taking the parent process with it, and
-//! that the parent observes a disconnect (EOF) rather than a Host command.
-//! GPU initialization is outside this IPC/process-lifetime contract; child
-//! processes skip it so adapter startup cannot consume the protocol deadlines.
-
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -41,8 +33,6 @@ async fn dummy_parent_sees_disconnect_and_keeps_running_after_body_kill() {
         .expect("parent read must not hang")
         .expect("read");
 
-    // Dummy parent keeps running after the overlay child is gone: it can still
-    // do local work and did not interpret the disconnect as Companion stop.
     let mut parent_still_serving = 0u32;
     for _ in 0..8 {
         parent_still_serving = parent_still_serving.saturating_add(1);

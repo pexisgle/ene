@@ -1,54 +1,3 @@
-//! Stage 6 slice D: first-party E2E over the real transport for Targeted
-//! Deletion, usage / cost / cap, and credential secret non-exposure.
-//!
-//! Every leg starts from the production composition: a real listener
-//! ([`ene_core::conn::run`]), the real `ene-ctl` [`Client`], the real store,
-//! the real management inlets and the real preservation fan-out. Only the
-//! provider transport is a controllable fake (scripted replies, per-call
-//! barriers, injected usage and failures), never a substitute for a
-//! first-party boundary.
-//!
-//! The file is platform-neutral on purpose: the transport-generic
-//! `serve_connection` loop is what the Unix socket and the Windows named pipe
-//! both drive, so the same suite runs on both required CI operating systems
-//! over their own OS transport.
-//!
-//! Determinism: provider call order is controlled by per-call barriers and
-//! observation (`wait_sends`), never by sleeps that assume ordering; race
-//! legs park a supplier at a barrier and commit the other premise while it is
-//! held.
-//!
-//! Coverage map:
-//!
-//! - E2E 1 (Targeted Deletion): request → Host-local confirmation → bounded
-//!   fan-out → finalizing → completed through the real socket, with the
-//!   target planted in History, Learning Summary / Memory current + past
-//!   revision, Task instruction / result / report, the control/metadata
-//!   journal, the workspace path copies, and an undelivered presentation
-//!   transient; completed-state scans, search-material destruction, and the
-//!   fresh-origin acceptance are asserted after the operation.
-//! - E2E 1 Client participant: a Client that received a target-bearing copy
-//!   is snapshotted as a required `ClientIncarnation` by the serving Host's
-//!   first-party confirmation inlet; its local-erasure answer verifies the
-//!   participant, an unreachable Client keeps the operation `Held`, a
-//!   disconnect or replacement connection alone completes nothing, and an
-//!   already-snapshotted participant survives a Host restart until the
-//!   Client's own local erasure (lifecycle §8.1).
-//! - E2E 1 races: provider wait and deletion condition in both orders;
-//!   Learning formation and deletion condition in both orders; presentation
-//!   ACK after the condition is a domain hold, not a Presented write.
-//! - E2E 1 restart: an unfinished operation survives Host restart in
-//!   `active` and in `finalizing` and is never completed by the restart.
-//! - E2E 2 (Usage / Cost / Cap): Reported input/cached/output tokens and the
-//!   cost breakdown from the first-party query for dialogue, learning and
-//!   Task Agent calls, Unknown distinct from Reported, concurrent admission
-//!   for the last cap slot with a zero-byte refusal, `ResponseLost` Unknown
-//!   counted across restart, and cap update currentness / replay.
-//! - E2E 3 (Credential safety): a registered secret never reaches provider
-//!   request bodies, History, Memory, Task data, presentation bodies, or the
-//!   frames, errors, and debug renderings this process captures; a rotation
-//!   during a parked provider wait leaves no raw value durable.
-
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -93,13 +42,9 @@ use ene_preservation::{ConfirmTargetedDeletionOutcome, DeletionOperationRef};
 use ene_primitive::{RawId, WallClockWithTz};
 
 const DESCRIPTOR: &str = "stage6 e2e";
-/// A reviewed first-party route, so the usage surface can project a cost.
 const MODEL: &str = "gpt-4o-mini";
-/// The mechanical keyword the Targeted Deletion E2E plants everywhere.
 const TARGET: &str = "TS6-DELETION-CANARY-9137";
-/// The credential value the secret-safety E2E registers and scans for.
 const SECRET: &str = "sk-stage6-secret-marker-8821";
-/// The value a rotation registers over [`SECRET`].
 const ROTATED_SECRET: &str = "sk-stage6-rotated-marker-4477";
 
 fn memory_store_with(secret: &str) -> MemoryCredentialStore {
@@ -115,8 +60,6 @@ fn memory_store() -> MemoryCredentialStore {
     memory_store_with("sk-test-only")
 }
 
-/// Two usable bearers: the registered `main` value and a not-yet-registered
-/// `rotated` value a later approval promotes.
 fn memory_store_with_rotated(main: &str, rotated: &str) -> MemoryCredentialStore {
     let store = memory_store_with(main);
     store.insert(
@@ -126,12 +69,10 @@ fn memory_store_with_rotated(main: &str, rotated: &str) -> MemoryCredentialStore
     store
 }
 
-/// One scripted provider call.
 #[derive(Clone)]
 struct Call {
     reply: String,
     usage: Option<RawUsage>,
-    /// The provider may have run but the response was lost.
     lost: bool,
 }
 
@@ -165,21 +106,13 @@ impl Call {
     }
 }
 
-/// One matcher over the provider request's logical input. Content matching
-/// (instead of FIFO) keeps a fixture deterministic when background work
-/// (Learning formation, Task Agent turns) interleaves with dialogue calls.
 type Matcher = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
-/// Matches the dialogue prompt whose *current* owner message is `text`: the
-/// same words may legitimately remain in the recent-conversation window, so a
-/// plain substring match would answer a later round with an earlier script.
 fn on_latest_owner(text: &str) -> Matcher {
     let needle = format!("\nOwner: {text}");
     Box::new(move |input| input.ends_with(&needle))
 }
 
-/// Matches one Learning formation prompt; `create` selects the pass whose
-/// prompt shows no existing memory.
 fn on_learning_formation(create: bool) -> Matcher {
     Box::new(move |input| {
         input.contains("learning formation pass")
@@ -187,30 +120,17 @@ fn on_learning_formation(create: bool) -> Matcher {
     })
 }
 
-/// Matches one Task Agent turn carrying `tool_calls` prior exchanges.
 fn on_task_agent_turn(tool_calls: usize) -> Matcher {
     Box::new(move |input| {
         input.starts_with("[RESPONSE FORMAT]") && input.matches("[TOOL CALL]").count() == tool_calls
     })
 }
 
-/// Controllable provider fake: content-matched scripted calls, per-call
-/// barriers, captured inputs, a send counter, and one fixed safe usage upper
-/// bound.
-///
-/// A barrier is membership-only (it shrinks), so removing a call from
-/// `blocks` releases it without a lost-wakeup race. Observation polls
-/// (`wait_sends`) watch background completion; they are never an ordering
-/// device for a race, which uses the barriers.
 struct ScriptedTransport {
     scripts: Mutex<Vec<(Matcher, Call)>>,
     default_call: Mutex<Call>,
     blocks: Mutex<BTreeSet<usize>>,
-    /// Content barriers: a request whose logical input matches one of these
-    /// parks before answering, so a race commits its other premise while this
-    /// exact call is provably held.
     block_matches: Mutex<Vec<Matcher>>,
-    /// Calls currently parked on a barrier (observation for `wait_parked`).
     parked: AtomicUsize,
     inputs: Mutex<Vec<String>>,
     sends: AtomicUsize,
@@ -240,8 +160,6 @@ impl ScriptedTransport {
         self.sends.load(Ordering::SeqCst)
     }
 
-    /// Parks every future call whose input matches `matcher` until
-    /// [`Self::release_blocked`] runs.
     fn block_input(&self, matcher: Matcher) {
         self.block_matches
             .lock()
@@ -256,7 +174,6 @@ impl ScriptedTransport {
             .clear();
     }
 
-    /// Observation poll for `wanted` calls parked on a content barrier.
     async fn wait_parked(&self, wanted: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         while self.parked.load(Ordering::SeqCst) < wanted {
@@ -349,8 +266,6 @@ impl ProviderTransport for ScriptedTransport {
     }
 }
 
-/// One provider reply carrying exactly one companion `[task-control]`
-/// directive: the marker line must be the reply's first non-empty line.
 fn task_reply(directive: serde_json::Value) -> String {
     format!("[task-control] {directive}")
 }
@@ -363,14 +278,10 @@ async fn open_host_with(dir: &Path, store: MemoryCredentialStore) -> Arc<HostHan
     let opened = HostHandle::open_with_cred_store(dir, CredStore::Memory(store)).await;
     assert!(opened.is_ok(), "host must open");
     let handle = Arc::new(opened.unwrap());
-    // Production silence wait is 30s; e2e must not sit on that wall clock.
     handle.set_client_erasure_wait_for_tests(Duration::from_millis(200));
     handle
 }
 
-/// Dials the data directory until the listener takes the pairing request and
-/// requires the typed pending outcome. A failed dial is a bounded
-/// availability wait, never an ordering device.
 async fn dial_until_pending(dir: &Path) -> Result<PendingPairingClient, String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
@@ -420,11 +331,6 @@ async fn connect(dir: &Path) -> Client {
     }
 }
 
-/// Hang guard for one request round-trip. This is not a synchronization
-/// mechanism: every wait the tests rely on is a barrier or a durable-state
-/// poll, and this bound exists only so a genuinely wedged run fails instead of
-/// hanging forever. It is generous because a loaded CI runner (notably the
-/// Windows runner) can stall a background round while other race legs run.
 const ROUND_TRIP_GUARD: Duration = Duration::from_secs(60);
 
 async fn ask(client: &mut Client, payload: WirePayload, what: &str) -> Result<WirePayload, String> {
@@ -470,8 +376,6 @@ fn setup_complete_intent(target: &str, mark: &str) -> WirePayload {
     })
 }
 
-/// Registers the credential, assigns every capability the E2E uses, and
-/// completes setup.
 async fn setup_flow(
     client: &mut Client,
     approver: &HostHandle,
@@ -541,8 +445,6 @@ async fn setup_flow(
     Ok(())
 }
 
-/// Yields until `ready` is true. This waits for a published condition, never
-/// for a guessed Targeted Deletion tick interval.
 async fn wait_until(mut ready: impl FnMut() -> bool, mut what: impl FnMut() -> String) {
     for _ in 0..1_000_000 {
         if ready() {
@@ -553,8 +455,6 @@ async fn wait_until(mut ready: impl FnMut() -> bool, mut what: impl FnMut() -> S
     panic!("{}", what());
 }
 
-/// Waits until this handle's serving-composition Targeted Deletion driver
-/// count equals `expected`.
 async fn wait_until_deletion_drivers(handle: &HostHandle, expected: usize) {
     wait_until(
         || handle.live_targeted_deletion_drivers_for_tests() == expected,
@@ -588,13 +488,6 @@ async fn wait_until_deletion_blocking(handle: &HostHandle, expected: usize) {
     .await;
 }
 
-/// One served Host under test: the composition handle, the listener task, and
-/// a live first-party client.
-///
-/// The client is optional because a restart must first close the current
-/// connection: the Windows named-pipe listener creates the exclusive *first*
-/// instance for the pipe name, so the previous connection's still-open server
-/// instance would block the new listener from binding.
 struct Served {
     dir: PathBuf,
     handle: Option<Arc<HostHandle>>,
@@ -646,31 +539,18 @@ impl Served {
         }
     }
 
-    /// The live first-party client.
     fn client(&mut self) -> &mut Client {
         self.client.as_mut().expect("a live client")
     }
 
-    /// The current Host composition. Present after start/stop; `serve`
-    /// drops the predecessor before opening the successor.
     fn handle(&self) -> &HostHandle {
         self.handle.as_ref().expect("a live HostHandle")
     }
 
-    /// A clone of the current Host composition Arc.
     fn handle_arc(&self) -> Arc<HostHandle> {
         Arc::clone(self.handle.as_ref().expect("a live HostHandle"))
     }
 
-    /// Closes the current connection and stops the listener. The state stays
-    /// open on the current handle, exactly like a Host process that stopped
-    /// serving.
-    ///
-    /// Restart correctness uses graceful shutdown: the client is dropped
-    /// first so per-connection tasks release the handle, then the listener
-    /// is signalled to stop accepting and join the Targeted Deletion driver
-    /// after any already-started bounded tick (including its Store
-    /// `spawn_blocking` work) finishes.
     async fn stop(&mut self) {
         self.client = None;
         tokio::task::yield_now().await;
@@ -698,8 +578,6 @@ impl Served {
         }
     }
 
-    /// Emergency abort of `conn::run` without joining a running tick. Used
-    /// only to prove AbortOnDrop still stops the async driver.
     async fn abort_listener(&mut self) {
         self.client = None;
         tokio::task::yield_now().await;
@@ -709,16 +587,6 @@ impl Served {
         drop(std::fs::remove_file(conn::socket_path(&self.dir)));
     }
 
-    /// Opens the state again, runs the production startup mutations, and
-    /// serves; returns a fresh authenticated client.
-    ///
-    /// Restart order: predecessor driver and started deletion Store work are
-    /// gone, the predecessor `HostHandle` is dropped, then the successor
-    /// opens the same database and runs startup mutations. The OS transport
-    /// may still be releasing the previous connection's server instance (the
-    /// Windows named-pipe listener owns the exclusive first instance for the
-    /// pipe name), so a listener that exits immediately is retried until it
-    /// stays up.
     async fn serve(&mut self) -> Client {
         wait_until_deletion_drivers(self.handle(), 0).await;
         wait_until_deletion_blocking(self.handle(), 0).await;
@@ -737,8 +605,6 @@ impl Served {
                 Arc::clone(&self.transport),
                 shutdown,
             ));
-            // Bind is the listener's first await point: a task that exits
-            // within this window could not bind (or lost the singleton race).
             if let Ok(outcome) = tokio::time::timeout(Duration::from_millis(250), &mut server).await
             {
                 let failure = outcome.expect("the listener task must not panic");
@@ -757,15 +623,11 @@ impl Served {
         }
     }
 
-    /// Stops and serves again, mirroring a Host process restart.
     async fn restart(&mut self) -> Client {
         self.stop().await;
         self.serve().await
     }
 
-    /// Aborts the listener and returns the canonical mechanical remainder the
-    /// production completion boundary verifies, read through a fresh store on
-    /// the quiesced database.
     async fn canonical_remainder(&self, needle: &str) -> u64 {
         let store = ene_store::Store::open(&self.dir.join("app.db"))
             .await
@@ -777,8 +639,6 @@ impl Served {
     }
 }
 
-/// Serves `dir`, pairs the first device, and completes setup with the standard
-/// test credential.
 async fn serve_and_setup(
     dir: PathBuf,
     transport: Arc<ScriptedTransport>,
@@ -787,9 +647,6 @@ async fn serve_and_setup(
     Served::start(dir, memory_store(), transport, capabilities).await
 }
 
-/// One conversation round over the socket: submit, require acceptance, drain
-/// the stream to completion. The raw variant also returns the close status, so
-/// a race leg can observe a fail-closed interruption instead of completion.
 async fn send_round_raw(
     client: &mut Client,
     text: &str,
@@ -844,7 +701,6 @@ async fn send_round_raw(
     }
 }
 
-/// The completed-round convenience wrapper used by fixture seeding.
 async fn send_round(
     client: &mut Client,
     text: &str,
@@ -858,7 +714,6 @@ async fn send_round(
     Ok((round, stream, text_out))
 }
 
-/// Submits one input that a current erasure condition must hold at intake.
 async fn submit_expect_hold(client: &mut Client, text: &str) -> Result<(), String> {
     let companion = client.companion_ref();
     let answer = ask(
@@ -995,7 +850,6 @@ async fn wait_task_progress(
     }
 }
 
-/// The bounded deletion status page over the real wire.
 async fn deletion_page(client: &mut Client) -> Result<DeletionStatusPage, String> {
     let answer = ask(
         client,
@@ -1014,7 +868,6 @@ async fn deletion_page(client: &mut Client) -> Result<DeletionStatusPage, String
     Ok(page)
 }
 
-/// Runs the production request inlet and returns the typed outcome.
 async fn request_deletion(client: &mut Client, text: &str) -> Result<ManagementOutcome, String> {
     let page = deletion_page(client).await?;
     let intent = cmds::deletion_intent(
@@ -1037,8 +890,6 @@ async fn request_deletion(client: &mut Client, text: &str) -> Result<ManagementO
     Ok(outcome)
 }
 
-/// Confirms the single staged request on the Host-local trusted inlet and
-/// returns the canonical operation reference.
 async fn confirm_deletion(handle: &HostHandle) -> DeletionOperationRef {
     let pending = handle
         .pending_targeted_deletions(None, 10)
@@ -1057,13 +908,6 @@ async fn confirm_deletion(handle: &HostHandle) -> DeletionOperationRef {
     }
 }
 
-/// Drives bounded preservation passes while polling the status page, so a
-/// parked Client-incarnation demand is answered by the poll's connection read.
-///
-/// A pass that finds the demand not yet on the wire yields more-work instead
-/// of waiting. The next pass must start immediately: `join!` of one tick with
-/// a poll that waits for `wanted` would sit on the production 15s driver
-/// period after that yield.
 async fn drive_until(
     handle: &HostHandle,
     client: &mut Client,
@@ -1080,8 +924,6 @@ async fn drive_until(
             "the deletion operation did not reach {}: {page:?}",
             wanted.as_str()
         );
-        // The serving composition's production tick: the same method the
-        // background driver calls, so the E2E does not step the fan-out by hand.
         let mut drive = std::pin::pin!(handle.run_targeted_deletion_tick());
         loop {
             tokio::select! {
@@ -1107,9 +949,6 @@ async fn drive_until(
     }
 }
 
-/// Every `(table, column)` of the state database whose TEXT content carries
-/// `needle`, read over an independent connection: the mechanical DB scan the
-/// completed-state assertions run.
 fn db_target_hits(db: &Path, needle: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(db).expect("the state database opens for scanning");
     conn.busy_timeout(Duration::from_secs(30))
@@ -1190,14 +1029,9 @@ fn formation_update() -> String {
     formation_update_with(TARGET)
 }
 
-/// Stages the fixture that plants [`TARGET`] in every required surface:
-/// History, Learning Summary and Memory current + past revision, the Task
-/// instruction / result / report, the control journal, the workspace path
-/// copies, and the undelivered presentation transient.
 async fn plant_target_fixture(served: &mut Served) {
     let dir = served.dir.clone();
     let client = served.client();
-    // Round 1: History (owner input + companion reply) and one formation.
     let (round, stream, reply) = send_round(client, &format!("please remember {TARGET} for me"))
         .await
         .expect("round one must complete");
@@ -1207,8 +1041,6 @@ async fn plant_target_fixture(served: &mut Served) {
     );
     confirm_round(client, &round, stream).await;
     wait_for_memory_revision_at_least(client, 1).await;
-    // Round 2: History and an update that leaves the current Memory plus the
-    // previous revision carrying the target.
     let (round, stream, reply) =
         send_round(client, &format!("{TARGET} is critical, never forget it"))
             .await
@@ -1219,17 +1051,12 @@ async fn plant_target_fixture(served: &mut Served) {
     );
     confirm_round(client, &round, stream).await;
     wait_for_memory_revision_at_least(client, 2).await;
-    // Workspace selection: the path copies and the control journal carry the
-    // target (a plausible Owner folder name).
     let workspace = dir.join(format!("workspace-{TARGET}"));
     std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
     std::fs::write(workspace.join("input.txt"), b"notes").expect("input fixture");
     select_workspace(client, &workspace)
         .await
         .expect("workspace must select");
-    // Round 3: the companion proposes a Task whose purpose carries the
-    // target; the production launcher runs the agent, whose final result
-    // carries it too.
     let (round, stream, reply) = send_round(client, "please read input.txt and write report.md")
         .await
         .expect("the propose round must complete");
@@ -1241,8 +1068,6 @@ async fn plant_target_fixture(served: &mut Served) {
     wait_task_progress(client, "completed", 1)
         .await
         .expect("the delegated task must complete");
-    // The completion is delivered as an un-ACKed presentation transient: its
-    // excerpt carries the target until the operation invalidates it.
     let summary = wait_for_summary_with(client, TARGET).await;
     assert!(
         summary
@@ -1253,8 +1078,6 @@ async fn plant_target_fixture(served: &mut Served) {
     );
 }
 
-/// Polls the read-only memory view until the companion reports a memory whose
-/// revision is at least `wanted` (the formation and its update committed).
 async fn wait_for_memory_revision_at_least(client: &mut Client, wanted: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
@@ -1279,7 +1102,6 @@ async fn wait_for_memory_revision_at_least(client: &mut Client, wanted: u64) {
     }
 }
 
-/// The History page's item texts for the running companion.
 async fn history_texts(client: &mut Client) -> Vec<String> {
     let companion = client.companion_ref();
     let history = ask(
@@ -1295,7 +1117,6 @@ async fn history_texts(client: &mut Client) -> Vec<String> {
     items.into_iter().map(|item| item.text).collect()
 }
 
-/// The read-only memory section body from one management view answer.
 async fn memory_view(client: &mut Client) -> String {
     let answer = ask(
         client,
@@ -1313,12 +1134,6 @@ async fn memory_view(client: &mut Client) -> String {
         .unwrap_or_default()
 }
 
-/// Polls the undelivered subscription until a carried excerpt quotes `needle`.
-///
-/// A live receipt re-emits its selection until ACK or the 30s TTL, so a poll
-/// that only sleeps would wait out production expiry. Non-matching pages are
-/// ACKed so the next fetch can present later arrivals; the matching page is
-/// left un-ACKed.
 async fn wait_for_summary_with(client: &mut Client, needle: &str) -> UndeliveredSummary {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
@@ -1346,8 +1161,6 @@ async fn wait_for_summary_with(client: &mut Client, needle: &str) -> Undelivered
     }
 }
 
-/// The target must be provably planted before the deletion runs, otherwise
-/// the completed-state scans would prove nothing.
 fn assert_target_is_planted(served: &Served) {
     let hits = db_target_hits(&served.dir.join("app.db"), TARGET);
     assert!(
@@ -1356,10 +1169,6 @@ fn assert_target_is_planted(served: &Served) {
     );
 }
 
-/// Completed-state verification through the bounded first-party reads: the
-/// History page, the Memory view, the undelivered subscription, and the Task
-/// report must not carry the target, and no provider request issued after the
-/// confirmation may quote it.
 async fn assert_completed_reads_are_clean(served: &mut Served, sends_at_confirmation: usize) {
     let client = served.client();
     let texts = history_texts(client).await;
@@ -1389,9 +1198,6 @@ async fn assert_completed_reads_are_clean(served: &mut Served, sends_at_confirma
     assert_absent_all("post-confirmation provider request", &later, TARGET);
 }
 
-/// E2E 1: the whole Targeted Deletion lifecycle over the real socket, from the
-/// first-party request to the completed operation, with system-wide scans,
-/// search-material destruction, and the fresh-origin acceptance.
 #[tokio::test]
 async fn stage6_targeted_deletion_completes_system_wide() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1442,7 +1248,6 @@ async fn stage6_targeted_deletion_completes_system_wide() {
     plant_target_fixture(&mut served).await;
     assert_target_is_planted(&served);
 
-    // First-party request: only stages, never destructive.
     let outcome = request_deletion(served.client(), TARGET)
         .await
         .expect("the request inlet must answer");
@@ -1459,7 +1264,6 @@ async fn stage6_targeted_deletion_completes_system_wide() {
             .is_empty(),
         "the wire intent must create no operation"
     );
-    // Host-local trusted confirmation starts the canonical operation.
     let current = confirm_deletion(served.handle()).await;
     let sends_at_confirmation = transport.sends();
     let page = deletion_page(served.client())
@@ -1498,8 +1302,6 @@ async fn stage6_targeted_deletion_completes_system_wide() {
         "every required participant must be verified: {participants:?}"
     );
     assert_completed_reads_are_clean(&mut served, sends_at_confirmation).await;
-    // The canonical production remainder probe and the independent DB scan
-    // both agree the completed state keeps nothing.
     assert_eq!(
         served.canonical_remainder(TARGET).await,
         0,
@@ -1510,8 +1312,6 @@ async fn stage6_targeted_deletion_completes_system_wide() {
         "no table may keep the target after completion"
     );
 
-    // A completed operation is not a permanent keyword ban: the Owner may
-    // provide the same text again as a fresh origin.
     let sends_before = transport.sends();
     let (round, stream, reply) = send_round(served.client(), &format!("a fresh note: {TARGET}"))
         .await
@@ -1543,15 +1343,6 @@ async fn stage6_targeted_deletion_completes_system_wide() {
     served.server.abort();
 }
 
-/// E2E 1 race (design R2): a dialogue provider call already claimed when the
-/// deletion condition commits must not publish or adopt its covered reply, a
-/// fresh target-bearing submit is held with zero provider bytes while the
-/// operation is unfinished, and the completed surface stays clean.
-///
-/// A Host restart between the fixture and the admission clears the in-process
-/// Client-delivery tracking, so this leg drives the fence without parking on a
-/// Client demand the single-frame connection loop cannot deliver mid-frame;
-/// the Client-incarnation demand path has its own legs below.
 #[tokio::test]
 async fn stage6_deletion_races_provider_wait_and_delayed_result() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1581,20 +1372,13 @@ async fn stage6_deletion_races_provider_wait_and_delayed_result() {
         .await
         .expect("the first round must complete");
     assert!(reply.contains(TARGET));
-    // Drain and present the round's backlog before the restart, so no
-    // post-restart push re-tracks the reconnecting incarnation: this leg
-    // targets the provider-wait race, and the Client-incarnation demand has
-    // its own legs.
     let backlog = wait_for_summary_with(served.client(), TARGET).await;
     drop(ack_summary(served.client(), &backlog).await);
     let mut client = served.restart().await;
-    // Advisory staging first; the condition is committed while the external
-    // provider call is already in flight.
     let outcome = request_deletion(&mut client, TARGET)
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    // The second round's provider call parks after its attempt claim.
     transport.block_input(on_latest_owner(&second));
     let handle = served.handle_arc();
     let barrier = Arc::clone(&transport);
@@ -1610,9 +1394,6 @@ async fn stage6_deletion_races_provider_wait_and_delayed_result() {
             }
         }
         if confirmed && !driven {
-            // One bounded pass collects the durable owner surfaces and moves
-            // the Host transient fence; the parked provider call stays held
-            // until the pass returns.
             let pass = handle
                 .run_targeted_deletion_tick()
                 .await
@@ -1639,7 +1420,6 @@ async fn stage6_deletion_races_provider_wait_and_delayed_result() {
     assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
     assert_eq!(served.canonical_remainder(TARGET).await, 0);
     assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
-    // The completed operation is not a permanent ban on the string.
     let (round, stream, fresh) = send_round(&mut client, &format!("a fresh note: {TARGET}"))
         .await
         .expect("a fresh origin must be accepted");
@@ -1648,8 +1428,6 @@ async fn stage6_deletion_races_provider_wait_and_delayed_result() {
     served.server.abort();
 }
 
-/// E2E 1 race: a receipt created before the condition is neither presented nor
-/// acknowledged after it, and a fresh read withholds the covered body.
 #[tokio::test]
 async fn stage6_deletion_presentation_ack_after_condition_holds() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1677,8 +1455,6 @@ async fn stage6_deletion_presentation_ack_after_condition_holds() {
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
     confirm_deletion(served.handle()).await;
-    // Condition first: a fresh target-bearing submit is held at intake with
-    // zero provider bytes and leaves no History row.
     let history_before = history_texts(served.client()).await;
     let sends_before = transport.sends();
     submit_expect_hold(served.client(), &format!("still {TARGET}"))
@@ -1694,9 +1470,6 @@ async fn stage6_deletion_presentation_ack_after_condition_holds() {
         history_before.len(),
         "a held submit leaves no History row"
     );
-    // The receipt predates the condition. The confirmation's driver pass
-    // invalidates the transient receipt, so the ACK answers either as a
-    // domain hold or as a stale receipt; neither confirms presentation.
     let acked = ack_summary(served.client(), &receipt)
         .await
         .expect("the ack must answer");
@@ -1707,7 +1480,6 @@ async fn stage6_deletion_presentation_ack_after_condition_holds() {
         ),
         "an ACK for a covered receipt never confirms presentation, got {acked:?}"
     );
-    // A fresh read withholds the covered body.
     let fresh = fetch_summary(served.client(), "covered subscription")
         .await
         .expect("the subscription must answer");
@@ -1724,9 +1496,6 @@ async fn stage6_deletion_presentation_ack_after_condition_holds() {
     served.server.abort();
 }
 
-/// E2E 1 race: a Learning formation already claimed when the deletion
-/// condition commits must not form a Summary or Memory from the covered
-/// transcript, and the completed state keeps nothing.
 #[tokio::test]
 async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1742,9 +1511,6 @@ async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
         ],
         &[],
     ));
-    // The formation call parks after its claim; the condition commits while
-    // the Learning provider work is in flight (design R2 for the Learning
-    // owner).
     transport.block_input(on_learning_formation(true));
     let mut served = serve_and_setup(
         dir.clone(),
@@ -1763,8 +1529,6 @@ async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
     confirm_deletion(served.handle()).await;
     transport.release_blocked();
-    // The formation commit lands against the current condition; give it the
-    // bounded window the fan-out would use, then prove no Memory exists.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         !memory_view(served.client()).await.contains(TARGET),
@@ -1787,12 +1551,6 @@ async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
     served.server.abort();
 }
 
-/// E2E 1 race (design R2, post-completion): a Learning formation already
-/// claimed when the deletion condition commits is refused at its commit even
-/// after the operation completed and every current condition closed; the
-/// completed surface keeps no target body. A fresh Owner origin after
-/// completion is learned normally: the durable correspondence names the
-/// claim, never the text.
 #[tokio::test]
 async fn stage6_delayed_formation_after_completion_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1810,8 +1568,6 @@ async fn stage6_delayed_formation_after_completion_is_refused() {
         ],
         &[],
     ));
-    // The formation pass parks after its durable claim; the deletion runs to
-    // completion while the provider work is still in flight.
     transport.block_input(on_learning_formation(true));
     let mut served = serve_and_setup(
         dir.clone(),
@@ -1834,9 +1590,6 @@ async fn stage6_delayed_formation_after_completion_is_refused() {
         .await
         .expect("the operation must complete while the formation is parked");
     assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
-    // The parked provider call resumes after completion. Its settlement is
-    // durable before the formation's commit attempt, so observing it orders
-    // the refusal asserted below.
     transport.release_blocked();
     wait_for_usage_consumer(served.client(), "companion_learning").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1846,8 +1599,6 @@ async fn stage6_delayed_formation_after_completion_is_refused() {
     );
     assert_eq!(served.canonical_remainder(TARGET).await, 0);
     assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
-    // The completed operation is not a permanent ban: a fresh Owner origin
-    // after completion is learned as a new experience.
     let (_round, _stream, reply) = send_round(served.client(), &fresh)
         .await
         .expect("a fresh origin must be accepted");
@@ -1860,11 +1611,6 @@ async fn stage6_delayed_formation_after_completion_is_refused() {
     served.server.abort();
 }
 
-/// E2E 1 race (design R2, post-completion): a Task Agent execution already
-/// claimed when the deletion condition commits has its delayed final result
-/// collected after the operation completed; the execution seal, certainty,
-/// and adoption facts survive and the task still completes. A fresh Owner
-/// origin after completion is a new History row.
 #[tokio::test]
 async fn stage6_delayed_task_result_after_completion_is_collected() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1898,8 +1644,6 @@ async fn stage6_delayed_task_result_after_completion_is_collected() {
         ],
         &[],
     ));
-    // The final turn parks after its durable claim; the deletion runs to
-    // completion while the provider work is still in flight.
     transport.block_input(on_task_agent_turn(2));
     let mut served = serve_and_setup(
         dir.clone(),
@@ -1933,9 +1677,6 @@ async fn stage6_delayed_task_result_after_completion_is_collected() {
         .await
         .expect("the operation must complete while the final turn is parked");
     assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
-    // The parked final answer arrives after completion: the delegation's
-    // admission-time hold collects the body, and the durable execution facts
-    // still seal, adopt, and complete the task.
     transport.release_blocked();
     wait_task_progress(served.client(), "completed", 1)
         .await
@@ -1945,8 +1686,6 @@ async fn stage6_delayed_task_result_after_completion_is_collected() {
         db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
         "the delayed result body is never stored"
     );
-    // The completed operation is not a permanent ban: a fresh Owner origin
-    // after completion is a new History row.
     let (_round, _stream, reply) = send_round(served.client(), &fresh)
         .await
         .expect("a fresh origin must be accepted");
@@ -1961,8 +1700,6 @@ async fn stage6_delayed_task_result_after_completion_is_collected() {
     served.server.abort();
 }
 
-/// Aborting `conn::run` still stops the async Targeted Deletion driver as an
-/// emergency path. Restart correctness uses graceful shutdown instead.
 #[tokio::test]
 async fn listener_abort_stops_the_deletion_driver() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1983,9 +1720,6 @@ async fn listener_abort_stops_the_deletion_driver() {
     );
 }
 
-/// A Host restart leaves exactly one quiescent Targeted Deletion drive
-/// domain: the successor's async driver, with no predecessor Store blocking
-/// work and no predecessor HostHandle.
 #[tokio::test]
 async fn restart_has_exactly_one_deletion_driver() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2021,9 +1755,6 @@ async fn restart_has_exactly_one_deletion_driver() {
     );
 }
 
-/// Graceful shutdown must not return while a Targeted Deletion tick is inside
-/// a started Store `spawn_blocking` section. Successor startup waits until
-/// that section finishes.
 #[tokio::test]
 async fn shutdown_waits_for_started_deletion_store_work() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2124,12 +1855,6 @@ async fn shutdown_waits_for_started_deletion_store_work() {
         .expect("successor startup must complete once predecessor Store work is gone");
 }
 
-// ---------------------------------------------------------------------------
-// E2E 1: the Client-incarnation required participant (lifecycle §8.1)
-// ---------------------------------------------------------------------------
-
-/// The Client-incarnation participant row of the first operation in one
-/// status page, when the durable snapshot named one (lifecycle §8.1).
 fn client_incarnation_participant(
     page: &DeletionStatusPage,
 ) -> Option<&DeletionParticipantStatusWire> {
@@ -2142,8 +1867,6 @@ fn client_incarnation_participant(
         .find(|participant| participant.owner.starts_with("client_incarnation:"))
 }
 
-/// Renders the single staged request identity, exactly as the Host-local
-/// preview does.
 async fn render_single_pending_request(handle: &HostHandle) -> String {
     let pending = handle
         .pending_targeted_deletions(None, 10)
@@ -2158,20 +1881,9 @@ async fn render_single_pending_request(handle: &HostHandle) -> String {
         .to_string()
 }
 
-/// Records the Owner confirmation through the serving Host's Host-local
-/// first-party control inlet: the same production path `ene-core
-/// confirm-deletion` dials, never an offline state open.
-///
-/// While a Client is attached it keeps reading frames, so the Host's bounded
-/// local-erasure demand is answered inline exactly as an interactive Client
-/// would. With no attached Client the demand resolves to an explicit hold.
 async fn confirm_deletion_via_serving_control(served: &mut Served) -> DeletionOperationRef {
     let request = render_single_pending_request(served.handle()).await;
     let dir = served.dir.clone();
-    // The Owner's confirmation surface is the GUI the Host spawned. The
-    // console asks on the requester listener; this surface confirms on the
-    // private channel, and the Client's frame pump keeps answering the bounded
-    // local-erasure demand while the console waits.
     let gui_handle = served.handle_arc();
     let mut gui = ene_core::host_control::seat_test_gui_for_tests(&gui_handle)
         .expect("the private confirmation channel must open");
@@ -2204,9 +1916,6 @@ async fn confirm_deletion_via_serving_control(served: &mut Served) -> DeletionOp
                 tokio::select! {
                     outcome = &mut confirmation => break outcome,
                     () = tokio::time::sleep(Duration::from_millis(20)) => {
-                        // A read drives the frame pump, which answers the
-                        // Host's demand inline; a failed read means the
-                        // connection ended and the participant must hold.
                         drop(deletion_page(client).await);
                     }
                 }
@@ -2233,9 +1942,6 @@ async fn confirm_deletion_via_serving_control(served: &mut Served) -> DeletionOp
     }
 }
 
-/// One bounded status page read through the Host handle. Used by legs whose
-/// Client connection must stay absent: a reconnect would make the incarnation
-/// reachable again and change the premise under test.
 async fn local_deletion_page(handle: &HostHandle) -> DeletionStatusPage {
     match handle
         .deletion_status_page(None, 20)
@@ -2247,8 +1953,6 @@ async fn local_deletion_page(handle: &HostHandle) -> DeletionStatusPage {
     }
 }
 
-/// Drives production serving ticks while reading status through the handle
-/// until the operation reaches `wanted`.
 async fn drive_until_local(handle: &HostHandle, wanted: DeletionPhaseWire) -> DeletionStatusPage {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
     loop {
@@ -2269,10 +1973,6 @@ async fn drive_until_local(handle: &HostHandle, wanted: DeletionPhaseWire) -> De
     }
 }
 
-/// Delivers one target-bearing transient copy to the live Client: the
-/// companion reply quotes the target on the text stream and the carried
-/// presentation excerpt quotes it again, left un-ACKed. The Host therefore
-/// observed a real body delivery to this incarnation.
 async fn deliver_target_copy(served: &mut Served) {
     let first = format!("please remember {TARGET} for me");
     let (_round, _stream, reply) = send_round(served.client(), &first)
@@ -2292,9 +1992,6 @@ async fn deliver_target_copy(served: &mut Served) {
     );
 }
 
-/// Waits until the Learning Memory row itself carries the target, observed
-/// through the independent DB scan. The fixture needs the planted body
-/// without reading any body-bearing Client surface first.
 async fn wait_for_target_memory_row(served: &Served) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
@@ -2312,10 +2009,6 @@ async fn wait_for_target_memory_row(served: &Served) {
     }
 }
 
-/// Stage 6 Blocker 1: the Owner confirmation runs in the serving Host, so the
-/// Client that received a target-bearing copy is snapshotted as a required
-/// participant; its own local-erasure confirmation is what verifies the
-/// participant and lets global completion commit.
 #[tokio::test]
 async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2334,10 +2027,8 @@ async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
         &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
     )
     .await;
-    // 1: a target-bearing copy actually reaches the Client.
     deliver_target_copy(&mut served).await;
 
-    // 2: the first-party request only stages.
     let outcome = request_deletion(served.client(), TARGET)
         .await
         .expect("the request inlet must answer");
@@ -2347,11 +2038,8 @@ async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
         "the Client intent only stages"
     );
 
-    // 3: the production trusted first-party confirmation through the serving
-    // Host control inlet; the Client answers the bounded demand inline.
     let current = confirm_deletion_via_serving_control(&mut served).await;
 
-    // 4: the durable participant snapshot names the Client incarnation.
     let page = local_deletion_page(served.handle()).await;
     let participant = client_incarnation_participant(&page)
         .expect("the durable snapshot must name the delivered Client incarnation");
@@ -2360,8 +2048,6 @@ async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
         "the Client participant belongs to the current sweep: {participant:?}"
     );
 
-    // 6: the Client's local erasure confirmation verifies the participant and
-    // the operation reaches the sealed global completion.
     let handle = served.handle_arc();
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
@@ -2378,11 +2064,6 @@ async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
     served.server.abort();
 }
 
-/// Stage 6 Blocker 1: an unreachable Client that received a target-bearing
-/// copy keeps the operation `Held`; a disconnect, a replacement connection,
-/// and a Host restart alone never verify it or complete the operation. The
-/// snapshotted Client participant survives the restart, and only its own
-/// local-erasure confirmation lets completion commit.
 #[tokio::test]
 async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2407,13 +2088,9 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
 
-    // The Client disconnects before the Owner confirmation. The delivery
-    // evidence is not a connection fact, so the incarnation stays in the
-    // snapshot, but its local erasure can no longer be confirmed.
     served.client = None;
     let _current = confirm_deletion_via_serving_control(&mut served).await;
 
-    // 5: the unreachable Client is an explicit hold, never a completion.
     let page = drive_until_local(served.handle(), DeletionPhaseWire::Held).await;
     assert_ne!(
         page.operations[0].phase,
@@ -2424,10 +2101,6 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
         client_incarnation_participant(&page).expect("the snapshotted Client stays required");
     assert_eq!(participant.progress, "held:unavailable");
 
-    // 7a: a replacement connection alone (same incarnation, new connection
-    // lifetime) changes no durable fact and confirms nothing. The serving
-    // tick may resume an Unavailable hold and re-demand the now-reachable
-    // socket; this Client is not pumped, so that demand cannot verify.
     let replacement = connect(&served.dir).await;
     let page = local_deletion_page(served.handle()).await;
     assert_ne!(
@@ -2449,10 +2122,6 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     );
     drop(replacement);
 
-    // 8: a Host restart keeps the durable snapshot; the restart itself
-    // completes nothing and the same Client participant survives. Startup
-    // recovery may resume the Unavailable hold and re-demand; this Client is
-    // not pumped yet, so that demand cannot verify.
     let mut client = served.restart().await;
     let page = local_deletion_page(served.handle()).await;
     assert_ne!(page.operations[0].phase, DeletionPhaseWire::Completed);
@@ -2465,8 +2134,6 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
         participant.progress
     );
 
-    // 6: the reconnected Client reads frames, answers the bounded demand, and
-    // only then does the durable participant verify and completion commit.
     let handle = served.handle_arc();
     let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
         .await
@@ -2479,20 +2146,10 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     served.server.abort();
 }
 
-/// Stage 6 deletion final review, Blocker B1: the management Memory view is a
-/// body-bearing first-party read. After a Host restart cleared the in-memory
-/// delivery evidence of the earlier non-target round, an incarnation that
-/// receives the target-bearing Memory only through the management view must
-/// still be snapshotted as a required participant by the serving Host's
-/// control inlet, and its own local erasure is what verifies it and lets
-/// global completion commit.
 #[tokio::test]
 async fn stage6_management_view_memory_body_is_a_required_client_participant() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
-    // The owner turn and the companion reply carry no target: the Memory the
-    // Learning pass forms is the only target-bearing surface, and the current
-    // list page is the only Client-facing read that renders its body.
     let owner = "please keep this note for later";
     let transport = Arc::new(ScriptedTransport::new(
         vec![
@@ -2524,9 +2181,6 @@ async fn stage6_management_view_memory_body_is_a_required_client_participant() {
     );
     wait_for_target_memory_row(&served).await;
 
-    // A Host restart drops the Host-memory delivery evidence; the durable
-    // Memory survives and the reconnected incarnation has received no
-    // target-bearing body in this serving process yet.
     let mut client = served.restart().await;
     let body = memory_view(&mut client).await;
     assert!(
@@ -2534,8 +2188,6 @@ async fn stage6_management_view_memory_body_is_a_required_client_participant() {
         "the management view hands the target-bearing Memory over: {body}"
     );
 
-    // The first-party request only stages; the serving Host's control inlet
-    // snapshots the required participants and starts the operation.
     let outcome = request_deletion(&mut client, TARGET)
         .await
         .expect("the request inlet must answer");
@@ -2547,8 +2199,6 @@ async fn stage6_management_view_memory_body_is_a_required_client_participant() {
     served.client = Some(client);
     let current = confirm_deletion_via_serving_control(&mut served).await;
 
-    // The durable participant snapshot names the incarnation whose only
-    // target-bearing delivery was the management Memory view.
     let page = local_deletion_page(served.handle()).await;
     let participant = client_incarnation_participant(&page)
         .expect("the view-delivered Client incarnation is a required participant");
@@ -2557,14 +2207,9 @@ async fn stage6_management_view_memory_body_is_a_required_client_participant() {
         "the Client participant belongs to the current sweep: {participant:?}"
     );
 
-    // While the operation is unfinished, a fresh management Memory view is
-    // covered by the current condition: no covered body is displayed again,
-    // whether the row is still present (withheld) or already erased.
     let body = memory_view(served.client()).await;
     assert_absent("covered management view", &body, TARGET);
 
-    // The Client answers the bounded demand and only then does the operation
-    // reach the sealed global completion.
     let handle = served.handle_arc();
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
@@ -2581,11 +2226,6 @@ async fn stage6_management_view_memory_body_is_a_required_client_participant() {
     served.server.abort();
 }
 
-// ---------------------------------------------------------------------------
-// E2E 2: usage / cost / cap
-// ---------------------------------------------------------------------------
-
-/// One bounded first-party usage read over the socket.
 async fn usage_page(client: &mut Client) -> UsageSummaryPage {
     let answer = ask(
         client,
@@ -2610,12 +2250,6 @@ async fn usage_page(client: &mut Client) -> UsageSummaryPage {
     page
 }
 
-/// Polls the first-party usage surface until one row for `consumer` exists.
-///
-/// The usage fact settles inside dispatch *before* the caller can adopt or
-/// commit the provider output, so observing the row orders the delayed
-/// adoption/commit attempt that follows it: a test can assert the refusal is
-/// decided after the parked call actually resumed, not before it.
 async fn wait_for_usage_consumer(client: &mut Client, consumer: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
@@ -2632,8 +2266,6 @@ async fn wait_for_usage_consumer(client: &mut Client, consumer: &str) {
     }
 }
 
-/// One bounded usage read with an explicit provider filter, so the page names
-/// that provider's cap slots (the system scope is always included).
 async fn usage_page_for(client: &mut Client, provider: &str) -> UsageSummaryPage {
     let answer = ask(
         client,
@@ -2658,8 +2290,6 @@ async fn usage_page_for(client: &mut Client, provider: &str) -> UsageSummaryPage
     page
 }
 
-/// Sets or updates one provider's monthly cap through the first-party
-/// management intent and returns the typed outcome.
 async fn set_provider_monthly_cap(
     client: &mut Client,
     intent_id: CommandWireId,
@@ -2691,8 +2321,6 @@ async fn set_provider_monthly_cap(
     outcome
 }
 
-/// Sets or updates the system daily cap through the first-party management
-/// intent and returns the typed outcome.
 async fn set_system_daily_cap(
     client: &mut Client,
     intent_id: CommandWireId,
@@ -2723,10 +2351,6 @@ async fn set_system_daily_cap(
     outcome
 }
 
-/// The safe upper bound the cap tests reserve: 1,000,000 input tokens at the
-/// non-cached input rate plus 100,000 output tokens at the output rate under
-/// the reviewed `gpt-4o-mini` snapshot plus the one-micro-unit allowance for
-/// the separately rounded input components = 210,001 micro-USD.
 fn cap_estimate() -> UsageEstimate {
     UsageEstimate {
         input_tokens_upper_bound: 1_000_000,
@@ -2736,10 +2360,6 @@ fn cap_estimate() -> UsageEstimate {
 
 const CAP_UPPER_BOUND_MICROS: u64 = 210_001;
 
-/// E2E 2: the reservation linearization. While one claimed call's reservation
-/// holds the last cap slot, a second send is refused with zero provider bytes;
-/// a Reported settlement releases the unused reservation and the next send is
-/// admitted.
 #[tokio::test]
 async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2777,8 +2397,6 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
         &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
     )
     .await;
-    // A loose system daily cap plus a tight provider monthly cap: the
-    // provider scope is the binding one for the next send.
     let outcome = set_system_daily_cap(
         served.client(),
         CommandWireId(uuid::Uuid::new_v4()),
@@ -2800,17 +2418,12 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
         matches!(outcome, ManagementOutcome::StoredAsRuleView { .. }),
         "the provider cap must store, got {outcome:?}"
     );
-    // The formation call parks after its claim: its reservation holds the
-    // last provider slot (250,000 limit against a 210,000 bound while the
-    // system daily cap alone would still admit the send).
     transport.block_input(on_learning_formation(true));
     let (round, stream, _) = send_round(served.client(), &first)
         .await
         .expect("the first round must complete");
     confirm_round(served.client(), &round, stream).await;
     transport.wait_parked(1).await;
-    // A concurrent dialogue send cannot claim: zero provider bytes, never a
-    // second attempt or reservation.
     let sends_before = transport.sends();
     let raced = send_round_raw(served.client(), &second).await;
     assert!(
@@ -2825,8 +2438,6 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
         sends_before,
         "the provider receives zero bytes for a cap-refused claim"
     );
-    // Which scope refused: the provider monthly slot is out of room while the
-    // system daily slot alone would still admit the send.
     let observed = usage_page_for(served.client(), "openai").await;
     let provider_slot = observed
         .caps
@@ -2872,8 +2483,6 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
         system_remaining.micros > CAP_UPPER_BOUND_MICROS,
         "the system cap alone would admit the send: {system_slot:?}"
     );
-    // Release the reservation: the Reported settlement releases the unused
-    // bound, and the next send fits.
     transport.release_blocked();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let page = loop {
@@ -2917,7 +2526,6 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     );
     assert_eq!(consumed.micros, 840);
     assert!(!held, "the settled reservation frees the slot");
-    // The next send is admitted and settles Reported.
     let (round, stream, reply) = send_round(served.client(), &third)
         .await
         .expect("the next send must be admitted");
@@ -2926,11 +2534,6 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     served.server.abort();
 }
 
-/// E2E 2: Unknown usage is never released or zeroed. A `ResponseLost` call
-/// keeps its reserved upper bound counted against the cap, an orphaned
-/// reservation is settled `CommittedUnknown` by the restart, a new send stays
-/// refused with zero provider bytes, and the first-party cap update passes
-/// currentness, replay, and stale-premise checks.
 #[tokio::test]
 async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2971,7 +2574,6 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
         outcome,
         ManagementOutcome::StoredAsRuleView { .. }
     ));
-    // ResponseLost: the attempt may have run, so the upper bound stays counted.
     let raced = send_round_raw(served.client(), &lost).await;
     assert!(
         raced.is_err()
@@ -2992,7 +2594,6 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
         "Unknown keeps the reserved upper bound"
     );
     assert!(unknown.tokens.is_none() && unknown.cost.is_none());
-    // A new send cannot fit while the Unknown counts.
     let sends_before = transport.sends();
     let refused = send_round_raw(served.client(), "one more note").await;
     assert!(
@@ -3004,7 +2605,6 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     );
     assert_eq!(transport.sends(), sends_before);
 
-    // First-party cap update: currentness, replay, and stale premise.
     let observed = usage_page(served.client()).await;
     let observed_mark = cmds::usage_cap_mark_for(&observed, "system", None, "daily_utc")
         .expect("the slot mark")
@@ -3022,8 +2622,6 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
         matches!(outcome, ManagementOutcome::StoredAsRuleView { .. }),
         "the cap raise must store, got {outcome:?}"
     );
-    // An exact replay of the same intent id observes the first decision and
-    // never applies a second write.
     let replay = set_system_daily_cap_mark(
         served.client(),
         intent_id,
@@ -3035,8 +2633,6 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
         matches!(replay, ManagementOutcome::StoredAsRuleView { .. }),
         "the replayed intent observes the stored decision, got {replay:?}"
     );
-    // A conflicting reuse of the key (same id, different body) decides
-    // nothing and never rewrites the cap.
     let conflicting =
         set_system_daily_cap_mark(served.client(), intent_id, &observed_mark, 999).await;
     assert!(
@@ -3052,7 +2648,6 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
             .all(|stored| stored.limit.micros != 999),
         "no replay path rewrites the cap: {after_replay:?}"
     );
-    // A stale base view is refused and decides nothing.
     let stale = set_system_daily_cap_mark(
         served.client(),
         CommandWireId(uuid::Uuid::new_v4()),
@@ -3065,10 +2660,6 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
         "a stale cap premise is refused, got {stale:?}"
     );
 
-    // Crash with an orphaned reservation: the Host stops, and a claim left
-    // mid-flight by the stopped process (built here through the production
-    // claim boundary, because only a real crash leaves a Reserved row) is
-    // reconciled to CommittedUnknown by the restart, still counted.
     served.stop().await;
     {
         use ene_credential::CredentialSetRepository as _;
@@ -3142,8 +2733,6 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
         CAP_UPPER_BOUND_MICROS * 2,
         "the restart keeps every unknown upper bound counted: {system_daily:?}"
     );
-    // A send that would overshoot the raised limit is still refused with zero
-    // provider bytes; after a further first-party raise it is admitted.
     let refused = send_round_raw(&mut client, "another note").await;
     assert!(
         refused.is_err()
@@ -3172,8 +2761,6 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     served.server.abort();
 }
 
-/// Sets the system daily cap on an explicit mark and intent id, for the
-/// replay and stale-premise legs.
 async fn set_system_daily_cap_mark(
     client: &mut Client,
     intent_id: CommandWireId,
@@ -3201,22 +2788,8 @@ async fn set_system_daily_cap_mark(
     outcome
 }
 
-// ---------------------------------------------------------------------------
-// E2E 1 dialogue currentness (Stage 6 M2 / #1627)
-// ---------------------------------------------------------------------------
-
-/// The delayed reply's paraphrase: it never quotes the target, so only the
-/// durable old-claim provenance can refuse it.
 const DIALOGUE_RACE_PARAPHRASE: &str = "I still keep that detail in mind.";
 
-/// Drives bounded serving ticks until no unfinished deletion operation
-/// remains.
-///
-/// Used by a race leg whose foreground connection is parked on a provider
-/// barrier and cannot poll the status page: the tick outcome's `operations`
-/// count is the durable unfinished-set size, so `0` proves the completion
-/// commit ran. Held operations stay in the unfinished set, so a hold can
-/// never read as completion.
 async fn dialogue_race_drive_deletion_to_completed(handle: &HostHandle) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
     loop {
@@ -3235,15 +2808,6 @@ async fn dialogue_race_drive_deletion_to_completed(handle: &HostHandle) {
     }
 }
 
-/// E2E 1 race (design R2, post-completion): a dialogue provider call already
-/// claimed when the deletion condition commits must not publish or adopt its
-/// delayed paraphrase after the operation completed.
-///
-/// The dialogue prompt's read-set is the durable correspondence: admission
-/// associates the claim with the interval through the target-bearing History
-/// and Memory identities the prompt actually consumed, and the released
-/// result is refused even though the paraphrase has no literal target and no
-/// current condition is readable.
 #[tokio::test]
 async fn stage6_dialogue_claim_before_completion_refuses_the_delayed_paraphrase() {
     use ene_companion::{
@@ -3275,12 +2839,6 @@ async fn stage6_dialogue_claim_before_completion_refuses_the_delayed_paraphrase(
         &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
     )
     .await;
-    // Quiesce the serving Host and seed the target-bearing canonical context
-    // directly through the production repository boundaries: one Owner History
-    // message and one Memory. Nothing target-bearing was ever handed to the
-    // Client, so its parked connection is not a required local-erasure
-    // participant and the operation can reach the sealed global completion
-    // while the pre-deletion provider call is still held by the barrier.
     served.stop().await;
     {
         let store = ene_store::Store::open(&dir.join("app.db"))
@@ -3347,15 +2905,11 @@ async fn stage6_dialogue_claim_before_completion_refuses_the_delayed_paraphrase(
             "the Memory seed must commit"
         );
     }
-    // Stage the request before parking: the client is the only connection.
     let mut client = served.serve().await;
-    // Stage the request before parking: the client is the only connection.
     let outcome = request_deletion(&mut client, TARGET)
         .await
         .expect("the request inlet must answer");
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    // The second turn's provider call parks after its claim; its prompt read
-    // the target-bearing History rows and the target-bearing Memory.
     transport.block_input(on_latest_owner(&second));
     let handle = served.handle_arc();
     let barrier = Arc::clone(&transport);
@@ -3364,15 +2918,8 @@ async fn stage6_dialogue_claim_before_completion_refuses_the_delayed_paraphrase(
         result = parked.as_mut() => panic!("the parked round cannot finish before completion: {result:?}"),
         () = barrier.wait_parked(1) => {}
     }
-    // Condition + erase/verify + global completion while the provider call is
-    // still held by the barrier.
     confirm_deletion(&handle).await;
     dialogue_race_drive_deletion_to_completed(&handle).await;
-    // The parked result is released only after completion: the durable
-    // old-claim hold refuses presentation and adoption. The transport records
-    // the request text when it answers, so the fixture premise (the prompt
-    // read the target-bearing sources before the condition committed) is
-    // asserted from the captured pre-deletion request.
     barrier.release_blocked();
     let (_round2, _stream2, raced_text, close) = parked.await.expect("the raced round must answer");
     assert!(
@@ -3406,8 +2953,6 @@ async fn stage6_dialogue_claim_before_completion_refuses_the_delayed_paraphrase(
         db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
         "no table may keep the target after completion"
     );
-    // The completed operation is not a permanent ban: a fresh Owner origin
-    // after completion is accepted as a new History row.
     let (round, stream, reply) = send_round(&mut client, &fresh)
         .await
         .expect("a fresh origin must be accepted");
@@ -3423,11 +2968,6 @@ async fn stage6_dialogue_claim_before_completion_refuses_the_delayed_paraphrase(
     served.server.abort();
 }
 
-/// E2E 1 race (read-side gate): while a deletion condition is current, a
-/// dialogue turn's recent-History and Memory reads must not hand the covered
-/// rows to the provider. The turn still serves the uncovered remainder, so
-/// the withheld context is proven by the provider input rather than by a
-/// refused turn.
 #[tokio::test]
 async fn stage6_active_deletion_keeps_covered_context_from_the_provider() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -3457,10 +2997,6 @@ async fn stage6_active_deletion_keeps_covered_context_from_the_provider() {
     assert!(reply.contains(TARGET));
     confirm_round(served.client(), &round, stream).await;
     wait_for_memory_revision_at_least(served.client(), 1).await;
-    // Condition first: the confirmation commits the erasure condition and
-    // its bounded fan-out, and the operation stays unfinished (the delivered
-    // Client incarnation is an un-answered local-erasure participant), so the
-    // condition is provably current when the next dialogue turn starts.
     let outcome = request_deletion(served.client(), TARGET)
         .await
         .expect("the request inlet must answer");
@@ -3486,7 +3022,6 @@ async fn stage6_active_deletion_keeps_covered_context_from_the_provider() {
         "the fixture must reach the second provider call"
     );
     assert_absent_all("dialogue provider input", &second_inputs, TARGET);
-    // The operation completes and the completed surface stays clean.
     let handle = served.handle_arc();
     let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
         .await
@@ -3500,28 +3035,11 @@ async fn stage6_active_deletion_keeps_covered_context_from_the_provider() {
     served.server.abort();
 }
 
-// ---------------------------------------------------------------------------
-// E2E 1 M3: exhaustive source reconciliation beyond the admission page
-// ---------------------------------------------------------------------------
-
-/// E2E 1 race (design R2, post-completion): a Task Agent execution observed a
-/// target-bearing workspace source as execution-local tool output (no
-/// canonical source identity), the following provider claim consumed that
-/// observation and parked, the mutable workspace path was then rewritten so
-/// the current file no longer carries the target, and Targeted Deletion
-/// started only after that rewrite. Re-reading the path at admission cannot
-/// prove the discarded observation body was unrelated to the target, so the
-/// occurrence stays deletion-relevant, the unsealed delegation is held, and
-/// the delayed clean paraphrase is collected. A fresh Owner origin after
-/// completion remains allowed.
 #[tokio::test]
 async fn stage6_task_transient_observation_after_completion_is_collected() {
     const LEG_TARGET: &str = TARGET;
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
-    // The final answer never restates the target: only the durable
-    // observation correspondence can collect it (the exact-text redaction
-    // would not match a clean paraphrase).
     let paraphrase = "The input file describes confidential material; I did not copy its contents.";
     let fresh = format!("a fresh note about {LEG_TARGET}");
     let proposal = task_reply(serde_json::json!({
@@ -3546,9 +3064,6 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
         ],
         &[],
     ));
-    // The final turn parks after its durable claim; the workspace mutation
-    // and the deletion run to completion while the provider work is still in
-    // flight.
     transport.block_input(on_task_agent_turn(1));
     let mut served = serve_and_setup(
         dir.clone(),
@@ -3576,9 +3091,6 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
     transport.wait_parked(1).await;
 
     let db = served.dir.join("app.db");
-    // The observation occurrence is durable before the claim that consumed it:
-    // the ledger row and its producing-attempt correlation exist while the
-    // final turn is parked. The body itself is not stored.
     assert_eq!(
         transient_observation_rows(&db),
         1,
@@ -3589,8 +3101,6 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
         "the occurrence reproduced a target-bearing body at observation time"
     );
 
-    // Barrier-fixed TOCTOU: rewrite the mutable path so a current-content
-    // survey would miss the target, then start Targeted Deletion.
     std::fs::write(&input, "ordinary notes after the observation")
         .expect("the workspace source is rewritten clean");
     assert!(
@@ -3606,8 +3116,6 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
     assert_eq!(outcome, ManagementOutcome::NeedsClarification);
     let handle = served.handle_arc();
     confirm_deletion(&handle).await;
-    // Admission cannot prove the discarded body was unrelated to the target,
-    // so the occurrence stays deletion-relevant and the execution is held.
     assert_eq!(
         transient_task_delegation_holds(&db),
         1,
@@ -3618,9 +3126,6 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
         .expect("the operation must complete while the final turn is parked");
     assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
 
-    // The parked final answer arrives after completion with a clean
-    // paraphrase: the durable observation correspondence collects it into the
-    // body-free form, and the execution still seals, adopts, and completes.
     transport.release_blocked();
     wait_task_progress(served.client(), "completed", 1)
         .await
@@ -3654,13 +3159,6 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
     served.server.abort();
 }
 
-/// E2E 1 sealed-result provenance: a Task Agent already stored a paraphrased
-/// final result derived from a target-bearing transient workspace read. The
-/// workspace path is later rewritten clean, so mechanical search of the
-/// current file and of the sealed paraphrase both miss the target. Observation
-/// → delegation/result provenance still collects the sealed body; the
-/// execution seal and Action certainty survive, and a fresh Owner input after
-/// completion remains allowed.
 #[tokio::test]
 async fn stage6_task_sealed_observation_paraphrase_is_erased_after_workspace_rewrite() {
     const LEG_TARGET: &str = TARGET;
@@ -3792,11 +3290,6 @@ async fn stage6_task_sealed_observation_paraphrase_is_erased_after_workspace_rew
     served.server.abort();
 }
 
-/// Blocker 1: Action result body is in memory, the occurrence row is not yet
-/// durable, and Targeted Deletion runs to completion in that window. The
-/// in-flight read/list correspondence keeps the delayed body old-origin, so
-/// it cannot re-enter the next provider turn or a durable result. A later
-/// fresh Owner origin of the same string is accepted.
 #[tokio::test]
 async fn stage6_observation_write_across_deletion_stays_old_origin() {
     const LEG_TARGET: &str = TARGET;
@@ -3949,9 +3442,6 @@ async fn stage6_observation_write_across_deletion_stays_old_origin() {
     served.server.abort();
 }
 
-/// Blocker 2: a paraphrase Summary whose History pin sits past the
-/// admission page is erased with that source. Exact-text remainder of 0 is
-/// not enough; the semantic derived Summary/Memory must actually disappear.
 #[tokio::test]
 async fn stage6_reconciliation_erases_paraphrase_pinned_past_the_page() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _, HistoryRole};
@@ -4159,8 +3649,6 @@ async fn stage6_reconciliation_erases_paraphrase_pinned_past_the_page() {
     );
 }
 
-/// Observation occurrence ledger rows in the state database, read over an
-/// independent connection.
 fn transient_observation_rows(db: &Path) -> i64 {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
     conn.busy_timeout(Duration::from_secs(30))
@@ -4171,7 +3659,6 @@ fn transient_observation_rows(db: &Path) -> i64 {
     .expect("the observation probe must run")
 }
 
-/// Whether the sole observation occurrence reproduced a workspace body.
 fn transient_observation_body_observed(db: &Path) -> bool {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
     conn.busy_timeout(Duration::from_secs(30))
@@ -4184,7 +3671,6 @@ fn transient_observation_body_observed(db: &Path) -> bool {
     .expect("the observation body-observed probe must run")
 }
 
-/// Confirmed-success Action attempts in the state database.
 fn transient_action_success_rows(db: &Path) -> i64 {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
     conn.busy_timeout(Duration::from_secs(30))
@@ -4197,7 +3683,6 @@ fn transient_action_success_rows(db: &Path) -> i64 {
     .expect("the certainty probe must run")
 }
 
-/// Durable `task_delegation` holds in the state database.
 fn transient_task_delegation_holds(db: &Path) -> i64 {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
     conn.busy_timeout(Duration::from_secs(30))
@@ -4210,7 +3695,6 @@ fn transient_task_delegation_holds(db: &Path) -> i64 {
     .expect("the hold probe must run")
 }
 
-/// The body of the task's single result, read over an independent connection.
 fn transient_sole_result_body(db: &Path) -> String {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
     conn.busy_timeout(Duration::from_secs(30))
@@ -4223,17 +3707,6 @@ fn transient_sole_result_body(db: &Path) -> String {
     .expect("the result body must read")
 }
 
-/// E2E 4 (Stage 6 C3): a credential rotation that commits while the Task
-/// Agent's final provider call is parked is current at the result commit, so
-/// the final answer is scrubbed under the advanced set: the durable result
-/// body carries only the redaction marker, the raw value is absent from every
-/// durable surface and every provider request, and no diagnostic carries it.
-///
-/// The stale-refusal half of the same premise is driven deterministically at
-/// the execution boundary in `task_run::tests`, where a delegating scrubber
-/// can advance the set between the scrub and the commit; the serving
-/// composition reads the revision immediately before its own commit, so this
-/// E2E pins the current-premise path end to end.
 #[tokio::test]
 async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scrub() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -4265,8 +3738,6 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
         ],
         &[],
     ));
-    // The final turn parks after its prompt was scrubbed and sent; the
-    // rotation commits while the answer is still in flight.
     transport.block_input(on_task_agent_turn(2));
     let mut served = Served::start(
         dir.clone(),
@@ -4292,7 +3763,6 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
     confirm_round(served.client(), &round, stream).await;
     transport.wait_parked(1).await;
 
-    // Stage and commit the rotation while the final answer is in flight.
     let mark = view_mark(served.client()).await.expect("show");
     let staged = ask(
         served.client(),
@@ -4331,8 +3801,6 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
         .await
         .expect("the final result commits under the advanced set");
 
-    // Durable result bodies: the final answer was scrubbed after the
-    // rotation, so every result body is redacted and none carries the value.
     let tasks = list_tasks(served.client()).await.expect("tasks must list");
     let task = tasks.tasks.first().expect("the task exists");
     let report = ask(
@@ -4385,8 +3853,6 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
         assert_absent("result body", body, ROTATED_SECRET);
     }
 
-    // The rotated value never reached a provider request either: it appeared
-    // only in the parked answer, after the rotation.
     assert_absent_all("provider request", &transport.input_texts(), ROTATED_SECRET);
     assert_absent_all("provider request", &transport.input_texts(), SECRET);
     assert_absent_all(

@@ -88,10 +88,10 @@ in completed changes.
 
 ## Comments and documentation
 
-Comments and rustdoc should explain contracts, invariants, ordering,
-provenance, or why a simpler implementation is incorrect. Do not restate the
-code, leave changelogs in comments, or keep commented-out code.
+Write self-documenting code. Keep comments and rustdoc to the absolute
+minimum: explain only non-obvious rationale that cannot be expressed in code.
+Do not restate the code, write obvious docs, leave changelogs, or keep
+commented-out code.
 
-A comment may document an invariant but cannot enforce it. Correctness that
-depends on serialization, currentness, atomicity, or a similar premise must be
-enforced by the owning API or code path and covered by tests.
+A comment cannot enforce correctness; enforce invariants through types, APIs,
+and tests.

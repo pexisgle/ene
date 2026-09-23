@@ -1,9 +1,6 @@
-//! Host process launch: detach `ene-core serve` so GUI close does not stop Host.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// A Host this GUI started. Drop does **not** kill it.
 #[derive(Debug)]
 pub struct DetachedHost {
     pub pid: u32,
@@ -23,8 +20,6 @@ pub enum LaunchError {
     Spawn(String),
 }
 
-/// True when the Client listener already answers. Stale sockets that refuse
-/// a connect are treated as not serving.
 #[must_use]
 pub fn host_is_serving(data_dir: &Path) -> bool {
     #[cfg(unix)]
@@ -55,7 +50,6 @@ fn probe_windows_client_pipe(data_dir: &Path) -> bool {
     std::fs::metadata(pipe).is_ok()
 }
 
-/// Resolves `ene-core` next to this binary, then `ENE_CORE_PATH`.
 #[must_use]
 pub fn locate_host_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("ENE_CORE_PATH") {
@@ -79,11 +73,6 @@ fn host_binary_name() -> &'static str {
     }
 }
 
-/// Starts `ene-core serve` in a new process group / detached session.
-///
-/// The returned value never kills Host on drop. A waiter thread reaps the
-/// direct child so this GUI does not accumulate zombies; that wait is not a
-/// kill.
 pub fn detach_serve(data_dir: &Path, host_bin: &Path) -> Result<DetachedHost, LaunchError> {
     if !host_bin.is_file() {
         return Err(LaunchError::MissingBinary);

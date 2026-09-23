@@ -1,5 +1,3 @@
-//! One-shot delivery slots for first-pairing authentication material.
-
 use std::collections::HashMap;
 use std::sync::Mutex;
 

@@ -1,12 +1,3 @@
-//! Consent management-intent orchestration.
-//!
-//! The Host converts a management wire intent into [`AssignConsentIntent`]
-//! premises; this module owns the consent-side decision order: parse the
-//! base-view mark, hold when the route's credential is not fully present,
-//! refuse a moved base, claim the same-route shortcut, and finally commit
-//! through the compare-and-save transaction. The intent journal stays
-//! write-once in every path, so a reused id observes one outcome forever.
-
 use crate::{
     CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
     IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
@@ -16,13 +7,8 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BaseViewExpectation {
-    /// The mark (`"consent-{capability}-none"`) expects no stored row.
     ExpectEmpty,
-    /// The mark (`"consent-{capability}-rev-N"`) expects the stored row at
-    /// revision `N`.
     ExpectRevision(String, ConsentRevision),
-    /// The mark is stale on its face: unparseable, names another capability,
-    /// or claims a revision with no stored row.
     FaceStale,
 }
 
@@ -49,29 +35,15 @@ pub fn base_view_expectation(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignConsentIntent {
-    /// Capability this assignment authorizes. The row and its base view are
-    /// scoped to exactly this capability.
     pub capability: CapabilityKind,
     pub provider: String,
     pub model: String,
     pub credential_id: String,
     pub base_view: String,
-    /// Whether the credential id resolves to a registered, bearer-backed
-    /// ref (computed by the Host, which alone can cross owners).
     pub credential_present: bool,
     pub fingerprint: IntentFingerprint,
 }
 
-/// Assigns the consent route from owner-side premises.
-///
-/// Order: current read, mark parse (face-stale records its stale answer),
-/// credential presence (absent records a clarification), base freshness
-/// (moved records the stale answer), atomic same-route shortcut, then the
-/// compare-and-save commit that bumps the revision. Every deciding path
-/// records its journal row first, so a retry replays it: `Decided` is the
-/// fresh outcome this call recorded, while `Replay`/`Conflict` carry the
-/// immutable journal row so the caller answers from durable state, never
-/// from a locally decided outcome.
 pub async fn assign_consent(
     intents: &impl IntentOutcomeRepository,
     consents: &impl ConsentRepository,
@@ -101,8 +73,6 @@ pub async fn assign_consent(
         )
         .await;
     }
-    // The base premise is enforced before the shortcut: a stale base with a
-    // coincidentally equal route must answer stale, never silent success.
     let base_fresh = match (&expected, current.as_ref()) {
         (None, None) => true,
         (Some((id, revision)), Some(record)) => record.id == *id && record.rev == *revision,

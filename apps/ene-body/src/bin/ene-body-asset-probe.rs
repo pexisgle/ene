@@ -1,10 +1,3 @@
-//! Machine-readable VRM runtime probe.
-//!
-//! Usage: `ene-body-asset-probe PATH.vrm [MOTION_DIR]`
-//!
-//! This validates runtime capability only. It does not claim that the avatar
-//! was displayed by a real compositor or accepted as the official `ene`.
-
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -129,7 +122,6 @@ fn run() -> Result<ProbeReport, String> {
     })
 }
 
-/// Assigns the documented pack clips found in `dir` to their activity hints.
 fn pose_motion_set(dir: &Path) -> Result<MotionSetInfo, String> {
     let clips = pose_clips_in(dir);
     if clips.is_empty() {

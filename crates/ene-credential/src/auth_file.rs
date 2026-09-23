@@ -1,7 +1,3 @@
-//! File-backed custody for device-auth verification material: one protected
-//! JSON file keeps a secret entry per paired device across process boundaries
-//! and Host restarts.
-
 use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -15,77 +11,10 @@ use crate::CredentialTechnicalError;
 use crate::pairing::{DeviceId, decode_hex_lower, encode_hex_lower, verify_pairing_proof};
 use crate::secret::SecretValue;
 
-/// File-backed custody for device-auth verification material.
-///
-/// Pairing secrets minted at approval must survive both process boundaries
-/// (a separate `approve-device` process persists them while the serving
-/// process verifies proofs) and Host restarts, so verification material
-/// cannot live only in the serving process's memory. This store keeps one
-/// entry per paired device in a protected file shared across processes and
-/// restarts. Reads are read-through on every call: nothing is cached, so a
-/// verifier always observes the latest persisted rotation.
-/// Authentication stays per-connection-once, so the extra file read costs
-/// correctness nothing it cannot afford.
-///
-/// The whole file is one JSON document mapping canonical device UUID text to
-/// an entry holding the secret (lowercase hex), the owner-visible
-/// descriptor, and the entry write time as RFC 3339:
-///
-/// ```json
-/// {"devices": {"123e4567-e89b-12d3-a456-426614174000": {"secret_hex": "00ab",
-/// "descriptor": "phone", "paired_at": "2026-09-08T12:00:00+09:00"}}}
-/// ```
-///
-/// Secret custody: generation stays with the caller (the pairing repository
-/// approve path mints the secret); this store only persists and returns
-/// custody via [`load_secret`](FileDeviceAuthStore::load_secret), which hands
-/// back an owned [`SecretValue`]. Secrets and descriptors are never logged and
-/// never appear in this type's `Debug` output, which shows the path and the
-/// entry count only.
-///
-/// File protection: on Unix the file at rest must be mode `0600`. Opening an
-/// existing file with any other mode attempts to tighten it to `0600` and
-/// fails when tightening does not stick; newly written files (including the
-/// staging temp) are created `0600`. On non-Unix platforms there is no mode
-/// check: the OS-specific protection story is documented at the call site
-/// instead, and the file must still live in a directory only the owner can
-/// read.
-///
-/// Caller-owned directory: the caller creates the parent directory. Opening
-/// fails when the parent directory is missing, so a misconfigured data
-/// directory can never silently redirect the store. A missing file is not an
-/// error: opening succeeds empty and the file is created lazily on the first
-/// save. A malformed file is always an error, never a silent default.
-///
-/// Atomicity story: every mutation rewrites the whole file by staging the
-/// new bytes to a temp file in the same directory (created `0600` on Unix,
-/// flushed with `sync_all`) and renaming it over the target. The rename is
-/// the atomic replace: concurrent readers observe the old or the new
-/// document whole, so torn reads are impossible. Atomic replacement does
-/// not order writers, so every read-modify-write cycle additionally holds an
-/// exclusive OS advisory lock on the sidecar `device-auth.json.lock` for
-/// its whole duration: concurrent approves of different devices serialize
-/// instead of dropping each other's entry, and concurrent rotations of one
-/// device leave exactly one current secret. The kernel releases the lock
-/// when the holder exits or drops it, so a crashed approval never leaves a
-/// permanent lock.
-///
-/// Backup-exclusion contract: this file holds Group K verification material
-/// with E classification. It must never enter backups or exports and must
-/// never live inside `app.db`: a future backup stage walks the data
-/// directory and must exclude it by name. The file name convention is
-/// `device-auth.json` directly under the caller's data directory; restore
-/// must not replace it, reset wipes it only on full-data reset, and a Host
-/// without this file authenticates nothing until fresh pairing mints new
-/// material. The mutation sidecar `device-auth.json.lock` carries no secret
-/// material; backups may ignore it and restore must not replace it.
 pub struct FileDeviceAuthStore {
     path: PathBuf,
 }
 
-/// A clone names the same protected file that
-/// [`FileDeviceAuthStore::open`] already validated; cloning never re-opens,
-/// re-reads, or re-checks the file.
 impl Clone for FileDeviceAuthStore {
     fn clone(&self) -> Self {
         Self {
@@ -95,8 +24,6 @@ impl Clone for FileDeviceAuthStore {
 }
 
 impl core::fmt::Debug for FileDeviceAuthStore {
-    /// The read is best-effort: an unreadable or unparseable file renders
-    /// the count as `"unreadable"` instead of failing.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self.read_entries() {
             Ok(entries) => f
@@ -114,21 +41,6 @@ impl core::fmt::Debug for FileDeviceAuthStore {
 }
 
 impl FileDeviceAuthStore {
-    /// Opens the protected device-auth file at `path`.
-    ///
-    /// A missing file opens as an empty store and is created lazily on the
-    /// first save. An existing file keeps its bytes untouched, but on Unix
-    /// its mode is verified (and tightened to `0600` when lax; see the
-    /// type-level contract). Paths naming no file, and paths naming a
-    /// directory, are rejected.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the path
-    /// names no file, the parent directory is missing, the path is a
-    /// directory, file metadata cannot be read, or Unix permissions cannot
-    /// be tightened to owner-only. Error reasons carry the path only, never
-    /// file content.
     pub fn open(path: &Path) -> Result<Self, CredentialTechnicalError> {
         let shown = path.display();
         if path.file_name().is_none() {
@@ -159,23 +71,6 @@ impl FileDeviceAuthStore {
         })
     }
 
-    /// Persists `secret` for `device`, creating or rotating its entry.
-    ///
-    /// The caller mints the secret; this method performs no strength
-    /// validation on it, it only takes custody. The entry's `descriptor` is
-    /// the owner-visible display string and `paired_at` is stamped with the
-    /// write time for display and audit only (it is not the pairing record's
-    /// pairing time). The whole read-modify-write runs under the sidecar
-    /// advisory lock, so concurrent approvals from independent processes
-    /// serialize instead of losing each other's entries; the wait is bounded
-    /// by one short whole-file rewrite.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
-    /// lock or the file cannot be read (including a malformed existing
-    /// file), the staging temp cannot be written, or the atomic replace
-    /// fails.
     pub fn save_secret(
         &self,
         device: &DeviceId,
@@ -196,8 +91,6 @@ impl FileDeviceAuthStore {
         })
     }
 
-    /// Sidecar path carrying no content: it exists only for the advisory
-    /// lock that serializes mutations across processes.
     fn lock_path(&self) -> PathBuf {
         let mut name = self
             .path
@@ -208,13 +101,6 @@ impl FileDeviceAuthStore {
         self.path.with_file_name(name)
     }
 
-    /// Runs `mutate` while holding the exclusive cross-process mutation
-    /// lock.
-    ///
-    /// The lock file is created on demand; the OS releases the lock when the
-    /// file closes, including on process death, so a crashed holder never
-    /// blocks later approvals. Reads intentionally skip the lock: the atomic
-    /// rename already gives them a whole document.
     pub(crate) fn with_mutation_lock<R>(
         &self,
         mutate: impl FnOnce() -> Result<R, CredentialTechnicalError>,
@@ -232,21 +118,10 @@ impl FileDeviceAuthStore {
             .map_err(|err| lock_error(&err))?;
         lock.lock().map_err(|err| lock_error(&err))?;
         let result = mutate();
-        // Dropping the handle releases the advisory lock; the mutation result
-        // stays authoritative, so an unlock error cannot mask it.
         drop(lock);
         result
     }
 
-    /// Loads the persisted secret for `device`, if any.
-    ///
-    /// An unknown device (or a missing file) yields `Ok(None)`; only an
-    /// unreadable or malformed file yields an error, never a silent default.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
-    /// file cannot be read or fails validation.
     pub fn load_secret(
         &self,
         device: &DeviceId,
@@ -264,19 +139,6 @@ impl FileDeviceAuthStore {
         Ok(Some(SecretValue::new(bytes)))
     }
 
-    /// Verifies one pairing ownership proof against the persisted secret.
-    ///
-    /// The secret bytes never leave this crate: they are borrowed into the
-    /// constant-time comparison inside [`verify_pairing_proof`] and zeroized
-    /// on drop with the [`SecretValue`]. An unknown device yields `Ok(false)`;
-    /// a stored secret that is not valid UTF-8 (never minted by the approve
-    /// path, which stores UUID text) likewise yields `Ok(false)`. Both are
-    /// fail-closed without distinguishing the reason to the caller.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
-    /// file cannot be read or fails validation.
     pub fn verify_device_proof(
         &self,
         device: &DeviceId,
@@ -292,24 +154,6 @@ impl FileDeviceAuthStore {
         Ok(verify_pairing_proof(text, nonce, proof_hex))
     }
 
-    /// Removes every entry whose device key or stored descriptor contains the
-    /// exact `target` text, returning the number of removed entries.
-    ///
-    /// This is the Targeted Deletion erasure for the protected device-auth
-    /// file: device display descriptors are caller-supplied text, and a key
-    /// can be the target itself. Removing an entry also removes that device's
-    /// local verification material, so the device must pair again — a local
-    /// erasure, never a statement about the device's trust elsewhere. A no-op
-    /// target (nothing matches) never rewrites the file, so a duplicate sweep
-    /// has no second effect.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the lock
-    /// or the file cannot be read, the staging temp cannot be written, the
-    /// atomic replace fails, or protection cannot be re-established. An
-    /// unreadable file fails closed rather than reporting an erasure that
-    /// cannot be proven.
     pub fn erase_target_text(&self, target: &str) -> Result<u64, CredentialTechnicalError> {
         if target.is_empty() {
             return Ok(0);
@@ -327,15 +171,6 @@ impl FileDeviceAuthStore {
         })
     }
 
-    /// Counts entries whose device key or stored descriptor still contains the
-    /// exact `target` text: the bounded remainder check for the same surface
-    /// [`Self::erase_target_text`] covers.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the file
-    /// cannot be read or fails validation, so an unproven remainder is never
-    /// reported as zero.
     pub fn count_target_text(&self, target: &str) -> Result<u64, CredentialTechnicalError> {
         if target.is_empty() {
             return Ok(0);
@@ -423,9 +258,6 @@ impl FileDeviceAuthStore {
     }
 }
 
-// One file entry: secret bytes as lowercase hex plus display and timing
-// metadata. Keys live in the surrounding map, canonicalized to hyphenated
-// UUID text.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredDeviceAuth {
@@ -438,8 +270,6 @@ fn device_key(device: &DeviceId) -> String {
     device.0.as_uuid().to_string()
 }
 
-// The backing UUID type is inferred through `RawId::from_uuid` and never
-// named, so this stays on the existing dependency set.
 pub(crate) fn parse_device_key(text: &str) -> Option<DeviceId> {
     text.parse().ok().map(RawId::from_uuid).map(DeviceId)
 }
@@ -471,15 +301,11 @@ fn enforce_owner_only(path: &Path) -> Result<(), CredentialTechnicalError> {
     Ok(())
 }
 
-// No Unix mode bits to enforce here; protection rests on the caller-owned
-// directory.
 #[cfg(not(unix))]
 fn enforce_owner_only(_path: &Path) -> Result<(), CredentialTechnicalError> {
     Ok(())
 }
 
-// Unix creates the temp `0600` so secrets are never briefly world-readable;
-// `sync_all` keeps a crash from leaving a truncated temp behind.
 fn stage_file(tmp: &Path, rendered: &[u8]) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -491,14 +317,9 @@ fn stage_file(tmp: &Path, rendered: &[u8]) -> std::io::Result<()> {
 }
 
 fn remove_best_effort(tmp: &Path) {
-    if std::fs::remove_file(tmp).is_err() {
-        // Nothing to do: the temp carries no trust beyond the store file
-        // itself, and reporting cleanup failure would mask the real error.
-    }
+    if std::fs::remove_file(tmp).is_err() {}
 }
 
-// `serde_json` is the one JSON implementation for both directions; a render
-// failure is reported, never defaulted.
 fn render_device_auth_file(
     entries: &BTreeMap<String, StoredDeviceAuth>,
 ) -> Result<String, CredentialTechnicalError> {
@@ -515,20 +336,12 @@ fn render_device_auth_file(
     Ok(rendered)
 }
 
-// Every decode failure maps to one fixed content-free detail: `serde_json`
-// error displays can echo the offending input (unexpected values, unknown
-// field names), and this file holds secrets and descriptors. Semantic checks
-// (UUID keys, hex secrets, RFC 3339 timestamps) happen in `read_entries`.
 fn parse_device_auth_file(bytes: &[u8]) -> Result<BTreeMap<String, StoredDeviceAuth>, String> {
     serde_json::from_slice::<DeviceAuthFile>(bytes)
         .map(|file| file.devices)
         .map_err(|_| "file is not a valid device-auth document".to_owned())
 }
 
-// Whole-file document: exactly one `devices` section mapping canonical
-// device UUID text to entries. Unknown top-level fields are rejected, so a
-// hand-edited file with stray keys fails closed instead of silently
-// dropping them.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeviceAuthFile {
@@ -536,9 +349,6 @@ struct DeviceAuthFile {
     devices: BTreeMap<String, StoredDeviceAuth>,
 }
 
-// Rejects duplicate device entries at decode: deserializing straight into a
-// map would let a later entry silently overwrite an earlier one, and the
-// custody contract fails closed on hand-edited files instead.
 fn devices_without_duplicates<'de, D>(
     deserializer: D,
 ) -> Result<BTreeMap<String, StoredDeviceAuth>, D::Error>

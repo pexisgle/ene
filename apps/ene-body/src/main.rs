@@ -1,8 +1,3 @@
-//! `ene-body` overlay process entry.
-//!
-//! Stdout is the projection IPC write side when `--ipc-stdio` is used.
-//! Diagnostics go to stderr and never echo frame bytes.
-
 use std::io::Write as _;
 use std::process::ExitCode;
 

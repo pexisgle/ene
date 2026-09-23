@@ -1,28 +1,3 @@
-//! First-party usage / cost / cap surface (`usage-cost-cap` §16/§17).
-//!
-//! Two halves, kept apart on purpose:
-//!
-//! - The bounded usage summary read is SELECT-only composition over the
-//!   inference-owned query ([`ene_inference::UsageSummaryRepository`]) and
-//!   the permission-owned cap status ([`ene_permission::UsageCapRepository`]).
-//!   It settles no reservation, refreshes no pricing, mutates no cap, and
-//!   reconciles no usage; a read observes the durable state and changes
-//!   nothing. The Host clamps the limit and the period before calling the
-//!   owner, which clamps again at the SQL boundary.
-//! - Cap set/update is a management intent (`ManageRuleConsentCap` with the
-//!   shared `cap:` target grammar). The Host parses the intent's opaque
-//!   `base_view` mark into the expected cap revision and reaches the
-//!   permission-owned [`ene_permission::SetUsageCapCommand`]; the command's
-//!   compare-and-set is the only mutation authority. A stale mark answers
-//!   `StaleBaseView` with the current mark and stores nothing; a malformed
-//!   mark is face-stale, never "expects no cap". LLM output and provider
-//!   responses never construct an intent, and only the authenticated
-//!   first-party connection reaches this handler.
-//!
-//! No body text, prompt, output, or credential value crosses either half:
-//! the read rows carry attribution and accounting only, and the cap target
-//! carries the intended limit.
-
 use ene_api::v1::management::{
     ManagementIntent, ManagementOutcome, USAGE_CAP_TARGET_PREFIX, parse_usage_cap_target,
 };
@@ -51,13 +26,8 @@ use crate::presentation::{StoredCursor, field_reject, stale_operation};
 use crate::serve::{HostHandle, LiveInput, connection_key, outgoing_frame};
 use crate::setup::outcome_frame;
 
-/// Replay-fingerprint discriminator for one cap update; distinct from every
-/// consent/setup kind so a reused intent id is different content by
-/// construction.
 pub(crate) const INTENT_KIND_USAGE_CAP: &str = "usage-cap";
 
-/// One stored usage cursor's page state: the effective period bounds the
-/// walk keeps and the keyset position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct UsageCursorPage {
     pub(crate) from: WallClockWithTz,
@@ -65,14 +35,6 @@ pub(crate) struct UsageCursorPage {
     pub(crate) after: Option<UsageSummaryCursor>,
 }
 
-/// The exact caller-declared filter premise one usage cursor is bound to.
-/// Reusing a cursor under any other filter set answers `StaleBaseView` instead
-/// of reading a different result set with an old position.
-///
-/// `from`/`to` are the declared bounds (canonical UTC text) or `None` when the
-/// caller left the period to the Host: a cursor minted with the default period
-/// keeps the same effective bounds on every page, so the Host stores those
-/// bounds with the cursor rather than re-deriving them from a later clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UsageQueryPremise {
     pub(crate) from: Option<String>,
@@ -85,11 +47,6 @@ pub(crate) struct UsageQueryPremise {
 }
 
 impl HostHandle {
-    /// Dispatch entry: one bounded usage summary read.
-    ///
-    /// Malformed filters answer `UnsupportedFieldValue` (nothing is read); a
-    /// foreign or premise-mismatched cursor answers `StaleBaseView`; a store
-    /// failure answers `Unavailable` rather than an empty page.
     pub(crate) async fn usage_summary_wire(
         &self,
         frame: &WireFrame,
@@ -145,14 +102,9 @@ impl HostHandle {
         };
         let now = WallClockWithTz::now();
         let conn = connection_key(&live.connection_id);
-        // The first page derives (and clamps) the effective bounds; a cursor
-        // page reuses the bounds its cursor was minted with, so every page of
-        // one walk covers the same window even though the wall clock moved.
         let (from, to, after) = match request.cursor.as_ref() {
             None => {
                 let to = declared_to.unwrap_or(now);
-                // A bound in the future is clamped to now: the read never
-                // claims to have observed a later instant than it did.
                 let to = if to.as_datetime() > now.as_datetime() {
                     now
                 } else {
@@ -180,8 +132,6 @@ impl HostHandle {
             after,
             limit,
         };
-        // The owner query clamps again and applies LIMIT in SQL: the bound is
-        // on the rows read, never a full materialization with a late cutoff.
         let rows = match self.store.query_usage_summary(query).await {
             Ok(rows) => rows,
             Err(_) => {
@@ -192,8 +142,6 @@ impl HostHandle {
                 )];
             }
         };
-        // The cap section is the current state at the same instant the query
-        // was bounded by; it is a read like the rows above.
         let caps = match self
             .store
             .load_usage_cap_status(UsageCapStatusQuery {
@@ -213,14 +161,10 @@ impl HostHandle {
         };
         let cap_views = build_cap_views(request.provider.as_deref(), &caps);
         let row_views: Vec<UsageSummaryRowView> = rows.iter().map(usage_row_view).collect();
-        // Test-only race gate: pause after the durable read and before the
-        // guarded mint (S5-05-style ownership check).
         #[cfg(test)]
         if let Some(gate) = self.ref_mint_gate() {
             gate.pause().await;
         }
-        // The cursor mint runs under the ownership section: a connection
-        // superseded while the page was read creates no cursor.
         let minted = self.with_presentation_state(live, |state| {
             Self::take_cursor(
                 state,
@@ -269,16 +213,6 @@ impl HostHandle {
         )]
     }
 
-    /// Maps one `ManageRuleConsentCap` intent whose target carries the shared
-    /// `cap:` grammar onto the permission-owned command (`usage-cost-cap`
-    /// §13/§17).
-    ///
-    /// Currentness is re-checked here, not trusted from the Client: the
-    /// `base_view` mark names exactly `(scope, window)` at one revision (or
-    /// the none state), and the command serializes the compare with the send
-    /// admission. A face-stale mark, an unknown scope/window/currency, or an
-    /// unrepresentable limit clarifies with zero writes; a store failure
-    /// holds (nothing decided, a retry is safe).
     pub(crate) async fn set_usage_cap_intent(
         &self,
         frame: &WireFrame,
@@ -316,9 +250,6 @@ impl HostHandle {
                 UsageCapId::new(scope.clone(), window),
                 UsageCapRevision::from_u64(revision),
             )),
-            // A mark that names another cap or another shape is stale on its
-            // face: it is never read as "expects no cap". Nothing is written;
-            // the answer carries the rebuilt current mark.
             None => {
                 return vec![self.cap_stale(frame, intent, live, &scope, window).await];
             }
@@ -376,7 +307,6 @@ impl HostHandle {
                     .await,
                 )]
             }
-            // Nothing was decided, so a retry is safe.
             Err(_) => vec![outcome_frame(
                 frame,
                 live,
@@ -386,8 +316,6 @@ impl HostHandle {
         }
     }
 
-    /// Records one clarify answer for a cap intent that cannot reach the
-    /// owner command.
     async fn cap_clarify(
         &self,
         frame: &WireFrame,
@@ -406,8 +334,6 @@ impl HostHandle {
         )
     }
 
-    /// Answers a face-stale base view with the rebuilt current mark, reading
-    /// the current cap without mutating anything.
     async fn cap_stale(
         &self,
         frame: &WireFrame,
@@ -425,15 +351,10 @@ impl HostHandle {
             .await
         {
             Ok(statuses) => statuses,
-            // The cap read could not answer: nothing is decided, and a retry
-            // is safe.
             Err(_) => {
                 return outcome_frame(frame, live, intent, ManagementOutcome::HeldByOperation);
             }
         };
-        // A successful read answers with the rebuilt current mark; an absent
-        // row answers the none-state mark, which is a real current state, not
-        // a failure.
         let current = statuses
             .iter()
             .find(|status| status.cap.scope() == scope && status.cap.window() == window)
@@ -462,8 +383,6 @@ fn stale_usage_cursor(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     )
 }
 
-/// The clamped page bound: `1..=USAGE_PAGE_LIMIT_MAX`, default
-/// [`USAGE_PAGE_LIMIT_DEFAULT`].
 fn checked_usage_limit(limit: Option<u32>) -> Option<u32> {
     match limit {
         None => Some(USAGE_PAGE_LIMIT_DEFAULT),
@@ -472,9 +391,6 @@ fn checked_usage_limit(limit: Option<u32>) -> Option<u32> {
     }
 }
 
-/// The default lower bound: [`USAGE_SUMMARY_RANGE_DEFAULT_DAYS`] before `to`.
-/// A calendar extreme without a representable floor keeps `to` itself, so the
-/// range stays empty rather than inventing an unbounded one.
 fn default_from(to: WallClockWithTz) -> WallClockWithTz {
     to.as_datetime()
         .checked_sub_days(chrono::Days::new(USAGE_SUMMARY_RANGE_DEFAULT_DAYS))
@@ -502,11 +418,6 @@ fn parse_status(name: Option<&str>) -> Option<Option<UsageSummaryStatus>> {
     }
 }
 
-/// The cap slots the response reports: the system scope always (it budgets
-/// every provider), plus the provider the query names (its slots appear even
-/// without a stored cap, so the Client receives the none-state mark it must
-/// echo to create the first cap). Stored caps of other providers are included
-/// with their slots.
 fn build_cap_views(
     provider_filter: Option<&str>,
     statuses: &[UsageCapStatus],
@@ -572,8 +483,6 @@ fn cap_view(
     }
 }
 
-/// The owner rendering of one cap reference; the single mark grammar owner is
-/// [`ene_permission::usage_cap_mark`].
 fn cap_mark_of(reference: &UsageCapRef) -> String {
     usage_cap_mark(
         reference.scope(),
@@ -640,9 +549,6 @@ fn money_view(money: Money) -> UsageMoneyView {
     }
 }
 
-/// Whether one `ManageRuleConsentCap` target belongs to the usage-cap grammar
-/// rather than the consent/setup grammar; the Host branch keys on this and
-/// then parses it authoritatively.
 pub(crate) fn is_usage_cap_target(target: &str) -> bool {
     target.starts_with(USAGE_CAP_TARGET_PREFIX)
 }

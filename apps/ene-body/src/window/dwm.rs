@@ -1,5 +1,3 @@
-//! Windows 11 layered/DWM transparent overlay.
-
 #[cfg(target_os = "windows")]
 mod imp {
     use std::collections::VecDeque;
@@ -97,8 +95,6 @@ mod imp {
                 lpszClassName: CLASS_NAME.as_ptr(),
                 hIconSm: std::ptr::null_mut(),
             };
-            // A zero result can mean the class already exists in this process;
-            // CreateWindowExW below remains the authoritative check.
             // SAFETY: class is fully initialized.
             let _atom = unsafe { RegisterClassExW(&class) };
             let placement = PlacementBox {
@@ -166,8 +162,6 @@ mod imp {
             state.hit_test_mask = initial_mask;
             state.region_dirty = true;
             state.region_failed = false;
-            // DirectComposition supplies the per-pixel alpha. A layered/GDI
-            // redirection bitmap would put an opaque surface behind the visual.
             let mut gpu_failure = None;
             let renderer = if try_gpu {
                 let hwnd_value =
@@ -350,8 +344,6 @@ mod imp {
                 let logical_height = logical(height, self.state.placement.scale);
                 self.state.placement.width = logical_width;
                 self.state.placement.height = logical_height;
-                // WM_SIZE already updates placement. The renderer compares its
-                // own physical extent, including changes of DPI at equal DIPs.
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(width, height);
                 }
@@ -385,10 +377,6 @@ mod imp {
         dpi_resize_in_progress: bool,
     }
 
-    /// Alpha-region rasterization walks every rendered triangle. Refreshing it
-    /// on alternate presented frames caps pointer-region lag at roughly 65 ms
-    /// while leaving the visual presentation cadence unchanged. Dirty geometry
-    /// (startup, resize, or DPI transition) always refreshes immediately.
     fn should_refresh_input_region(region_dirty: bool, defer_once: &mut bool) -> bool {
         if region_dirty {
             *defer_once = true;
@@ -471,12 +459,6 @@ mod imp {
                             .events
                             .push_back(LocalUiFact::Resize { width, height });
                     }
-                    // SetWindowRgn can fail transiently while Windows is in a
-                    // DPI/interactive-size transaction. Keep the last
-                    // displayed silhouette (automatically clipped to the new
-                    // HWND bounds) and force replacement only after the next
-                    // actual presentation. A skipped frame must not publish a
-                    // region for pixels that were never shown.
                     (*state).region_dirty = true;
                 }
                 return 0;
@@ -487,10 +469,6 @@ mod imp {
                     // SAFETY: WM_DPICHANGED lparam is a suggested RECT.
                     let rect = unsafe { *suggested };
                     let dpi = (wparam as u32 & 0xffff).max(96);
-                    // Keep the user-selected logical extent stable across
-                    // monitors. Reusing the suggested physical extent and
-                    // then reporting its WM_SIZE as a user resize compounds
-                    // the scale factor on each 100%↔125% transition.
                     // SAFETY: state pointer validity was established above.
                     let (width, height) = unsafe {
                         (

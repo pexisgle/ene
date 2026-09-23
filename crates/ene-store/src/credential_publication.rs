@@ -1,13 +1,3 @@
-//! SQLite side of credential publication (Stage 7 A1c).
-//!
-//! Only non-secret references live here: the mutation journal, the active and
-//! retired version pointers, and the credential-set revision the activation
-//! advances. The value itself is in the OS protected store, so the two are
-//! updated in the order [Credential publication] fixes and never described as
-//! one atomic rename.
-//!
-//! [Credential publication]: ../../../../docs/design/concrete/credential-publication.md
-
 use std::sync::Arc;
 
 use ene_credential::{
@@ -37,8 +27,6 @@ const SQL_CLEAR_CLEANUP: &str = "UPDATE credential_active SET cleanup_version = 
 
 const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
 
-/// A stored outcome is written as its own durable text, so a later phase move
-/// never rewrites what the Owner decided.
 fn outcome_text(outcome: &MutationOutcome) -> String {
     match outcome {
         MutationOutcome::Activated { revision } => format!("activated:{revision}"),
@@ -119,8 +107,6 @@ impl CredentialPublicationRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            // Write-once: a retry observes the original attempt instead of
-            // starting a second one under the same id.
             let stored: Option<Option<ene_credential::CredentialMutation>> = tx
                 .query_row(SQL_SELECT_MUTATION, params![mutation_id], |row| {
                     mutation_from_row(mutation_id.clone(), row)
@@ -233,9 +219,6 @@ impl CredentialPublicationRepository for Store {
             let Some(Some(mutation)) = stored else {
                 return Ok(ActivationOutcome::Missing);
             };
-            // A decided mutation answers from its stored outcome: a retry
-            // never re-applies a past decision, and a later update never
-            // rewrites it.
             if let Some(outcome) = mutation.outcome {
                 return Ok(ActivationOutcome::AlreadyDecided(outcome));
             }
@@ -250,8 +233,6 @@ impl CredentialPublicationRepository for Store {
             if let Some(expected) = mutation.expected_revision
                 && expected != current
             {
-                // The premise moved; the candidate is not adopted and its
-                // value is swept so nothing survives the refused attempt.
                 sweep_registered_secret(&tx, &candidate_bearer)?;
                 if let Some(retired) = retired_bearer.as_deref() {
                     sweep_registered_secret(&tx, retired)?;
@@ -275,9 +256,6 @@ impl CredentialPublicationRepository for Store {
             let next = current
                 .checked_add(1)
                 .ok_or_else(|| credential_unavailable("credential set revision exhausted"))?;
-            // Sweep first: the new value and any value it replaces are removed
-            // from stored content in this same transaction, so a premise taken
-            // before the commit is covered by it.
             sweep_registered_secret(&tx, &candidate_bearer)?;
             if let Some(retired) = retired_bearer.as_deref() {
                 sweep_registered_secret(&tx, retired)?;
@@ -300,9 +278,6 @@ impl CredentialPublicationRepository for Store {
                 .optional()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             let (previous_active, previous_cleanup) = previous.unwrap_or((None, None));
-            // A version that was already retired but not yet removed stays
-            // pending: only the newest retired version is tracked, and an
-            // older one is removed by the cleanup pass before this point.
             let retired = previous_cleanup.or(previous_active);
             tx.execute(
                 SQL_UPSERT_ACTIVE,

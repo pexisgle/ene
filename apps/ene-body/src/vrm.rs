@@ -1,14 +1,3 @@
-//! Body-local VRM 1.0 runtime.
-//!
-//! `vrm-runtime` is intentionally confined to this crate. The parent projects
-//! only [`PoseHint`]; expression weights, LookAt targets,
-//! humanoid rotations, SpringBone state, and renderer frame data never cross
-//! IPC.
-//!
-//! An activity hint plays the `.vrma` clip the parent assigned to it. Hints
-//! without a clip keep the hand-authored staging, so a missing motion pack
-//! degrades to the previous behavior instead of faking playback.
-
 use crate::ipc::{
     AssetFailInfo, AssetFailReason, AssetRef, FeatureSupport, MotionFailInfo, MotionFailReason,
     MotionSetInfo, PoseHint,
@@ -17,7 +6,6 @@ use std::sync::Arc;
 
 use vrm_runtime::{PlaybackMode, PlaybackOptions, VrmAnimation};
 
-/// Pose hints in a fixed order so replay and reporting stay deterministic.
 const POSE_ORDER: [PoseHint; 5] = [
     PoseHint::Idle,
     PoseHint::Listening,
@@ -26,14 +14,12 @@ const POSE_ORDER: [PoseHint; 5] = [
     PoseHint::Attention,
 ];
 
-/// Assigned clips loop: a hint is a standing activity class, not a one-shot.
 const MOTION_PLAYBACK: PlaybackOptions = PlaybackOptions {
     speed: 1.0,
     mode: PlaybackMode::Loop,
     scale_hips_translation: true,
 };
 
-/// Validated renderer-facing information about the loaded avatar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct AssetStats {
     pub primitives: usize,
@@ -41,9 +27,6 @@ pub struct AssetStats {
     pub spring_chains: usize,
 }
 
-/// One CPU-deformed primitive plus its expression-evaluated PBR base color.
-/// Texture sampling and MToon remain renderer quality work; geometry,
-/// skinning, morphs, vertex colors, and dynamic material color are retained.
 #[derive(Debug, Clone)]
 pub struct RenderMesh {
     pub mesh: vrm_runtime::CpuMesh,
@@ -67,7 +50,6 @@ struct MaterialTexture {
     transform: vrm_runtime::TextureTransform,
 }
 
-/// Per-process VRM session. Holds one validated asset and its mutable runtime.
 pub struct VrmSession {
     current: Option<AssetRef>,
     runtime: Option<vrm_runtime::AvatarRuntime>,
@@ -146,14 +128,10 @@ impl VrmSession {
         self.runtime.is_some()
     }
 
-    /// Changes the Body-local activity projection. Runtime controls are
-    /// applied on the next fixed-rate update.
     pub fn set_pose(&mut self, pose: PoseHint) {
         self.pose = pose;
     }
 
-    /// Whether validated clips are loaded. Playback itself is per hint and is
-    /// driven by [`Self::update`].
     #[must_use]
     pub fn motion(&self) -> FeatureSupport {
         if self.motions.iter().any(Option::is_some) {
@@ -163,7 +141,6 @@ impl VrmSession {
         }
     }
 
-    /// Hints that currently have a clip, in the fixed pose order replay uses.
     #[must_use]
     pub fn motion_poses(&self) -> Vec<PoseHint> {
         POSE_ORDER
@@ -177,16 +154,6 @@ impl VrmSession {
             .collect()
     }
 
-    /// Validates and adopts a pose → clip assignment.
-    ///
-    /// Every clip is loaded and validated before any of them replaces playback
-    /// state, so a set with one bad clip cannot partially disable motion. The
-    /// previous assignment stays live on failure.
-    ///
-    /// # Errors
-    ///
-    /// Structural violations ([`MotionSetInfo::validate`]), unavailable or
-    /// non-file paths, and `.vrma` files the runtime rejects.
     pub fn set_motions(&mut self, set: &MotionSetInfo) -> Result<(), MotionFailInfo> {
         set.validate()?;
         let mut loaded = Vec::with_capacity(set.clips.len());
@@ -227,13 +194,6 @@ impl VrmSession {
         Ok(())
     }
 
-    /// Strictly loads and validates a VRM 1.0 asset before replacing the
-    /// current runtime. A failed replacement leaves the previous avatar live.
-    ///
-    /// # Errors
-    ///
-    /// Missing/non-file paths, invalid VRM 1.0, or an asset that cannot meet
-    /// Stage 7's renderer/expression/LookAt/SpringBone contract.
     pub fn set_asset(&mut self, asset: AssetRef) -> Result<(), AssetFailInfo> {
         let path = asset.path();
         if path.is_empty() {
@@ -307,12 +267,6 @@ impl VrmSession {
         Ok(())
     }
 
-    /// Evaluates expression, LookAt, humanoid motion, and SpringBone and
-    /// returns CPU-deformed meshes for the simple wgpu fallback renderer.
-    ///
-    /// # Errors
-    ///
-    /// Runtime evaluation failure. No asset yields an empty frame.
     pub fn update(&mut self, dt: f32) -> Result<Vec<RenderMesh>, AssetFailInfo> {
         let pose = self.pose;
         let clip = self
@@ -326,8 +280,6 @@ impl VrmSession {
         };
         match clip {
             Some(clip) => {
-                // The clip is started once per hint change: restarting every
-                // frame would pin playback to time zero.
                 if self.playing != Some(pose) {
                     runtime.play(clip, MOTION_PLAYBACK).map_err(|error| {
                         fail(
@@ -499,7 +451,6 @@ fn fail(reason: AssetFailReason, detail: impl Into<String>) -> AssetFailInfo {
     }
 }
 
-/// Slot of a pose hint inside the fixed pose order.
 fn pose_index(pose: PoseHint) -> usize {
     match pose {
         PoseHint::Idle => 0,
@@ -510,7 +461,6 @@ fn pose_index(pose: PoseHint) -> usize {
     }
 }
 
-/// Hand-authored expression, gaze, and sway for one activity hint.
 struct Staging {
     expression: &'static str,
     weight: f32,
@@ -573,16 +523,12 @@ fn apply_expression(runtime: &mut vrm_runtime::AvatarRuntime, staging: &Staging)
     let _result = runtime.set_look_at_target(Some(glam::Vec3::from_array(staging.look_at)));
 }
 
-/// Clip playback owns every humanoid rotation, so only the expression and gaze
-/// of the activity staging are layered on. Applying the hand-authored head and
-/// spine rotations on top would compose two claims about the same bones.
 fn apply_clip_staging(runtime: &mut vrm_runtime::AvatarRuntime, pose: PoseHint) {
     runtime.clear_expressions();
     runtime.clear_bone_rotations();
     apply_expression(runtime, &staging(pose, 0.0));
 }
 
-/// Staging for activity hints that have no clip assigned.
 fn apply_procedural_pose(
     runtime: &mut vrm_runtime::AvatarRuntime,
     pose: PoseHint,

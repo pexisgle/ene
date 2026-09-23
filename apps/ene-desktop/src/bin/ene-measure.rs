@@ -1,5 +1,3 @@
-//! Stage 7 release-process performance campaign runner.
-
 use std::io::{BufRead as _, Seek as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -197,8 +195,6 @@ fn start_presentmon(args: &Args) -> Result<Option<std::process::Child>, CliError
         .arg(body_pid.to_string())
         .arg("--output_file")
         .arg(output)
-        // The importer requires explicit display duration; newer PresentMon
-        // releases default to a different set of columns.
         .arg("--v2_metrics")
         .arg("--timed")
         .arg(args.duration.as_secs().to_string())
@@ -294,12 +290,6 @@ fn read_wayland_feedback(
                 selected.push(trace.feedback);
             }
             ene_body::ipc::PresentationOutcome::Submitted => {}
-            // The window is defined by the commit/submission time. A terminal
-            // feedback line is written when the Body's event reaches the
-            // desktop's tick (up to ~250 ms later), so filtering terminal
-            // lines by their observed write time would misreport the last
-            // frames of the window as unresolved. A feedback that never
-            // resolves still has no terminal line and stays Missing.
             _ if submitted.contains(&trace.feedback.correlation_id) => {
                 selected.push(trace.feedback);
             }
@@ -517,10 +507,6 @@ mod tests {
         assert_eq!(args.duration.as_secs(), 300);
     }
 
-    /// Window: started 1000 ms after epoch, warmup 0 s, wall 10 s, so the
-    /// submission window is [1e9, 11e9) ns. The terminal line arrives after
-    /// the window end (the desktop writes Body events on its tick) and must
-    /// still count as presented, not missing.
     #[test]
     fn terminal_feedback_after_the_window_end_still_counts() {
         let trace = write_trace(&[
@@ -543,8 +529,6 @@ mod tests {
         assert_eq!(record.discarded, 0);
     }
 
-    /// A submission inside the window with no terminal line is unresolved and
-    /// stays missing; the window must not silently drop it.
     #[test]
     fn unresolved_submission_inside_the_window_is_missing() {
         let trace = write_trace(&[line(5_000_000_000, 9, PresentationOutcome::Submitted)]);
@@ -555,7 +539,6 @@ mod tests {
         assert_eq!(record.missing, 1);
     }
 
-    /// Submissions outside the window are not part of the campaign at all.
     #[test]
     fn submissions_outside_the_window_are_ignored() {
         let trace = write_trace(&[

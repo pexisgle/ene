@@ -1,23 +1,3 @@
-//! `ActionAttemptRepository` over the `action_attempt` table group.
-//!
-//! The insert is AU5: one short `Immediate` transaction compares the
-//! delegation correspondence, the relied task revision, the current task
-//! revision, the current non-terminal `task.progress`, the absence of the
-//! delegation's final result row (execution seal), the current workspace
-//! association (exactly one, fail closed on duplicates), and the delegation's
-//! copied scope association before writing the attempt row. Missing rows and
-//! moved revisions/associations answer `StalePremise` with zero writes;
-//! terminal progress answers `TaskTerminal` and a sealed delegation answers
-//! `ExecutionSealed`, both before any external effect. A premise that
-//! disagrees with the stored delegation row, a duplicate association, an
-//! unknown stored operation, and a duplicate attempt identity are technical
-//! errors and are never reduced to stale.
-//!
-//! The certainty update is a per-row compare-and-set that accepts only
-//! `expected = Unknown` and the closed-world `(certainty, grounds)` pairs. The
-//! read composes a record only when the correlation and the certainty/grounds
-//! pair are consistent; a malformed row is never guessed.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -41,8 +21,6 @@ const SQL_SELECT_ATTEMPT: &str = "SELECT task_id, task_revision, delegation_id, 
 const SQL_SELECT_ATTEMPT_EXISTS: &str =
     "SELECT attempt_id FROM action_attempt WHERE attempt_id = ?1";
 
-/// Attempt identities and K-B.1 evaluations are both single-use; the probe
-/// answers a reused evaluation as a technical error instead of a stale start.
 const SQL_SELECT_EVALUATION_EXISTS: &str =
     "SELECT attempt_id FROM action_attempt WHERE relied_evaluation = ?1";
 
@@ -51,8 +29,6 @@ const SQL_SELECT_CERTAINTY: &str =
 
 const SQL_UPDATE_CERTAINTY: &str = "UPDATE action_attempt SET certainty = ?2, grounds = ?3 WHERE attempt_id = ?1 AND certainty = ?4";
 
-/// The notification destination of an Action-attempt fact: the Task's
-/// assignee, read inside the same transaction as the attempt write.
 const SQL_SELECT_TASK_ASSIGNEE: &str = "SELECT assignee FROM task WHERE task_id = ?1";
 
 const SQL_SELECT_DELEGATION_PREMISE: &str =
@@ -60,13 +36,9 @@ const SQL_SELECT_DELEGATION_PREMISE: &str =
 
 const SQL_SELECT_TASK_STATE: &str = "SELECT revision, progress FROM task WHERE task_id = ?1";
 
-/// The delegation's final result row, i.e. its execution seal. The row's
-/// existence — never a liveness or completion flag — refuses a new start.
 const SQL_SELECT_DELEGATION_RESULT: &str =
     "SELECT result_id FROM task_result WHERE delegation_id = ?1";
 
-/// Probes two rows so a duplicate association is detected instead of being
-/// silently reduced to the first one.
 const SQL_SELECT_WORKSPACE_ASSOCS: &str =
     "SELECT assoc_id FROM workspace_assoc WHERE task_id = ?1 ORDER BY rowid LIMIT 2";
 
@@ -82,14 +54,6 @@ fn decode_revision(raw: i64) -> Result<RevisionInner, ActionTechnicalError> {
     ))
 }
 
-/// Registers one `ActionAttempt` undelivered source inside the caller's
-/// transaction (AU1b).
-///
-/// The destination is derived from the Task row the attempt belongs to, and
-/// the phase is the certainty in force after the write, so a certainty change
-/// is a new source key and a new notification while the old `unknown` entry
-/// keeps its own row. A missing Task row is durable corruption and fails
-/// closed, rolling the attempt write back with it.
 fn register_action_attempt(
     tx: &rusqlite::Transaction<'_>,
     task_text: &str,
@@ -124,7 +88,6 @@ fn register_action_attempt(
     .map_err(action_unavailable)
 }
 
-/// The undelivered wire projection of the Action owner's closed world.
 fn certainty_wire(certainty: ActionCertainty) -> ActionCertaintyWire {
     match certainty {
         ActionCertainty::ConfirmedSuccess => ActionCertaintyWire::ConfirmedSuccess,
@@ -147,9 +110,6 @@ fn insert_attempt_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(action_unavailable)?;
-    // Attempt identities and evaluations are single-use. Explicit pre-checks
-    // answer duplicates deterministically; the constraints below only cover a
-    // writer that committed between these reads and the insert.
     let existing: Option<String> = tx
         .query_row(SQL_SELECT_ATTEMPT_EXISTS, params![attempt_text], |row| {
             row.get(0)
@@ -170,9 +130,6 @@ fn insert_attempt_sync(
     if used_evaluation.is_some() {
         return Err(action_unavailable("action evaluation already used"));
     }
-    // (1) The delegation row exists and its relied revision equals the
-    // premise. A disagreement is an inconsistent correlation, never a
-    // fabricated stale; a missing row is a domain stale with zero writes.
     let stored: Option<(String, i64, Option<String>)> = tx
         .query_row(
             SQL_SELECT_DELEGATION_PREMISE,
@@ -191,7 +148,6 @@ fn insert_attempt_sync(
             "delegation correlation disagrees with the attempt premise",
         ));
     }
-    // (2) The current Task row is still at the relied revision.
     let current: Option<(i64, Option<String>)> = tx
         .query_row(SQL_SELECT_TASK_STATE, params![task_text], |row| {
             Ok((row.get(0)?, row.get(1)?))
@@ -204,9 +160,6 @@ fn insert_attempt_sync(
     if decode_u64(current_raw).map_err(action_unavailable)? != premise.task_revision.as_u64() {
         return Ok(ActionStartOutcome::StalePremise);
     }
-    // (3) The Task is not terminal. Terminal progress is absorbing, so a
-    // start can never succeed later and the Work owner reports it as its own
-    // outcome instead of stale.
     let progress_text =
         progress_raw.ok_or_else(|| action_unavailable("task progress is missing"))?;
     let progress = ene_task::TaskProgress::from_name(&progress_text)
@@ -214,8 +167,6 @@ fn insert_attempt_sync(
     if progress.is_terminal() {
         return Ok(ActionStartOutcome::TaskTerminal);
     }
-    // (4) The delegated execution is not sealed: a final result row refuses
-    // every new start even while the Task stays non-terminal.
     let sealed: Option<String> = tx
         .query_row(
             SQL_SELECT_DELEGATION_RESULT,
@@ -227,10 +178,6 @@ fn insert_attempt_sync(
     if sealed.is_some() {
         return Ok(ActionStartOutcome::ExecutionSealed);
     }
-    // (5) Exactly one current workspace association exists, it is the premise
-    // association, and the delegation's copied scope relied on the same
-    // boundary. The copy is provenance: a mismatch means the delegation did
-    // not witness the current boundary, so no widening is allowed.
     let associations = {
         let mut statement = tx
             .prepare(SQL_SELECT_WORKSPACE_ASSOCS)
@@ -260,16 +207,6 @@ fn insert_attempt_sync(
         return Ok(ActionStartOutcome::StalePremise);
     }
     let started_at = WallClockWithTz::now().to_rfc3339();
-    // The A4/R2 delayed-action gate: the resolved target is the attempt's only
-    // stored body. A target under a canonical current condition — or an
-    // Action started by a delegation already associated with a deletion
-    // interval at admission — refuses the attempt before any row exists, so no
-    // external effect starts on covered content and no target copy is saved.
-    // The hold names the execution, never the text, and it outlives the
-    // operation, so a delayed Action from a pre-deletion execution stays
-    // refused while a fresh execution after completion proceeds. The refusal
-    // is a domain outcome (distinct from premise staleness and the execution
-    // seal).
     if crate::preservation::covering_text(&tx, premise.real_target.as_path())
         .map_err(|error| action_unavailable(error.to_string()))?
         .is_some()
@@ -280,10 +217,6 @@ fn insert_attempt_sync(
         )
         .map_err(|error| action_unavailable(error.to_string()))?
     {
-        // The direct-correlation fallback in `held_use` may have written the
-        // durable hold for an unreconciled operation; commit it even though
-        // the attempt itself is refused, so the correspondence survives this
-        // arrival instead of rolling back with the refused try.
         tx.commit().map_err(action_unavailable)?;
         return Ok(ActionStartOutcome::HeldForErasure);
     }
@@ -307,31 +240,18 @@ fn insert_attempt_sync(
         Err(error)
             if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) =>
         {
-            // The explicit pre-checks answered a duplicate; this only covers a
-            // writer that committed between those reads and this insert.
             return Err(action_unavailable(
                 "duplicate action attempt id or evaluation",
             ));
         }
         Err(error) => return Err(action_unavailable(error)),
     }
-    // AU5 registers the started attempt in the same transaction: phase
-    // `unknown` until objective evidence moves the certainty.
     register_action_attempt(
         &tx,
         &task_text,
         premise.attempt.as_raw(),
         ActionCertaintyWire::Unknown,
     )?;
-    // A body-observing Action that starts while a deletion interval is open
-    // (Active / Held / Finalizing, lifecycle §11) cannot prove its
-    // yet-recorded observation body is unrelated to the protected text inside
-    // this transaction. The start fact is already written (certainty stays
-    // Unknown); associating the execution keeps that work old-origin if the
-    // observation write lands after completion. The Immediate writer is
-    // shared with the completion commit: whichever commits first wins, so a
-    // post-completion start is a free origin and a start that landed first
-    // stays held. No unfinished operation is a no-op.
     if matches!(premise.operation, OperationKind::Read | OperationKind::List) {
         crate::preservation::hold_body_observing_delegation(&tx, premise.delegation, &started_at)
             .map_err(|error| action_unavailable(error.to_string()))?;
@@ -347,8 +267,6 @@ fn compare_and_set_sync(
     new: ActionCertainty,
     grounds: EffectGrounds,
 ) -> Result<CertaintyUpdateOutcome, ActionTechnicalError> {
-    // Only the started value may be compare-and-set, and only the closed-world
-    // evidence pair may be written. A confirmed value is never rewritten.
     if expected != ActionCertainty::Unknown {
         return Err(action_unavailable(
             "certainty compare-and-set expected value must be unknown",
@@ -394,9 +312,6 @@ fn compare_and_set_sync(
             "attempt certainty update did not apply exactly once",
         ));
     }
-    // The certainty CAS is a new fact: register the new phase in the same
-    // transaction. A grounded `unknown -> unknown` update reuses the start
-    // phase and the source-key constraint keeps that a no-op.
     register_action_attempt(&tx, &task_text, attempt.as_raw(), certainty_wire(new))?;
     tx.commit().map_err(action_unavailable)?;
     Ok(CertaintyUpdateOutcome::Updated)
@@ -430,10 +345,6 @@ fn raw_attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawAttempt> {
     })
 }
 
-/// True when the stored certainty and grounds form one allowed state.
-///
-/// The started attempt has no grounds; every reported pair must agree. A
-/// confirmed certainty without its matching ground is corruption.
 fn grounds_match(certainty: ActionCertainty, grounds: Option<EffectGrounds>) -> bool {
     matches!(
         (certainty, grounds),

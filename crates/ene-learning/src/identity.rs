@@ -1,9 +1,5 @@
-//! Durable identities and the source range one Summary grounds on.
-
 use ene_primitive::{RawId, RevisionInner};
 
-/// Identity of one Memory. Wraps [`RawId`]; never converted to any other
-/// domain newtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MemoryId(RawId);
 
@@ -24,18 +20,9 @@ impl MemoryId {
     }
 }
 
-/// Identity of one Experience Summary. Wraps [`RawId`]; never converted to
-/// any other domain newtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SummaryId(RawId);
 
-/// Opaque identity of the provider claim one formation pass ran under.
-///
-/// The Learning crate never interprets it: it is the durable claim handle the
-/// inference boundary returned, carried into the commit so the store can
-/// refuse a formation whose claim was already associated with a deletion
-/// operation whose condition committed after that claim (lifecycle §11 R2).
-/// It is a correlation identity, never a target hash or a stored body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LearningClaimRef(RawId);
 
@@ -68,16 +55,10 @@ impl SummaryId {
     }
 }
 
-/// Monotonic order of one Memory's revisions.
-///
-/// Follows the [`RevisionInner`] discipline: the inner count travels only
-/// inside its `(MemoryId, MemoryRevision)` pair, and [`Self::checked_next`]
-/// reports exhaustion instead of aliasing `u64::MAX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MemoryRevision(RevisionInner);
 
 impl MemoryRevision {
-    /// The revision of a newly formed Memory.
     #[must_use]
     pub fn initial() -> Self {
         Self(RevisionInner::from_u64(1))
@@ -93,29 +74,17 @@ impl MemoryRevision {
         self.0.as_u64()
     }
 
-    /// Callers must treat [`None`] as revision exhaustion and refuse the
-    /// commit rather than writing `u64::MAX` again with new content.
     #[must_use]
     pub fn checked_next(&self) -> Option<Self> {
         self.0.checked_next().map(Self)
     }
 }
 
-/// Which activity produced the Experience behind a Summary.
-///
-/// Stage 3 forms from dialogue only; the other Experience kinds arrive with
-/// their owners.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExperienceSourceKind {
     Dialogue,
 }
 
-/// The coarse source range a Summary was compressed from.
-///
-/// `start` and `end` are History message identities in the conversation that
-/// produced the Experience, so the current recognition can always be traced
-/// back towards the retained record. This is a reference, not a copy: the raw
-/// text is owned by Conversation History and is never duplicated here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceRangeRef {
     pub kind: ExperienceSourceKind,

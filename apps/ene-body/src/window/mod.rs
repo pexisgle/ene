@@ -1,9 +1,3 @@
-//! OS overlay surface.
-//!
-//! wgpu and each native surface are co-owned by the selected backend. Native
-//! backend failure falls back explicitly to headless and is never acceptance
-//! evidence.
-
 mod dwm;
 mod headless;
 mod wayland;
@@ -14,15 +8,12 @@ pub use wayland::kde_layer_shell_probe;
 
 use crate::ipc::{LocalUiFact, OverlayKind, PlacementBox};
 
-/// Outcome of asking for a real OS overlay. Never pretended as a pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayProbe {
     Available,
     Unavailable { reason: String },
 }
 
-/// Overlay in this process. Production attempts the native backend and reports
-/// an explicit unavailable outcome before using Headless.
 #[derive(Debug)]
 pub enum Overlay {
     Headless(HeadlessOverlay),
@@ -115,8 +106,6 @@ impl Overlay {
         }
     }
 
-    /// Local UI facts exist so a future OS backend can report drag/resize/hide
-    /// without talking to Host. Headless never synthesizes them.
     #[must_use]
     pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
         match self {
@@ -152,7 +141,6 @@ impl Overlay {
         }
     }
 
-    /// Dispatches native window/compositor events without presenting.
     pub fn pump(&mut self) {
         match self {
             Self::Headless(_) => {}
@@ -163,7 +151,6 @@ impl Overlay {
         }
     }
 
-    /// True only when a native surface is visible, paced, and able to present.
     #[must_use]
     pub fn ready_to_render(&self) -> bool {
         match self {

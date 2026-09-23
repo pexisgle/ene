@@ -1,27 +1,3 @@
-//! The Workspace-contained filesystem execution boundary (E-1/E-2, K-H).
-//!
-//! A [`WorkspaceRoot`] is a canonicalized folder. [`WorkspaceRoot::resolve`]
-//! turns one requested workspace-relative path into a [`RealTargetRef`]: a
-//! canonical absolute path proven to be inside the folder and on the same
-//! filesystem entity at resolution time. Absolute paths, parent-directory
-//! components, symlink resolutions that leave the folder, and targets that
-//! cross a mount/reparse/volume boundary are refused; string equality of the
-//! request is never treated as identity.
-//!
-//! [`WorkspaceRoot::execute`] re-verifies containment immediately before the
-//! effect and publishes writes atomically in the destination directory
-//! (`persist_noclobber` for create, `persist` for edit), then reads the
-//! destination back. `List` observes a non-recursive directory enumeration.
-//! Confirmed success means the executor observed the intended result at the
-//! target; an agent self-report is never a ground.
-//!
-//! The guarantee is against the agent-requested path, not against an
-//! unbounded concurrent local writer: a same-user process swapping directory
-//! components mid-operation is outside the container the OS gives this
-//! process, and an `openat2`-style syscall boundary is platform work this
-//! slice does not claim. The mount/reparse check is a static boundary check
-//! of the resolved path, not a live mount-table watcher.
-
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -31,95 +7,62 @@ use thiserror::Error;
 
 use crate::attempt::{ActionCertainty, EffectGrounds, OperationKind, RealTargetRef};
 
-/// Failure to open the workspace folder itself.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WorkspaceRootError {
-    /// The folder does not exist or cannot be canonicalized.
     #[error("workspace folder is unavailable")]
     Unavailable,
-    /// The path exists but is not a directory.
     #[error("workspace folder is not a directory")]
     NotADirectory,
 }
 
-/// One directory entry observed by a `List`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListEntry {
     pub name: String,
     pub kind: ListEntryKind,
 }
 
-/// The kind of one listed directory entry.
-///
-/// Only regular files and directories are listable; symlinks, reparse points,
-/// junctions, mounts, and special files are excluded from the listing (never
-/// followed), so they have no kind here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListEntryKind {
     File,
     Directory,
 }
 
-/// The observed output of one action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionOutput {
-    /// The bytes read by a `Read`.
     Bytes(Vec<u8>),
-    /// The entries observed by a `List`, sorted by name.
     Listing(Vec<ListEntry>),
-    /// The created marker of a successful `Create`, carrying the exact
-    /// [`RealTargetRef`] the attempt was recorded and executed under; the
-    /// request path is never reconstructed into the result.
     Created { target: RealTargetRef },
-    /// The updated marker of a successful `Edit`.
     Updated,
 }
 
-/// Why one requested path was refused before any attempt was claimed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TargetRejection {
-    /// Empty, non-UTF-8, or containing `..`/absolute/root components.
     #[error("requested path is malformed")]
     MalformedPath,
-    /// The canonical resolution left the workspace folder (including symlinks).
     #[error("requested path escapes the workspace")]
     OutsideWorkspace,
-    /// The resolved target crosses the workspace root's filesystem entity (a
-    /// nested mount, reparse point, or volume boundary), or the boundary could
-    /// not be determined on this platform.
     #[error("requested target crosses the workspace filesystem boundary")]
     CrossFilesystem,
-    /// List named a target that does not exist.
     #[error("requested target does not exist")]
     MissingTarget,
-    /// Create named a target whose parent directory does not exist.
     #[error("requested target parent does not exist")]
     MissingParent,
-    /// Read/edit named a non-regular file.
     #[error("requested target is not a regular file")]
     NotAFile,
-    /// List named a non-directory.
     #[error("requested target is not a directory")]
     NotADirectory,
-    /// Create named a target that already exists.
     #[error("requested target already exists")]
     AlreadyExists,
-    /// The filesystem refused to answer (permission or I/O failure).
     #[error("requested target is unavailable")]
     TargetUnavailable,
 }
 
-/// A canonical workspace folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceRoot {
     root: PathBuf,
 }
 
 impl WorkspaceRoot {
-    /// Opens and canonicalizes one workspace folder.
-    ///
-    /// The folder is an external locator ene does not own: opening only
-    /// proves it is currently a canonical directory, not availability.
     pub fn open(folder: &str) -> Result<Self, WorkspaceRootError> {
         let root = fs::canonicalize(folder).map_err(|_| WorkspaceRootError::Unavailable)?;
         if !root.is_dir() {
@@ -128,21 +71,11 @@ impl WorkspaceRoot {
         Ok(Self { root })
     }
 
-    /// The canonical folder path.
     #[must_use]
     pub fn as_path(&self) -> &Path {
         &self.root
     }
 
-    /// Resolves one requested workspace-relative path to a real target.
-    ///
-    /// List accepts an empty request or `.` to enumerate the workspace root.
-    /// Read/edit require an existing regular file inside the folder; list
-    /// requires an existing directory; create requires every existing
-    /// ancestor of the requested path, including the destination's parent, to
-    /// canonicalize inside the folder on the root's filesystem entity, and a
-    /// destination that does not exist yet. The returned target is the
-    /// canonical absolute path, which is what execution uses.
     pub fn resolve(
         &self,
         requested: &str,
@@ -186,14 +119,6 @@ impl WorkspaceRoot {
                 let Some((file_name, parent_names)) = names.split_last() else {
                     return Err(TargetRejection::MalformedPath);
                 };
-                // Verify every existing ancestor in order. Canonicalizing the
-                // whole parent at once would accept a path that leaves the
-                // workspace through one symlink/reparse and re-enters through
-                // another (e.g. `out` -> outside, `outside/back` ->
-                // workspace/sub): the final parent canonicalizes back inside
-                // even though an intermediate ancestor resolved outside. Each
-                // prefix must canonicalize inside the root and stay on the
-                // root's filesystem entity before the next name is joined.
                 let mut canonical_parent = self.root.clone();
                 for name in parent_names {
                     canonical_parent.push(name);
@@ -228,24 +153,6 @@ impl WorkspaceRoot {
         }
     }
 
-    /// Executes one already-resolved operation and observes the effect.
-    ///
-    /// Reads return the observed bytes, listings return the observed entries.
-    /// Writes publish atomically in the destination directory and read the
-    /// destination back; a verified read-back is the confirmed-success ground,
-    /// a refusal before publishing is a confirmed failure, and anything the
-    /// executor cannot verify stays [`ActionCertainty::Unknown`].
-    ///
-    /// `content` is required for create/edit and ignored for list/read; the
-    /// orchestration checks this before any durable claim.
-    ///
-    /// This is `pub(crate)`: the only public effect path is
-    /// [`orchestrate_workspace_action`](crate::orchestrate_workspace_action),
-    /// which binds the target to the K-B.1 live decision and the AU5 start
-    /// claim before executing. An externally forged [`RealTargetRef`] (built
-    /// from an arbitrary string via the store read-back constructor) cannot
-    /// reach an effect from another crate. Effect-time containment is
-    /// re-verified for every operation and fails closed.
     #[must_use]
     pub(crate) fn execute(
         &self,
@@ -279,14 +186,6 @@ impl WorkspaceRoot {
         }
     }
 
-    /// Observes one directory as a sorted, non-recursive entry listing.
-    ///
-    /// Each direct child is classified from no-follow metadata: symlinks,
-    /// Windows reparse points, junctions, mounts/cross-device entries, and
-    /// special files are excluded from the result rather than followed or
-    /// mapped to `file`/`dir`; an excluded child never fails the whole
-    /// listing. A partial read of the directory is a confirmed refusal (a
-    /// listing changes nothing).
     fn list_directory(&self, target: &RealTargetRef) -> ObservedEffect {
         let destination = Path::new(target.as_path());
         if self.verified_existing_metadata(destination, true).is_none() {
@@ -314,12 +213,6 @@ impl WorkspaceRoot {
         }
     }
 
-    /// Classifies one direct child of a listing without following it.
-    ///
-    /// `None` means the entry is excluded: a symlink or reparse point (no
-    /// traversal), a mount or cross-device directory (outside the root's
-    /// filesystem entity), a special file, or an entry whose metadata cannot
-    /// be read (fail closed).
     fn listable_child(&self, path: &Path) -> Option<ListEntryKind> {
         let metadata = fs::symlink_metadata(path).ok()?;
         let file_type = metadata.file_type();
@@ -329,7 +222,6 @@ impl WorkspaceRoot {
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
-            // Any reparse point (symlink, junction, mount point) is excluded.
             const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
             if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                 return None;
@@ -355,8 +247,6 @@ impl WorkspaceRoot {
         replace: bool,
     ) -> ObservedEffect {
         let destination = Path::new(target.as_path());
-        // Re-verify the resolved target at the effect moment: a component or
-        // symlink swapped after resolution must not redirect the write.
         if !self.reverifies_at_effect(destination, replace) {
             return refused();
         }
@@ -370,8 +260,6 @@ impl WorkspaceRoot {
         {
             let file = temporary.as_file_mut();
             if file.write_all(bytes).is_err() || file.sync_all().is_err() {
-                // The temporary file is removed on drop; the destination was
-                // never touched, so this is a confirmed pre-effect refusal.
                 return refused();
             }
         }
@@ -382,13 +270,9 @@ impl WorkspaceRoot {
         };
         let persisted = match persisted {
             Ok(file) => file,
-            // Publish failed atomically: the destination is untouched (for
-            // create, another writer may have won; for edit, the original
-            // remains), so the intended effect did not happen.
             Err(_) => return refused(),
         };
         if persisted.sync_all().is_err() {
-            // The rename landed but the content durability is unconfirmed.
             return ObservedEffect {
                 certainty: ActionCertainty::Unknown,
                 grounds: EffectGrounds::OutcomeUnverified,
@@ -407,8 +291,6 @@ impl WorkspaceRoot {
                     }
                 }),
             },
-            // Something is at the destination but not what we intended; an
-            // effect occurred, but it cannot be confirmed as the intended one.
             _ => ObservedEffect {
                 certainty: ActionCertainty::Unknown,
                 grounds: EffectGrounds::OutcomeUnverified,
@@ -417,17 +299,6 @@ impl WorkspaceRoot {
         }
     }
 
-    /// Best-effort re-verification immediately before the effect.
-    ///
-    /// Edit requires the target to still canonicalize to itself inside the
-    /// root and remain on the root's filesystem entity; create requires the
-    /// canonical parent to still be inside the root and on the same entity,
-    /// and the destination to still be absent.
-    ///
-    /// Read and list use [`Self::verified_existing_metadata`]: the stored
-    /// target must still canonicalize to itself, stay inside the root, and
-    /// remain on the root's filesystem entity. A forged [`RealTargetRef`]
-    /// pointing outside the workspace (even on the same device) is refused.
     fn verified_existing_metadata(
         &self,
         destination: &Path,
@@ -473,14 +344,6 @@ impl WorkspaceRoot {
         }
     }
 
-    /// Whether `target` is on the same filesystem entity as the workspace root
-    /// and no nested mount/reparse boundary lies between them.
-    ///
-    /// Linux: root and target must share a device, and no mount point from
-    /// `/proc/self/mountinfo` may sit strictly below the root on the target's
-    /// path (an unreadable mount table fails closed). Other Unix: device
-    /// equality. Windows: volume serial number equality. Undeterminable
-    /// boundaries are refused, never assumed inside.
     fn boundary_holds(&self, target: &Path, metadata: &fs::Metadata) -> bool {
         self.boundary_holds_impl(target, metadata)
     }
@@ -504,8 +367,6 @@ impl WorkspaceRoot {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            // Device equality is the available boundary judgment on non-Linux
-            // Unix; same-device nested mounts are not distinguishable here.
             let _ = target;
             true
         }
@@ -513,9 +374,6 @@ impl WorkspaceRoot {
 
     #[cfg(windows)]
     fn boundary_holds_impl(&self, target: &Path, _metadata: &fs::Metadata) -> bool {
-        // A nested mounted volume or reparse target lives on a different
-        // volume serial; an undeterminable serial fails closed. Create passes
-        // its canonical parent, so the same equality covers it.
         match (
             Self::volume_serial_of(&self.root),
             Self::volume_serial_of(target),
@@ -525,12 +383,6 @@ impl WorkspaceRoot {
         }
     }
 
-    /// The volume serial number of the volume hosting `path`, if determinable.
-    ///
-    /// Maps the path to its volume mount point with `GetVolumePathNameW` and
-    /// reads the serial with `GetVolumeInformationW`; any failure answers
-    /// `None` so the boundary fails closed. Both are stable Win32 APIs (the
-    /// std `MetadataExt::volume_serial_number` needs `windows_by_handle`).
     #[cfg(windows)]
     fn volume_serial_of(path: &Path) -> Option<u32> {
         use std::os::windows::ffi::OsStrExt;
@@ -571,17 +423,12 @@ impl WorkspaceRoot {
     }
 }
 
-/// Reads the Linux mount table's mount points, decoded.
 #[cfg(target_os = "linux")]
 fn linux_mount_points() -> Result<Vec<PathBuf>, std::io::Error> {
     let content = fs::read_to_string("/proc/self/mountinfo")?;
     Ok(content.lines().filter_map(parse_mount_point).collect())
 }
 
-/// One mountinfo line's mount point (field 5) as a path.
-///
-/// The field is the mount point in the mount namespace; `\040`, `\011`,
-/// `\012`, and `\134` are the kernel's space/tab/newline/backslash escapes.
 #[cfg(target_os = "linux")]
 fn parse_mount_point(line: &str) -> Option<PathBuf> {
     let field = line.split_whitespace().nth(4)?;
@@ -605,10 +452,6 @@ fn decode_mountinfo_escape(field: &str) -> String {
     decoded
 }
 
-/// True when a mount point strictly below `root` sits on the `target` path.
-///
-/// The root itself may be a mount point; mount points above the root are
-/// outside the workspace's own boundary.
 #[cfg(target_os = "linux")]
 fn crosses_linux_mount(root: &Path, target: &Path, mounts: &[PathBuf]) -> bool {
     mounts
@@ -616,11 +459,6 @@ fn crosses_linux_mount(root: &Path, target: &Path, mounts: &[PathBuf]) -> bool {
         .any(|mount| mount != root && mount.starts_with(root) && target.starts_with(mount))
 }
 
-/// One observed execution result.
-///
-/// `output` carries read bytes, a listing, or a write success marker and is
-/// redacted from [`core::fmt::Debug`] so diagnostic output never leaks file
-/// content, entry names, or private target paths.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ObservedEffect {
     pub certainty: ActionCertainty,
@@ -669,11 +507,6 @@ fn map_io_error(error: &std::io::Error) -> TargetRejection {
     }
 }
 
-/// Splits one requested path into normal component names.
-///
-/// Everything that is not a non-empty normal component is malformed: `..`,
-/// absolute roots and prefixes, `.`, and empty names are all refused, so a
-/// traversal never reaches the filesystem.
 fn requested_components(requested: &str) -> Option<Vec<String>> {
     let mut names = Vec::new();
     for component in Path::new(requested).components() {
@@ -820,8 +653,6 @@ mod tests {
         let outside = tempdir().expect("outside directory");
         let sub = directory.path().join("sub");
         fs::create_dir(&sub).expect("inside subdirectory");
-        // Directory symlinks are reparse points; creation may require
-        // Developer Mode or privileges, so skip when the platform refuses.
         if symlink_dir(outside.path(), directory.path().join("out")).is_err()
             || symlink_dir(&sub, outside.path().join("back")).is_err()
         {
@@ -857,7 +688,6 @@ mod tests {
             root.resolve("escape-dir/secret.txt", OperationKind::Read),
             Err(TargetRejection::OutsideWorkspace)
         );
-        // A symlink whose target stays inside the folder is resolved inside.
         fs::write(directory.path().join("inside.txt"), b"inside").expect("inside fixture");
         std::os::unix::fs::symlink(
             directory.path().join("inside.txt"),
@@ -905,13 +735,10 @@ mod tests {
             b"# report"
         );
 
-        // Creating over an existing destination is refused at resolution.
         assert_eq!(
             root.resolve("input.txt", OperationKind::Create),
             Err(TargetRejection::AlreadyExists)
         );
-        // A destination that appears after resolution is refused at publish
-        // time and is never clobbered.
         let race_target = root
             .resolve("race.md", OperationKind::Create)
             .expect("a fresh target resolves");
@@ -973,8 +800,6 @@ mod tests {
         let outside_file = outside.path().join("secret.txt");
         fs::write(&outside_file, b"secret").expect("outside fixture");
         let canonical_file = fs::canonicalize(&outside_file).expect("canonical outside file");
-        // A forged reference to an outside absolute path, even on the same
-        // device, must fail closed at effect time.
         let forged_file = crate::attempt::RealTargetRef::from_canonical_path(
             canonical_file.to_string_lossy().into_owned(),
         );
@@ -1115,9 +940,6 @@ mod tests {
         let canonical =
             fs::canonicalize(directory.path().join("input.txt")).expect("canonical fixture");
         let target_metadata = fs::metadata(&canonical).expect("target metadata");
-        // A nested mounted volume presents a different volume serial, so the
-        // same equality refuses it; an undeterminable serial (None) fails
-        // closed by the matches! guard in boundary_holds_impl.
         assert_eq!(
             WorkspaceRoot::volume_serial_of(root.as_path()),
             WorkspaceRoot::volume_serial_of(&canonical),
@@ -1142,9 +964,6 @@ mod tests {
         let outside = tempdir().expect("outside directory");
         fs::write(outside.path().join("secret.txt"), b"secret").expect("outside fixture");
         fs::write(directory.path().join("regular.txt"), b"x").expect("fixture file");
-        // File and directory symlinks are reparse points, like junctions and
-        // mounted volumes; creation may require privileges, so skip when the
-        // platform refuses to create them.
         if symlink_file(
             outside.path().join("secret.txt"),
             directory.path().join("escape.txt"),
@@ -1153,8 +972,6 @@ mod tests {
         {
             return;
         }
-        // A junction-like directory reparse; a failure leaves only the file
-        // reparse for the exclusion assertion below.
         drop(symlink_dir(
             outside.path(),
             directory.path().join("escape-dir"),

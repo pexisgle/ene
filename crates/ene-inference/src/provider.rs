@@ -1,19 +1,3 @@
-//! `OpenAI` Responses API transport for inference dispatch.
-//!
-//! [`OpenAiResponsesTransport`] posts one
-//! `{"model", "input", "stream": true, "store": false, "max_output_tokens"}`
-//! body per [`ProviderTransport::complete_streaming`] call and parses the
-//! server-sent event stream, forwarding text deltas as they arrive;
-//! [`ProviderTransport::complete`] keeps the non-streaming JSON path.
-//! Key material never rests on the transport: each call borrows the bearer inside
-//! [`CredentialStore::with_bearer`] and only the owned [`reqwest::Request`]
-//! escapes the closure. Error strings carry status classes only, never URLs,
-//! keys, or bodies. There is no retry and no model fallback.
-//!
-//! Both paths perform HTTPS I/O, so integration tests cover them through
-//! transport fakes; the pure `parse_response()` and `StreamAssembler`
-//! mappings below carry the unit tests.
-
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -26,39 +10,16 @@ use super::{
     ProviderTransport, RawUsage, UsageEstimate,
 };
 
-/// Base URL for the `OpenAI` API; tests inject a local URL instead.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Explicit output maximum sent with every Responses request.
-///
-/// `usage-cost-cap` §8 requires the output side of the reservation upper bound
-/// to be the request's own explicit maximum, not a prediction. The body and
-/// [`OpenAiResponsesTransport::usage_estimate`] share this constant, so the
-/// bound can never drift below what the provider is allowed to generate.
 pub const MAX_OUTPUT_TOKENS: u64 = 4_096;
 
-/// Protocol-framing allowance added to the request text's byte length for the
-/// input side of the reservation upper bound.
-///
-/// A BPE tokenizer never emits fewer than one token per byte for the text
-/// itself, so the UTF-8 byte length is already a tokenizer-safe bound for the
-/// input string; the allowance covers server-side framing (special tokens and
-/// request formatting) that the local body does not spell out.
 pub const INPUT_TOKENS_FRAMING_ALLOWANCE: u64 = 1_024;
 
-/// HTTPS transport for the `OpenAI` Responses API (`POST /v1/responses`).
-///
-/// No field ever holds key material or a fixed credential: the bearer is
-/// resolved per request from the [`ene_credential::CredentialRef`] the authorized dispatch
-/// carries, and borrowed transiently inside [`CredentialStore::with_bearer`].
-///
-/// The store is a generic `S: CredentialStore` rather than a trait object
-/// because [`CredentialStore::with_bearer`] is generic over its closure return
-/// type, which makes the trait not dyn-compatible.
 pub struct OpenAiResponsesTransport<S> {
     base_url: String,
     http: reqwest::Client,
@@ -66,8 +27,6 @@ pub struct OpenAiResponsesTransport<S> {
 }
 
 impl<S> core::fmt::Debug for OpenAiResponsesTransport<S> {
-    /// Renders the base URL; the HTTP client and the store render opaque so
-    /// no bearer material can leak through logging.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("OpenAiResponsesTransport")
             .field("base_url", &self.base_url)
@@ -78,16 +37,6 @@ impl<S> core::fmt::Debug for OpenAiResponsesTransport<S> {
 }
 
 impl<S: CredentialStore> OpenAiResponsesTransport<S> {
-    /// The client enforces [`CONNECT_TIMEOUT`] and [`REQUEST_TIMEOUT`]. No
-    /// I/O happens here; pass [`DEFAULT_BASE_URL`] for production. Each call
-    /// bills the credential its [`ProviderRequest`] carries, so a consent
-    /// reassignment takes effect on the next request without rebinding.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InferenceTechnicalError::HttpClientBuildFailed`] when the
-    /// timeout-bound client cannot be built — the timeout invariant is
-    /// reported, never silently dropped for an unbounded default.
     pub fn new(base_url: impl Into<String>, store: S) -> Result<Self, InferenceTechnicalError> {
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -103,12 +52,6 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
 }
 
 impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
-    /// Runs one Responses API completion with no retries or side effects
-    /// beyond the call.
-    ///
-    /// Input policy, including the length cap, is owned by the dispatch
-    /// boundary ([`crate::dispatch_authorized`]); the transport bills the
-    /// request's authorized credential and sends what it is given.
     fn complete(
         &self,
         req: ProviderRequest,
@@ -117,12 +60,6 @@ impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
         Box::pin(self.complete_inner(req))
     }
 
-    /// The safe upper bound of one Responses request.
-    ///
-    /// The input side is the request text's UTF-8 byte length plus
-    /// [`INPUT_TOKENS_FRAMING_ALLOWANCE`]; the output side is the explicit
-    /// [`MAX_OUTPUT_TOKENS`] the body carries. Both are contract bounds, not
-    /// estimates of what this prompt will use.
     fn usage_estimate(&self, req: &ProviderRequest) -> Option<UsageEstimate> {
         let input_bytes = u64::try_from(req.input.len()).ok()?;
         Some(UsageEstimate {
@@ -131,13 +68,6 @@ impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
         })
     }
 
-    /// Runs one Responses API completion with `"stream": true`, forwarding
-    /// each `response.output_text.delta` as it arrives.
-    ///
-    /// The returned response still carries the full assembled text and usage,
-    /// so adoption, durable History, and display remain separate facts. When
-    /// the sink aborts, the SSE read stops with it: no later delta is
-    /// presented, and the call never completes normally with a gap.
     fn complete_streaming<'a>(
         &'a self,
         req: ProviderRequest,
@@ -183,9 +113,6 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
             .bytes()
             .await
             .map_err(|err| io_error(&err, "read failed"))?;
-        // Status-class errors take priority over body shape: an error page
-        // that is not JSON must still report its status, while a malformed
-        // success body is a decode failure.
         let is_success = (200..300).contains(&status);
         let body: serde_json::Value = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
@@ -199,9 +126,6 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
         parse_response(status, body)
     }
 
-    /// Streaming sibling of [`Self::complete_inner`]: status errors fall back
-    /// to the same status-class mapping (an error body is not an event
-    /// stream), while a 2xx body is parsed as server-sent events.
     async fn complete_streaming_inner(
         &self,
         req: ProviderRequest,
@@ -234,8 +158,6 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
             .map_err(|err| io_error(&err, "send failed"))?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            // Status-class errors take priority over stream shape: an error
-            // body is JSON, not events, and must report its status.
             let bytes = response
                 .bytes()
                 .await
@@ -269,13 +191,6 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
     }
 }
 
-/// Incremental parser for the Responses API event stream.
-///
-/// Only the events this stage consumes are interpreted: text deltas,
-/// completion with usage, and bounded failure events. Unknown event types are
-/// ignored (forward compatibility), while malformed JSON or a missing
-/// completion is a decode failure, never a silent success. Error strings
-/// carry the event class only, never provider body text.
 #[derive(Default)]
 struct StreamAssembler {
     text: String,
@@ -284,9 +199,6 @@ struct StreamAssembler {
 }
 
 impl StreamAssembler {
-    /// Feeds one event-stream line, returning the text delta it carries, if
-    /// any. The caller pushes the delta to its sink: parsing stays a pure
-    /// sync mapping with no delivery policy of its own.
     fn feed_line(&mut self, line: &str) -> Result<Option<String>, InferenceTechnicalError> {
         let Some(data) = line.strip_prefix("data:") else {
             return Ok(None);
@@ -349,13 +261,6 @@ impl StreamAssembler {
     }
 }
 
-/// History lives durably on the local side, which never needs server-side
-/// response state; leaving `store` unset would default it to `true` and
-/// retain conversation text provider-side for no reason. This is a
-/// storage-scope boundary, not a no-logging promise: it disables the
-/// Responses application-state store, nothing more. `max_output_tokens` is
-/// the explicit maximum the reservation upper bound uses, so the provider
-/// cannot generate more output than the bound covers.
 fn responses_body(model: &str, input: &str, stream: bool) -> serde_json::Value {
     serde_json::json!({
         "model": model,
@@ -366,9 +271,6 @@ fn responses_body(model: &str, input: &str, stream: bool) -> serde_json::Value {
     })
 }
 
-/// An elapsed timeout (connect or whole-request) may mean the call ran, so it
-/// maps to [`InferenceTechnicalError::ResponseLost`]; any other I/O failure
-/// maps to a status-class transport failure that carries no secrets.
 fn io_error(err: &reqwest::Error, context: &'static str) -> InferenceTechnicalError {
     if err.is_timeout() {
         InferenceTechnicalError::ResponseLost
@@ -377,10 +279,6 @@ fn io_error(err: &reqwest::Error, context: &'static str) -> InferenceTechnicalEr
     }
 }
 
-/// Tolerantly decoded Responses API envelope; unknown fields are ignored.
-///
-/// `status` has no default: a response without one is a protocol failure,
-/// never a silent success (see [`parse_response`]).
 #[derive(Deserialize)]
 struct ResponsesBody {
     status: Option<String>,
@@ -429,8 +327,6 @@ struct InputTokenDetails {
 }
 
 impl UsageObj {
-    /// Only a complete, valid report is known. Absent cache detail is not
-    /// evidence of zero cache hits, even when input and output are present.
     fn into_raw(self) -> Option<RawUsage> {
         let input_tokens = self.input_tokens?;
         let output_tokens = self.output_tokens?;
@@ -443,22 +339,6 @@ impl UsageObj {
     }
 }
 
-/// Maps one HTTP completion (`status` plus decoded JSON `body`) to a
-/// [`ProviderResponse`].
-///
-/// Status mapping: 401 reports unauthorized (core surfaces reauthentication);
-/// 429 and 5xx report provider-unavailable with the status; other non-2xx
-/// reports a request failure with the status. On 2xx, only a response
-/// object with `status == "completed"` succeeds: `incomplete` reports the
-/// bounded reason class, `failed` / `cancelled` report their status, and
-/// `queued` / `in_progress` / unknown / missing statuses report an
-/// unexpected-state failure — this synchronous contract never waits on a
-/// background response. On success, the text is the concatenation of every
-/// `output[].content[]` part of type `output_text`; usage is [`Some`] only
-/// when both counts are present, otherwise [`None`] (core maps that to
-/// [`crate::UsageSource::Unknown`]). A success body with the wrong shape
-/// reports a decode failure. Reason strings carry only the bounded
-/// `incomplete_details.reason` vocabulary, never message bodies.
 fn parse_response(
     status: u16,
     body: serde_json::Value,
@@ -787,8 +667,6 @@ mod tests {
         assert!(!rendered.contains("Bearer"));
     }
 
-    /// Models the pinned credential set the real Host wires into the
-    /// scrubber: the ref list and the pinned value agree on one pair.
     struct FixtureRefs {
         refs: Vec<CredentialRef>,
         revision: ene_credential::CredentialSetRevision,
@@ -813,8 +691,6 @@ mod tests {
         }
     }
 
-    /// Serves one HTTP/1.1 response with `status` and `payload`, recording the
-    /// exact request bytes (head and body) the production transport emitted.
     async fn spawn_capturing_responses(
         status: u16,
         payload: String,
@@ -881,9 +757,6 @@ mod tests {
         Some((addr, handle, captured))
     }
 
-    /// The HTTP authorization boundary is the only place the pinned bearer may
-    /// appear: the body carries the scrubbed input, and no debug rendering of
-    /// the transport or the request carries the value.
     #[tokio::test]
     async fn bearer_stays_at_the_http_authorization_boundary() {
         use crate::ProviderTransport as _;
@@ -973,8 +846,6 @@ mod tests {
             "the request keeps server-side storage disabled: {body}"
         );
 
-        // A provider failure that echoes the value in its error body and a
-        // transport failure at a closed port both render their class only.
         let failing_store = MemoryCredentialStore::new();
         failing_store.insert(
             CredentialRef::new("openai", "main").expect("valid test fixture"),

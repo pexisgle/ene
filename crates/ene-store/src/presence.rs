@@ -24,23 +24,7 @@ const SQL_UPDATE_ATTRIBUTION: &str = "UPDATE presence_attribution SET state = ?1
 
 const SQL_INSERT_TRANSITION: &str = "INSERT INTO presence_transition_log (companion_id, old_state, new_state, old_gen, new_gen, reason, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
-/// Synchronous presence primitives for the connection-ownership section.
-///
-/// [`PresenceRepository`] wraps each of these in its own `spawn_blocking`
-/// call, which is the right shape for standalone await callers. The connection
-/// table's admission sections are different: they must decide and commit while
-/// holding the connection-table lock, inside a single `spawn_blocking`
-/// (CCT §10.4), so the same compare/commit is exposed synchronously and never
-/// awaited across the section. The sync bodies carry the full slice B
-/// semantics (stop outranks begin, encode-checked generations, relocation-hint
-/// maintenance), so the close-admission fallback and the async repository
-/// agree by construction.
 impl Store {
-    /// Synchronous [`PresenceRepository::load_attribution`].
-    ///
-    /// # Errors
-    ///
-    /// [`PresenceTechnicalError`] when the row cannot be read.
     pub fn load_attribution_sync(
         &self,
         companion: RawId,
@@ -50,11 +34,6 @@ impl Store {
         select_attribution(&guard, &key).map_err(presence_unavailable)
     }
 
-    /// Synchronous [`PresenceRepository::compare_and_begin_transition`].
-    ///
-    /// # Errors
-    ///
-    /// [`PresenceTechnicalError`] when the transaction cannot commit.
     pub fn compare_and_begin_transition_sync(
         &self,
         companion: RawId,
@@ -81,8 +60,6 @@ impl Store {
         {
             return Ok(MoveDecision::RejectedAsStalePresence { current });
         }
-        // Stop outranks move and recovery: a stopped companion is never
-        // moved, summoned, or recovered by a transition begin.
         if current.state == PresenceState::Stopped {
             return Ok(MoveDecision::DeniedByConstraint {
                 reason: String::from("companion stopped"),
@@ -105,8 +82,6 @@ impl Store {
             ],
         )
         .map_err(|error| presence_unavailable(error.to_string()))?;
-        // Leaving RecoveryWait cancels the recovery intent; the candidate
-        // lives only in the attribution and never becomes `last_client`.
         tx.execute(
             SQL_SET_HINT_DESTINATION,
             params![key, Option::<String>::None],
@@ -132,11 +107,6 @@ impl Store {
         })
     }
 
-    /// Synchronous [`PresenceRepository::confirm_transition`].
-    ///
-    /// # Errors
-    ///
-    /// [`PresenceTechnicalError`] when the transaction cannot commit.
     pub fn confirm_transition_sync(
         &self,
         companion: RawId,
@@ -159,10 +129,6 @@ impl Store {
                 "missing presence attribution",
             )));
         };
-        // Idempotent: only an `InTransition` row at the transitioning
-        // generation moves; anything else reads back unchanged, except a
-        // stopped row: stop outranks the transition, so the caller must
-        // not read a stop as its own confirmation.
         if current.generation != transitioning_generation
             || current.state != PresenceState::InTransition
         {
@@ -171,10 +137,6 @@ impl Store {
             }
             return Ok(ConfirmTransitionOutcome::Confirmed(current));
         }
-        // Authority pin: a live confirm may only crown the client pinned at
-        // begin time (stored as the row's active client). A different
-        // claimant leaves the row untouched and observes stale instead —
-        // the connection table, not a self-report, decides who is current.
         if live.connection_live && current.active_client != Some(live.client) {
             return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
         }
@@ -198,8 +160,6 @@ impl Store {
             ],
         )
         .map_err(|error| presence_unavailable(error.to_string()))?;
-        // `last_client` moves only when the attribution becomes Present;
-        // a NoActive confirm keeps the last confirmed client as history.
         if let Some(client) = target_client {
             tx.execute(
                 SQL_SET_HINT_PRESENT,
@@ -237,26 +197,17 @@ impl Store {
     }
 }
 
-/// Sets the recovery destination to `?2` (possibly `NULL`) without touching
-/// `last_client`: begin and stop clear the destination, and startup recovery
-/// refreshes it. `last_client` is only ever written by the Present confirm.
 const SQL_SET_HINT_DESTINATION: &str = "INSERT INTO relocation_hint (companion_id, last_client, recovery_destination) VALUES (?1, NULL, ?2) ON CONFLICT(companion_id) DO UPDATE SET recovery_destination = excluded.recovery_destination";
 
-/// Records the confirmed Present client as `last_client` and clears the
-/// recovery destination: the hint leaves `RecoveryWait` together with the
-/// attribution.
 const SQL_SET_HINT_PRESENT: &str = "INSERT INTO relocation_hint (companion_id, last_client, recovery_destination) VALUES (?1, ?2, NULL) ON CONFLICT(companion_id) DO UPDATE SET last_client = excluded.last_client, recovery_destination = NULL";
 
 const SQL_SELECT_COMPANIONS: &str = "SELECT companion_id, lifecycle FROM companion";
 
-/// The next generation only when it can be encoded into the column's range;
-/// a value that cannot be stored is exhaustion, never a wrapped write.
 fn next_generation(current: PresenceGeneration) -> Option<PresenceGeneration> {
     let next = current.checked_next()?;
     encode_u64(next.as_u64()).ok().map(|_| next)
 }
 
-/// The committed shape of one companion's startup normalization.
 struct StartupTarget {
     state: PresenceState,
     active_client: Option<ClientId>,
@@ -264,14 +215,6 @@ struct StartupTarget {
     recovery_destination: Option<ClientId>,
 }
 
-/// Plans one companion's startup row from the PR §6.4 table.
-///
-/// Running rows advance the generation (`Present` → `RecoveryWait` toward the
-/// same client, `RecoveryWait` → new generation keeping the destination,
-/// `InTransition` → `NoActive`, `NoActive` → keep). Stopped/Deleted rows and
-/// rows already `Stopped` only clear the active client and the recovery
-/// destination: the lifecycle wins and never recovers. Nothing here moves a
-/// companion to a client it was not already confirmed on.
 fn plan_startup(
     lifecycle: CompanionLifecycle,
     current: PresenceAttribution,
@@ -395,9 +338,6 @@ impl PresenceRepository for Store {
             };
             let mut report = StartupNormalizationReport::default();
             for (companion_text, lifecycle_text) in companions {
-                // Each companion's normalization is its own short transaction:
-                // a refusal or a storage fault in one never rolls back or
-                // blocks another companion's committed row.
                 let tx = guard
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|error| presence_unavailable(error.to_string()))?;
@@ -509,10 +449,6 @@ impl PresenceRepository for Store {
             }
             let current_raw =
                 encode_u64(current.generation.as_u64()).map_err(presence_unavailable)?;
-            // Stop clears presence without advancing the generation: the
-            // lifecycle change that would make the companion movable again is
-            // a separate owner's decision, and the stopped state itself
-            // rejects every later begin.
             tx.execute(
                 SQL_UPDATE_ATTRIBUTION,
                 params![
@@ -554,13 +490,8 @@ impl PresenceRepository for Store {
     }
 }
 
-/// Bounded rows mutated per statement in one local erasure pass (lifecycle §9).
 const ERASURE_BATCH_ROWS: i64 = 500;
 
-/// A companion identity that is the target is erased whole: the identity is
-/// the row's primary fact, so a redaction would be a silent rename. The
-/// companion itself belongs to its own owner; presence only removes its
-/// attribution.
 const SQL_ERASE_ATTRIBUTION_IDENTITY: &str = "DELETE FROM presence_attribution
      WHERE companion_id IN (
          SELECT companion_id FROM presence_attribution
@@ -568,11 +499,6 @@ const SQL_ERASE_ATTRIBUTION_IDENTITY: &str = "DELETE FROM presence_attribution
          LIMIT ?2
      )";
 
-/// An attribution that names the target as its active client is stopped with
-/// the client cleared: `Present` without an active client is malformed, and a
-/// stopped companion is never moved, summoned, or recovered, so the erased
-/// client can never be re-crowned. The generation is not advanced (stop
-/// semantics, PR §6.4).
 const SQL_ERASE_ATTRIBUTION_ACTIVE_CLIENT: &str = "UPDATE presence_attribution
      SET state = 'stopped', active_client = NULL
      WHERE companion_id IN (
@@ -604,11 +530,6 @@ const SQL_ERASE_HINT_RECOVERY_DESTINATION: &str = "UPDATE relocation_hint
          LIMIT ?2
      )";
 
-/// Presence history rows naming the target companion are erased whole: a
-/// transition log row is a copy of one attribution change, not a current
-/// fact, so removing it is the complete local erasure. The state vocabulary,
-/// reason tokens, generation counters, and host-stamped times are derived
-/// values, not caller text, and are never matched or mutated.
 const SQL_ERASE_TRANSITION_LOG: &str = "DELETE FROM presence_transition_log
      WHERE transition_seq IN (
          SELECT transition_seq FROM presence_transition_log
@@ -650,9 +571,6 @@ impl PresenceErasureRepository for Store {
                 let tx = guard
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|error| presence_unavailable(error.to_string()))?;
-                // Stale-generation rejection and the mutation share one short
-                // transaction: a superseded sweep or a completed operation
-                // mutates nothing (lifecycle §6-§7/§9.1).
                 if !condition_is_current(&tx, condition)
                     .map_err(|error| presence_unavailable(error.to_string()))?
                 {

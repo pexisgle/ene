@@ -1,9 +1,3 @@
-//! Stage 7 performance measurement and gate evaluation.
-//!
-//! CPU and resident-memory samples are read from the operating system. FPS
-//! evidence is deliberately supplied separately because redraw requests,
-//! `Present` calls, and Wayland frame callbacks are not display evidence.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -18,7 +12,6 @@ const FPS_MINIMUM: f64 = 30.0;
 const INTAKE_LIMIT_SECS: f64 = 1.0;
 const IDLE_GATE_SECS: f64 = 300.0;
 
-/// Role of a process included in the idle campaign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessRole {
@@ -28,7 +21,6 @@ pub enum ProcessRole {
     Other,
 }
 
-/// A process selected before an idle campaign begins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessTarget {
     pub role: ProcessRole,
@@ -36,7 +28,6 @@ pub struct ProcessTarget {
     pub pid: u32,
 }
 
-/// Raw cumulative CPU values and point-in-time resident bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ProcessPoint {
     pub wall_offset_secs: f64,
@@ -45,7 +36,6 @@ pub struct ProcessPoint {
     pub rss_bytes: u64,
 }
 
-/// All retained evidence for one PID.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcessRecord {
     pub role: ProcessRole,
@@ -58,7 +48,6 @@ pub struct ProcessRecord {
     pub rss_peak_bytes: u64,
 }
 
-/// CPU aggregate using the machine-wide denominator from the design.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CpuRecord {
     pub cpu_seconds_sum: f64,
@@ -67,14 +56,12 @@ pub struct CpuRecord {
     pub busy_wait_pids: Vec<u32>,
 }
 
-/// Aggregate resident set over aligned sampling rounds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RssRecord {
     pub mean_bytes: u64,
     pub peak_bytes: u64,
 }
 
-/// Source and correlation metadata for presented-frame evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PresentationSource {
@@ -89,7 +76,6 @@ pub enum PresentationSource {
     },
 }
 
-/// One commit/swap-chain event from a compositor or display-timing provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum PresentationEvent {
@@ -108,7 +94,6 @@ pub enum PresentationEvent {
     },
 }
 
-/// Fixed-window display evidence. Missing events are never converted to zero.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PresentationRecord {
     pub source: PresentationSource,
@@ -121,8 +106,6 @@ pub struct PresentationRecord {
     pub actual_fps: f64,
 }
 
-/// One raw Body feedback item as observed by desktop. JSONL files containing
-/// this type are measurement evidence, not a precomputed verdict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaylandFeedbackTraceLine {
     pub observed_unix_ns: u64,
@@ -130,12 +113,6 @@ pub struct WaylandFeedbackTraceLine {
 }
 
 impl PresentationRecord {
-    /// Builds aggregate counts from raw events.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a non-finite/non-positive window, duplicate
-    /// correlation IDs, or aggregate overflow.
     pub fn from_events(
         source: PresentationSource,
         warmup_secs: f64,
@@ -244,13 +221,6 @@ impl PresentationRecord {
     }
 }
 
-/// Converts Body's native Wayland feedback stream into a fixed-window FPS
-/// record. Callers must select only the post-warmup window; no frame callback
-/// or render request enters this conversion.
-///
-/// # Errors
-///
-/// Invalid window or duplicate Body correlation IDs.
 pub fn wayland_presentation_record(
     body_pid: u32,
     warmup_secs: f64,
@@ -345,16 +315,6 @@ pub fn wayland_presentation_record(
     )
 }
 
-/// Imports a PresentMon CSV while retaining the raw trace path and requiring
-/// every row to correlate to the selected Body PID and swap chain.
-/// `DisplayedTime` must show a positive display duration; the display timestamp
-/// is reconstructed from `TimeInSeconds + MsUntilDisplayed` (or the equivalent
-/// `CPUStartTime + DisplayLatency`). An explicit dropped row is discarded,
-/// while a row without complete display timing is missing.
-///
-/// # Errors
-///
-/// Missing required columns, malformed values, no correlated rows, or I/O.
 pub fn import_presentmon_csv(
     path: &Path,
     body_pid: u32,
@@ -484,7 +444,6 @@ pub fn import_presentmon_csv(
     )
 }
 
-/// Input-to-intake-to-painted timestamps for a first-party GUI operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InteractionSample {
     pub operation: String,
@@ -493,16 +452,12 @@ pub struct InteractionSample {
     pub gui_painted_monotonic_ns: u64,
 }
 
-/// One completed GUI paint observation. JSONL is used so a renderer/process
-/// crash cannot retroactively manufacture a complete array.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InteractionTraceLine {
     pub observed_unix_ns: u64,
     pub sample: InteractionSample,
 }
 
-/// Process-local monotonic clock shared by GUI input, Host outcome, and paint
-/// instrumentation.
 #[must_use]
 pub fn monotonic_ns() -> u64 {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
@@ -536,7 +491,6 @@ impl InteractionSample {
     }
 }
 
-/// Result from the compositor-level transparent-area and input-hitch probe.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClickThroughRecord {
     pub compositor: String,
@@ -545,7 +499,6 @@ pub struct ClickThroughRecord {
     pub raw_evidence: String,
 }
 
-/// Hardware, desktop, and build facts required to reproduce a campaign.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeasurementEnvironment {
     pub desktop_session: String,
@@ -590,8 +543,6 @@ impl ClickThroughRecord {
     }
 }
 
-/// Gate state. The inner representation is private so callers cannot create a
-/// Pass without [`MeasurementRecord::evaluate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct MeasurementVerdict(VerdictKind);
@@ -623,7 +574,6 @@ impl MeasurementVerdict {
     }
 }
 
-/// One complete machine-readable campaign.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MeasurementRecord {
     pub exact_sha: String,
@@ -668,7 +618,6 @@ impl Default for MeasurementRecord {
 }
 
 impl MeasurementRecord {
-    /// Re-evaluates every mandatory field and is the only constructor of Pass.
     pub fn evaluate(&mut self) {
         self.failures.clear();
         let required_roles = [ProcessRole::Host, ProcessRole::Desktop, ProcessRole::Body];
@@ -811,7 +760,6 @@ impl MeasurementRecord {
         self.verdict.is_pass()
     }
 
-    /// Human-readable report generated from the same record as JSON.
     #[must_use]
     pub fn human_report(&self) -> String {
         let mut out = format!(
@@ -907,11 +855,6 @@ impl MeasurementRecord {
         out
     }
 
-    /// Writes machine-readable JSON and a report derived from it.
-    ///
-    /// # Errors
-    ///
-    /// Serialization or file I/O failure.
     pub fn write_outputs(&self, json: &Path, report: &Path) -> Result<(), MeasurementError> {
         let encoded = serde_json::to_vec_pretty(self)
             .map_err(|error| MeasurementError::Json(error.to_string()))?;
@@ -920,12 +863,6 @@ impl MeasurementRecord {
     }
 }
 
-/// Runs an aligned CPU/RSS sampling campaign. Presentation, interaction, and
-/// click-through evidence must be attached before evaluation.
-///
-/// # Errors
-///
-/// Invalid duration/targets or an OS process query failure.
 pub fn sample_idle(
     targets: &[ProcessTarget],
     duration: Duration,
@@ -1070,8 +1007,6 @@ pub fn sample_idle(
     })
 }
 
-/// Measurement collection/validation failures. No variant contains process
-/// memory or credential data.
 #[derive(Debug, thiserror::Error)]
 pub enum MeasurementError {
     #[error("invalid measurement campaign")]
@@ -1132,8 +1067,6 @@ mod os {
                     reason: String::from("invalid /proc CPU counter"),
                 })
         };
-        // After removing pid/comm, field 3 (state) is index 0, therefore
-        // fields 14 and 15 are indices 11 and 12.
         let user_ticks = ticks(11)?;
         let system_ticks = ticks(12)?;
         // SAFETY: sysconf is side-effect free for this constant and has no

@@ -1,16 +1,3 @@
-//! Durable usage cap definitions, cap admission, and reservation accounting.
-//!
-//! `usage-cost-cap` §6-§10/§13: the cap rows and the reservation lifecycle
-//! state live in the same SQLite master as the attempt claim, so the compare,
-//! the reservation insert, and the attempt insert share one short `Immediate`
-//! transaction. Cap accounting is reconstructed from durable reservation rows
-//! and usage facts; no process-local counter is authority.
-//!
-//! A reservation's cap window is the UTC period containing `opened_at`, fixed
-//! at admission: settlement never moves a row between windows, so a call
-//! admitted at 23:59 on the last day of a month stays in that month even when
-//! it settles after the boundary.
-
 use std::sync::Arc;
 
 use ene_inference::cost::{Money, UsageEstimate};
@@ -38,33 +25,24 @@ const SQL_INSERT_CAP: &str = "INSERT INTO usage_cap (scope, provider, window, re
 
 const SQL_UPDATE_CAP: &str = "UPDATE usage_cap SET revision = ?4, currency = ?5, limit_micros = ?6 WHERE scope = ?1 AND provider = ?2 AND window = ?3";
 
-/// Every current cap that applies to one route: the system scope and the
-/// route's provider scope, in both windows.
 const SQL_SELECT_APPLICABLE_CAPS: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap WHERE scope = 'system' OR (scope = 'provider' AND provider = ?1)";
 
-/// Every stored cap, deterministically ordered for the status read.
 const SQL_SELECT_ALL_CAPS: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap ORDER BY scope, provider, window";
 
-/// The caps a provider-filtered status read reports: the system scope (it
-/// budgets every provider) plus that provider's own scopes.
 const SQL_SELECT_CAPS_FOR_PROVIDER: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap WHERE scope = 'system' OR (scope = 'provider' AND provider = ?1) ORDER BY scope, provider, window";
 
-/// Non-released reservations opened inside `[?1, ?2)`; the provider-scoped
-/// sum additionally filters `provider = ?3`.
 const SQL_SELECT_WINDOW_CONSUMPTION: &str = "SELECT state, currency, upper_bound_micros, committed_currency, committed_micros FROM usage_reservation WHERE state != 'released' AND opened_at >= ?1 AND opened_at < ?2";
 
 const SQL_SELECT_WINDOW_CONSUMPTION_PROVIDER: &str = "SELECT state, currency, upper_bound_micros, committed_currency, committed_micros FROM usage_reservation WHERE state != 'released' AND opened_at >= ?1 AND opened_at < ?2 AND provider = ?3";
 
 pub(crate) const SQL_SELECT_RESERVATION_BY_TICKET: &str = "SELECT ticket, reservation_id, provider, model, pricing_snapshot, currency, upper_bound_micros, state, committed_currency, committed_micros, opened_at FROM usage_reservation WHERE ticket = ?1";
 
-/// Every non-terminal reservation, for Host-startup reconciliation.
 pub(crate) const SQL_SELECT_ORPHANED_RESERVATIONS: &str = "SELECT ticket, reservation_id, provider, model, pricing_snapshot, currency, upper_bound_micros, state, committed_currency, committed_micros, opened_at FROM usage_reservation WHERE state = 'reserved'";
 
 const SQL_INSERT_RESERVATION: &str = "INSERT INTO usage_reservation (reservation_id, ticket, provider, model, pricing_snapshot, currency, upper_bound_micros, state, opened_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reserved', ?8)";
 
 pub(crate) const SQL_SETTLE_RESERVATION: &str = "UPDATE usage_reservation SET state = ?2, committed_currency = ?3, committed_micros = ?4 WHERE ticket = ?1 AND state = 'reserved'";
 
-/// One current cap row, decoded.
 pub(crate) struct CapRow {
     id: UsageCapId,
     revision: UsageCapRevision,
@@ -112,7 +90,6 @@ fn decode_cap(
     })
 }
 
-/// Reads the one cap row for `(scope, window)`, if any.
 fn select_cap(
     conn: &rusqlite::Connection,
     scope: &UsageCapScope,
@@ -141,9 +118,6 @@ fn select_cap(
         .transpose()
 }
 
-/// Reads every current cap applying to the route. The rows are ordered
-/// deterministically (system before provider, daily before monthly) so a
-/// multi-cap violation always answers with the same cap reference.
 fn select_applicable_caps(tx: &Transaction<'_>, provider: &str) -> Result<Vec<CapRow>, String> {
     let mut statement = tx
         .prepare(SQL_SELECT_APPLICABLE_CAPS)
@@ -172,7 +146,6 @@ fn select_applicable_caps(tx: &Transaction<'_>, provider: &str) -> Result<Vec<Ca
     Ok(caps)
 }
 
-/// System before provider, daily before monthly.
 fn cap_order(cap: &CapRow) -> (u8, u8) {
     let scope = match cap.scope() {
         UsageCapScope::System => 0,
@@ -185,19 +158,11 @@ fn cap_order(cap: &CapRow) -> (u8, u8) {
     (scope, window)
 }
 
-/// The current-period consumption of one cap scope.
 pub(crate) enum CapWindowConsumption {
-    /// The exact sum of every non-released reservation's cap amount in the
-    /// window: the reserved upper bound, or the actual committed cost when
-    /// the provider reported usage.
     Known(Money),
-    /// Safety cannot be confirmed from the durable rows (an unrepresentable
-    /// period, a currency the cap cannot be compared in, or an overflowing
-    /// sum). The caller must not start a cap-enabled send.
     Indeterminate,
 }
 
-/// One non-released reservation row's accounting columns.
 struct ConsumptionRow {
     state: String,
     currency: String,
@@ -216,27 +181,12 @@ fn consumption_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsumptionRow> 
     })
 }
 
-/// One cap window's consumption split by the reservation state that counts
-/// it, in exact micro-currency units of one currency.
 pub(crate) struct WindowConsumption {
-    /// Upper bounds of still-non-terminal reservations.
     pub(crate) reserved: u64,
-    /// Actual committed cost of reported settlements.
     pub(crate) committed_reported: u64,
-    /// Upper bounds kept counted for unknown settlements.
     pub(crate) committed_unknown: u64,
 }
 
-/// Sums one scope's consumption breakdown over the UTC period containing
-/// `at`.
-///
-/// Only rows whose state is not `released` count. `committed_reported`
-/// contributes the actual committed cost (the reserved upper bound is
-/// released); `reserved` and `committed_unknown` contribute the reserved
-/// upper bound, so an unknown external consumption can never free a cap slot.
-/// `Ok(None)` is indeterminate: an unrepresentable period, a currency the cap
-/// cannot be compared in, or an unreadable state. A malformed stored amount
-/// stays a technical error, never a guessed number.
 pub(crate) fn consumption_breakdown(
     conn: &rusqlite::Connection,
     scope: &UsageCapScope,
@@ -267,8 +217,6 @@ pub(crate) fn consumption_breakdown(
             .collect::<Result<Vec<_>, _>>(),
     }
     .map_err(|error| error.to_string())?;
-    // Accumulate in u128: an overflowing u64 sum is an indeterminate cap
-    // state, never a wrapped or saturated amount.
     let mut reserved: u128 = 0;
     let mut committed_reported: u128 = 0;
     let mut committed_unknown: u128 = 0;
@@ -310,7 +258,6 @@ pub(crate) fn consumption_breakdown(
     }))
 }
 
-/// Sums one scope's consumption over the UTC period containing `at`.
 pub(crate) fn consumed_in_window(
     conn: &rusqlite::Connection,
     scope: &UsageCapScope,
@@ -332,24 +279,13 @@ pub(crate) fn consumed_in_window(
     )))
 }
 
-/// The cap-admission decision for one attempt claim.
 pub(crate) enum ReservationAdmission {
-    /// No cap applies to the route: the attempt claims without a reservation
-    /// because there is no limit to protect.
     NoCap,
-    /// The reservation is durable in this transaction; the caller may run
-    /// provider I/O once the transaction commits.
     Reserved,
-    /// A current cap would be exceeded: no attempt, no reservation, and no
-    /// provider byte.
     Held(UsageCapRef),
-    /// A cap applies but a finite safe upper bound cannot be established:
-    /// no attempt, no reservation, and no provider byte.
     Indeterminate,
 }
 
-/// The premises the claim resolved before admission: the route, the immutable
-/// pricing snapshot it published, and the provider adapter's safe bound.
 pub(crate) struct ReservationPremise<'a> {
     pub(crate) provider: &'a str,
     pub(crate) model: &'a str,
@@ -358,14 +294,6 @@ pub(crate) struct ReservationPremise<'a> {
     pub(crate) estimate: Option<&'a UsageEstimate>,
 }
 
-/// Reserves the conservative upper bound of one claim against every
-/// applicable cap, inside the claim transaction.
-///
-/// Reads the current cap revisions, sums each cap's window consumption, and
-/// inserts the reservation only when the new upper bound keeps every
-/// applicable cap satisfied. Any missing premise (no reviewed rate, no
-/// provider estimate) or unrepresentable amount answers
-/// [`ReservationAdmission::Indeterminate`], never a guessed or zero bound.
 pub(crate) fn admit_reservation(
     tx: &Transaction<'_>,
     ticket: &InferenceTicketId,
@@ -376,8 +304,6 @@ pub(crate) fn admit_reservation(
     if caps.is_empty() {
         return Ok(ReservationAdmission::NoCap);
     }
-    // A cap-enabled send needs both the immutable rate and a finite safe
-    // bound: without either, the cap cannot be proven satisfied.
     let (Some(snapshot), Some(reference), Some(estimate)) =
         (premise.pricing, premise.pricing_reference, premise.estimate)
     else {
@@ -388,8 +314,6 @@ pub(crate) fn admit_reservation(
     };
     for cap in &caps {
         if cap.limit().currency() != upper_bound.currency() {
-            // Comparing currencies by a guessed rate is forbidden; refusing
-            // the send is the only safe answer.
             return Ok(ReservationAdmission::Indeterminate);
         }
         let consumed =
@@ -422,7 +346,6 @@ pub(crate) fn admit_reservation(
     Ok(ReservationAdmission::Reserved)
 }
 
-/// One stored reservation row, exactly as `usage_reservation` holds it.
 pub(crate) struct ReservationRow {
     pub(crate) ticket: String,
     pub(crate) reservation_id: String,
@@ -453,11 +376,6 @@ pub(crate) fn reservation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reser
     })
 }
 
-/// Decodes one stored reservation into the composed inference record.
-///
-/// The state and money columns must agree with the lifecycle: `reported`
-/// carries an actual amount, every other state carries none, and the pricing
-/// reference parses. Anything else is unreadable, never a guessed state.
 pub(crate) fn decode_reservation(raw: &ReservationRow) -> Result<UsageReservation, String> {
     let state = UsageReservationState::from_name(&raw.state)
         .ok_or_else(|| String::from("unknown usage reservation state"))?;
@@ -504,10 +422,6 @@ impl UsageCapRepository for Store {
             let tx = guard
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| permission_unavailable(error.to_string()))?;
-            // The compare and the write share the admission path's
-            // serialization domain: an admission that committed first is
-            // observed here (stale), and an update that commits first is what
-            // the next admission reads.
             let current =
                 select_cap(&tx, &command.scope, command.window).map_err(permission_unavailable)?;
             let matches = match (&current, &command.expected) {
@@ -579,9 +493,6 @@ impl UsageCapRepository for Store {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            // One read transaction is not needed: each cap's consumption is
-            // computed from the durable rows under the shared connection
-            // lock, and the read writes nothing (SELECT-only).
             let mut statement = guard
                 .prepare(match query.provider {
                     None => SQL_SELECT_ALL_CAPS,
@@ -634,11 +545,6 @@ impl UsageCapRepository for Store {
     }
 }
 
-/// Builds one cap's window consumption from the same durable reservation rows
-/// the send admission compares.
-///
-/// Indeterminate stays distinct from a zero total: a read must never display
-/// "nothing consumed" for a row it cannot compare.
 fn cap_consumption(
     conn: &rusqlite::Connection,
     cap: &CapRow,

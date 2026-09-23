@@ -1,13 +1,9 @@
-//! Task identity, purpose, current state, and revision records.
-
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
 
 use crate::context::{TaskContextEntry, TaskContextEntryId, TaskContextOrigin};
 use crate::result::TaskResultId;
 use crate::workspace::{WorkspaceAssociation, WorkspaceAssociationPremise};
 
-/// Identity of one Task. Wraps [`RawId`]; never converted to any other domain
-/// newtype and never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskId(RawId);
 
@@ -28,17 +24,10 @@ impl TaskId {
     }
 }
 
-/// Monotonic order of one Task's revisions, as decided by the Task owner.
-///
-/// Follows the [`RevisionInner`] discipline: the number travels only inside
-/// its `(TaskId, TaskRevision)` pair, and a larger value never proves newer
-/// across different tasks. A Task purpose change is a forward step of this
-/// revision, never a change of some other generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TaskRevision(RevisionInner);
 
 impl TaskRevision {
-    /// The revision of a newly created Task.
     #[must_use]
     pub fn initial() -> Self {
         Self(RevisionInner::from_u64(1))
@@ -54,33 +43,18 @@ impl TaskRevision {
         self.0.as_u64()
     }
 
-    /// Returns the successor revision, or [`None`] at [`u64::MAX`].
-    ///
-    /// Exhaustion is reported rather than hidden: a silent maximum step would
-    /// make a new revision indistinguishable from its predecessor and break
-    /// compare-before-commit.
     #[must_use]
     pub fn checked_next(&self) -> Option<Self> {
         self.0.checked_next().map(Self)
     }
 }
 
-/// One Task identity together with the revision of its state.
-///
-/// This is the boundary token a caller passes so the owner can compare the
-/// revision it expects against the durable current one. It is comparison
-/// material, not authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskRef {
     pub task: TaskId,
     pub revision: TaskRevision,
 }
 
-/// The adopted purpose text.
-///
-/// This is content, not identity: [`TaskPurposeRef`] identifies where the
-/// purpose was adopted, and the text is stored once in that revision's
-/// snapshot. Redacted from [`core::fmt::Debug`].
 #[derive(Clone, PartialEq, Eq)]
 pub struct TaskPurpose {
     pub text: String,
@@ -95,74 +69,33 @@ impl core::fmt::Debug for TaskPurpose {
     }
 }
 
-/// Identity of a purpose adopted by one Task revision.
-///
-/// The purpose text is canonical in the `task_revision` snapshot at
-/// `adopted_revision`; a revision that does not change the purpose carries
-/// the predecessor's reference forward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskPurposeRef {
     pub task: TaskId,
     pub adopted_revision: TaskRevision,
 }
 
-/// A steering caller's relied-on Task revision and purpose.
-///
-/// This is comparison material, not authority: the Task owner compares it
-/// against the durable current state and returns a stale outcome on
-/// mismatch. `purpose` must be the purpose identity in force at
-/// `expected.revision`; [`orchestrate_steering`](crate::orchestrate_steering)
-/// checks that correspondence before committing, and a purpose text match is
-/// never used as identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SteeringPremiseRef {
-    /// The current revision the caller relied on.
     pub expected: TaskRef,
-    /// The purpose identity the caller relied on at `expected.revision`.
     pub purpose: TaskPurposeRef,
 }
 
-/// The Companion a Task is assigned to, as a Task-owned premise.
-///
-/// Carries [`RawId`] and is never converted from or into another domain's
-/// Companion newtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AssigneeRef {
     pub companion: RawId,
 }
 
-/// The lifecycle progress of one Task.
-///
-/// Progress is a closed world orthogonal to the revision: a purpose change is
-/// a revision forward, never a progress transition, and terminal states are
-/// absorbing. The admission gates (delegation, steering, Task Agent inference
-/// claim, Action start) require a non-terminal progress in their own atomic
-/// compare; `Completed` is only produced by the adoption commit, `Cancelled`
-/// by the cancel admission CAS (AU16), and `Failed` only by the confirmed
-/// terminal-failure commit ([`crate::TaskRepository::fail_task`]) whose
-/// closed-world classification has no variant for provider failures,
-/// `NotSent`, Action `Unknown`, withheld results, or cancel. `Cancelled` means
-/// the cancel request was accepted, never that running work or an external
-/// effect stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskProgress {
-    /// The Task was accepted; delegation is possible while non-terminal.
     Started,
-    /// At least one delegation is durable; the Task awaits its outcome.
     InProgress,
-    /// The Task owner adopted a final result after verifying the relied Action
-    /// facts and the Task-wide completion barrier.
     Completed,
-    /// Confirmed terminal failure committed by the Task owner through
-    /// [`crate::TaskRepository::fail_task`].
     Failed,
-    /// The cancel request was accepted (AU16). Absorbing; the Task is never
-    /// resumed in place, and already-started activity keeps its own facts.
     Cancelled,
 }
 
 impl TaskProgress {
-    /// Stable storage name, closed world.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -174,7 +107,6 @@ impl TaskProgress {
         }
     }
 
-    /// Parses the [`Self::as_str`] vocabulary, closed world.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
@@ -187,19 +119,12 @@ impl TaskProgress {
         }
     }
 
-    /// Whether this progress admits no further work.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 }
 
-/// The current durable state of one Task (D1).
-///
-/// The purpose text is not duplicated here; it is read from the current
-/// revision snapshot. `adopted_result` is not a second master: it is resolved
-/// from the single `task_result` row whose `adopted_revision` is set, and is
-/// `None` for every Task that is not completed by a result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub reference: TaskRef,
@@ -209,73 +134,39 @@ pub struct Task {
     pub adopted_result: Option<TaskResultId>,
 }
 
-/// One revision of a Task, kept as the change history (D2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRevisionRecord {
     pub reference: TaskRef,
-    /// The adopted purpose in force at this revision.
     pub purpose: TaskPurposeRef,
-    /// The purpose text snapshot for this revision.
     pub purpose_text: TaskPurpose,
     pub assignee: AssigneeRef,
 }
 
-/// The committed current unit of one Task: the AU2 creation plus every AU4
-/// steering forward.
-///
-/// The context spans the current revision's adopted-purpose entry and the
-/// adopted-instruction entries in force (adopted at or before the current
-/// revision); each entry keeps its own adoption reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRecord {
     pub task: Task,
-    /// The snapshot of the current revision.
     pub revision: TaskRevisionRecord,
-    /// The current revision's adopted-purpose entry, followed by every
-    /// adopted-instruction entry in force.
     pub context: Vec<TaskContextEntry>,
     pub workspace: Option<WorkspaceAssociation>,
 }
 
-/// The premise for creating one Task (AU2).
-///
-/// Identities are minted by the Task owner before the repository call; the
-/// repository writes the whole premise in one atomic commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskCreationPremise {
     pub task: TaskId,
     pub purpose: TaskPurpose,
-    /// Identity of the initial context entry adopting the purpose.
     pub entry: TaskContextEntryId,
     pub origin: TaskContextOrigin,
     pub acquired_at: WallClockWithTz,
     pub assignee: AssigneeRef,
-    /// The confirmed workspace association, when the Task has one.
     pub workspace: Option<WorkspaceAssociationPremise>,
 }
 
-/// The Task owner's domain result of one Task creation.
-///
-/// The unguarded [`TaskRepository::create_task`](crate::TaskRepository::create_task)
-/// always creates; the conversation-sourced guarded commit can additionally
-/// answer [`Self::Superseded`] when a newer Owner input overtook the turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskCreationOutcome {
-    /// The creation unit committed.
     Created(TaskRef),
-    /// A newer accepted Owner input superseded the relied utterance; nothing
-    /// was written.
     Superseded,
 }
 
-/// A purpose adoption proposed by one steering commit (AU4).
-///
-/// The repository stamps the adopted revision (`expected.revision + 1`) after
-/// the CAS succeeds; the caller supplies the text and the provenance, and
-/// never names a future revision. For steering, `origin` is the same
-/// utterance record as the adopted instruction's: kind
-/// [`TaskContextOriginKind::OwnerConversation`](crate::TaskContextOriginKind::OwnerConversation)
-/// with `source` equal to the steering proposal's instruction source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPurposeAdoptionPremise {
     pub purpose: TaskPurpose,
@@ -283,50 +174,17 @@ pub struct TaskPurposeAdoptionPremise {
     pub acquired_at: WallClockWithTz,
 }
 
-/// An instruction adoption proposed by one steering commit (AU4).
-///
-/// `entry` is the adoption identity itself: the Task owner's orchestration
-/// mints it and passes it in [`TaskCommitPremise::adopted_instruction`]; the
-/// repository never re-mints it and stamps only the post-CAS `(task,
-/// revision)` reference. The entry is written once at the adoption revision
-/// and never re-recorded by a later forward. `origin.source` references the
-/// utterance record and never copies its body; steering always uses kind
-/// [`TaskContextOriginKind::OwnerConversation`](crate::TaskContextOriginKind::OwnerConversation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskInstructionAdoptionPremise {
-    /// Identity of the context entry recording the adopted instruction.
     pub entry: TaskContextEntryId,
     pub origin: TaskContextOrigin,
     pub acquired_at: WallClockWithTz,
 }
 
-/// The premise for one steering commit (AU4).
-///
-/// Advances the Task by exactly one revision. The repository writes the new
-/// revision snapshot, the new revision's adopted-purpose context entry, the
-/// adopted-instruction context entry when one is proposed, and the current
-/// pointer in one atomic commit; every older revision and context entry is
-/// retained. The caller never names the successor revision: it supplies the
-/// relied-on `expected` revision and the repository stamps the post-CAS
-/// `(task, revision)` references. Other context kinds arrive with the
-/// producers that can identify them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskCommitPremise {
     pub expected: TaskRef,
-    /// `Some` adopts a new purpose at the new revision; `None` carries the
-    /// current purpose and its adopted-purpose context entry forward.
     pub new_purpose: Option<TaskPurposeAdoptionPremise>,
-    /// Identity of the context entry the new revision records for the adopted
-    /// purpose, in both the change and carry-forward branches. The Task owner
-    /// mints it; the repository never allocates it and stamps only the
-    /// post-CAS `(task, revision)` reference and adopted revision.
     pub adopted_purpose_entry: TaskContextEntryId,
-    /// The instruction adopted by this forward. Steering always passes
-    /// `Some`: the instruction source is mandatory in the steering proposal,
-    /// and its origin is the same utterance record as a purpose change (kind
-    /// [`TaskContextOriginKind::OwnerConversation`](crate::TaskContextOriginKind::OwnerConversation),
-    /// source equal to the instruction source). `None` is for a future
-    /// forward that adopts no instruction; the entry is written once and
-    /// never re-recorded.
     pub adopted_instruction: Option<TaskInstructionAdoptionPremise>,
 }

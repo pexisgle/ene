@@ -1,16 +1,3 @@
-//! Stage 7 C2: Task / Workspace management GUI against a real Host.
-//!
-//! Provider is fake and barrier-gated. The Slint window is not displayed; the
-//! same [`DesktopRuntime`] the window projects is driven here. Tasks are
-//! created only through companion `[task-control]` delegation, never a
-//! GUI-only factory.
-//!
-//! Covers acceptance §4's GUI path and the GUI subset of §5: Unknown vs
-//! interrupted vs Failed vs Cancelled vs Completed; cancel admission vs
-//! stop-complete; resume bound to the displayed revision/purpose; GUI close /
-//! reconnect; presentation ACK only after the panel copies a receipt.
-//! Conversation ACK already lives in [`ene_desktop::session::submit_and_collect`].
-
 #![cfg(any(unix, windows))]
 #![allow(
     clippy::expect_used,
@@ -290,8 +277,6 @@ async fn select_first_task(desktop: &mut DesktopRuntime) {
         .expect("select listed task");
 }
 
-/// §4: Workspace → companion-created Task → parallel chat → complete with
-/// changed files / save location / remaining work on the management panel.
 #[tokio::test]
 async fn acceptance_4_workspace_task_gui_path() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -418,8 +403,6 @@ async fn acceptance_4_workspace_task_gui_path() {
     server.shutdown_and_join().await;
 }
 
-/// Cancel admission (`AppliedAsOneTime`) is not stop-complete. Failed is
-/// never inferred from a technical provider drop; that is interrupted.
 #[tokio::test]
 async fn cancel_admission_is_not_stop_complete() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -481,9 +464,6 @@ async fn cancel_admission_is_not_stop_complete() {
     server.shutdown_and_join().await;
 }
 
-/// S5-01/S5-02 GUI subset: close mid-wait keeps the Host-only Task; reconnect
-/// does not cancel. ACK is refused until the panel has copied a receipt.
-/// Conversation ConfirmPresentation is the existing chat hook in session.
 #[tokio::test]
 async fn gui_close_reconnect_and_ack_only_after_present() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -587,9 +567,6 @@ async fn gui_close_reconnect_and_ack_only_after_present() {
     server.shutdown_and_join().await;
 }
 
-/// S5-16/S5-17 GUI subset: interrupted is in_progress without execution
-/// registration. Resume echoes the displayed revision/purpose; a later list
-/// must not replace that premise. Failed is not this technical path.
 #[tokio::test]
 async fn resume_is_bound_to_the_displayed_premise() {
     let dir = tempfile::tempdir().expect("tempdir");

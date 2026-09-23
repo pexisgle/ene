@@ -1,21 +1,7 @@
-//! Memory management view-model: a Host-paged projection, not a store.
-//!
-//! The GUI does not know the DB schema. Current recognition, scope,
-//! importance, created-at, Experience Summary grounds, and revision history
-//! come from [`ManagementViewRequest`] fields `memory`, `memory_after`,
-//! `memory_revisions_of`, and `memory_revisions_after`. The Host applies the
-//! page bound; this module never full-scans then truncates.
-//!
-//! Formation, correction, situation change, merge, and conversational forget
-//! stay on Learning / Companion. This page has no write, no physical-delete
-//! shortcut, and no Targeted Deletion path.
-
 use ene_api::v1::management::{ManagementView, ManagementViewRequest};
 
-/// Host section name for the read-only Memory view.
 pub const HOST_MEMORY_SECTION: &str = "memory";
 
-/// One current Memory row as the Host rendered it.
 #[derive(Clone, PartialEq, Eq, serde::Serialize)]
 pub struct MemoryRow {
     pub id: String,
@@ -24,9 +10,6 @@ pub struct MemoryRow {
     pub temporal: String,
     pub recall: String,
     pub revision: String,
-    /// Host list publishes this as `updated=`. For an initial revision it is
-    /// the creation time; later revisions keep the current-row timestamp here
-    /// and the per-change created-at on [`MemoryRevisionRow::at`].
     pub created_at: String,
     pub content: String,
 }
@@ -47,8 +30,6 @@ impl core::fmt::Debug for MemoryRow {
     }
 }
 
-/// One revision of a Memory, including Experience Summary grounds when the
-/// Host included them on this page.
 #[derive(Clone, PartialEq, Eq, serde::Serialize)]
 pub struct MemoryRevisionRow {
     pub revision: u64,
@@ -73,9 +54,6 @@ impl core::fmt::Debug for MemoryRevisionRow {
     }
 }
 
-/// One Host Memory page (list or revisions), plus the cursor to ask for the
-/// next page. Accumulating pages happens only when the caller requests the
-/// next Host page; nothing here walks the whole corpus.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryPage {
     rows: Vec<MemoryRow>,
@@ -88,7 +66,6 @@ pub struct MemoryPage {
 }
 
 impl MemoryPage {
-    /// Typed current-list read. `after` is the Host `next: <id>` cursor.
     #[must_use]
     pub fn list_request(after: Option<&str>) -> ManagementViewRequest {
         ManagementViewRequest {
@@ -99,8 +76,6 @@ impl MemoryPage {
         }
     }
 
-    /// Typed revision-history read for one Memory. `after_revision` is the
-    /// Host `next-revision: <n>` cursor. The list cursor is not mixed in.
     #[must_use]
     pub fn revisions_request(
         memory_id: &str,
@@ -114,8 +89,6 @@ impl MemoryPage {
         }
     }
 
-    /// Replace or append from one Host answer. `append` is only for a caller
-    /// that already consumed this page's `next` cursor; it is not a scan.
     pub fn apply_host_view(
         &mut self,
         view: &ManagementView,
@@ -177,8 +150,6 @@ impl MemoryPage {
         self.last_request.as_ref()
     }
 
-    /// Drops every Host-projected Memory copy this page holds. Old cursors
-    /// and revision views are invalid after this.
     pub fn wipe(&mut self) {
         *self = Self::default();
     }
@@ -188,7 +159,6 @@ impl MemoryPage {
         self.rows.is_empty() && self.revisions.is_empty()
     }
 
-    /// Slint projection of the current Host page(s) already fetched.
     #[must_use]
     pub fn panel(&self) -> String {
         let mut lines = Vec::new();

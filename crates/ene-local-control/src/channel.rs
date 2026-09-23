@@ -1,56 +1,16 @@
-//! The private confirmation channel between the serving Host and the GUI it
-//! spawned (Stage 7 A1, [First-party desktop] §5.1.2).
-//!
-//! The Host creates the pair while spawning the official GUI and hands the
-//! child end to that child alone: on Linux an unnamed socket-pair end carried
-//! as the child's stdin, on Windows a pair of anonymous pipes carried as the
-//! child's stdin and stdout. No other handle is made inheritable, so nothing
-//! else reaches the child, and nothing names the channel, so no other process
-//! can dial it.
-//!
-//! The channel is blocking by design. It carries a handful of small frames
-//! per Owner action, never stream data, and each side runs it on its own
-//! thread so a silent peer can never stall an event loop.
-//!
-//! [First-party desktop]: ../../../../docs/design/concrete/first-party-desktop.md
-
-// The frame types live in this crate's root; the platform modules import the
-// ones they need.
-
-/// Environment marker the Host sets on the spawned GUI. Its absence means the
-/// process was started by the user as the short-lived launcher.
 pub const CONFIRMATION_MODE_ENV: &str = "ENE_CONFIRMATION_CHANNEL";
-
-/// Marker value: the confirmation channel is on this process's stdio.
 pub const CONFIRMATION_MODE_STDIO: &str = "stdio";
-
-/// Upper bound on one channel frame. The secret-bearing credential frame is
-/// the largest legal message; anything bigger is not this protocol.
 pub const MAX_CONFIRMATION_FRAME_BYTES: u32 = 16 * 1024;
 
-/// One confirmation-channel event, either direction.
-///
-/// The Host merges its own outbound frames and the GUI's inbound frames into
-/// one queue so a single thread owns the channel and no lock is held across a
-/// blocking read.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChannelEvent {
-    /// A frame the GUI sent to the Host.
     Inbound(ToConfirmation),
-    /// A frame the Host is sending to the GUI.
     Outbound(FromConfirmation),
-    /// The channel ended (clean EOF, malformed frame, or transport failure).
     Closed,
 }
 
 use crate::{FromConfirmation, ToConfirmation};
 
-/// Encodes one frame as a `u32` big-endian length followed by JSON.
-///
-/// # Errors
-///
-/// Fails when the value cannot serialize or exceeds
-/// [`MAX_CONFIRMATION_FRAME_BYTES`].
 pub fn encode_frame<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
     let body = serde_json::to_vec(value)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -66,15 +26,6 @@ pub fn encode_frame<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> 
     Ok(out)
 }
 
-/// Reads one framed message.
-///
-/// `Ok(None)` means the peer closed, or the frame was malformed or oversize.
-/// Both are terminal for the channel: a malformed frame never becomes a
-/// guessed message.
-///
-/// # Errors
-///
-/// Propagates transport failures other than a clean EOF.
 pub fn read_frame<R, T>(reader: &mut R) -> std::io::Result<Option<T>>
 where
     R: std::io::Read,
@@ -97,128 +48,82 @@ where
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
-/// Writes one framed message.
-///
-/// # Errors
-///
-/// Propagates encoding and transport failures.
 pub fn write_frame<W, T>(writer: &mut W, value: &T) -> std::io::Result<()>
 where
     W: std::io::Write,
     T: serde::Serialize,
 {
-    let bytes = encode_frame(value)?;
-    writer.write_all(&bytes)?;
+    let encoded = encode_frame(value)?;
+    writer.write_all(&encoded)?;
     writer.flush()
 }
 
 #[cfg(unix)]
 mod platform {
-    use std::os::fd::{FromRawFd as _, OwnedFd};
+    use std::os::fd::{FromRawFd, OwnedFd};
     use std::os::unix::net::UnixStream;
 
     use crate::{FromConfirmation, ToConfirmation};
 
-    /// The Host's end of one spawned GUI's private channel.
     pub struct HostChannel {
         stream: UnixStream,
     }
 
     impl HostChannel {
-        /// Duplicates this end so one thread can read while another writes.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when the descriptor cannot be duplicated.
         pub fn try_clone(&self) -> std::io::Result<Self> {
             Ok(Self {
                 stream: self.stream.try_clone()?,
             })
         }
 
-        /// Creates one private pair plus the child ends to pass as stdio.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when the socket pair cannot be created.
         pub fn pair() -> std::io::Result<(Self, ChildHandles)> {
-            let (host, child) = UnixStream::pair()?;
-            Ok((Self { stream: host }, ChildHandles { stdin: Some(child) }))
+            let (host, gui) = UnixStream::pair()?;
+            Ok((
+                Self { stream: host },
+                ChildHandles {
+                    child: Some(OwnedFd::from(gui)),
+                },
+            ))
         }
 
-        /// Reads one frame from the GUI.
-        ///
-        /// # Errors
-        ///
-        /// Propagates transport failures other than a clean EOF.
         pub fn recv(&mut self) -> std::io::Result<Option<ToConfirmation>> {
             super::read_frame(&mut self.stream)
         }
 
-        /// Sends one frame to the GUI.
-        ///
-        /// # Errors
-        ///
-        /// Propagates encoding and transport failures.
         pub fn send(&mut self, frame: &FromConfirmation) -> std::io::Result<()> {
             super::write_frame(&mut self.stream, frame)
         }
     }
 
-    /// The child ends of one private pair, applied to a spawn.
     pub struct ChildHandles {
-        stdin: Option<UnixStream>,
+        child: Option<OwnedFd>,
     }
 
     impl ChildHandles {
-        /// Applies the pair to `command`'s stdio.
-        ///
-        /// Only these ends are handed to the child: the socket pair was made
-        /// close-on-exec, so no other descriptor of this process travels.
         pub fn apply(&mut self, command: &mut std::process::Command) {
-            if let Some(stream) = self.stdin.take() {
-                command.stdin(std::process::Stdio::from(OwnedFd::from(stream)));
+            if let Some(fd) = self.child.take() {
+                command.stdin(std::process::Stdio::from(fd));
             }
         }
     }
 
-    /// The GUI's end of the inherited private channel.
     pub struct GuiChannel {
         stream: UnixStream,
     }
 
     impl GuiChannel {
-        /// Duplicates this end so one thread can read while the owner writes.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when the descriptor cannot be duplicated.
         pub fn try_clone(&self) -> std::io::Result<Self> {
             Ok(Self {
                 stream: self.stream.try_clone()?,
             })
         }
 
-        /// Creates a connected pair for tests that drive a GUI in-process.
-        ///
-        /// The production GUI always adopts the Host's stdio; this constructor
-        /// exists so a test can act as the spawned child without a process
-        /// boundary, and is never used by product code.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when the socket pair cannot be created.
         #[doc(hidden)]
         pub fn pair_for_test() -> std::io::Result<(Self, HostChannel)> {
             let (host, gui) = UnixStream::pair()?;
             Ok((Self { stream: gui }, HostChannel { stream: host }))
         }
 
-        /// Adopts the channel the Host passed as this process's stdin.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when stdin cannot be taken.
         pub fn adopt_stdio() -> std::io::Result<Self> {
             // SAFETY: fd 0 is this process's stdin, which the Host set to the
             // child end of the pair before exec. Taking ownership here keeps a
@@ -230,20 +135,10 @@ mod platform {
             })
         }
 
-        /// Reads one frame from the Host.
-        ///
-        /// # Errors
-        ///
-        /// Propagates transport failures other than a clean EOF.
         pub fn recv(&mut self) -> std::io::Result<Option<FromConfirmation>> {
             super::read_frame(&mut self.stream)
         }
 
-        /// Sends one frame to the Host.
-        ///
-        /// # Errors
-        ///
-        /// Propagates encoding and transport failures.
         pub fn send(&mut self, frame: &ToConfirmation) -> std::io::Result<()> {
             super::write_frame(&mut self.stream, frame)
         }
@@ -260,11 +155,6 @@ mod platform {
 
     use crate::{FromConfirmation, ToConfirmation};
 
-    /// One anonymous pipe pair as `(read end, write end)`.
-    ///
-    /// The default security attributes are used deliberately: a pipe end is
-    /// inheritable only because the child's stdio carries it. The Host marks
-    /// no other handle inheritable, so nothing else reaches the child.
     fn anonymous_pipe() -> std::io::Result<(OwnedHandle, OwnedHandle)> {
         let mut read: HANDLE = INVALID_HANDLE_VALUE;
         let mut write: HANDLE = INVALID_HANDLE_VALUE;
@@ -286,18 +176,12 @@ mod platform {
         })
     }
 
-    /// The Host's end of one spawned GUI's private channel.
     pub struct HostChannel {
         from_gui: File,
         to_gui: File,
     }
 
     impl HostChannel {
-        /// Duplicates this end so one thread can read while another writes.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when a handle cannot be duplicated.
         pub fn try_clone(&self) -> std::io::Result<Self> {
             Ok(Self {
                 from_gui: self.from_gui.try_clone()?,
@@ -305,11 +189,6 @@ mod platform {
             })
         }
 
-        /// Creates one private pair plus the child ends to pass as stdio.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when a pipe cannot be created.
         pub fn pair() -> std::io::Result<(Self, ChildHandles)> {
             let (gui_read, host_write) = anonymous_pipe()?;
             let (host_read, gui_write) = anonymous_pipe()?;
@@ -325,36 +204,21 @@ mod platform {
             ))
         }
 
-        /// Reads one frame from the GUI.
-        ///
-        /// # Errors
-        ///
-        /// Propagates transport failures other than a clean EOF.
         pub fn recv(&mut self) -> std::io::Result<Option<ToConfirmation>> {
             super::read_frame(&mut self.from_gui)
         }
 
-        /// Sends one frame to the GUI.
-        ///
-        /// # Errors
-        ///
-        /// Propagates encoding and transport failures.
         pub fn send(&mut self, frame: &FromConfirmation) -> std::io::Result<()> {
             super::write_frame(&mut self.to_gui, frame)
         }
     }
 
-    /// The child ends of one private pair, applied to a spawn.
     pub struct ChildHandles {
         stdin: Option<File>,
         stdout: Option<File>,
     }
 
     impl ChildHandles {
-        /// Applies the pair to `command`'s stdio.
-        ///
-        /// The Host marks no other handle inheritable, so these two are the
-        /// only handles that reach the child.
         pub fn apply(&mut self, command: &mut std::process::Command) {
             if let Some(stdin) = self.stdin.take() {
                 command.stdin(std::process::Stdio::from(stdin));
@@ -365,22 +229,12 @@ mod platform {
         }
     }
 
-    /// The GUI's end of the inherited private channel.
-    ///
-    /// The host-spawned GUI takes its channel from stdio directly, so no raw
-    /// handle is retained here: the standard streams own them for the process
-    /// lifetime and the channel is never re-handed onward.
     pub struct GuiChannel {
         from_host: File,
         to_host: File,
     }
 
     impl GuiChannel {
-        /// Duplicates this end so one thread can read while the owner writes.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when a handle cannot be duplicated.
         pub fn try_clone(&self) -> std::io::Result<Self> {
             Ok(Self {
                 from_host: self.from_host.try_clone()?,
@@ -388,15 +242,6 @@ mod platform {
             })
         }
 
-        /// Creates a connected pair for tests that drive a GUI in-process.
-        ///
-        /// The production GUI always adopts the Host's stdio; this constructor
-        /// exists so a test can act as the spawned child without a process
-        /// boundary, and is never used by product code.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when the pipes cannot be created.
         #[doc(hidden)]
         pub fn pair_for_test() -> std::io::Result<(Self, HostChannel)> {
             let (host_read, gui_write) = anonymous_pipe()?;
@@ -413,11 +258,6 @@ mod platform {
             ))
         }
 
-        /// Adopts the channel the Host passed as this process's stdio.
-        ///
-        /// # Errors
-        ///
-        /// Returns the OS failure when the standard handles are unusable.
         pub fn adopt_stdio() -> std::io::Result<Self> {
             use std::os::windows::io::AsHandle as _;
 
@@ -429,20 +269,10 @@ mod platform {
             })
         }
 
-        /// Reads one frame from the Host.
-        ///
-        /// # Errors
-        ///
-        /// Propagates transport failures other than a clean EOF.
         pub fn recv(&mut self) -> std::io::Result<Option<FromConfirmation>> {
             super::read_frame(&mut self.from_host)
         }
 
-        /// Sends one frame to the Host.
-        ///
-        /// # Errors
-        ///
-        /// Propagates encoding and transport failures.
         pub fn send(&mut self, frame: &ToConfirmation) -> std::io::Result<()> {
             super::write_frame(&mut self.to_host, frame)
         }

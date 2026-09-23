@@ -1,9 +1,3 @@
-//! Usage / cost / cap management projection.
-//!
-//! Reads the Stage 6 first-party bounded query over the Client channel.
-//! Cap mutation uses the existing revisioned intent; displayed remaining
-//! is never the admit authority.
-
 use std::time::Duration;
 
 use ene_api::v1::management::{
@@ -22,7 +16,6 @@ use crate::ui::DesktopError;
 
 const UNKNOWN: &str = "unknown";
 
-/// Token / cost / cap page the usage screen projects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsagePanel {
     request: UsageSummaryRequest,
@@ -152,7 +145,6 @@ impl UsagePanel {
         self.page.as_ref().is_some_and(|p| p.next_cursor.is_some())
     }
 
-    /// Display-only body. Unknown cost is never formatted as yen zero.
     #[must_use]
     pub fn render(&self) -> String {
         let mut lines = Vec::new();
@@ -236,7 +228,6 @@ impl UsagePanel {
         self.cap_currency = currency;
     }
 
-    /// Drops the cached usage page. Filters stay; they are not target bodies.
     pub fn wipe_body(&mut self) {
         self.page = None;
         self.notice.clear();
@@ -260,8 +251,6 @@ impl UsagePanel {
         self.load(client).await
     }
 
-    /// Cap mutation through the Host revision/intent. The panel's remaining
-    /// figure is not consulted.
     pub async fn apply_cap(
         &mut self,
         client: &mut Client,

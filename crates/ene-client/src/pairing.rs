@@ -1,18 +1,12 @@
-//! Pairing ownership proof: HMAC-SHA256 of the Host nonce keyed by the
-//! pairing secret. Lives here so `ene-client` does not depend on
-//! `ene-credential` (secret-as-API). The Host verifies with the same MAC.
-
 use hmac::{Hmac, KeyInit as _, Mac as _};
 use sha2::Sha256;
 use subtle::ConstantTimeEq as _;
 
-/// HMAC-SHA256 of `nonce` keyed by `secret`, lowercase hex.
 #[must_use]
 pub fn pairing_proof_hex(secret: &str, nonce: &str) -> String {
     encode_hex_lower(&compute_pairing_mac(secret, nonce))
 }
 
-/// Constant-time verify of a lowercase-hex proof.
 #[must_use]
 pub fn verify_pairing_proof(secret: &str, nonce: &str, proof: &str) -> bool {
     let Some(decoded) = decode_hex_lower(proof) else {

@@ -1,32 +1,14 @@
-//! Monotonic ordering helper for one identity's content sequence.
-//!
-//! A helper only: downstream crates wrap it in domain newtypes such as
-//! `TaskRevision` and always carry it with the identity it orders.
-
 use serde::{Deserialize, Serialize};
 
-/// Monotonic content order for a single identity, as decided by its owner.
-///
-/// Meaningful only together with that identity, and comparable only within the
-/// same `(identity, owner)` pair: a larger value never proves newness across
-/// different identities or owners. [`Self::first`] is the smallest value of a
-/// sequence, not a reserved sentinel; each domain newtype chooses the value it
-/// exposes first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RevisionInner(u64);
 
 impl RevisionInner {
-    /// Returns the smallest value in a sequence.
     #[must_use]
     pub fn first() -> Self {
         Self(0)
     }
 
-    /// Returns the successor in the sequence, or [`None`] at [`u64::MAX`].
-    ///
-    /// Exhaustion is reported rather than hidden: a silent `MAX -> MAX` step
-    /// would make a new revision indistinguishable from its predecessor and
-    /// break compare-before-commit.
     #[must_use]
     pub fn checked_next(&self) -> Option<Self> {
         self.0.checked_add(1).map(Self)

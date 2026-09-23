@@ -1,83 +1,33 @@
-//! Length-prefixed `MessagePack` transport frames (IPC §10.1), shared by the
-//! Host listener and the Client dialer.
-//!
-//! This is a pure byte codec: it frames one domain message ([`WireFrame`]) as
-//! a 4-byte big-endian exclusive length prefix followed by the canonical
-//! `MessagePack` body (IPC §7), and parses such bytes back. It performs no
-//! I/O, owns no sockets, and runs no async tasks; socket read/write loops
-//! live in the applications that embed it.
-//!
-//! One frame carries exactly one domain message. Text streaming chunking
-//! happens at the DTO level ([`ene_api::v1::round::TextStreamFrameWire`]),
-//! never here: this layer never splits, merges, or otherwise interprets
-//! payloads. It never inspects envelope or payload semantics either; domain
-//! meaning (routing, validation, authority) stays in `ene-api` and the
-//! Host. Unknown-field tolerance therefore comes free from the `ene-api`
-//! DTOs, not from any logic here.
-
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::payload::WirePayload;
 use serde::{Deserialize, Serialize};
 
 const LEN_PREFIX_LEN: usize = 4;
-
-/// Maximum `MessagePack` body length in bytes, exclusive of the prefix. The
-/// bound keeps a single hostile or corrupt length prefix from driving
-/// unbounded allocation while comfortably fitting text round-trip traffic.
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 
-/// Serialization order is the field order (`envelope`, then `payload`) under
-/// the crate-wide `MessagePack` configuration used by [`encode_frame`] and
-/// [`decode_frame`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WireFrame {
     pub envelope: WireEnvelope,
     pub payload: WirePayload,
 }
 
-/// Display strings carry lengths and decoder reasons only. They never echo
-/// frame bytes: a corrupt body may contain conversation text, so neither
-/// the reason nor any other field may include raw payload material.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CodecError {
-    /// A body length exceeded [`MAX_FRAME_BYTES`]: on encode, the encoded
-    /// body; on decode, the length the prefix claims.
     #[error("frame body of {len} bytes exceeds the 256 KiB cap")]
     FrameTooLarge { len: usize },
-    /// Fewer bytes than a complete frame arrived. `need` is the total byte
-    /// count required: 4 bytes when the prefix itself is short,
-    /// prefix plus claimed body length otherwise.
     #[error("truncated frame: have {have} bytes, need {need}")]
     Truncated { have: usize, need: usize },
-    /// The length prefix was well-formed but the body bytes did not decode
-    /// as a [`WireFrame`].
     #[error("frame body failed to decode: {reason}")]
     DecodeFailed { reason: String },
 }
 
-/// The length prefix is exclusive: it counts the `MessagePack` body only,
-/// not the prefix (IPC §10.1). Bodies longer than [`MAX_FRAME_BYTES`] are
-/// rejected with [`CodecError::FrameTooLarge`].
-///
-/// The cap is enforced encode-then-check: the body is serialized first and
-/// its length compared before the output buffer is built. This allocates up
-/// to the true body size even for oversize inputs. That is acceptable at the
-/// 256 KiB scale on a same-machine socket between mutually authenticated
-/// peers, but a future hardening step (a length-bounded streaming encoder)
-/// should precede any use over larger-payload or less-trusted transports.
 pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, CodecError> {
     let body = rmp_serde::to_vec(frame).map_err(|error| CodecError::DecodeFailed {
-        // `rmp-serde` writing into a `Vec` cannot fail in practice; there is
-        // no encode-dedicated variant because the failure is uninhabited for
-        // these types, so the single codec error carries it with the stage
-        // named in the reason.
         reason: std::format!("encode: {error}"),
     })?;
     if body.len() > MAX_FRAME_BYTES {
         return Err(CodecError::FrameTooLarge { len: body.len() });
     }
-    // The cap check above keeps this conversion exact: `MAX_FRAME_BYTES`
-    // (256 KiB) fits in `u32`.
     let len_prefix = body.len() as u32;
     let mut out = Vec::with_capacity(LEN_PREFIX_LEN + body.len());
     out.extend_from_slice(&len_prefix.to_be_bytes());
@@ -85,13 +35,6 @@ pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, CodecError> {
     Ok(out)
 }
 
-/// Consumed length is prefix plus claimed body length, so trailing bytes are
-/// the next frame: callers advance past the consumed count and call again.
-/// Inputs shorter than the prefix or the claimed body fail with
-/// [`CodecError::Truncated`]; a claimed length over [`MAX_FRAME_BYTES`]
-/// fails with [`CodecError::FrameTooLarge`] before any body-sized work (no
-/// large allocation, no large read); an undecodable body fails with
-/// [`CodecError::DecodeFailed`], whose reason carries no raw payload bytes.
 pub fn decode_frame(bytes: &[u8]) -> Result<(WireFrame, usize), CodecError> {
     if bytes.len() < LEN_PREFIX_LEN {
         return Err(CodecError::Truncated {
@@ -112,9 +55,6 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(WireFrame, usize), CodecError> {
     }
     let frame = rmp_serde::from_slice(&bytes[LEN_PREFIX_LEN..need]).map_err(|error| {
         CodecError::DecodeFailed {
-            // `rmp-serde` diagnostics describe the structural failure and
-            // never echo input bytes, so this passthrough cannot leak body
-            // text into logs.
             reason: std::format!("{error}"),
         }
     })?;
@@ -211,8 +151,6 @@ mod tests {
 
     #[test]
     fn oversize_prefix_rejected_without_large_read() {
-        // Claims 1 GiB but only 10 body bytes arrive: the cap must fire
-        // before any body-sized allocation or read.
         let mut bytes = 1_073_741_824_u32.to_be_bytes().to_vec();
         bytes.extend_from_slice(&[0_u8; 10]);
         let error = decode_frame(&bytes).expect_err("decode oversize prefix");
@@ -225,8 +163,6 @@ mod tests {
 
     #[test]
     fn corrupt_body_is_decode_failed_without_payload_echo() {
-        // 0xC1 is never a valid `MessagePack` marker; the trailing ASCII is
-        // planted body-like text that must not leak into the diagnostics.
         let mut body = vec![0xC1_u8];
         body.extend_from_slice(b"secret-body-marker-xyz");
         let mut bytes = (body.len() as u32).to_be_bytes().to_vec();

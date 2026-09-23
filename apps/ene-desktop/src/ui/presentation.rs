@@ -1,4 +1,3 @@
-//! Typed, body-bearing projections. Opaque keys are action premises, never labels.
 use crate::i18n::Locale;
 use std::{future::Future, pin::Pin, sync::Arc};
 

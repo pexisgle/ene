@@ -1,12 +1,3 @@
-//! Stage 7 C1: Memory management GUI against a real Host.
-//!
-//! Provider is fake. Barriers park learning formation so the GUI cannot
-//! invent a Memory before the Host commits. Correction, situation change,
-//! merge, and conversational forget stay on Learning / Companion; this GUI
-//! does not add formation or physical-delete shortcuts.
-//!
-//! Acceptance §3.1–§3.10. Targeted Deletion (§3.11–§3.12) is C3.
-
 #![cfg(any(unix, windows))]
 #![allow(
     clippy::expect_used,
@@ -410,8 +401,6 @@ async fn memory_gui_confirms_acceptance_3_1_to_3_10() {
         "the first list page is a Host memory section with no cursor"
     );
 
-    // §3.1–§3.3: conversation forms a companion Memory; GUI shows content,
-    // scope, importance, created-at; grounds live on the revision page.
     transport.push_learning(
         r#"{"summary": "The owner prefers jasmine tea in the morning.", "memories": [{"action": "create", "content": "The owner prefers jasmine tea in the morning.", "importance": 5, "temporal": "enduring"}]}"#,
     );
@@ -476,14 +465,12 @@ async fn memory_gui_confirms_acceptance_3_1_to_3_10() {
         "revisions use memory_revisions_of, not a list scan"
     );
 
-    // §3.8: chatter with no lasting value is not stored.
     transport.push_learning(r#"{"summary": "Small talk about the weather.", "memories": []}"#);
     say(&mut desktop, "nice weather today").await;
     transport.wait_learning().await;
     desktop.refresh_memory().await.expect("after chatter");
     assert_eq!(desktop.memory().rows().len(), 1, "chatter stores nothing");
 
-    // §3.9: repeating the same fact reinforces rather than duplicating.
     transport.push_learning(
         r#"{"summary": "The owner mentioned tea again.", "memories": [{"action": "update", "target": 1, "change": "reinforced", "content": "The owner prefers jasmine tea in the morning."}]}"#,
     );
@@ -493,7 +480,6 @@ async fn memory_gui_confirms_acceptance_3_1_to_3_10() {
     desktop.refresh_memory().await.expect("after reinforce");
     assert_eq!(desktop.memory().rows().len(), 1, "no duplicate memory");
 
-    // §3.5–§3.6: conversational correction and situation-change keep history.
     transport.push_learning(
         r#"{"summary": "The owner corrected the earlier memory.", "memories": [{"action": "update", "target": 1, "change": "corrected_initially_wrong", "content": "The owner never liked jasmine tea."}]}"#,
     );
@@ -535,8 +521,6 @@ async fn memory_gui_confirms_acceptance_3_1_to_3_10() {
         desktop.memory().rows()
     );
 
-    // §3.7: a registered secret is never stored as Memory or shown in the
-    // snapshot, even when the owner asks to remember it.
     transport.push_learning(&format!(
         r#"{{"summary": "The owner shared a key: {SECRET}.", "memories": [{{"action": "create", "content": "The owner's key is {SECRET}.", "importance": 5, "temporal": "enduring"}}]}}"#
     ));
@@ -593,7 +577,6 @@ async fn memory_gui_confirms_acceptance_3_1_to_3_10() {
         snap.memory_panel
     );
 
-    // §3.4: restart keeps memories and the companion still recalls them.
     server.shutdown_and_join().await;
     handle
         .run_startup_mutations()
@@ -643,7 +626,6 @@ async fn memory_gui_confirms_acceptance_3_1_to_3_10() {
         "the current recognition is recalled after restart: {recalled}"
     );
 
-    // §3.10: conversational forget deprioritizes; the GUI still shows the row.
     transport.push_learning(
         r#"{"summary": "The owner asked to let the drink topic rest.", "memories": [{"action": "forget", "target": 2}]}"#,
     );

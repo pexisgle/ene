@@ -1,42 +1,15 @@
-//! Projection IPC owned by `ene-body`.
-//!
-//! This is **not** the Host↔Client protocol (`ene-api` / `ene-plugin-ipc`) and
-//! not plugin IPC. `ene-desktop` will match this byte layout later; it does
-//! not need to link this crate. See `apps/ene-body/README.md` for the table
-//! of flags and the separation between automated checks and real probes.
-//!
-//! Frame:
-//!
-//! ```text
-//! u32 BE exclusive body length | MessagePack body (named structs, ≤ 64 KiB)
-//! ```
-//!
-//! Direction is implied by the writer: parent encodes [`ParentToBody`]; body
-//! encodes [`BodyToParent`]. Forbidden content (secrets, conversation text,
-//! pairing material, Task commands, Host PKs) has no variant and is rejected
-//! as an unknown payload, not interpreted.
-
 use serde::{Deserialize, Serialize};
 
 const LEN_PREFIX_LEN: usize = 4;
 
-/// Maximum MessagePack body length, exclusive of the length prefix.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
-/// Maximum number of pose clips one [`MotionSetInfo`] may carry. Five pose
-/// hints exist today; the bound keeps a parent from streaming paths without
-/// end and is enforced before any file is opened.
 pub const MAX_MOTION_CLIPS: usize = 16;
 
-/// Maximum accepted byte length of one clip path.
 pub const MAX_MOTION_PATH_BYTES: usize = 4096;
 
-/// Health ticks are a liveness signal, not presented-FPS evidence.
 pub const HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Codec failures. Reasons carry lengths and structural decoder text only —
-/// never the raw frame bytes, which a confused parent might have stuffed
-/// with conversation text.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IpcError {
     #[error("frame body of {len} bytes exceeds the 64 KiB cap")]
@@ -49,7 +22,6 @@ pub enum IpcError {
     EncodeFailed { reason: String },
 }
 
-/// Parent → body projection commands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ParentToBody {
     Show,
@@ -61,7 +33,6 @@ pub enum ParentToBody {
     Shutdown,
 }
 
-/// Body → parent status, health, and overlay-local facts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BodyToParent {
     Ready(ReadyInfo),
@@ -76,11 +47,6 @@ pub enum BodyToParent {
     CleanExit,
 }
 
-/// Screen-space placement and HiDPI scale.
-///
-/// `scale` is the factor the parent observed (e.g. 1.0 or 2.0), not a
-/// joint/bone value. Zero sizes and non-finite scales are invalid and must
-/// not change overlay state.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlacementBox {
@@ -110,7 +76,6 @@ impl Default for PlacementBox {
     }
 }
 
-/// Activity class only. Joint angles and blendshapes stay inside the body.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PoseHint {
     #[default]
@@ -121,17 +86,11 @@ pub enum PoseHint {
     Attention,
 }
 
-/// Filesystem reference to a VRM asset. Not a Host primary key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum AssetRef {
-    Path {
-        path: String,
-    },
-    /// Parent-owned temp file holding bytes. Body does not unlink it.
-    BytesTemp {
-        path: String,
-    },
+    Path { path: String },
+    BytesTemp { path: String },
 }
 
 impl AssetRef {
@@ -143,8 +102,6 @@ impl AssetRef {
     }
 }
 
-/// One activity hint's animation clip. The path is a filesystem reference;
-/// clip bytes are never in the frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PoseClip {
@@ -152,11 +109,6 @@ pub struct PoseClip {
     pub path: String,
 }
 
-/// Pose → clip assignment for body-local `.vrma` playback.
-///
-/// A set replaces the previous assignment; it is not merged into it. Which
-/// clip file backs an activity hint is an asset fact the parent supplies.
-/// Joint-level staging stays inside the body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MotionSetInfo {
@@ -169,14 +121,6 @@ impl MotionSetInfo {
         self.clips.iter().find(|clip| clip.pose == pose)
     }
 
-    /// Structural checks that run before any clip file is opened, so a
-    /// malformed set cannot partially replace playback state.
-    ///
-    /// # Errors
-    ///
-    /// [`MotionFailReason::EmptySet`], [`MotionFailReason::TooManyClips`],
-    /// [`MotionFailReason::DuplicatePose`], [`MotionFailReason::EmptyPath`],
-    /// or [`MotionFailReason::PathTooLong`].
     pub fn validate(&self) -> Result<(), MotionFailInfo> {
         if self.clips.is_empty() {
             return Err(MotionFailInfo::new(
@@ -222,7 +166,6 @@ impl MotionSetInfo {
     }
 }
 
-/// Overlay backend actually in use. Headless is never production acceptance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OverlayKind {
     Headless,
@@ -230,14 +173,12 @@ pub enum OverlayKind {
     WindowsDwm,
 }
 
-/// wgpu init outcome carried on Ready; a failed GPU also emits [`GpuFailInfo`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GpuInitStatus {
     Ok,
     Failed,
 }
 
-/// Expression / SpringBone / LookAt runtime availability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FeatureSupport {
     Available,
@@ -292,11 +233,9 @@ pub enum AssetFailReason {
 #[serde(deny_unknown_fields)]
 pub struct AssetFailInfo {
     pub reason: AssetFailReason,
-    /// Sanitized loader/runtime detail. It never contains asset bytes.
     pub detail: String,
 }
 
-/// Why a [`MotionSetInfo`] was not adopted as playback state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MotionFailReason {
     EmptySet,
@@ -309,12 +248,10 @@ pub enum MotionFailReason {
     InvalidVrma,
 }
 
-/// Rejected motion set. The previous assignment stays live.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MotionFailInfo {
     pub reason: MotionFailReason,
-    /// Sanitized loader detail. It never contains clip bytes.
     pub detail: String,
 }
 
@@ -328,7 +265,6 @@ impl MotionFailInfo {
     }
 }
 
-/// A strict VRM load completed and produced renderer/runtime inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssetReadyInfo {
@@ -347,13 +283,9 @@ pub struct HealthTick {
     pub overlay: OverlayKind,
     pub expressions: FeatureSupport,
     pub spring_bone: FeatureSupport,
-    /// Whether a validated clip set is loaded. Layout capability is not
-    /// claimed here; a playable clip per pose is what this reports.
     pub motion: FeatureSupport,
 }
 
-/// Overlay-local user facts. Parent may later treat these as settings
-/// candidates; they are not Host-master writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum LocalUiFact {
@@ -362,8 +294,6 @@ pub enum LocalUiFact {
     Hide,
 }
 
-/// Compositor/display outcome for one surface commit. This is FPS evidence;
-/// health ticks and render requests are not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PresentationFeedback {
@@ -386,40 +316,18 @@ pub enum PresentationOutcome {
     },
 }
 
-/// Encode a parent→body command (tests and dummy parents).
-///
-/// # Errors
-///
-/// Returns [`IpcError::EncodeFailed`] or [`IpcError::FrameTooLarge`].
 pub fn encode_parent(message: &ParentToBody) -> Result<Vec<u8>, IpcError> {
     encode_named(message)
 }
 
-/// Encode a body→parent event.
-///
-/// # Errors
-///
-/// Returns [`IpcError::EncodeFailed`] or [`IpcError::FrameTooLarge`].
 pub fn encode_body(message: &BodyToParent) -> Result<Vec<u8>, IpcError> {
     encode_named(message)
 }
 
-/// Decode one parent→body command from a buffer that may contain extra
-/// trailing bytes of the next frame. Returns the message and total bytes
-/// consumed (prefix + body).
-///
-/// # Errors
-///
-/// Truncated input, oversize claimed length, or an undecodable / unknown body.
 pub fn decode_parent(bytes: &[u8]) -> Result<(ParentToBody, usize), IpcError> {
     decode_named(bytes)
 }
 
-/// Decode one body→parent event.
-///
-/// # Errors
-///
-/// Truncated input, oversize claimed length, or an undecodable / unknown body.
 pub fn decode_body(bytes: &[u8]) -> Result<(BodyToParent, usize), IpcError> {
     decode_named(bytes)
 }
@@ -733,8 +641,6 @@ mod tests {
 
     #[test]
     fn unknown_motion_pose_and_extra_fields_are_rejected() {
-        // The parent encodes named maps; an unknown pose or an added field
-        // must fail decoding rather than being interpreted as something else.
         let unknown_pose = rmp_serde::to_vec_named(&serde_json::json!({
             "MotionSet": { "clips": [{ "pose": "Dancing", "path": "/tmp/x.vrma" }] }
         }))

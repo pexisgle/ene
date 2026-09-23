@@ -1,19 +1,3 @@
-//! Stage 5 slice F: Host-integration + first-party Client E2E over the real
-//! Unix-socket transport (S5-01..24, OS-transport paragraph).
-//!
-//! Real listener socket, real `ene-ctl` [`Client`], real Host orchestration;
-//! only the provider transport is fake. The fake is controllable: scripted
-//! FIFO replies, a send counter, recorded inputs, and deterministic per-call
-//! gates (barriers), never sleeps for ordering. Each test maps to its S5 row
-//! in a comment; rows already covered at Host-handle level by slice unit
-//! tests are cited, not re-driven.
-//!
-//! Unix-only: like `vertical_slice.rs`, these tests drive the Unix socket
-//! listener. The Windows named-pipe listener shares the same handshake and
-//! phase path; its transport subset runs in
-//! [`stage5_windows_pipe_e2e.rs`](stage5_windows_pipe_e2e.rs) on the Windows
-//! CI runner.
-
 #![cfg(unix)]
 #![allow(
     clippy::expect_used,
@@ -63,13 +47,6 @@ fn memory_store() -> MemoryCredentialStore {
     store
 }
 
-/// Controllable provider fake: scripted FIFO replies consumed in arrival
-/// order, a send counter, recorded inputs, and deterministic per-call gates.
-///
-/// Replies pop per provider call in arrival order, so a test serializes
-/// dialogue turns against agent bursts with gates: while the agent's call N
-/// sits in `blocks`, the only arriving call is the dialogue's, and it pops
-/// the next reply. Ordering never depends on timing.
 struct GateTransport {
     replies: Mutex<VecDeque<String>>,
     inputs: Mutex<Vec<String>>,
@@ -100,8 +77,6 @@ impl GateTransport {
             .remove(&call);
     }
 
-    /// Ends a parked provider call without producing a final result or an
-    /// Action directive, so graceful restart can drain the old execution.
     fn fail(&self, call: usize) {
         self.failures.lock().unwrap().insert(call);
         self.unblock(call);
@@ -114,8 +89,6 @@ impl GateTransport {
             .clone()
     }
 
-    /// Observation poll for background completion (not an ordering device;
-    /// ordering uses [`Self::blocks`] gates).
     async fn wait_sends(&self, wanted: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while self.sends() < wanted {
@@ -141,8 +114,6 @@ impl ProviderTransport for GateTransport {
     > {
         Box::pin(async move {
             let call = self.sends.fetch_add(1, Ordering::SeqCst) + 1;
-            // Deterministic barrier: this call number stays here until the
-            // test unblocks it. Membership only shrinks, so no wakeup races.
             loop {
                 let held = self
                     .blocks
@@ -176,8 +147,6 @@ impl ProviderTransport for GateTransport {
     }
 }
 
-/// One provider reply carrying exactly one companion `[task-control]`
-/// directive: the marker line must be the reply's first non-empty line.
 fn task_reply(directive: serde_json::Value) -> String {
     format!("[task-control] {directive}")
 }
@@ -198,8 +167,6 @@ async fn wait_for_socket(dir: &std::path::Path) -> bool {
     false
 }
 
-/// A stopped Host leaves the path behind, so this waits for an actual
-/// accept, not mere path existence.
 async fn wait_for_listener(dir: &std::path::Path) -> bool {
     for _ in 0..200 {
         if tokio::net::UnixStream::connect(dir.join("ene.sock"))
@@ -336,8 +303,6 @@ async fn setup_flow(client: &mut Client, approver: &HostHandle) -> Result<(), St
     Ok(())
 }
 
-/// Owns serving shutdown without retaining a strong Host reference. Joining
-/// every serving child, then observing the dead Weak, precedes any successor.
 struct ServingTask {
     shutdown: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<Result<(), CoreError>>,
@@ -378,14 +343,11 @@ impl ServingTask {
         );
     }
 
-    /// Final test teardown only; a restart always uses shutdown_and_join.
     fn abort(&self) {
         self.task.abort();
     }
 }
 
-/// Serves `dir` with `transport`, pairs the first device, and completes
-/// setup; returns a weak Host observer, the serving owner, and a live client.
 async fn serve_and_setup(
     dir: std::path::PathBuf,
     transport: Arc<GateTransport>,
@@ -410,8 +372,6 @@ async fn serve_and_setup(
     (observer, server, client)
 }
 
-/// One conversation round over the socket: submit, require acceptance, drain
-/// the stream to completion. Returns the round wire id, stream id, and text.
 async fn send_round(
     client: &mut Client,
     text: &str,
@@ -518,8 +478,6 @@ async fn select_workspace(client: &mut Client, path: &std::path::Path) -> Result
     Ok(())
 }
 
-/// Drains the session-deferred auto-presented summaries (pushed backlog the
-/// Host sent without `reply_to`).
 fn take_summaries(client: &mut Client) -> Vec<UndeliveredSummary> {
     let mut summaries = Vec::new();
     for frame in client.take_undelivered() {
@@ -545,8 +503,6 @@ async fn fetch_summary(client: &mut Client, what: &str) -> Result<UndeliveredSum
     Ok(summary)
 }
 
-/// One domain frame on a superseded connection answers typed
-/// `StaleConnection` while the socket stays open (IPC §11.3, S5-03/04).
 async fn ack_summary(
     client: &mut Client,
     summary: &UndeliveredSummary,
@@ -617,7 +573,6 @@ async fn wait_path(path: std::path::PathBuf) {
     }
 }
 
-/// Gracefully joins the predecessor before opening and starting its successor.
 async fn restart_host(
     dir: &std::path::Path,
     server: ServingTask,
@@ -632,8 +587,6 @@ async fn start_restarted_host(
     transport: Arc<GateTransport>,
 ) -> (Weak<HostHandle>, ServingTask) {
     let handle = open_host(dir).await;
-    // Production startup mutations before the listener binds: normalization,
-    // pairing cleanup, sweep, and sealed-result reconciliation.
     handle
         .run_startup_mutations()
         .await
@@ -647,8 +600,6 @@ async fn start_restarted_host(
     (observer, server)
 }
 
-/// Observation poll for the server-side disconnect fallback (not an
-/// ordering device; the fallback is async after a socket close).
 async fn wait_presence(dir: &std::path::Path, wanted: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -681,18 +632,12 @@ fn presence_row(dir: &std::path::Path) -> (String, i64) {
     .expect("one presence attribution must read")
 }
 
-/// S5-01 (disconnect mid-provider-wait: the Host-only Task continues, no
-/// cancel/Failed, another valid round runs mid-execution) flowing into S5-02
-/// (absence completion auto-displays on reconnect; send is not Presented).
 #[tokio::test]
 async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let workspace = tempfile::tempdir().expect("workspace directory");
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
-    // Call order is arrival-gated: 1 propose, 2 agent-read (held), 3 chat,
-    // then 4 create and 5 final after the release, and 6 summons presence
-    // on the last reconnect (the submit auto-presents the backlog).
     let transport = Arc::new(GateTransport::new(
         vec![
             task_reply(
@@ -713,8 +658,6 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
         .await
         .expect("workspace must select");
 
-    // Round 1 creates and delegates the Task; the production launcher starts
-    // the runner, whose first provider call parks at the gate.
     let (round_wire, stream_id, text_out) =
         send_round(&mut client, "please read input.txt and write report.md")
             .await
@@ -723,11 +666,7 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
     confirm_round(&mut client, &round_wire, stream_id).await;
     transport.wait_sends(2).await;
 
-    // Disconnect mid-provider-wait: no cancel, no failure may follow.
     drop(client);
-    // Reconnect while the execution is still parked: another valid round
-    // runs to completion mid-execution (call 3 pops the chat reply while
-    // call 2 stays gated, so the order is arrival-deterministic).
     let mut client = Client::connect(&dir, DESCRIPTOR, "test")
         .await
         .expect("reconnect must succeed");
@@ -743,11 +682,8 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
         .expect("a round must start mid-execution");
     assert_eq!(chat, "You are welcome.");
     confirm_round(&mut client, &_round2, stream2).await;
-    // Absent again before the completion commits.
     drop(client);
 
-    // Release the provider wait: the Host-only execution reads, writes, and
-    // finalizes with no client attached.
     transport.unblock(2);
     wait_path(workspace.path().join("report.md")).await;
     assert_eq!(
@@ -755,7 +691,6 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
         "# Report\nnotes"
     );
 
-    // Reconnect: the absence completion auto-displays with its file facts.
     let mut client = Client::connect(&dir, DESCRIPTOR, "test")
         .await
         .expect("second reconnect must succeed");
@@ -764,9 +699,6 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
         .expect("task must complete");
     assert_eq!(page.tasks[0].revision, 1, "no resume happened");
     assert_eq!(transport.sends(), 5, "no second launch, no rerun");
-    // The summon submit establishes formal presence and auto-presents the
-    // absence backlog without an Owner query; the pushed frames defer on
-    // the session while the turn's own reply still streams normally.
     let (_round3, stream3, done_chat) = send_round(&mut client, "all done?")
         .await
         .expect("summon round must complete");
@@ -782,11 +714,6 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
         .iter()
         .find(|candidate| !candidate.items.is_empty())
         .expect("a pushed batch must carry rows");
-    // The summon published the authoritative presence fact ahead of this
-    // summary, so the session already echoes the pushed generation: the
-    // first ACK presents the carried batch with no probe round and no
-    // second submit. A summary ahead of its fact could only be refused
-    // stale, so this leg is the regression the fact ordering fixes.
     let acked = client
         .request_observed(
             WirePayload::UndeliveredAck(cmds::undelivered_ack(
@@ -810,7 +737,6 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
         6,
         "the first ACK presents without an extra round"
     );
-    // After the ACK the backlog drains: a fresh fetch shows no rows.
     let answer = ask(
         &mut client,
         WirePayload::UndeliveredRequest(cmds::undelivered_request(None, None, false)),
@@ -837,13 +763,8 @@ async fn s5_01_disconnect_mid_wait_then_absence_completion_presents() {
     server.abort();
 }
 
-/// S5-05: the old close never clears the new current, in both orders: (A)
-/// the old close completes before the new auth, (B) the new auth installs
-/// first and the old close races in after. The same-admission comparison is
-/// serve-level; these are the two orders' end states over real sockets.
 #[tokio::test]
 async fn s5_05_old_close_never_clears_new_current_both_orders() {
-    // Order A: close, then auth.
     let temp_a = tempfile::TempDir::new().unwrap();
     let dir_a = temp_a.path().to_path_buf();
     let transport_a = Arc::new(GateTransport::new(
@@ -867,7 +788,6 @@ async fn s5_05_old_close_never_clears_new_current_both_orders() {
     confirm_round(&mut c2, &_round_a2, stream_a2).await;
     server_a.abort();
 
-    // Order B: auth, then the old close.
     let temp_b = tempfile::TempDir::new().unwrap();
     let dir_b = temp_b.path().to_path_buf();
     let transport_b = Arc::new(GateTransport::new(
@@ -884,9 +804,6 @@ async fn s5_05_old_close_never_clears_new_current_both_orders() {
         .await
         .expect("order-B second auth must succeed");
     drop(c1);
-    // The order is fixed above (auth before close); the end-state round
-    // itself is the event gate — it retries to a deadline instead of
-    // sleeping a fixed window for the server-side close to land.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let (_round_b2, stream_b2, chat_b) = loop {
         match send_round(&mut c2, "hi again").await {
@@ -909,9 +826,6 @@ fn only_task_uuid(dir: &std::path::Path) -> String {
         .expect("one task must exist")
 }
 
-/// All task UUIDs in creation order. The wire purpose ID prefixes the raw
-/// task UUID (`encode_purpose`), so these correlate list rows across
-/// connections, where wire refs are re-minted.
 fn task_uuids(dir: &std::path::Path) -> Vec<String> {
     let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
     let mut statement = conn
@@ -924,10 +838,6 @@ fn task_uuids(dir: &std::path::Path) -> Vec<String> {
         .expect("task ids must decode")
 }
 
-/// S5-07: after a normal disconnect and reconnect, nothing old replays: the
-/// pre-restart round id is stale, the old connection's receipt never
-/// migrates, management stays readable, and only a fresh summon starts a
-/// new round. Auth alone restores nothing (the fresh submit summons).
 #[tokio::test]
 async fn s5_07_stale_round_input_and_ack_never_replay() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -940,21 +850,16 @@ async fn s5_07_stale_round_input_and_ack_never_replay() {
     let (round1, _stream1, _) = send_round(&mut c1, "hello")
         .await
         .expect("first round must complete");
-    // Leave the reply unconfirmed so an undelivered receipt exists.
     let receipt = fetch_summary(&mut c1, "fetch")
         .await
         .expect("fetch must answer");
     assert!(!receipt.items.is_empty(), "the reply must linger");
     drop(c1);
-    // The disconnect fallback is a durable fact: wait for it before the new
-    // connection so the stale-round probe cannot race it (the fallback
-    // decides whether the old round can still match the current presence).
     wait_presence(&dir, "no_active").await;
 
     let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
         .await
         .expect("reconnect must succeed");
-    // The pre-restart round never resumes.
     let companion = c2.companion_ref();
     let stale = ask(
         &mut c2,
@@ -976,7 +881,6 @@ async fn s5_07_stale_round_input_and_ack_never_replay() {
         ),
         "pre-restart rounds must not resume, got {stale:?}"
     );
-    // The old connection's receipt never migrates to the new one.
     let migrated = ack_summary(&mut c2, &receipt)
         .await
         .expect("old ACK must answer");
@@ -987,11 +891,9 @@ async fn s5_07_stale_round_input_and_ack_never_replay() {
         ),
         "old ACKs never cross connections, got {migrated:?}"
     );
-    // Management stays readable without presence...
     view_mark(&mut c2).await.expect("view must read");
     let page = list_tasks(&mut c2).await.expect("list must read");
     assert!(page.tasks.is_empty());
-    // ...and only the fresh summon starts a new round.
     let (_round2, stream2, chat) = send_round(&mut c2, "fresh start")
         .await
         .expect("post-reconnect round must complete");
@@ -1000,17 +902,12 @@ async fn s5_07_stale_round_input_and_ack_never_replay() {
     server.abort();
 }
 
-/// S5-09: while the progress receipt is on display, the completion commits;
-/// ACKing the progress receipt presents only its batch, the completion
-/// stays unpresented for the next display, and duplicate, forged-round, and
-/// foreign-connection ACKs never corrupt either state.
 #[tokio::test]
 async fn s5_09_progress_ack_never_presents_later_completion() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let workspace = tempfile::tempdir().expect("workspace directory");
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
-    // Calls: 1 propose, 2 read, 3 create, 4 final (held), 5 post-drop chat.
     let transport = Arc::new(GateTransport::new(
         vec![
             task_reply(
@@ -1032,19 +929,13 @@ async fn s5_09_progress_ack_never_presents_later_completion() {
     let (_round1, _stream1, _) = send_round(&mut c1, "please read input.txt and write report.md")
         .await
         .expect("propose round must complete");
-    // The propose submit summons and publishes the presence fact, so this
-    // session already echoes the generation the receipts below are stamped
-    // with: every ACK leg answers its own outcome with no probe round.
     transport.wait_sends(4).await;
 
-    // Display the progress batch while the completion is still gated.
     let progress = fetch_summary(&mut c1, "progress fetch")
         .await
         .expect("progress fetch must answer");
     assert!(!progress.items.is_empty(), "progress must display");
 
-    // The completion commits; ACKing the progress receipt presents only its
-    // batch, never the completion.
     transport.unblock(4);
     let page = wait_task_progress(&mut c1, "completed", 1)
         .await
@@ -1074,7 +965,6 @@ async fn s5_09_progress_ack_never_presents_later_completion() {
         "the completion rides a new receipt"
     );
 
-    // A duplicate ACK of the consumed progress receipt changes nothing...
     let dup = ack_summary(&mut c1, &progress)
         .await
         .expect("duplicate ACK must answer");
@@ -1082,8 +972,6 @@ async fn s5_09_progress_ack_never_presents_later_completion() {
         matches!(dup, UndeliveredAckOutcome::StalePresentation),
         "consumed receipts stay stale, got {dup:?}"
     );
-    // ...a forged round on the live completion receipt is stale, never
-    // applied...
     let forged = c1
         .request_observed(
             WirePayload::UndeliveredAck(cmds::undelivered_ack(
@@ -1103,7 +991,6 @@ async fn s5_09_progress_ack_never_presents_later_completion() {
         ),
         "forged rounds never apply, got {forged:?}"
     );
-    // ...and the completion rows stay unpresented throughout.
     let again = fetch_summary(&mut c1, "completion refetch")
         .await
         .expect("completion refetch must answer");
@@ -1112,8 +999,6 @@ async fn s5_09_progress_ack_never_presents_later_completion() {
         "unpresented rows keep their receipt"
     );
 
-    // The old receipt never migrates: on a new connection it answers stale
-    // while the rows re-present under the new receipt, which then presents.
     drop(c1);
     let mut c2 = Client::connect(&dir, DESCRIPTOR, "test")
         .await
@@ -1155,21 +1040,12 @@ async fn s5_09_progress_ack_never_presents_later_completion() {
     server.abort();
 }
 
-/// S5-17 (ordered gates; the true race is unit-level in
-/// `concurrent_resume_commands_commit_at_most_once`): of two resumes at the
-/// same revision exactly one commits r+1 and launches once; the loser is
-/// stale, cancel stays effective on the new revision, and terminal refuses.
-/// S5-18: the same-epoch retry replays the first outcome without a second
-/// launch; after a crash the old command never auto-resends (stale epoch),
-/// and a fresh command on the committed-away revision is stale while the
-/// new revision waits unexecuted.
 #[tokio::test]
 async fn s5_17_18_resume_gates_and_retry_idempotency() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let workspace = tempfile::tempdir().expect("workspace directory");
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
-    // T_a calls: 1 propose, 2 read, 3 create (held: interrupted by crash).
     let transport_a = Arc::new(GateTransport::new(
         vec![
             task_reply(
@@ -1190,8 +1066,6 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     transport_a.wait_sends(3).await;
     drop(c1);
 
-    // Restart with the resumed execution held before its first send, so no
-    // completion can interfere with the gate assertions.
     let transport_b = Arc::new(GateTransport::new(vec![String::from("held")], &[1]));
     transport_a.fail(3);
     let (_handle, server) = restart_host(&dir, server, Arc::clone(&transport_b)).await;
@@ -1204,7 +1078,6 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     let wire = page.tasks[0].task.0.clone();
     let purpose = page.tasks[0].purpose.clone();
 
-    // Two resumes at the same revision: exactly one commits r+1.
     let prep1 = c2.prepare(WirePayload::ResumeTask(cmds::resume_task_request(
         &wire,
         1,
@@ -1242,18 +1115,11 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     assert_eq!(transport_b.sends(), 1, "only the winner launches once");
     assert_eq!(table_count(&dir, "delegation"), 2, "one new delegation");
 
-    // The same-epoch retry replays the first outcome with no second launch.
     let replay = c2.retry(&prep1).await.expect("retry must answer");
     assert_eq!(replay, out1, "retries replay instead of recommitting");
     assert_eq!(transport_b.sends(), 1, "retry launches nothing");
     assert_eq!(table_count(&dir, "delegation"), 2, "retry commits nothing");
 
-    // End the held call without a result, then restart silent:
-    // the old command never auto-resends. Over the socket the old
-    // connection's task ref already resolves to nothing (refs are
-    // connection-scoped, so ref resolution precedes the epoch compare that
-    // answers StaleConnection at handle level); either way nothing commits
-    // and nothing launches.
     drop(c2);
     let transport_c = Arc::new(GateTransport::new(Vec::new(), &[]));
     transport_b.fail(1);
@@ -1297,8 +1163,6 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     );
     assert_eq!(transport_c.sends(), 0, "no auto-resend, no relaunch");
 
-    // Cancel stays effective on the new revision; the cancelled terminal
-    // then refuses resume.
     let task_uuid: uuid::Uuid = only_task_uuid(&dir).parse().expect("task id parses");
     let mark = view_mark(&mut c3).await.expect("view must read");
     let cancelled = ask(
@@ -1353,8 +1217,6 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     server.abort();
 }
 
-/// Observation poll for a durable table count (background completion, not
-/// ordering; ordering uses provider gates).
 fn delegation_ids(dir: &std::path::Path, task: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
     let mut statement = conn
@@ -1383,25 +1245,12 @@ fn task_results(dir: &std::path::Path) -> Vec<(String, i64, String, Option<i64>)
         .expect("results must decode")
 }
 
-/// S5-19: after an explicit resume, the old delegation's late result is
-/// recorded once to the original execution and sealed there — adoption is
-/// original-only, the resumed Task waits for (and completes with) only its
-/// own delegation, and old evidence never moves into the new delegation's
-/// relied set. The old provider call ends without a result before graceful
-/// restart. A late-arrival fixture then enters the successor's canonical
-/// arrival/adoption boundaries with the immutable original execution refs;
-/// no predecessor Host or runner survives into the successor's lifetime.
-/// Late failures go stale and settlements stay attempt-local at owner level
-/// (`result_arrival` / `resume_orchestration`); the socket E2E pins the
-/// result-routing observables.
 #[tokio::test]
 async fn s5_19_late_arrival_stays_with_original_execution() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let workspace = tempfile::tempdir().expect("workspace directory");
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
-    // T_a calls: 1 propose, 2 read, 3 create, 4 final-d1 (held, then failed
-    // without a result so graceful shutdown can join the original runner).
     let transport_a = Arc::new(GateTransport::new(
         vec![
             task_reply(
@@ -1444,10 +1293,6 @@ async fn s5_19_late_arrival_stays_with_original_execution() {
     transport_a.fail(4);
     drop(c1);
 
-    // Join the old runner before opening the restarted Host (empty launch
-    // registry: no AlreadyRunning). The new delegation's
-    // own final is held so the late arrival lands while r2 still waits.
-    // T_b calls: 1 create-B2, 2 final-B2 (held).
     let transport_b = Arc::new(GateTransport::new(
         vec![
             String::from(
@@ -1495,9 +1340,6 @@ async fn s5_19_late_arrival_stays_with_original_execution() {
     assert_eq!(ids.len(), 2);
     assert_eq!(ids[0], d1);
 
-    // The old final arrives late: recorded once to the original execution
-    // and sealed there, never adopted as the Task's completion — r2 still
-    // waits for its own delegation.
     {
         let successor = _handle.upgrade().expect("successor is serving");
         let store = successor.store_for_tests();
@@ -1553,8 +1395,6 @@ async fn s5_19_late_arrival_stays_with_original_execution() {
     assert_eq!(transport_a.sends(), 4, "the old run sent nothing more");
     assert_eq!(transport_b.sends(), 2, "the new run still waits");
 
-    // The new delegation then completes with its own result, which alone is
-    // adopted — old evidence never moves into its relied set.
     transport_b.unblock(2);
     let page = wait_task_progress(&mut c2, "completed", 1)
         .await
@@ -1604,17 +1444,12 @@ async fn s5_19_late_arrival_stays_with_original_execution() {
     server.abort();
 }
 
-/// S5 subscription over the real socket: after the attach-time backlog is
-/// drained, a new deliverable fact produced by the Task runner is pushed to
-/// the idle Client without it sending another request.
 #[tokio::test]
 async fn s5_subscription_pushes_a_new_arrival_without_a_request() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let workspace = tempfile::tempdir().expect("workspace directory");
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
-    // Call 1 is the propose turn; call 2 is the runner's first provider call,
-    // held until the Client has gone idle.
     let transport = Arc::new(GateTransport::new(
         vec![
             task_reply(
@@ -1635,12 +1470,9 @@ async fn s5_subscription_pushes_a_new_arrival_without_a_request() {
     assert!(text_out.contains("Task accepted"), "{text_out}");
     confirm_round(&mut client, &round_wire, stream_id).await;
 
-    // The runner is parked on its first provider call, and the Client sends
-    // nothing further from here on.
     transport.wait_sends(2).await;
     transport.unblock(2);
 
-    // The runner's committed facts push without any Client request.
     let pushed = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let next = client.next_frame().await.expect("a frame must read");

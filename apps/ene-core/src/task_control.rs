@@ -1,34 +1,3 @@
-//! Host composition for conversation / first-party Task control.
-//!
-//! Every method here is composition only. The Task owner decides Task
-//! creation, revision commits, cancel admission, failure, and result
-//! adoption; the Action owner decides attempt starts and certainty. This
-//! module loads those durable facts, maps owner-defined premises across the
-//! boundary, and renders user-facing reports. It adds no Task lifecycle, no
-//! report master, no adoption queue, and no SQL: reopening a report never
-//! changes a canonical fact.
-//!
-//! The production triggers live here because they compose two owners:
-//!
-//! - `HostTaskControl` is the composition root behind the companion's
-//!   [`DialogueTaskControlPort`]: a companion `[task-control]` directive from
-//!   an ordinary dialogue turn resolves its target through the transient
-//!   conversation projection and maps onto the same owner boundaries below.
-//! - [`HostHandle::propose_task`] receives the dialogue layer's accepted
-//!   proposal, lets the Task owner commit the creation unit, then issues the
-//!   first delegation through the existing AU3 orchestration. Starting the
-//!   returned execution is [`HostHandle::run_task_agent`]'s job, not a side
-//!   effect of the proposal.
-//! - [`HostHandle::settle_action_certainty`] is the late-evidence settlement
-//!   entry: it commits the Action owner's certainty CAS and then re-evaluates
-//!   the same execution's sealed-but-unadopted result through the Task
-//!   owner's adoption gate.
-//! - [`HostHandle::reconcile_sealed_results`] is the explicit bounded startup
-//!   reconciliation producer for results sealed after AU15a but not adopted
-//!   before a stop. It never resumes an execution.
-//! - [`HostHandle::task_report`] composes the progress / cancel / completion
-//!   report from canonical Task and Action facts.
-
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 
@@ -59,11 +28,6 @@ use thiserror::Error;
 
 use crate::serve::{HostHandle, LiveInput};
 
-/// Technical failure of one conversation / first-party Task control call.
-///
-/// Domain refusals (stale, terminal, missing, withheld) stay on the `Ok` side
-/// of each owner outcome; this error exists only where a composition crosses
-/// two owners and either store can fail.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TaskControlError {
     #[error(transparent)]
@@ -72,73 +36,36 @@ pub enum TaskControlError {
     Action(#[from] ActionTechnicalError),
 }
 
-/// Host-level result of one conversation-initiated Task proposal.
-///
-/// The Task owner's decision is preserved; the delegation is the separate
-/// AU3 owner request the composition root issues after an accepted creation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskProposalHostOutcome {
-    /// The Task was created and its first delegation committed.
     AcceptedAsTask {
         task: TaskRef,
         delegation: DelegationId,
     },
-    /// The Task was created, but the first delegation was refused by the Task
-    /// owner (for example a concurrent steering advanced the revision).
-    /// The Task stays non-terminal without an execution; the caller decides
-    /// whether to propose again.
     DelegationRefused {
         task: TaskRef,
         outcome: DelegationOutcome,
     },
-    /// The Task owner refused the proposal itself ([`TaskProposalOutcome`]).
     Proposal(TaskProposalOutcome),
 }
 
-/// The Action owner's settled certainty together with the adoption
-/// re-evaluation it may have triggered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectSettlementOutcome {
-    /// The Action owner's compare-and-set answer.
     pub certainty: CertaintyUpdateOutcome,
-    /// The re-evaluation of the execution's sealed-but-unadopted result, when
-    /// exactly one such result existed.
     pub adoption: Option<TaskResultAcceptance>,
 }
 
-/// Bounded accounting of one reconciliation pass.
-///
-/// The pass never materializes every candidate: it processes one bounded page
-/// at a time and returns counters plus at most the first technical error, so
-/// memory stays independent of history size. A per-candidate technical error
-/// is counted (never rounded to `Completed` / `Withheld`); the first one is
-/// kept for diagnostics and the rest are summarized by count.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReconciliationSummary {
-    /// Candidates evaluated in this pass.
     pub evaluated: u64,
-    /// Results adopted as completion.
     pub adopted: u64,
-    /// Results that legitimately stayed withheld by effect facts.
     pub withheld: u64,
-    /// Results recorded to their original only (terminal / moved).
     pub recorded_to_original_only: u64,
-    /// Results whose identity, delegation, or Task row is missing.
     pub missing: u64,
-    /// Candidates whose re-evaluation failed technically.
     pub unavailable: u64,
-    /// The first technical error, kept for diagnostics only.
     pub first_error: Option<TaskTechnicalError>,
 }
 
-/// Transient conversation projection of the Task one dialogue is working on.
-///
-/// In-memory only, keyed by Companion, and never durable authority: it lets a
-/// task-less companion directive resolve to the Task the conversation most
-/// recently created, while every operation still goes through the Task
-/// owner's durable compare. The projection is dropped on restart, so a
-/// post-restart directive answers "no active task" instead of guessing;
-/// restart continuation is Stage 5.
 #[derive(Default)]
 pub(crate) struct ConversationTaskProjection {
     current: StdMutex<HashMap<CompanionId, ConversationTask>>,
@@ -147,26 +74,13 @@ pub(crate) struct ConversationTaskProjection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConversationTask {
     pub(crate) task: TaskId,
-    /// `None` when the creation committed but the delegation was refused; the
-    /// report then shows no execution-local result.
     pub(crate) delegation: Option<DelegationId>,
-    /// What put this Task in the projection: conversation-owned work or a
-    /// first-party wire selection bound to one connection lifetime.
     source: ConversationTaskSource,
 }
 
-/// Why one Task is the conversation's current projection.
-///
-/// The distinction is load-bearing: a dialogue-created/steered/resumed Task
-/// is Host-only accepted work that a reconnect must not erase, while a
-/// first-party `SelectTask` is a memory-only wire selection whose lifecycle
-/// ends with the connection that made it (IPC §9.3 replacement; the
-/// projection resets to unselected on reconnect/restart).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConversationTaskSource {
-    /// Created, steered, or resumed by an accepted dialogue turn.
     Dialogue,
-    /// First-party wire `SelectTask` on one connection lifetime.
     FirstPartySelection { connection: ConnectionWireId },
 }
 
@@ -182,14 +96,6 @@ impl ConversationTaskProjection {
         );
     }
 
-    /// Records a first-party wire selection (`SelectTask`): the Task the
-    /// Owner chose to talk about, with no execution attached.
-    ///
-    /// In-memory display selection bound to the selecting connection: every
-    /// later operation still goes through the Task owner's durable compare, a
-    /// reconnect/supersession drops the selection, and a restart drops it
-    /// back to unselected. Never called from model output, only from the
-    /// first-party wire inlet under its ownership section.
     pub(crate) fn select(
         &self,
         companion: CompanionId,
@@ -206,11 +112,6 @@ impl ConversationTaskProjection {
         );
     }
 
-    /// The conversation's current Task for `connection`.
-    ///
-    /// A dialogue-owned projection is always current; a first-party wire
-    /// selection is visible only on the connection that made it, so a
-    /// replacement answers "unselected" until it selects again.
     pub(crate) fn current(
         &self,
         companion: CompanionId,
@@ -230,8 +131,6 @@ impl ConversationTaskProjection {
         }
     }
 
-    /// Drops one connection lifetime's first-party selection, leaving
-    /// dialogue-owned projections untouched.
     pub(crate) fn drop_first_party_selection_for(&self, connection: &ConnectionWireId) {
         crate::lock_unpoison(&self.current).retain(|_, entry| {
             !matches!(
@@ -241,7 +140,6 @@ impl ConversationTaskProjection {
         });
     }
 
-    /// Test-only: how many first-party selections are remembered at all.
     #[cfg(test)]
     #[expect(dead_code, reason = "test observation probe")]
     pub(crate) fn first_party_selection_count(&self) -> usize {
@@ -257,11 +155,6 @@ impl ConversationTaskProjection {
     }
 }
 
-/// Trusted first-party Task premises.
-///
-/// The Owner selects the Workspace through a first-party management inlet;
-/// provider output can never create or widen these premises. In-memory only:
-/// a restart re-selection is Stage 5.
 #[derive(Default)]
 pub(crate) struct TrustedTaskPremises {
     workspace: StdMutex<Option<WorkspaceFolderRef>>,
@@ -277,11 +170,6 @@ impl TrustedTaskPremises {
     }
 }
 
-/// Deterministic race gate for one conversation task-control command.
-///
-/// Test-only: it pauses a mutating directive right before it enters the Task
-/// owner boundary, so a test can commit a newer Owner input first and pin
-/// that the superseded command changes nothing.
 #[cfg(test)]
 pub(crate) struct TestTaskControlGate {
     entered: tokio::sync::Semaphore,
@@ -300,33 +188,24 @@ impl Default for TestTaskControlGate {
 
 #[cfg(test)]
 impl TestTaskControlGate {
-    /// Pauses until the test releases the gate, marking entry first.
     pub(crate) async fn pause(&self) {
         self.entered.add_permits(1);
         let permit = self.release.acquire().await.expect("gate stays open");
         permit.forget();
     }
 
-    /// Waits until a paused command has entered the gate.
     #[expect(dead_code, reason = "test synchronization gate")]
     pub(crate) async fn wait_entered(&self) {
         let permit = self.entered.acquire().await.expect("gate is entered");
         permit.forget();
     }
 
-    /// Releases one paused command.
     #[expect(dead_code, reason = "test synchronization gate")]
     pub(crate) fn release(&self) {
         self.release.add_permits(1);
     }
 }
 
-/// Deterministic race gate for one guarded wire resume (CCT §10.4).
-///
-/// Test-only: it pauses the resume after entry validation and launch-scope
-/// acquisition but before the connection-ownership commit section, so a test
-/// can authenticate a newer connection in between and pin that the stale
-/// resume commits nothing.
 #[cfg(test)]
 pub(crate) struct TestResumeGate {
     entered: tokio::sync::Semaphore,
@@ -345,42 +224,27 @@ impl Default for TestResumeGate {
 
 #[cfg(test)]
 impl TestResumeGate {
-    /// Pauses until the test releases the gate, marking entry first.
     pub(crate) async fn pause(&self) {
         self.entered.add_permits(1);
         let permit = self.release.acquire().await.expect("gate stays open");
         permit.forget();
     }
 
-    /// Waits until a paused resume has entered the gate.
     #[expect(dead_code, reason = "test gate hook")]
     pub(crate) async fn wait_entered(&self) {
         let permit = self.entered.acquire().await.expect("gate is entered");
         permit.forget();
     }
 
-    /// Releases one paused resume.
     #[expect(dead_code, reason = "test gate hook")]
     pub(crate) fn release(&self) {
         self.release.add_permits(1);
     }
 }
 
-/// Host composition root implementing the companion's Task control port.
-///
-/// The companion interprets its provider output into a
-/// [`DialogueTaskCommand`]; this adapter maps that command onto the existing
-/// Task owner boundaries ([`HostHandle::propose_task`],
-/// [`HostHandle::propose_steering`], [`HostHandle::cancel_task`],
-/// [`HostHandle::task_report`]) and renders the typed outcome. It never
-/// writes Task state itself and never decides completion, cancellation
-/// meaning, or certainty.
 pub(crate) struct HostTaskControl<'a> {
     handle: &'a HostHandle,
     companion: CompanionId,
-    /// The connection whose dialogue turn is interpreting the directive: a
-    /// first-party selection made on another connection is never visible to
-    /// it (IPC §9.3 replacement).
     connection: ene_api::v1::refs::ConnectionWireId,
 }
 
@@ -397,7 +261,6 @@ impl<'a> HostTaskControl<'a> {
         }
     }
 
-    /// The conversation's current Task as this connection may see it.
     fn current_task(&self) -> Option<ConversationTask> {
         self.handle
             .conversation_tasks
@@ -411,10 +274,6 @@ impl<'a> HostTaskControl<'a> {
     }
 
     async fn propose(&self, purpose: String, origin: RawId) -> DialogueTaskControlReply {
-        // The Workspace authority is the trusted first-party premise only;
-        // provider output never carries one. Without a selection the Task is
-        // not created: file work cannot run without an Owner-confirmed
-        // boundary.
         let Some(workspace) = self.handle.trusted_task_premises.workspace() else {
             return DialogueTaskControlReply::Answered(String::from(
                 "Select a workspace folder first; I cannot start file work without one.",
@@ -443,37 +302,29 @@ impl<'a> HostTaskControl<'a> {
         .await;
         match outcome {
             Err(_) => DialogueTaskControlReply::Unavailable,
-            // The turn was superseded before the creation transaction: no
-            // Task, no delegation, no reply.
             Ok(TaskCreationOutcome::Superseded) => DialogueTaskControlReply::Unavailable,
-            Ok(TaskCreationOutcome::Created(task)) => {
-                match self.handle.delegate_task(task).await {
-                    Err(_) => DialogueTaskControlReply::Unavailable,
-                    Ok(DelegationOutcome::Delegated(delegation)) => {
-                        self.handle.conversation_tasks.record(
-                            self.companion,
-                            task.task,
-                            Some(delegation.delegation),
-                        );
-                        // Production launcher: the existing runner starts in
-                        // the background; this turn never awaits it. Without
-                        // a launcher the reservation is released and the
-                        // delegation stays durable and unexecuted.
-                        self.handle.launch_or_release(delegation.delegation);
-                        DialogueTaskControlReply::Answered(String::from(
-                            "Task accepted (status: in-progress). I will work on it.",
-                        ))
-                    }
-                    Ok(_) => {
-                        self.handle
-                            .conversation_tasks
-                            .record(self.companion, task.task, None);
-                        DialogueTaskControlReply::Answered(String::from(
-                            "Task accepted, but no execution could be delegated; it stays without an execution.",
-                        ))
-                    }
+            Ok(TaskCreationOutcome::Created(task)) => match self.handle.delegate_task(task).await {
+                Err(_) => DialogueTaskControlReply::Unavailable,
+                Ok(DelegationOutcome::Delegated(delegation)) => {
+                    self.handle.conversation_tasks.record(
+                        self.companion,
+                        task.task,
+                        Some(delegation.delegation),
+                    );
+                    self.handle.launch_or_release(delegation.delegation);
+                    DialogueTaskControlReply::Answered(String::from(
+                        "Task accepted (status: in-progress). I will work on it.",
+                    ))
                 }
-            }
+                Ok(_) => {
+                    self.handle
+                        .conversation_tasks
+                        .record(self.companion, task.task, None);
+                    DialogueTaskControlReply::Answered(String::from(
+                        "Task accepted, but no execution could be delegated; it stays without an execution.",
+                    ))
+                }
+            },
         }
     }
 
@@ -512,9 +363,6 @@ impl<'a> HostTaskControl<'a> {
                 progress_label(record.task.progress)
             ));
         }
-        // The adopted instruction body is canonical in the committed Owner
-        // message record this turn appended; `origin` references it and the
-        // directive's own summary text is never copied into Task state.
         let command = ProposeSteeringCommand {
             premise: SteeringPremiseRef {
                 expected: record.task.reference,
@@ -535,16 +383,8 @@ impl<'a> HostTaskControl<'a> {
         .await
         {
             Err(_) => DialogueTaskControlReply::Unavailable,
-            // The turn was superseded before the revision commit: nothing was
-            // written and no reply is adopted.
             Ok(TaskProposalOutcome::Superseded) => DialogueTaskControlReply::Unavailable,
             Ok(TaskProposalOutcome::AcceptedAsSteering(reference)) => {
-                // The new revision needs its own execution lifetime: create a
-                // fresh delegation (never reuse or replay the old one), point
-                // the conversation at it, and launch it. A concurrent
-                // steering/cancel between AU4 and AU3 is answered by the
-                // existing stale/terminal outcome; the old runner keeps
-                // stopping on the revision gate.
                 match self.handle.delegate_task(reference).await {
                     Err(_) => DialogueTaskControlReply::Unavailable,
                     Ok(DelegationOutcome::Delegated(delegation)) => {
@@ -585,8 +425,6 @@ impl<'a> HostTaskControl<'a> {
             Err(_) => DialogueTaskControlReply::Unavailable,
             Ok(TaskCancelOutcome::Superseded) => DialogueTaskControlReply::Unavailable,
             Ok(TaskCancelOutcome::CancelAccepted) => {
-                // The durable admission is the authority; the local signal is
-                // best-effort, exactly as in `HostHandle::cancel_task`.
                 self.handle.task_executions.cancel(current.task);
                 DialogueTaskControlReply::Answered(String::from(
                     "Cancel accepted. Running work stops best-effort; already-started effects keep their recorded certainty.",
@@ -606,13 +444,6 @@ impl<'a> HostTaskControl<'a> {
     }
 
     async fn resume(&self, origin: RawId) -> DialogueTaskControlReply {
-        // The directive carries no target: the conversation projection holds
-        // at most one Task per companion, so a missing projection is
-        // answered with a clarification asking which Task to resume, and
-        // ambiguity cannot arise. The model never names a Task, revision,
-        // purpose, or body: the Host composes the premise from durable
-        // state and references the turn's own Owner message as the resume
-        // instruction source.
         let Some(current) = self.current_task() else {
             return DialogueTaskControlReply::Answered(String::from(
                 "There is no active task in this conversation. Tell me which task to resume.",
@@ -639,13 +470,8 @@ impl<'a> HostTaskControl<'a> {
         };
         match self.handle.resume_task_current(command, currentness).await {
             Err(_) => DialogueTaskControlReply::Unavailable,
-            // The turn was superseded before the resume commit: nothing was
-            // written and no reply is adopted.
             Ok(TaskResumeOutcome::Superseded) => DialogueTaskControlReply::Unavailable,
             Ok(TaskResumeOutcome::Resumed { task, delegation }) => {
-                // The new revision needs its own execution lifetime, and it
-                // just committed one: point the conversation at it. The
-                // launcher already started it inside the resume scope.
                 self.handle.conversation_tasks.record(
                     self.companion,
                     task.task,
@@ -663,8 +489,6 @@ impl<'a> HostTaskControl<'a> {
 
 impl DialogueTaskControlPort for HostTaskControl<'_> {
     async fn apply(&self, command: DialogueTaskCommand, origin: RawId) -> DialogueTaskControlReply {
-        // Test-only race gate: a mutating command pauses before the owner
-        // boundary so a newer Owner input can be committed first.
         #[cfg(test)]
         if !matches!(command, DialogueTaskCommand::Report)
             && let Some(gate) = self.handle.test_task_control_gate()
@@ -706,7 +530,6 @@ fn task_outcome_text(outcome: &TaskProposalOutcome) -> String {
         TaskProposalOutcome::RevisionExhausted { .. } => {
             String::from("The task cannot take another change.")
         }
-        // The guarded mapping consumes supersession before this renderer.
         TaskProposalOutcome::Superseded => {
             String::from("The request was superseded by a newer message.")
         }
@@ -761,7 +584,6 @@ fn resume_outcome_text(outcome: &TaskResumeOutcome) -> String {
         TaskResumeOutcome::RevisionExhausted { .. } => {
             String::from("The task cannot take another change.")
         }
-        // The guarded mapping consumes supersession before this renderer.
         TaskResumeOutcome::Superseded => {
             String::from("The request was superseded by a newer message.")
         }
@@ -784,30 +606,9 @@ fn delegation_outcome_text(outcome: &DelegationOutcome) -> String {
     }
 }
 
-/// Candidates one reconciliation page reads.
-///
-/// Each storage read is bounded by this page size; a pass keeps advancing the
-/// `(recorded_at, result_id)` keyset cursor until the candidate set is
-/// exhausted, so a permanently unadopted front cannot starve later
-/// candidates.
 pub const RECONCILIATION_PAGE_SIZE: u64 = 64;
 
 impl HostHandle {
-    /// Proposes one Task from the Owner conversation and creates its first
-    /// delegation.
-    ///
-    /// The dialogue layer owns the command mapping
-    /// ([`ene_companion::dialogue::propose_task`]); the Task owner mints the
-    /// Task, context, and association identities and commits the AU2 unit.
-    /// On acceptance this composition loads the committed unit, copies its
-    /// confirmed workspace boundary into the delegation scope, and issues the
-    /// existing AU3 delegation request. A delegation refusal keeps its typed
-    /// owner outcome; nothing here re-tries, re-mints, or writes SQL.
-    ///
-    /// # Errors
-    ///
-    /// [`TaskTechnicalError`] when the store cannot answer; owner domain
-    /// refusals stay inside [`TaskProposalHostOutcome`].
     pub async fn propose_task(
         &self,
         requester: CompanionId,
@@ -837,24 +638,9 @@ impl HostHandle {
         })
     }
 
-    /// Issues the existing AU3 delegation request for one committed Task.
-    ///
-    /// The committed unit supplies the boundary copy; the Task owner confirms
-    /// the association and revision inside its own commit. This is the shared
-    /// delegation step of the first-party and conversation proposal paths.
-    ///
-    /// The commit and the launch reservation share the registry commit scope
-    /// (CCT §7.4): the scope serializes this producer against every other
-    /// AU3/AU17 producer in the process, so the committed delegation is
-    /// reserved before any concurrent resume can observe the Task as free.
-    /// A lost reservation race is a technical error: the delegation is
-    /// durable but unlaunchable, and a retry is a new explicit delegation,
-    /// never an automatic relaunch.
     async fn delegate_task(&self, task: TaskRef) -> Result<DelegationOutcome, TaskTechnicalError> {
         let _scope = self.task_executions.commit_scope().await;
         let Some(record) = self.store.load_task(task.task).await? else {
-            // The AU2 commit just succeeded: a missing read is an
-            // inconsistent unit, never a domain refusal.
             return Err(TaskTechnicalError::StorageUnavailable {
                 reason: String::from("accepted task creation is not readable"),
             });
@@ -873,8 +659,6 @@ impl HostHandle {
             orchestrate_delegation(&self.store, CreateDelegationCommand { task, scope_copy })
                 .await?;
         if let DelegationOutcome::Delegated(delegation) = &outcome {
-            // The delegation id is freshly minted and the scope serializes
-            // this producer, so the reservation cannot already exist; a
             // refusal here is a corrupted registry, never a lost race with
             // another Task.
             if !self
@@ -889,14 +673,6 @@ impl HostHandle {
         Ok(outcome)
     }
 
-    /// Starts the committed delegation's runner, or releases its launch
-    /// reservation when no runner exists.
-    ///
-    /// A handle without an installed launcher (unit tests, an offline
-    /// opener) accepts the delegation but starts no execution: the release
-    /// keeps the reservation from pinning the Task as running forever, and
-    /// the delegation stays durable and unexecuted. Production always
-    /// installs a launcher, so the reservation is consumed by the run.
     fn launch_or_release(&self, delegation: DelegationId) {
         if let Some(launcher) = self.task_launcher() {
             launcher.launch(delegation);
@@ -905,16 +681,6 @@ impl HostHandle {
         }
     }
 
-    /// Proposes one steering change from the Owner conversation.
-    ///
-    /// The caller passes the relied-on revision and purpose identity it
-    /// observed; the existing [`ene_companion::dialogue::propose_steering`]
-    /// path returns the Task owner's outcome unchanged, so a stale revision
-    /// is never retried or overwritten here.
-    ///
-    /// # Errors
-    ///
-    /// [`TaskTechnicalError`] when the store cannot answer.
     pub async fn propose_steering(
         &self,
         command: ProposeSteeringCommand,
@@ -922,14 +688,6 @@ impl HostHandle {
         ene_companion::dialogue::propose_steering(command, &self.store).await
     }
 
-    /// Host-known readiness for one resume commit.
-    ///
-    /// Read under the launch commit scope: the final permission / cap
-    /// judgement stays with the AU14/AU5 gates (`permission_available` is
-    /// always `true` here), while the Task's reservation/registration state
-    /// and the launcher's presence are read now so the commit orders them
-    /// in its refusal priority. No presence check and no provider call are
-    /// involved: an explicit Owner instruction is sufficient premise.
     fn resume_readiness(&self, task: TaskId) -> TaskResumeReadiness {
         TaskResumeReadiness {
             permission_available: true,
@@ -938,16 +696,6 @@ impl HostHandle {
         }
     }
 
-    /// Reserves and launches one resumed delegation, if the outcome carries
-    /// one.
-    ///
-    /// Call under the launch commit scope right after the resume commit, so
-    /// the commit and the reservation are one critical section (CCT §7.4).
-    /// A lost reservation race is a technical error: the revision forward
-    /// is durable but unlaunchable, and continuing is a new explicit
-    /// resume, never an automatic relaunch. Without an installed launcher
-    /// the commit already refused with `ExecutionUnavailable`, so reaching
-    /// here always launches.
     fn reserve_and_launch_resumed(
         &self,
         outcome: &TaskResumeOutcome,
@@ -967,28 +715,6 @@ impl HostHandle {
         Ok(())
     }
 
-    /// Resumes one Task explicitly with the commit linearized against the
-    /// issuing connection's currentness (CCT §10.4).
-    ///
-    /// The activity record and the AU17 commit run synchronously inside the
-    /// connection table's ownership section: the section verifies that
-    /// `live`'s connection is still its device's current authenticated
-    /// connection and holds until both commits finish, so a newer
-    /// authentication can never interleave between the check and the
-    /// commit. A connection superseded before the section answers [`None`]
-    /// with zero writes, no revision change, no delegation, and no launch;
-    /// a resume that won the section is accepted even if the connection is
-    /// superseded immediately afterwards, and its execution keeps running.
-    ///
-    /// Lock order (CCT §10.4): the launch commit scope (async) is taken
-    /// before the connection table (sync), which is held across the short
-    /// SQLite commits; no path takes the table lock and then awaits the
-    /// commit scope, so the order cannot cycle.
-    ///
-    /// # Errors
-    ///
-    /// [`TaskTechnicalError`] when the store cannot answer; the owner's
-    /// domain outcomes stay on the `Ok` side.
     pub(crate) async fn resume_task_guarded_by_connection(
         &self,
         live: &LiveInput,
@@ -997,9 +723,6 @@ impl HostHandle {
     ) -> Result<Option<TaskResumeOutcome>, TaskTechnicalError> {
         let _scope = self.task_executions.commit_scope().await;
         let launch_possible = self.task_launcher().is_some();
-        // Test-only race gate: pause before the connection-ownership
-        // section so a test can authenticate a newer connection and pin
-        // that the stale resume commits nothing.
         #[cfg(test)]
         {
             let gate = crate::lock_unpoison(&self.resume_gate).clone();
@@ -1019,9 +742,6 @@ impl HostHandle {
                     .map_err(|error| TaskTechnicalError::StorageUnavailable {
                         reason: error.to_string(),
                     })?;
-                // The A4 gate held the instruction body: the resume is held by
-                // the current erasure condition, and no activity, revision, or
-                // delegation is written.
                 let ResumeActivityOutcome::Recorded(activity) = activity else {
                     return Ok(TaskResumeOutcome::NeedsRevalidation(
                         ene_task::TaskResumeHold::DataUseHeld,
@@ -1054,8 +774,6 @@ impl HostHandle {
         let outcome = match joined {
             Ok(Some(Ok(outcome))) => outcome,
             Ok(Some(Err(error))) => return Err(error),
-            // The connection was superseded before the section: nothing was
-            // written, delegated, or launched.
             Ok(None) => return Ok(None),
             Err(join) => std::panic::resume_unwind(join.into_panic()),
         };
@@ -1068,21 +786,6 @@ impl HostHandle {
         Ok(Some(outcome))
     }
 
-    /// Resumes one Task explicitly from the first-party management inlet
-    /// (H-A.1 / AU17, unguarded).
-    ///
-    /// The caller composes the command from durable state: the premise is
-    /// the Task's current revision and purpose, and the instruction is the
-    /// recorded first-party activity. The Task owner compares everything
-    /// inside its single commit; a newer revision, terminal progress,
-    /// unknown effects, or an adoptable sealed result refuses with zero
-    /// writes. `Resumed` means the revision forward and the new delegation
-    /// committed and the runner launched; a launcher refusal or technical
-    /// failure after the commit is reported separately.
-    ///
-    /// # Errors
-    ///
-    /// [`TaskTechnicalError`] when the store cannot answer.
     pub async fn resume_task(
         &self,
         command: ResumeTaskCommand,
@@ -1094,13 +797,6 @@ impl HostHandle {
         Ok(outcome)
     }
 
-    /// Resumes one Task explicitly from the Owner conversation (H-A.1 /
-    /// AU17, guarded).
-    ///
-    /// Identical to [`HostHandle::resume_task`] except that the commit
-    /// additionally requires the relied Owner input to still be the newest
-    /// accepted one; a superseded turn answers `Superseded` with zero
-    /// writes and launches nothing.
     async fn resume_task_current(
         &self,
         command: ResumeTaskCommand,
@@ -1114,23 +810,6 @@ impl HostHandle {
         Ok(outcome)
     }
 
-    /// Settles one Action attempt's late objective evidence and, when the
-    /// settlement commits, re-evaluates the execution's sealed result.
-    ///
-    /// This composes two owner operations without merging them: the Action
-    /// owner's certainty compare-and-set commits first (it alone may change
-    /// certainty), and only an `Updated` answer triggers a bounded read of
-    /// the attempt's delegation and its sealed result. A result that exists
-    /// and is not adopted yet goes through
-    /// [`ene_task::reevaluate_result_adoption`], which re-runs the existing
-    /// `adopt_result` gate against current facts. A still-present blocker
-    /// legitimately answers `WithheldByEffectFacts`; no busy retry loop
-    /// exists. Nothing here re-executes a provider call or a filesystem
-    /// Action.
-    ///
-    /// # Errors
-    ///
-    /// [`TaskControlError`] when either store cannot answer.
     pub async fn settle_action_certainty(
         &self,
         attempt: ActionAttemptId,
@@ -1152,12 +831,6 @@ impl HostHandle {
         })
     }
 
-    /// Bounded re-evaluation of one attempt's execution sealed result.
-    ///
-    /// A missing attempt row, a missing sealed result, and an already-adopted
-    /// result all answer [`None`]: there is nothing to re-evaluate. The read
-    /// is bounded to the attempt → delegation → sealed result path, never a
-    /// scan.
     async fn reevaluate_sealed_result_for_attempt(
         &self,
         attempt: ActionAttemptId,
@@ -1177,32 +850,6 @@ impl HostHandle {
         ))
     }
 
-    /// Re-evaluates the reconciliation candidate set, one bounded page at a
-    /// time, without materializing every candidate.
-    ///
-    /// This is the explicit recovery producer for results that were durably
-    /// recorded (AU15a) but whose adoption commit (AU15b) did not run before
-    /// a stop, and for withheld results whose blocking facts settled while
-    /// nothing was listening. The candidate predicate is canonical-facts
-    /// only: `adopted_revision IS NULL` and re-adoption is still possible (the
-    /// Task is non-terminal and its current revision is the relied revision).
-    /// A result that can only answer `RecordedToOriginalOnly` is not a
-    /// candidate, so permanent history is not re-evaluated on every startup;
-    /// no pending flag, retry queue, or second adoption state exists. The walk
-    /// uses keyset pages over `(recorded_at, result_id)`, so every candidate
-    /// is visited once per pass and a candidate already passed is never
-    /// re-read from the front. Each page read is bounded by
-    /// [`RECONCILIATION_PAGE_SIZE`]. Each candidate goes through the same
-    /// [`ene_task::reevaluate_result_adoption`] path, so a still-blocked
-    /// result keeps its existing semantics. An execution is never resumed and
-    /// no provider call or filesystem Action is replayed.
-    ///
-    /// # Errors
-    ///
-    /// [`TaskTechnicalError`] when a candidate page cannot be read;
-    /// per-candidate failures are counted in the returned summary (never
-    /// rounded to completion or withheld), so one corrupt result cannot hide
-    /// the rest or wedge startup.
     pub async fn reconcile_sealed_results(
         &self,
     ) -> Result<ReconciliationSummary, TaskTechnicalError> {
@@ -1210,12 +857,6 @@ impl HostHandle {
             .await
     }
 
-    /// Runs the reconciliation loop with an explicit non-zero page bound.
-    ///
-    /// Production always calls this through [`HostHandle::reconcile_sealed_results`]
-    /// with [`RECONCILIATION_PAGE_SIZE`]. Keeping the traversal independent of
-    /// the concrete bound lets tests exercise multi-page behavior with a tiny
-    /// fixture instead of creating one durable Task per production page slot.
     async fn reconcile_sealed_results_with_page_size(
         &self,
         page_size: u64,
@@ -1263,23 +904,6 @@ impl HostHandle {
         Ok(summary)
     }
 
-    /// Composes the user-facing Task report from canonical durable facts.
-    ///
-    /// `delegation` names the conversation's current delegated execution, when
-    /// the caller holds one: it lets the report include a sealed-but-not-yet-
-    /// adopted result body. Everything else is read from the Task owner
-    /// (`task.progress`, the current workspace association, the adopted
-    /// result) and the Action owner (each attempt's operation, target, and
-    /// certainty). `None` means no Task with this identity exists.
-    ///
-    /// The composed report rewrites nothing: an `Unknown` effect stays
-    /// unknown, and a cancelled Task is reported as cancelled even when
-    /// already-started effects remain unresolved.
-    ///
-    /// # Errors
-    ///
-    /// [`TaskControlError`] when either store cannot answer, or when the
-    /// durable correlation the report reads is internally inconsistent.
     pub async fn task_report(
         &self,
         task: TaskId,
@@ -1288,10 +912,6 @@ impl HostHandle {
         let Some(record) = self.store.load_task(task).await? else {
             return Ok(None);
         };
-        // The adopted result is the current completion master; without one,
-        // the named execution's sealed result is shown as recorded-but-not-
-        // adopted. Either way the body and verified correlation come from the
-        // one `task_result` row.
         let (result_body, result_adopted, correlated_refs) = match record.task.adopted_result {
             Some(result) => {
                 let Some(stored) = self.store.load_task_result(result).await? else {

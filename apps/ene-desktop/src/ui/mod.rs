@@ -1,7 +1,3 @@
-//! GUI view-model: pages, IME composer, and the testable desktop runtime.
-//!
-//! Slint is a projection. Domain and secrets do not live in generated UI.
-
 pub(crate) mod deletion;
 mod memory;
 pub mod presentation;
@@ -15,7 +11,6 @@ use ene_client::error::ClientError;
 pub use memory::{MemoryPage, MemoryRevisionRow, MemoryRow};
 pub use runtime::DesktopRuntime;
 
-/// Visible page. Management remains reachable without Body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Wizard,
@@ -30,7 +25,6 @@ pub enum Page {
     Deletion,
 }
 
-/// Fresh-data-dir wizard. Consent is not stored here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WizardStep {
     Language,
@@ -64,8 +58,6 @@ impl WizardStep {
     }
 }
 
-/// Chat input plus IME composition and a bounded undo stack. Composition is
-/// never sent. Undo is a GUI copy of draft text and is wiped with InputDraft.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Composer {
     draft: String,
@@ -99,7 +91,6 @@ impl Composer {
         }
     }
 
-    /// Restores the previous committed draft. No-op while composing.
     pub fn undo(&mut self) {
         if self.composing {
             return;
@@ -109,7 +100,6 @@ impl Composer {
         }
     }
 
-    /// Returns the committed draft when IME is not composing.
     pub fn take_sendable(&mut self) -> Option<String> {
         if self.composing {
             return None;
@@ -153,7 +143,6 @@ impl Composer {
     }
 }
 
-/// Serializable GUI projection. Must never contain a raw secret.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GuiSnapshot {
     pub locale: String,

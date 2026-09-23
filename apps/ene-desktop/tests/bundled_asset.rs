@@ -1,6 +1,3 @@
-//! Bundled VRM 1.0 sample asset guard: `assets/seed-san.vrm` must stay an
-//! unmodified Seed-san sample with the features Body needs.
-
 #![cfg(any(unix, windows))]
 #![allow(
     clippy::expect_used,

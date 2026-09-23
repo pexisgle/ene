@@ -1,59 +1,3 @@
-//! One-to-one text round trip: intake, reply, stream, ack, timeline.
-//!
-//! `HostHandle::submit_text` mediates one accepted input: durable idempotent
-//! replay, presence attach, presentation intake, then the companion-owned
-//! turn (`ene_companion::dialogue`), whose inference boundary
-//! (`ene_inference::InferenceExecutor`) owns admission, the attempt claim,
-//! the provider call, adoption, and usage accounting. The Host maps the
-//! resulting domain outcome to frames and records the open round between the
-//! owner append and dispatch. A companion reply carrying a
-//! `[task-control]` directive is interpreted by the companion and executed
-//! through `HostTaskControl` against the existing Task
-//! owner boundaries before the reply is stored; the stored reply is the
-//! owner-derived text, never the directive. `HostHandle::confirm_presentation`
-//! applies presentation observations, and `HostHandle::answer_history`
-//! restores the filtered timeline.
-//!
-//! `Stage 2` wire reason vocabulary for
-//! [`NeedsRevalidation`](ene_api::v1::round::RoundIntakeOutcomeWire::NeedsRevalidation)
-//! outcomes: `"missing-generation-view"`, `"unknown-companion"`,
-//! `"stopped-companion"` (all straight from
-//! [`ene_presentation::RevalidationReason`]), plus `"setup-incomplete"` and
-//! `"consent-stale"` for the admission gates and `"not-in-allowlist"` as a
-//! defensive closed-world denial. `"unknown-reason"` is defensive only:
-//! [`ene_presentation::check_intake`] never emits its source variant.
-//!
-//! Infallible-frame mapping used here (no `Result`: [`HostHandle::handle_frame`]
-//! answers every frame):
-//!
-//! - Store failures before acceptance become
-//!   [`HeldForTransition`](ene_api::v1::round::RoundIntakeOutcomeWire::HeldForTransition):
-//!   no work started, so a later retry is safe.
-//! - A reused command key with a different [`RequestFingerprint`] becomes the
-//!   typed [`Reject`](ene_api::v1::payload::WirePayload::Reject)
-//!   (`ConflictingCommand`), judged by the companion's fingerprint comparison
-//!   shared with the store's in-transaction pre-check: declined without side
-//!   effects, never an intake outcome, never a retry signal.
-//! - A stale or held owner append becomes the matching outcome frame. Its
-//!   projection entry stays mapped but unpublished: no open-round record was
-//!   made and no ack carried it, so later intakes surface the round as stale
-//!   rather than rebinding anything onto it.
-//! - An admission decline becomes `NeedsRevalidation` with the setup/consent
-//!   reason above: the Client recovers by running the setup flow, then retries
-//!   with a fresh local id.
-//! - Any failure after acceptance (inference not sent, transport error, reply
-//!   append lost) becomes the accept ack plus a stream closed as
-//!   [`Interrupted`](ene_api::v1::round::StreamClose::Interrupted). Usage
-//!   accounting follows certainty, never adoption (owned by
-//!   `ene-inference`): never-sent calls record no fact, uncertain attempts
-//!   record [`Unknown`](ene_inference::UsageSource::Unknown) counts, and
-//!   reported counts are kept even when the reply cannot be adopted. A
-//!   usage-record failure after a durable reply keeps the `Completed` close:
-//!   the reply happened, and the usage gap is the documented `Stage 2`
-//!   follow-up (retry queue), not a reason to misreport the stream.
-//! - Presentation observations and unresolvable confirmation rounds produce no
-//!   reply: confirmation is an observation, never a report of completion.
-
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{CommandWireId, RoundWireId, StreamWireId};
 use ene_api::v1::refs::{ConnectionWireId, RevalidationReasonWire};
@@ -100,34 +44,13 @@ use crate::serve::{
     outgoing_fact, outgoing_frame, reject_frame, stale_reject, unpaired_close,
 };
 
-/// Garbage maps to [`None`] (no replay key) rather than rejection: a
-/// malformed key only degrades that sender's own idempotency, and every
-/// well-formed client mints fresh UUIDs. Transport retry reuses the same
-/// command ID with a fresh message ID within one sender incarnation; the
-/// store answers replays with the original acceptance instead of
-/// re-appending.
 fn command_id_for(envelope: &ene_api::v1::envelope::WireEnvelope) -> Option<CommandId> {
     let CommandWireId(id) = envelope.correlation.command_id?;
     Some(CommandId(ene_primitive::RawId::from_uuid(id)))
 }
 
-/// Canonical client round premise of one [`SubmitTextInput`] send.
-///
-/// The payload names the premise (`SubmitTextInput.round`); the envelope
-/// `round_view` is the mirror the Client relied on (IPC §5: comparison
-/// material, not a claim) and must agree with it once populated. A
-/// disagreement means two different round premises: neither side is adopted
-/// — the caller answers stale with current values and the Client re-syncs.
-///
-/// A force-new request is the design's round-less new-round request
-/// (IPC §13.1: `round = None`, `round_view = None`), so it names no premise
-/// at all. A force-new frame carrying a premise in either carrier is
-/// self-contradictory and is rejected here, never silently reinterpreted as
-/// the flag or joined on the hint.
 enum RoundPremise {
-    /// A round-less request: join-or-mint.
     Auto,
-    /// Join the round this Client-supplied reference names.
     Existing(String),
 }
 
@@ -241,9 +164,6 @@ fn command_conflict_detail(command: &CommandId) -> String {
     )
 }
 
-/// Admission never produces the over-limit, task-premise-stale, data-use
-/// hold, or usage-cap reasons, which belong to dispatch; they map defensively
-/// rather than claiming a setup failure.
 fn admission_reason(reason: NotSentReason) -> &'static str {
     match reason {
         NotSentReason::SetupIncomplete => "setup-incomplete",
@@ -260,14 +180,8 @@ fn admission_reason(reason: NotSentReason) -> &'static str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AttachOutcome {
-    /// Only this arm lets the caller proceed, with the generation from the
-    /// committed fact — never an assumption that the attach succeeded.
     Attached(PresenceAttribution),
-    /// The compare lost or the store failed: the caller reloads instead of
-    /// proceeding.
     Raced,
-    /// The connection was superseded before the ownership section: nothing
-    /// was attached and the caller answers the typed stale rejection.
     Superseded,
 }
 
@@ -293,24 +207,6 @@ impl HostHandle {
         stale_frame_with(frame, live, current_round, generation)
     }
 
-    /// Attaches presence for the paired device when none is active, or
-    /// restores it for a summoning client while recovery waits.
-    ///
-    /// Called only from the submit path with the generation it just read,
-    /// under `NoActive` or `RecoveryWait`: only an [`AttachOutcome::Attached`]
-    /// fact carries the fresh generation the caller may proceed with, and
-    /// [`AttachOutcome::Raced`] means the caller reloads rather than
-    /// proceeding. The [`ClientId`] comes from the deterministic device
-    /// mapping, so a re-attaching device re-derives the same id. A summon on
-    /// the current generation wins for any client and cancels the recovery
-    /// intent (S5-14); a stale premise loses at the store compare, so the
-    /// original client arriving late never auto-restores over a decided
-    /// present. No reply is produced here.
-    ///
-    /// The compare/begin and confirm run synchronously inside the
-    /// connection-ownership section (CCT §10.4), so a same-device replacement
-    /// that wins the section leaves presence untouched and answers
-    /// [`AttachOutcome::Superseded`]: the stale submit never attaches.
     pub(crate) async fn attach_presence(
         &self,
         live: &LiveInput,
@@ -360,56 +256,6 @@ impl HostHandle {
         }
     }
 
-    /// Mediates one [`SubmitTextInput`] frame into the companion turn.
-    ///
-    /// Order: companion mapping, mandatory command key, durable idempotent
-    /// replay, presence attach, presentation intake, dialogue prompt
-    /// assembly, then the companion-owned turn
-    /// (`ene_companion::dialogue::begin_turn`/`finish_turn`) with its
-    /// inference boundary. The assembled prompt's canonical read-set rides
-    /// the admission as the attempt's `data_use`, so the claim gate and the
-    /// deletion admission see the exact provenance the provider input was
-    /// built from. Admission precedes the append so a declined input leaves
-    /// neither history rows nor transient round claims behind; the round
-    /// projection is minted atomically with its map entry (one domain round,
-    /// one wire), and a racy duplicate that lands on
-    /// [`HistoryAppendOutcome::AlreadyCommittedAs`] answers the original
-    /// accept without re-running inference. The canonical round premise comes
-    /// from the input `round`, a populated envelope `round_view` must agree
-    /// with it, and a force-new request carries no premise at all — a
-    /// contradictory frame answers stale with current values instead of
-    /// adopting either side; a present-but-unresolvable round is stale, never
-    /// rebound.
-    ///
-    /// Presence attach runs when the loaded attribution is `NoActive` or
-    /// `RecoveryWait`, and only on the envelope's observed generation
-    /// premise: a missing `presence_generation_view` revalidates, a view
-    /// that does not equal the current generation answers stale with the
-    /// current values, and only then does the compare-and-commit run.
-    ///
-    /// A committed attach publishes the resulting attribution fact to this
-    /// connection (IPC §12.2): the fact is unsolicited — it names no
-    /// `reply_to`, so a Client awaiting this submit's answer absorbs it
-    /// instead of mistaking it for one — and it precedes the
-    /// auto-presented absence summary as well as this submit's own accept,
-    /// open, and stream frames. The order is load-bearing: the summary's
-    /// receipt carries the fresh generation and the Client's first ACK for
-    /// it echoes the generation it observed, so a summary delivered ahead
-    /// of its fact could only be answered `StalePresentation`.
-    ///
-    /// Idempotency is durable over the envelope `command_id`, looked up
-    /// through [`lookup_command`](HistoryRepository::lookup_command) and
-    /// judged by the same [`RequestFingerprint`] the store compares
-    /// in-transaction (role, body, language, sender incarnation, and the
-    /// canonical round intent — never the Host-decided round or its
-    /// projection): an exact retry replays the stored accept ack verbatim
-    /// without re-appending or re-streaming anything, including after a
-    /// restart, while a different request answers a typed wire rejection
-    /// (`ConflictingCommand`), never an intake outcome. Provider deltas may
-    /// be presented before durable reply adoption while the presentation
-    /// premise remains current. Durable completion/replay is reported only
-    /// after the final reply append succeeds. Stream outcome replay is
-    /// explicitly out of scope: only the accept ack replays.
     pub(crate) async fn submit_text(
         &self,
         frame: &WireFrame,
@@ -423,9 +269,6 @@ impl HostHandle {
             return emit_end(sink, unpaired_close(frame, live));
         };
         let client = device_client(&device_wire);
-        // The companion ref resolves through the handle mapping, never
-        // assumed or derived: an unknown ref (a projection rotated by a
-        // restart) revalidates so the Client relearns from presence.
         let companion = match self.resolve_companion(&submit.companion.0).await {
             Err(_) => {
                 return emit_end(sink, held_frame(frame, live));
@@ -447,9 +290,6 @@ impl HostHandle {
             return emit_end(sink, held_frame(frame, live));
         };
         let companion_key = companion.as_raw().as_uuid().to_string();
-        // Idempotency keys are mandatory: a command without one cannot be
-        // replayed safely, so it is declined before any state changes
-        // (before attach, before maps, before appends).
         let Some(command) = command_id_for(&frame.envelope) else {
             return emit_end(
                 sink,
@@ -460,9 +300,6 @@ impl HostHandle {
                 ),
             );
         };
-        // Canonical round premise first: the two carriers must agree before
-        // anything else is judged, so a contradictory frame is declined
-        // stale with current values instead of adopting one side.
         let Some(round_premise) =
             canonical_round_premise(submit, frame.envelope.observed.round_view.as_ref())
         else {
@@ -471,11 +308,6 @@ impl HostHandle {
                 self.stale_frame(frame, live, &companion_key, attribution.generation.as_u64()),
             );
         };
-        // Registered credentials never reach durable History or a model
-        // prompt: the owner input is redacted before any durable decision
-        // (the fingerprint included), so a retry redacts the same raw text to
-        // the same canonical form. An unprovable secret boundary holds the
-        // send without side effects instead of storing or sending raw text.
         let scrubber = CredentialScrubber {
             refs: &self.store,
             store: &self.cred_store,
@@ -485,10 +317,6 @@ impl HostHandle {
         };
         let credential_set = scrubbed.credential_set();
         let text = scrubbed.into_text();
-        // The request fingerprint is the immutable client semantics: role,
-        // body, language, sending incarnation, and the canonical round
-        // intent. Force-new carries no premise (the gate above declined
-        // one); otherwise the premise decides.
         let round_intent = if submit.fresh {
             RoundIntentMark::New
         } else {
@@ -507,11 +335,6 @@ impl HostHandle {
             )),
             round_intent: round_intent.clone(),
         };
-        // Durable replay precedes presence attach: an exact retry answers
-        // from the stored marker without advancing presence generation or
-        // touching any other state, while a conflicting reuse rejects just
-        // as early. The companion owns the fingerprint judge; core only
-        // maps its verdict to frames.
         match classify_replay(&self.store, companion, &command, incoming_fingerprint).await {
             ReplayClassification::Replay { round, round_wire } => {
                 for response in self.replay_frames(
@@ -543,17 +366,9 @@ impl HostHandle {
             }
             ReplayClassification::None => {}
         }
-        // The scrubbed current input is secured before any optional
-        // background. If it cannot fit the final request budget even alone,
-        // reducing background cannot help: decline before acceptance (no
-        // append, no presence move) with the explicit reason instead of
-        // storing an unsendable turn and closing an interrupted stream.
         if !ene_companion::dialogue::dialogue_input_fits(&text) {
             return emit_end(sink, revalidate_frame(frame, live, "input-over-limit"));
         }
-        // The winner's intake premise below carries the fresh generation from
-        // the committed fact. Any other path carries the envelope view
-        // untouched: intake reports a missing or mismatched view honestly.
         let mut attached_generation: Option<PresenceGeneration> = None;
         if matches!(
             attribution.state,
@@ -584,38 +399,11 @@ impl HostHandle {
                 AttachOutcome::Attached(fresh) => {
                     attached_generation = Some(fresh.generation);
                     attribution = fresh;
-                    // Presence transition distribution (IPC §12.1 M-6,
-                    // V-3): the compare-and-commit above made this
-                    // companion's attribution authoritative at a new
-                    // generation, so the resulting fact goes to this
-                    // subscriber before anything that depends on it.
-                    // Unsolicited by construction (outgoing_fact sets no
-                    // reply_to), so the Client absorbs it while its request
-                    // is in flight and never reads it as the answer to this
-                    // submit; the accept/open/stream frames below keep their
-                    // own correlation.
-                    //
-                    // Ordering is the invariant, not decoration: the
-                    // auto-presented summary that follows carries the fresh
-                    // generation on its receipt, and the first ACK for it
-                    // echoes the generation the Client observed. Ahead of the
-                    // fact that echo is the stale pre-summon view, and the
-                    // ACK is refused as StalePresentation, leaving the backlog
-                    // it carried unpresented.
                     let fact = outgoing_fact(
                         frame,
                         live,
                         WirePayload::PresenceAttribution(attribution_to_wire(self, &attribution)),
                     );
-                    // Summon auto-present: this submit just established
-                    // formal presence, so the absence backlog presents
-                    // without an Owner query. Best-effort and bounded: a
-                    // full buffer drops the push (the explicit request
-                    // path re-presents), and the new turn's own reply
-                    // still streams normally afterwards. An undelivered
-                    // fact skips the push: an ACK for a summary whose fact
-                    // never arrived could only be refused stale, so that
-                    // recovery belongs to the explicit request path.
                     if matches!(
                         self.with_current_connection(live, || sink.emit(fact)),
                         Some(Ok(()))
@@ -657,9 +445,6 @@ impl HostHandle {
                     };
                 }
                 AttachOutcome::Superseded => {
-                    // A same-device replacement won the ownership section:
-                    // this submit attaches nothing and stops before any
-                    // owner append, round, or provider dispatch.
                     return emit_end(
                         sink,
                         stale_reject(frame, live, "presence attach on a superseded connection"),
@@ -684,9 +469,6 @@ impl HostHandle {
                 }
             },
         };
-        // One meaning per value, matching the fingerprint's round intent:
-        // force-new mints and never joins; a resolved premise joins that
-        // round; no premise joins-or-mints.
         let intent = if submit.fresh {
             RoundIntent::New
         } else {
@@ -740,15 +522,6 @@ impl HostHandle {
                 return emit_end(sink, revalidate_frame(frame, live, intake_reason(&reason)));
             }
         };
-        // The companion owns the accepted-turn order: admission precedes the
-        // durable append, the Host records the open round only after that
-        // append commits, and dispatch plus reply integration follow.
-        //
-        // Admission (permission, credential, consent) runs outside the
-        // ownership section; the durable Owner append is the Client-dependent
-        // acceptance commit and runs inside it (CCT §10.4). A connection
-        // superseded while admission ran commits no row, opens no round,
-        // dispatches no provider call, and streams nothing.
         let round_wire = self.round_wire_or_mint(&accepted);
         let generation_number = attribution.generation.as_u64();
         let executor = HostInference {
@@ -757,13 +530,6 @@ impl HostHandle {
             tracker: &self.tracker,
             transport,
         };
-        // The prompt is assembled before admission: its canonical read-set
-        // (the History and Memory identities actually consumed) rides the
-        // admission into the attempt's `data_use`, so the claim gate and the
-        // deletion admission see the same provenance the provider input was
-        // built from. A read failure degrades the context, but a scrub
-        // failure holds the send without an Owner row, exactly like the input
-        // scrub above.
         let Ok(prompt) =
             assemble_dialogue_input(companion, &text, &self.store, &self.store, &scrubber).await
         else {
@@ -795,10 +561,6 @@ impl HostHandle {
             }
             Err(_) => return emit_end(sink, held_frame(frame, live)),
         };
-        // The claimed ticket is the durable correlation of the provider call
-        // this turn is about to start: the stream predicate reads it so a
-        // reply whose claim a deletion admission associated with an interval
-        // is never presented, even when the Host transient fence did not move.
         let inference_claim = authorized.ticket().0;
         let store = self.store.clone();
         let commit_input = input.clone();
@@ -814,9 +576,6 @@ impl HostHandle {
             })
             .await;
         let begin = match committed {
-            // Superseded before the acceptance section: no Owner row, no
-            // open round, no provider dispatch, no stream, and no accept ack
-            // that could name a round.
             None => {
                 return emit_end(
                     sink,
@@ -827,12 +586,6 @@ impl HostHandle {
         };
         match begin {
             DialogueBegin::Ready(turn) => {
-                // The connection-bound open round is installed under the
-                // ownership section: a replacement that wins this section
-                // leaves the durable Owner row and the reply's durable
-                // adoption to continue (the reply registers as undelivered
-                // for the new connection), while this connection opens no
-                // round and its stream aborts before any further publication.
                 let installed = self.record_open_round(
                     live,
                     &live.client_ref,
@@ -845,15 +598,7 @@ impl HostHandle {
                     },
                 );
                 let stream = StreamWireId(RawId::new().as_uuid());
-                // The fence epoch is captured before the stream can publish:
-                // a Targeted Deletion that invalidates Host transient payloads
-                // after this point stops the stream and refuses the assembly,
-                // because the reply can no longer prove it is uncovered.
                 let fence_epoch = self.transient_fence.epoch();
-                // Installation is not publication authority: replacement can
-                // win between them. Queue both control frames in one short
-                // ownership section, never socket I/O or an await. Already
-                // accepted work continues without a wire stream if stale.
                 let opened = if installed {
                     match self.with_current_connection(live, || {
                         sink.emit(accept_frame(frame, live, &round_wire))?;
@@ -872,11 +617,6 @@ impl HostHandle {
                 } else {
                     false
                 };
-                // Baselines the gate on the current record: the owner append
-                // committed under the admission consent, and any move since
-                // fails the attempt claim before the first delta. An
-                // unreadable record fails closed to an interrupted stream,
-                // like any post-acceptance failure.
                 let Ok(Some(consent)) = self.store.load_current(CapabilityKind::Dialogue).await
                 else {
                     if opened {
@@ -911,21 +651,7 @@ impl HostHandle {
                 let task_control =
                     crate::task_control::HostTaskControl::new(self, companion, live.connection_id);
                 let outcome = {
-                    // The open round is Host-owned transient state the
-                    // companion must never read directly: hand finish_turn
-                    // a sync predicate instead. It runs after provider
-                    // completion as an early refusal, sparing a doomed
-                    // append attempt; durable adoption authority stays in
-                    // the store transaction, which compares the turn's
-                    // Owner message premise atomically.
                     let is_current = || {
-                        // A Targeted Deletion that invalidated Host transient
-                        // payloads since this turn started refuses the adoption:
-                        // the assembled reply can no longer prove it is
-                        // uncovered, and a durable reply is not worth
-                        // resurrecting a deleted body into History. The
-                        // durable claim hold is the second, completion-proof
-                        // refusal: an unreadable hold fails closed.
                         self.transient_fence.epoch() == fence_epoch
                             && matches!(
                                 self.store.inference_claim_held_sync(inference_claim),
@@ -948,13 +674,6 @@ impl HostHandle {
                 };
                 match outcome {
                     DialogueOutcome::Completed { input, .. } => {
-                        // Occupancy starts before pin_experience so a
-                        // body-bearing local candidate cannot exist outside
-                        // HostTransient remainder. It starts after dispatch:
-                        // an in-flight stream is the fence's remainder, not a
-                        // Learning pin, and must not block Verified. The
-                        // guard releases occupancy on cancel/drop, not only
-                        // on the success path.
                         {
                             let _pin = self.acquire_learning_pin().await;
                             if let Some(experience) = pin_experience(&input, &self.store).await {
@@ -988,8 +707,6 @@ impl HostHandle {
                 emit_end(sink, revalidate_frame(frame, live, "consent-stale"));
             }
             DialogueBegin::StaleCredentialSet => {
-                // The input may carry a newly registered value; hold so the
-                // Client retries and the Host re-scrubs under the new set.
                 emit_end(sink, held_frame(frame, live));
             }
             DialogueBegin::Conflict => emit_end(
@@ -1015,35 +732,12 @@ impl HostHandle {
         }
     }
 
-    /// Applies one presentation observation with no reply.
-    ///
-    /// Confirmation is an observation, never a report of completion: matching
-    /// unpresented entries for the round move to presented on a presented
-    /// status, and a non-presented status is a presentation start against
-    /// `Pending` (the row stays re-presentable) or a current not-presented
-    /// receipt against `PresentationUnknown` (the row returns to `Pending`).
-    /// Failures end silently; the durable report state stays authoritative
-    /// either way.
-    ///
-    /// Linearization (CCT §10.4): the round resolve, companion resolve, and
-    /// the bounded `list_unpresented` page read run as prepare, then the
-    /// durable compare-and-mark for every matching row runs inside one
-    /// connection-ownership section with the currentness re-check. The
-    /// prepared statuses are CAS premises only: a replacement that wins the
-    /// table commits nothing (zero durable mutation for the stale
-    /// connection), and one that loses cannot interleave a supersession
-    /// between the check and any row's commit. The transition lock is taken
-    /// only across the short guarded section, never during the async
-    /// prepare.
     pub(crate) async fn confirm_presentation(
         &self,
         _frame: &WireFrame,
         live: &LiveInput,
         confirm: &ConfirmPresentationWire,
     ) -> Vec<WireFrame> {
-        // Confirmation moves durable presentation status for rows of one
-        // round: a connection superseded, replaced, or closed before this
-        // observation is applied changes nothing (CCT §10.4).
         if self.with_current_connection(live, || ()).is_none() {
             return Vec::new();
         }
@@ -1057,10 +751,6 @@ impl HostHandle {
         let Ok(companion) = self.store.ensure_running_companion().await else {
             return Vec::new();
         };
-        // The bounded first page is enough for this observation path; the
-        // full reconnect backlog subscription belongs to the presentation
-        // slice, which re-pages with a cursor. This read is prepare only:
-        // the statuses it returns are CAS premises, never authority.
         let Ok(page) = self
             .store
             .list_unpresented(companion, None, UNDELIVERED_PAGE_MAX)
@@ -1072,15 +762,12 @@ impl HostHandle {
         if let Some(gate) = self.confirm_commit_gate() {
             gate.pause().await;
         }
-        // Serialize commits, not preparation, with receipt transitions.
-        // Prepared statuses are CAS premises, never ownership authority.
         let _gate = self.presentation_gate().await;
         let store = self.store.clone();
         let _applied = self
             .with_current_connection_blocking(live, move || {
                 for entry in page.entries {
                     if entry.round == Some(mark.round) {
-                        // An unavailable or stale row does not block the rest.
                         drop(store.compare_and_mark_reported_sync(entry.id, entry.status, mark));
                     }
                 }
@@ -1089,12 +776,6 @@ impl HostHandle {
         Vec::new()
     }
 
-    /// Items map oldest-first with Host-filtered display facts only, never
-    /// undelivered reporting. A successful read may be empty; empty is
-    /// distinct from `Unavailable` (the read failed), `InvalidRequest`
-    /// (malformed `since`), and `StaleCompanion` (the projection rotated).
-    /// Failure payloads stay operation-level and never echo a body, secret,
-    /// or backend error.
     pub(crate) async fn answer_history(
         &self,
         frame: &WireFrame,
@@ -1105,27 +786,14 @@ impl HostHandle {
         let response = match self.read_history(request).await {
             HistoryResponse::Items(items) => {
                 let had_body = items.iter().any(|item| !item.text.is_empty());
-                // A covered body is not displayed: the canonical source is
-                // re-read here and checked against the current conditions, so
-                // a timeline page cannot show an erased message while the
-                // durable erasure finishes.
                 let items: Vec<_> = items
                     .into_iter()
                     .filter(|item| !coverage.covers(&item.text))
                     .collect();
                 let serves_body = items.iter().any(|item| !item.text.is_empty());
                 if had_body && serves_body && !self.note_client_body_delivery(live).await {
-                    // No durable delivery evidence: withhold the page rather
-                    // than hand over a copy the Host cannot account for.
                     HistoryResponse::Unavailable
                 } else {
-                    // The premise above was read before the evidence write and
-                    // the handoff. Admission serializes with that write, so a
-                    // condition that committed in between is either already in
-                    // the snapshot (evidence committed first) or must withhold
-                    // the body here: without this re-read a covered page could
-                    // leave while its incarnation is absent from the
-                    // operation's snapshot (critical-areas §5.2/§6.1).
                     let fresh = self.current_coverage().await;
                     HistoryResponse::Items(
                         items
@@ -1145,15 +813,11 @@ impl HostHandle {
     }
 
     async fn read_history(&self, request: &HistoryRequest) -> HistoryResponse {
-        // The same companion mapping as submits: an unknown ref means the
-        // Client's projection rotated, and it recovers by re-reading
-        // presence, never by treating the timeline as empty.
         let companion = match self.resolve_companion(&request.companion.0).await {
             Err(_) => return HistoryResponse::Unavailable,
             Ok(None) => return HistoryResponse::StaleCompanion,
             Ok(Some(companion)) => companion,
         };
-        // A malformed bound is never silently widened to "no bound".
         let since = match request.since.as_deref() {
             None => None,
             Some(bound) => match WallClockWithTz::parse_rfc3339(bound) {
@@ -1161,10 +825,6 @@ impl HostHandle {
                 Err(_) => return HistoryResponse::InvalidRequest,
             },
         };
-        // A round-scoped request resolves the stored projection durably, so
-        // an old round stays addressable after a restart dropped the
-        // transient wire map. A well-formed projection with no stored items
-        // is an empty result; only an unreadable store is `Unavailable`.
         let round = match &request.round {
             None => None,
             Some(wire) => match self.store.round_for_stored_wire(companion, &wire.0).await {
@@ -1182,11 +842,6 @@ impl HostHandle {
                 items
                     .iter()
                     .map(|item| HistoryItem {
-                        // The stored projection travels verbatim so views
-                        // agree with accept acks, including after a restart.
-                        // Pre-opaque rows fall back to the transient map,
-                        // then to the legacy domain rendering (continuity
-                        // for pre-release rows only).
                         round: RoundWireId(
                             item.round_wire
                                 .clone()
@@ -1210,11 +865,6 @@ impl HostHandle {
         self.wire_for_round(&RoundId::from_raw(round))
     }
 
-    /// The stored round wire travels verbatim, so a retry after a restart
-    /// replays instead of going stale on the dropped transient map.
-    /// Pre-opaque rows (no stored wire) fall back to the transient map; only
-    /// when both miss does the intake answer stale with the current
-    /// generation, and the Client recovers missed items through history.
     fn replay_frames(
         &self,
         frame: &WireFrame,
@@ -1230,18 +880,6 @@ impl HostHandle {
         }
     }
 
-    /// Queues the Experience premise pinned at one completed reply.
-    ///
-    /// Best-effort by design: the stream outcome was already decided by the
-    /// durable reply append, so a formation decline or failure never rewrites
-    /// it. Each item carries its own source range and transcript, so the
-    /// worker judges exactly that Experience; it never reads a later History
-    /// window and silently folds newer turns into an older pass. A full queue
-    /// drops the oldest pending pass rather than growing without bound.
-    ///
-    /// TARGET-bearing old-origin work is published to the canonical store as
-    /// a body-free delayed-arrival so an already-Verified HostTransient row
-    /// cannot complete over the new remainder.
     pub(crate) async fn queue_learning_formation(&self, experience: ExperienceCandidate) {
         let _gate = self.host_transient_arrival.lock().await;
         crate::lock_unpoison(&self.learning_queue).push_back(experience);
@@ -1262,29 +900,10 @@ impl HostHandle {
         self.host_transient_arrival.acquire_pin().await
     }
 
-    /// Whether a queued formation pass is waiting.
     pub(crate) fn has_pending_learning(&self) -> bool {
         !crate::lock_unpoison(&self.learning_queue).is_empty()
     }
 
-    /// Drains queued Learning formation passes, one pinned premise at a time.
-    ///
-    /// The queue is in-memory and best-effort: a crash before the drain loses
-    /// only the pending derived updates, exactly as a crash during the
-    /// previous synchronous pass did. No pass is durable, so a restart never
-    /// replays an old one and cannot duplicate a formation. The worker lock
-    /// serializes passes; the repository's compare-before-commit additionally
-    /// keeps a genuine overlap from overwriting newer recognition. Stopped
-    /// companions are skipped because stopping must not start new internal
-    /// activity. A pass failure drops its item, so there is no retry storm.
-    ///
-    /// Taking a candidate off the pending queue parks it in the worker-owned
-    /// `taken` slot until a body-free formation identity is published. HostTransient
-    /// can no longer drop that transcript as a queue entry; it also cannot
-    /// report Verified while the slot still carries a covered body. After the
-    /// identity commits, deletion correspondence outlives the slot, so a
-    /// deletion that completes before the Learning claim still refuses the
-    /// stale origin at the provider gate.
     pub(crate) async fn run_pending_learning<T: ProviderTransport>(&self, transport: &T) {
         let _serialized = self.learning_worker.lock().await;
         loop {
@@ -1295,9 +914,6 @@ impl HostHandle {
             let Some(experience) = next else {
                 break;
             };
-            // The candidate is in `taken` and no formation identity exists
-            // yet. HostTransient must observe this generation change instead
-            // of verifying from a pre-take snapshot.
             #[cfg(any(test, feature = "test-support"))]
             self.store.pause_learning_take_if_armed_for_tests().await;
             let formation = match self
@@ -1357,10 +973,6 @@ impl HostHandle {
     }
 }
 
-/// Pure wiring: every admission, attempt, provider, adoption, and usage
-/// decision lives in `ene-inference`; this adapter only hands it the concrete
-/// repositories and takes the short tracker lock for the single-use
-/// authorization.
 pub(crate) struct HostInference<'a, T> {
     store: &'a Store,
     cred_store: &'a CredStore,
@@ -1369,10 +981,6 @@ pub(crate) struct HostInference<'a, T> {
 }
 
 impl<'a, T: ProviderTransport + Send + Sync> HostInference<'a, T> {
-    /// Builds the Host inference boundary from its concrete repositories.
-    ///
-    /// Composition only: every admission, attempt, provider, adoption, and
-    /// usage decision lives in `ene-inference`.
     pub(crate) fn new(
         store: &'a Store,
         cred_store: &'a CredStore,
@@ -1389,8 +997,6 @@ impl<'a, T: ProviderTransport + Send + Sync> HostInference<'a, T> {
 }
 
 impl<T: ProviderTransport + Send + Sync> HostInference<'_, T> {
-    /// Runs one prepare step and turns it into an admission under the
-    /// single-use tracker lock.
     async fn admit(
         &self,
         prepared: impl std::future::Future<Output = Result<PreparedAdmission, InferenceTechnicalError>>,
@@ -1466,26 +1072,10 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
     }
 }
 
-/// Presentation gate for one open text stream: each delta is shown only
-/// while its premise is still current.
-///
-/// Baselines are captured at stream open, after the owner append committed,
-/// so they equal the admitted premises: the presented round, the presence
-/// generation, the dialogue consent `(id, rev)`, and the credential-set
-/// revision. Every delta re-reads those premises before it is shown. A newer
-/// submit replacing the open round, a presence move, a consent move, a
-/// lifecycle stop, or a credential registration aborts the stream first, so
-/// no delta produced after invalidation is presented as current. Deltas shown
-/// before the change stay as historical partial presentation; the aborted
-/// provider read never completes, so the stale reply is never adopted.
-/// Delivery itself backpressures through the bounded channel: a slow client
-/// paces the provider instead of queueing unboundedly.
 struct StreamGate<'a> {
     handle: &'a HostHandle,
     frame: &'a WireFrame,
     live: &'a LiveInput,
-    /// The connection that opened this stream; every publication re-checks
-    /// that it is still the device's current authenticated connection.
     connection: ConnectionWireId,
     companion_key: String,
     companion: CompanionId,
@@ -1496,53 +1086,25 @@ struct StreamGate<'a> {
     credential_set: CredentialSetRevision,
     tx: tokio::sync::mpsc::Sender<WireFrame>,
     seq: u64,
-    /// No wire close (or delta) is legal unless Open was queued.
     opened: bool,
-    /// The Host transient erasure fence epoch this stream started under; a
-    /// later epoch means the payload can no longer be published.
     fence_epoch: u64,
-    /// The ticket this stream's provider claim runs under: a deletion
-    /// admission that associated the claim with an interval refuses every
-    /// later delta, even after the operation completed.
     inference_claim: RawId,
 }
 
 impl StreamGate<'_> {
-    /// Whether the connection that opened this stream is still current.
-    ///
-    /// Reads the connection table, never the stale `LiveInput` snapshot: a
-    /// same-device replacement keeps `client_ref` and presence generation
-    /// identical, so only the table can tell that this stream's connection
-    /// was superseded (IPC §9.3 replacement). Synchronous by design: the
-    /// publication path calls it immediately before `permit.send`, with no
-    /// await in between.
     fn connection_current(&self) -> bool {
         self.live
             .authority
             .is_current_authenticated(&self.live.connection_id)
     }
 
-    /// Re-reads every presentation premise; any move — or any unreadable
-    /// premise — stops the stream. Failing closed keeps an unprovable
-    /// premise from presenting as current.
     async fn current(&self) -> bool {
-        // The connection itself must still be the current authenticated one:
-        // a replacement invalidates this stream even though the device,
-        // client id, generation, and round key look unchanged.
         if !self.connection_current() {
             return false;
         }
-        // A Targeted Deletion invalidated Host transient payloads since this
-        // stream opened: the remaining deltas can no longer prove they are
-        // uncovered, so they fail closed instead of publishing.
         if self.handle.transient_fence_epoch() != self.fence_epoch {
             return false;
         }
-        // The durable old-claim provenance (lifecycle §11 R2): a deletion
-        // admission associated this provider claim with its interval, so the
-        // reply cannot be presented even after the operation completed and no
-        // current condition is readable. The read is per delta and an
-        // unreadable hold refuses, never presents.
         if !matches!(
             self.handle
                 .store
@@ -1552,8 +1114,6 @@ impl StreamGate<'_> {
         ) {
             return false;
         }
-        // A newer submit replaced this stream's round: the owner's
-        // attention moved on, so further deltas are not current.
         let open = self
             .handle
             .open_round_for(&self.connection, &self.companion_key);
@@ -1608,15 +1168,6 @@ impl StreamGate<'_> {
         )
     }
 
-    /// Closes the displayed delta sequence as completed: the final empty
-    /// frame carries the next sequence number, and the close states
-    /// completion separately. A gone client ends the send; the reply is
-    /// already durable, so the close is best-effort either way.
-    ///
-    /// A connection that is no longer current — replaced while the reply
-    /// committed — never hears `Completed`: the durable reply stands, but
-    /// this stream was interrupted by the replacement, and the reply reaches
-    /// the new connection through its own presentation subscription.
     async fn finish(&mut self) {
         if !self.connection_current() || !self.current().await {
             self.interrupt().await;
@@ -1639,9 +1190,6 @@ impl StreamGate<'_> {
         }
     }
 
-    /// Queues one close path frame if the stream opened on the wire and the
-    /// connection is still current. An unopened stream sends nothing: a
-    /// stream the Client never saw opens no close-only lifecycle now.
     async fn publish_current(&mut self, frame: WireFrame) -> bool {
         if !self.opened {
             return false;
@@ -1654,8 +1202,6 @@ impl StreamGate<'_> {
             .is_some()
     }
 
-    /// Closes the stream interrupted after a stale or failed run: displayed
-    /// deltas stay, and no reply is adopted.
     async fn interrupt(&mut self) {
         if !self.opened {
             return;
@@ -1682,8 +1228,6 @@ impl DeltaSink for StreamGate<'_> {
         delta: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DeltaFlow> + Send + 'a>> {
         Box::pin(async move {
-            // Fast path: never reserve capacity for an already-stale
-            // stream, and never hold a permit across the premise reads.
             if !self.opened || !self.current().await {
                 return DeltaFlow::Abort("the presentation premise went stale");
             }
@@ -1692,33 +1236,18 @@ impl DeltaSink for StreamGate<'_> {
                 Ok(permit) => permit,
                 Err(_) => return DeltaFlow::Abort("the client connection is gone"),
             };
-            // Re-check after the capacity wait: the premise may have gone
-            // stale while parked, and a stale delta must never publish.
             if !self.current().await {
                 drop(permit);
                 return DeltaFlow::Abort("the presentation premise went stale");
             }
-            // Write-ahead delivery evidence: the delta body may only leave the
-            // Host after this incarnation's durable evidence row is committed,
-            // so a crash between the send and the record cannot lose the copy
-            // (lifecycle §8.1). A failed commit aborts the stream instead of
-            // creating an unaccountable copy; the durable reply still reaches
-            // the Client through its presentation subscription.
             if !self.handle.note_client_body_delivery(self.live).await {
                 drop(permit);
                 return DeltaFlow::Abort("the delivery evidence could not be committed");
             }
-            // Final premise check after the durable write: the write awaited,
-            // so a condition, fence, or connection that moved meanwhile must
-            // still stop this delta before it is published. The evidence row,
-            // when written, is conservative and re-derived by a later demand.
             if !self.current().await {
                 drop(permit);
                 return DeltaFlow::Abort("the presentation premise went stale");
             }
-            // Final connection currentness check, synchronous and after the
-            // last await: a same-device replacement during the premise reads
-            // must not let this stream publish one more delta (IPC §9.3).
             if self
                 .handle
                 .with_current_connection(self.live, || permit.send(frame))

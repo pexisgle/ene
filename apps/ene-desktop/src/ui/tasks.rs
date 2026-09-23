@@ -1,19 +1,3 @@
-//! Task / Workspace management view-model.
-//!
-//! Host is durable authority. This module talks existing Client wire DTOs
-//! only ([`ListTasks`], [`GetTaskReport`], [`GetReportSource`], [`SelectTask`],
-//! [`ResumeTask`], [`ManagementIntentKind::CancelTask`],
-//! [`ManagementIntentKind::SelectWorkspace`]). It does not know the DB schema
-//! and does not mint Tasks: creation stays on the companion delegation path
-//! (chat). Resume is explicit and bound to the Task revision / purpose the
-//! panel currently displays; a stale premise is shown, never rewritten to the
-//! latest behind the Owner's back.
-//!
-//! Presentation ACK for undelivered Task facts is issued only after this
-//! panel has copied a receipt into its displayed state. Conversation stream
-//! ACK lives in [`crate::session::confirm_chat_presentation`] after the GUI
-//! presents the collected turn.
-
 use std::path::Path;
 use std::time::Duration;
 
@@ -36,7 +20,6 @@ use crate::ui::DesktopError;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Connection-scoped Task / Workspace projection. Wire refs die on reconnect.
 #[derive(Debug, Default)]
 pub(crate) struct TaskPanel {
     items: Vec<TaskListItem>,
@@ -48,14 +31,12 @@ pub(crate) struct TaskPanel {
     report_rows: Vec<super::presentation::Row>,
     workspace_path: Option<String>,
     undelivered_lines: Vec<String>,
-    /// Set only after a receipt's items were copied into this panel.
     presented: Option<PresentedReceipt>,
     last_resume: Option<String>,
     last_cancel: Option<String>,
     last_ack: Option<String>,
 }
 
-/// Premise the Owner is looking at. Resume echoes this, never a fresher list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DisplayedTask {
     pub task: String,
@@ -205,8 +186,6 @@ impl TaskPanel {
         self.presented.is_some()
     }
 
-    /// Drops connection-scoped refs. Workspace path is the last Owner-sent
-    /// folder (display of our own intent), not a Host master.
     pub(crate) fn reset_connection_state(&mut self) {
         let workspace_path = self.workspace_path.clone();
         *self = Self {
@@ -215,8 +194,6 @@ impl TaskPanel {
         };
     }
 
-    /// Drops Task report, list, undelivered lines, and presented receipts.
-    /// Workspace folder is the last Owner-sent path, not a target body.
     pub(crate) fn wipe_owned_copies(&mut self) {
         self.reset_connection_state();
     }
@@ -338,11 +315,6 @@ impl TaskPanel {
         Ok(outcome)
     }
 
-    /// Cancel the displayed Task through first-party [`CancelTask`].
-    ///
-    /// The management target uses the Host-published purpose identity
-    /// (`{task}:{adopted_revision}`), not a SQLite read. Acceptance
-    /// (`AppliedAsOneTime`) is not stop-complete.
     pub(crate) async fn cancel_displayed(
         &mut self,
         client: &mut Client,
@@ -378,8 +350,6 @@ impl TaskPanel {
         Ok(outcome)
     }
 
-    /// Resume using the displayed revision / purpose. Does not refresh the
-    /// list first, so a stale view cannot be silently replaced with latest.
     pub(crate) async fn resume_displayed(
         &mut self,
         client: &mut Client,
@@ -410,7 +380,6 @@ impl TaskPanel {
         Ok(outcome)
     }
 
-    /// Copies one undelivered page into the panel. ACK is a separate step.
     pub(crate) async fn present_undelivered(
         &mut self,
         client: &mut Client,
@@ -474,8 +443,6 @@ impl TaskPanel {
         Ok(())
     }
 
-    /// ACK only after [`Self::present_undelivered`]. Receiving a frame is not
-    /// presentation.
     pub(crate) async fn ack_presented(
         &mut self,
         client: &mut Client,
@@ -615,8 +582,6 @@ impl TaskPanel {
         self.presented = None;
     }
 
-    /// Lifecycle flags may move (cancel admission, runner stop). Revision and
-    /// purpose stay as the Owner-selected resume premise.
     fn sync_lifecycle_from_list(&mut self) {
         let Some(shown) = &mut self.displayed else {
             return;

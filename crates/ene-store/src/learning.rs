@@ -1,11 +1,3 @@
-//! `LearningRepository` over the Learning table group.
-//!
-//! One commit writes the evidence Summary (once), the current Memory row, and
-//! the new revision row in one short `Immediate` transaction. The expected
-//! revision is compared inside that transaction, so a formation result
-//! computed against an older recognition answers [`MemoryChangeOutcome::StaleTarget`]
-//! and leaves the newer row untouched.
-
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -40,8 +32,6 @@ const SQL_LIST_REVISIONS: &str = "SELECT memory_id, revision, companion_id, cont
 
 const SQL_SELECT_SUMMARY: &str = "SELECT summary_id, companion_id, content, source_kind, source_start, source_end, formed_at FROM learning_summary WHERE summary_id = ?1";
 
-/// The only Experience source kind this stage stores; an unknown stored value
-/// is an unreadable row and is rejected on read.
 const SOURCE_KIND_DIALOGUE: &str = "dialogue";
 
 fn learning_unavailable(reason: impl core::fmt::Display) -> LearningTechnicalError {
@@ -58,9 +48,6 @@ fn commit_change_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(learning_unavailable)?;
-    // Credential-set premise first: content scrubbed before a credential
-    // became registered must not be written, so the whole change (including
-    // its Summary evidence) is refused before any row.
     if let Some(expected) = commit.secret_premise {
         let stored: i64 = tx
             .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
@@ -70,13 +57,6 @@ fn commit_change_sync(
             return Ok(MemoryChangeOutcome::StaleCredentialSet);
         }
     }
-    // The A4/R2 claim-hold gate: a formation claimed before a deletion
-    // condition committed was associated with that operation at admission
-    // (`erasure_use_hold`). The association outlives the operation, so a
-    // delayed formation is refused even when the operation completed and no
-    // current condition is readable. The check names the claim, never the
-    // target text: the same string from a fresh claim after completion is a
-    // new origin.
     if let Some(claim) = commit.claim
         && crate::preservation::held_use(
             &tx,
@@ -85,20 +65,9 @@ fn commit_change_sync(
         )
         .map_err(|error| learning_unavailable(error.to_string()))?
     {
-        // The direct-correlation fallback in `held_use` may have written the
-        // durable hold for an unreconciled operation; commit it even though
-        // the formation itself is refused, so the correspondence survives
-        // this arrival instead of rolling back with the refused try.
         tx.commit().map_err(learning_unavailable)?;
         return Ok(MemoryChangeOutcome::HeldForErasure);
     }
-    // The A4 delayed-arrival gate: the Summary evidence, the proposed
-    // recognition text, and the Summary's source correlation are compared
-    // against the canonical current conditions inside this same transaction.
-    // A formation pass whose output re-states the target, or whose evidence
-    // derives from a covered source, is refused before any row — evidence,
-    // current Memory, revision, or token index. A completed operation is not
-    // a current condition, so new formation over a fresh source proceeds.
     let covered = |text: &str| {
         crate::preservation::covering_text(&tx, text)
             .map_err(|error| learning_unavailable(error.to_string()))
@@ -189,11 +158,6 @@ fn insert_summary(
     tx: &Transaction<'_>,
     summary: &SummaryRecord,
 ) -> Result<(), LearningTechnicalError> {
-    // Reused verbatim when several changes of one formation share it; the id
-    // identifies the evidence, so a repeated insert is a no-op only while the
-    // stored payload equals the offered one. A different payload under the
-    // same identity would silently rebind the evidence, so it is refused and
-    // the caller's transaction (including this insert) rolls back.
     tx.execute(
         SQL_INSERT_SUMMARY_IGNORE,
         params![
@@ -281,11 +245,6 @@ fn update_current(
     Ok(())
 }
 
-/// Re-derives the recall token rows for one Memory inside the commit
-/// transaction, so the index never observes a half-written recognition.
-/// Suppression needs no reindexing: the lexical arm filters suppressed rows
-/// at read time, and clearing the flag re-exposes the already-indexed
-/// tokens.
 fn refresh_memory_terms(
     tx: &Transaction<'_>,
     memory: MemoryId,
@@ -301,13 +260,6 @@ fn refresh_memory_terms(
     Ok(())
 }
 
-/// Re-derives one Memory's token rows from its canonical content.
-///
-/// Shared by commit-time refresh and the credential-sweep rebuild: both
-/// pass the current canonical text, so the derived rows always equal
-/// [`ene_learning::recall_index_terms`] of what `learning_memory` holds.
-/// Raw [`rusqlite::Error`] travels to the caller, which maps it into its
-/// own domain error.
 pub(crate) fn rebuild_memory_terms_tx(
     tx: &Transaction<'_>,
     memory_text: &str,
@@ -439,19 +391,6 @@ fn decode_summary(raw: RawSummary) -> Result<SummaryRecord, LearningTechnicalErr
     })
 }
 
-/// Recall candidate arms: newest, most important, and lexical token
-/// matches, each capped by `limit`; suppression is excluded before any cap
-/// applies. The caller receives candidates in newest-first order with
-/// duplicates removed.
-///
-/// Every arm is an index walk, never a table scan or sort: the newest arm
-/// reverse-walks the partial companion index, the importance arm walks the
-/// partial (companion, importance) index in order, and the lexical arm seeks
-/// one covering token-index entry per query term and fetches at most `limit`
-/// rows by primary key. The importance arm carries no `rowid` tie-break
-/// because the merge below re-sorts every candidate newest-first anyway;
-/// the bare `importance DESC` is what lets SQLite walk the index with no
-/// sort step.
 pub(crate) fn recall_candidates_sql(term_count: usize) -> String {
     let columns = "memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at, rowid AS insertion_order";
     let base = format!(
@@ -487,11 +426,6 @@ fn recall_candidates_sync(
         values.push(Box::new(term.clone()));
     }
     let guard = lock_shared(conn);
-    // Recall is a use, not only a read: a Memory under a current deletion
-    // condition is not offered to any consumer (the dialogue prompt would
-    // otherwise put its content into the provider input), and an unreadable
-    // premise withholds every body. The durable erase is the owner sweep's;
-    // this is the same canonical premise applied at the read boundary.
     let premise = crate::preservation::TextCoveragePremise::read(&guard)
         .map_err(|error| learning_unavailable(error.to_string()))?;
     let mut statement = guard.prepare(&sql).map_err(learning_unavailable)?;
@@ -519,8 +453,6 @@ fn recall_candidates_sync(
             candidates.push((insertion_order, memory));
         }
     }
-    // Newest first, so the caller's stable ranking keeps recency as its
-    // final tie-break.
     candidates.sort_by_key(|(insertion_order, _)| std::cmp::Reverse(*insertion_order));
     Ok(candidates.into_iter().map(|(_, memory)| memory).collect())
 }
@@ -589,9 +521,6 @@ fn list_revisions_sync(
     Ok(revisions)
 }
 
-/// Loads the Summaries for `ids` in one query. Ids are deduplicated and
-/// bound as parameters; the placeholder count is bounded by the caller's
-/// page size, never by stored history.
 fn load_summaries_sync(
     conn: &Mutex<Connection>,
     ids: &[SummaryId],

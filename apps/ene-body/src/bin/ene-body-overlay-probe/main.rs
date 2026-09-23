@@ -1,17 +1,3 @@
-//! Real-compositor overlay probe for `ene-body`.
-//!
-//! Runs the Body runtime in-process with the same projection IPC contract as
-//! the product parent (`--ipc-stdio` framing), prints every Body event as one
-//! JSON line, and accepts projection commands on stdin:
-//!
-//! ```text
-//! show | hide | pose idle|listening|speaking|working|attention
-//! placement X Y W H SCALE | asset PATH | quit
-//! ```
-//!
-//! This is a probe tool, not product acceptance: a successful run here does
-//! not stand in for the official `ene` asset or for slice F.
-
 use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
@@ -64,9 +50,6 @@ async fn run() -> Result<(), ProbeError> {
 
     let (mut to_body, body_reader) = tokio::io::duplex(64 * 1024);
     let (body_writer, mut from_body) = tokio::io::duplex(64 * 1024);
-    // Drives the Body runtime in this task. On Windows the runtime future
-    // holds raw HWND handles and is not `Send`, so it must not cross
-    // `tokio::spawn`; the Windows CI check compiles this bin.
     let body_future = run_with_io(body_reader, body_writer, options);
     tokio::pin!(body_future);
 

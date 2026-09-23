@@ -42,10 +42,6 @@ pub(crate) const SQL_SELECT_INTENT_OUTCOME: &str = "SELECT kind, target, base, r
 
 pub(crate) const SQL_INSERT_INTENT_OUTCOME: &str = "INSERT INTO management_intent (intent_id, kind, target, base, rationale_origin, rationale_quote, outcome, mark) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
-/// Poisoning only follows a panic inside a critical section; sections here
-/// perform no panicking work while holding the guard, so recovery preserves
-/// the committed state. Recovering (rather than erroring) also keeps lock
-/// handling out of every repository's error vocabulary.
 pub(crate) fn lock_shared(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
     match conn.lock() {
         Ok(guard) => guard,
@@ -57,8 +53,6 @@ pub(crate) fn encode_id(id: RawId) -> String {
     id.as_uuid().as_hyphenated().to_string()
 }
 
-/// The `uuid` crate is not a direct dependency, so parsing goes through
-/// [`str::parse`], with the target type inferred from [`RawId::from_uuid`].
 pub(crate) fn decode_id(text: &str) -> Result<RawId, String> {
     let parsed = text
         .parse()
@@ -66,9 +60,6 @@ pub(crate) fn decode_id(text: &str) -> Result<RawId, String> {
     Ok(RawId::from_uuid(parsed))
 }
 
-/// Pricing references have a text form by design: the durable row is what
-/// historical cost facts join on. Malformed text never becomes a fresh or
-/// default reference.
 pub(crate) fn encode_pricing_reference(reference: PricingSnapshotRef) -> String {
     reference.to_text()
 }
@@ -86,7 +77,6 @@ pub(crate) fn decode_currency(text: &str) -> Result<CurrencyCode, String> {
     CurrencyCode::from_code(text).ok_or_else(|| String::from("unknown currency code"))
 }
 
-/// Canonical UTC rendering, so stored instants compare and order as text.
 pub(crate) fn encode_wall_clock(at: WallClockWithTz) -> String {
     at.to_rfc3339_utc()
 }
@@ -103,7 +93,6 @@ pub(crate) fn decode_u64(raw: i64) -> Result<u64, String> {
     u64::try_from(raw).map_err(|_| String::from("count out of range"))
 }
 
-/// Unknown counts stay `NULL`, never zero.
 pub(crate) fn encode_optional_count(value: Option<u64>) -> Result<Option<i64>, String> {
     match value {
         Some(number) => Ok(Some(encode_u64(number)?)),
@@ -143,7 +132,6 @@ pub(crate) fn decode_role(text: &str) -> Result<HistoryRole, String> {
     }
 }
 
-/// Only [`RoundIntentMark::Existing`] carries a reference, stored verbatim.
 pub(crate) fn encode_round_intent(intent: &RoundIntentMark) -> (&'static str, Option<&str>) {
     match intent {
         RoundIntentMark::Auto => ("auto", None),
@@ -152,9 +140,6 @@ pub(crate) fn encode_round_intent(intent: &RoundIntentMark) -> (&'static str, Op
     }
 }
 
-/// `None` intent means the row predates the mark (or carries no command
-/// key): the caller fail-closes on replay instead of guessing. A kind and
-/// reference that disagree are a malformed row, never defaulted.
 pub(crate) fn decode_round_intent(
     kind: Option<&str>,
     reference: Option<String>,
@@ -206,10 +191,6 @@ pub(crate) fn decode_report_status(text: &str) -> Result<ReportStatus, String> {
     }
 }
 
-/// The valid UTF-8 prefix of one byte-bounded page.
-///
-/// A byte cap may cut a multi-byte character; the cut character belongs to
-/// the next page, and only an actually invalid sequence fails closed.
 pub(crate) fn utf8_prefix(bytes: &[u8]) -> Result<&str, String> {
     match core::str::from_utf8(bytes) {
         Ok(text) => Ok(text),
@@ -221,7 +202,6 @@ pub(crate) fn utf8_prefix(bytes: &[u8]) -> Result<&str, String> {
     }
 }
 
-/// Storage names of the undelivered source kinds (PR §4.6).
 pub(crate) const SOURCE_KIND_TASK_REVISION: &str = "task_revision";
 pub(crate) const SOURCE_KIND_DELEGATION: &str = "delegation";
 pub(crate) const SOURCE_KIND_ACTION_ATTEMPT: &str = "action_attempt";
@@ -231,12 +211,6 @@ pub(crate) const SOURCE_KIND_TERMINAL: &str = "terminal";
 pub(crate) const SOURCE_KIND_HISTORY_MESSAGE: &str = "history_message";
 pub(crate) const SOURCE_KIND_ACTIVITY_RECORD: &str = "activity_record";
 
-/// Encodes one source as `(source_kind, source_id, source_phase)`.
-///
-/// `source_phase` is the revision decimal for `task_revision`, the certainty
-/// name for `action_attempt`, `failed` / `cancelled` for `terminal`, and the
-/// empty string (never NULL) for kinds without a phase, so the source-key
-/// uniqueness constraint compares every part and a later fact is a new key.
 pub(crate) fn encode_undelivered_source(source: &UndeliveredSource) -> (String, String, String) {
     let kind;
     let id;
@@ -288,16 +262,10 @@ pub(crate) fn encode_undelivered_source(source: &UndeliveredSource) -> (String, 
     (kind.to_owned(), id, phase)
 }
 
-/// The owning task of one delegation-owned notification source, read from
-/// the canonical row: the delegation row names its task, an attempt resolves
-/// through its delegation row (the delegation is authoritative, not the
-/// attempt's copied correlation), and a result row names its task.
 const SQL_SOURCE_DELEGATION_TASK: &str = "SELECT task_id FROM delegation WHERE delegation_id = ?1";
 const SQL_SOURCE_ATTEMPT_TASK: &str = "SELECT d.task_id FROM action_attempt a JOIN delegation d ON d.delegation_id = a.delegation_id WHERE a.attempt_id = ?1";
 const SQL_SOURCE_RESULT_TASK: &str = "SELECT task_id FROM task_result WHERE result_id = ?1";
 
-/// Resolves the owning task of one stored source identity. A missing owner
-/// row is an unreadable row and fails closed, never a fabricated task.
 fn resolve_source_task(
     conn: &Connection,
     sql: &str,
@@ -314,15 +282,6 @@ fn resolve_source_task(
     decode_id(&task_text)
 }
 
-/// Decodes one stored source key back to its typed form.
-///
-/// An unknown kind, an undecodable identity, a non-decimal revision phase,
-/// an unknown certainty, and an unknown terminal phase are unreadable rows
-/// and fail closed. Delegation-, attempt-, and result-owned facts resolve
-/// their owning task from the canonical rows at read time (the delegation
-/// row, the attempt's delegation row, the result row): the `task` field is
-/// the owning task, never the source identity itself, so report composition
-/// finds the task behind every fact.
 pub(crate) fn decode_undelivered_source(
     conn: &Connection,
     kind: &str,
@@ -400,8 +359,6 @@ pub(crate) fn encode_usage_source(source: UsageSource) -> &'static str {
     }
 }
 
-/// Consumer/purpose storage vocabulary is owned by `ene-permission`; unknown
-/// stored names are unreadable rows and fail closed on decode.
 pub(crate) fn encode_consumer(consumer: ConsumerKind) -> &'static str {
     consumer.as_str()
 }
@@ -453,7 +410,6 @@ pub(crate) fn inference_unavailable(reason: String) -> InferenceTechnicalError {
     InferenceTechnicalError::StorageUnavailable { reason }
 }
 
-/// Reads the single consent row for `capability`, if one is assigned.
 pub(crate) fn select_consent(
     conn: &Connection,
     capability: CapabilityKind,
@@ -507,8 +463,6 @@ pub(crate) fn encode_intent_outcome(outcome: &IntentOutcome) -> (&'static str, O
     }
 }
 
-/// Unknown kinds and missing marks are malformed rows, never guessed: the
-/// caller fails closed.
 pub(crate) fn decode_intent_outcome(
     outcome_text: &str,
     mark: Option<String>,
@@ -524,8 +478,6 @@ pub(crate) fn decode_intent_outcome(
     }
 }
 
-/// Compares content fields only: both rows share the key by construction, so
-/// the key itself carries no information.
 pub(crate) fn fingerprints_match(stored: &IntentFingerprint, incoming: &IntentFingerprint) -> bool {
     stored.kind == incoming.kind
         && stored.target == incoming.target
@@ -534,8 +486,6 @@ pub(crate) fn fingerprints_match(stored: &IntentFingerprint, incoming: &IntentFi
         && stored.rationale_quote == incoming.rationale_quote
 }
 
-/// Shared by the claim check and the insert-race fallback so both answer
-/// from the same rule: exact content replays, anything else clarifies.
 pub(crate) fn replay_or_conflict<T>(
     stored: IntentOutcomeRecord,
     fingerprint: &IntentFingerprint,
@@ -547,11 +497,6 @@ pub(crate) fn replay_or_conflict<T>(
     }
 }
 
-/// Returns `None` when this call stored the row, or the winning row when a
-/// concurrent writer committed first (cross-process only; same-process
-/// writers serialize on the shared connection). Callers must NOT commit on
-/// `Some`: dropping the transaction rolls back any decision writes made
-/// after the pre-check, so a loser changes nothing.
 pub(crate) fn insert_decided_row_tx(
     tx: &Transaction<'_>,
     fingerprint: &IntentFingerprint,
@@ -626,10 +571,6 @@ pub(crate) fn select_intent_row_tx(
         .transpose()
 }
 
-/// Pre-opaque rows store `NULL` for `wire` and decode to the legacy
-/// continuity projection (the device identity rendering) so
-/// already-provisioned clients keep resolving; new approvals always store a
-/// fresh opaque projection.
 pub(crate) fn decode_device_record(
     device_text: &str,
     descriptor: String,
@@ -662,8 +603,6 @@ pub(crate) fn decode_pending_pairing(
     })
 }
 
-/// Empty or whitespace-only input is absent: callers check this before
-/// touching the store, so blank pairs never become stored rows.
 pub(crate) fn credential_pair_is_blank(provider: &str, label: &str) -> bool {
     provider.trim().is_empty() || label.trim().is_empty()
 }
@@ -682,9 +621,6 @@ pub(crate) fn decode_pending_credential(
     })
 }
 
-/// `None` command text means no replay key; `None` wire projection marks a
-/// pre-opaque row; the incarnation appears only when both counter and random
-/// are present and decode; `local_id` is correspondence metadata only.
 pub(crate) fn decode_history_message(
     companion: CompanionId,
     row: HistoryRow,
@@ -736,8 +672,6 @@ pub(crate) fn decode_history_message(
     })
 }
 
-/// Reads the attribution row for `key`, the encoded companion id used as the
-/// table's primary key.
 pub(crate) fn select_attribution(
     conn: &Connection,
     key: &str,
@@ -780,8 +714,6 @@ pub(crate) fn decode_attribution(
     })
 }
 
-/// Reads the relocation hint row for `key`, the encoded companion id used as
-/// the table's primary key. A missing row is [`None`], never a defaulted hint.
 pub(crate) fn select_hint(conn: &Connection, key: &str) -> Result<Option<RelocationHint>, String> {
     let found: Option<(Option<String>, Option<String>)> = conn
         .query_row(SQL_SELECT_HINT, params![key], |row| {
@@ -812,9 +744,6 @@ pub(crate) fn decode_hint(
     })
 }
 
-/// Named fields keep column order in exactly one place:
-/// [`HistoryRow::from_row`]. All readers (`lookup_command`, `load_timeline`,
-/// `load_recent_timeline`) share the column order through that constructor.
 pub(crate) struct HistoryRow {
     message_text: String,
     round_text: String,

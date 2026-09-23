@@ -1,12 +1,3 @@
-//! Pre-accept handshake: pairing requests, capability negotiation, and
-//! ownership-proof verification.
-//!
-//! These methods run before the connection is authenticated; every answer
-//! predates the acceptance that reveals the connection id, so their senders
-//! hide it. Every phase transition and the single-use nonce live in the
-//! connection table, so a repeat or out-of-phase frame cannot change the
-//! negotiated terms or install currentness (IPC §9.3, #1385).
-
 use super::frames::{
     invalid_phase_reject, outgoing_frame, outgoing_frame_pre_auth, stale_reject, unpaired_close,
 };
@@ -25,8 +16,6 @@ use ene_presence::PresenceRepository;
 use uuid::Uuid;
 
 impl HostHandle {
-    /// Handles one fresh pairing request and binds its pending identity to the
-    /// live connection that sent it.
     pub(super) async fn pair(
         &self,
         frame: &WireFrame,
@@ -74,25 +63,6 @@ impl HostHandle {
         }
     }
 
-    /// Handles one [`CapabilityAdvertise`]: bind, negotiate, then challenge.
-    ///
-    /// On a connection that never paired, the frame's `sender.device_id` must
-    /// resolve to an existing device in the device store; that resolution,
-    /// the device bind, the terms, and the challenge are one phase operation
-    /// (`Accepted → Challenged`), so a reconnect never needs a redundant
-    /// pairing round trip and an unresolved claim cannot bind anything. On a
-    /// freshly paired connection the record's device is already bound
-    /// (`Paired → Challenged`). The table writes the terms and the nonce
-    /// exactly once: a repeat capability frame answers
-    /// [`InvalidHandshakePhase`](ene_api::v1::reject::RejectKind::InvalidHandshakePhase)
-    /// and changes neither.
-    ///
-    /// When no advertised version shares the v1 major, the reply is a single
-    /// terminal [`DisconnectNotice`] (the connection closes after it is
-    /// written; there is no `IncompatibleProtocol` DTO in `ene-api`).
-    /// Capability frames never attach presence: attach happens only on the
-    /// submit path, so a negotiating-but-never-submitting peer leaves
-    /// attribution untouched.
     pub(super) async fn advertise(
         &self,
         frame: &WireFrame,
@@ -121,17 +91,11 @@ impl HostHandle {
             .map(|id| id.0.as_hyphenated().to_string());
         let bind_device = match (&live.paired_device, claimed) {
             (None, Some(claim)) => {
-                // Reconnect: the Host resolves the claimed device against the
-                // device store (a revoked device would not resolve) before
-                // the bind becomes part of the phase operation.
                 match DevicePairingRepository::find_device_by_wire(&self.store, &claim).await {
                     Ok(Some(_)) => Some(claim),
                     _ => return vec![unpaired_close(frame, live)],
                 }
             }
-            // `live_for` already rejected a claim-less frame on a bound
-            // connection and a mismatched claim; an unbound, claim-less frame
-            // never paired and cannot proceed.
             (None, None) => return vec![unpaired_close(frame, live)],
             (Some(_), _) => None,
         };
@@ -166,23 +130,6 @@ impl HostHandle {
         }
     }
 
-    /// Handles one [`AuthProof`]: verify against the persisted secret and
-    /// install currentness, or answer.
-    ///
-    /// The pending nonce for this connection is consumed single-use in the
-    /// challenged phase; a proof in any other phase never reaches here (the
-    /// dispatcher answers `InvalidHandshakePhase`) and a second proof after
-    /// the nonce was consumed cannot challenge again. A missing device, a
-    /// missing or unreadable secret, or a bad proof consumes the nonce and
-    /// ends the connection phase in `Closed` with
-    /// [`Rejected`](AuthResult::Rejected) — a captured proof can never
-    /// replay. Success installs this connection as the device's current
-    /// authenticated one in one table section (superseding the previous
-    /// current irreversibly) *before* the
-    /// [`Accepted`](AuthResult::Accepted) answer is sent, so a lost response
-    /// never rolls the install back and a concurrent authentication only wins
-    /// by installing later. Proof comparison itself runs in constant time
-    /// inside `ene-credential`.
     pub(super) async fn verify_proof(
         &self,
         frame: &WireFrame,
@@ -206,17 +153,6 @@ impl HostHandle {
                 )];
             }
         };
-        // Device attribution comes from the connection table (bound moments
-        // earlier on this same connection), never from the envelope claim:
-        // the proof authenticates the pending pairing the Host recorded, and
-        // trusting a Client-supplied device here would let any peer claim
-        // any identity. The opaque wire string resolves to its domain record
-        // through the store — never by parsing, since projections are
-        // unrelated to the domain bytes — and the domain id keys the secret.
-        // Device revocation has no store API yet (explicitly deferred in
-        // `ene-credential`), so no revoke can interleave between that
-        // resolution and the install below; the install still re-checks the
-        // phase before installing.
         let reason = match live.paired_device.clone() {
             Some(device) => {
                 let stored = DevicePairingRepository::find_device_by_wire(&self.store, &device)
@@ -240,11 +176,6 @@ impl HostHandle {
         match reason {
             None => match live.authority.install_authenticated(&live.connection_id) {
                 InstallOutcome::Installed { superseded } => {
-                    // Supersession is terminal for the replaced connection's
-                    // connection-transient world: the single lifecycle hook
-                    // invalidates its presentation state, open rounds, and
-                    // first-party Task selection now, so the still-open old
-                    // socket can neither reach nor extend any of them.
                     if let Some(previous) = superseded {
                         self.on_connection_superseded(&previous);
                     }
@@ -267,12 +198,6 @@ impl HostHandle {
                                 &attribution,
                             )),
                         ));
-                        // Recovery auto-present: a reconnected still-present
-                        // client gets its absence backlog without an Owner
-                        // query. Unsolicited (no reply_to), silence when empty,
-                        // one bounded frame at most. Auth alone never restores
-                        // presence, so anything but Present-for-this-device
-                        // presents nothing.
                         if let Some(device) = live.paired_device.clone()
                             && attribution.active_client == Some(device_client(&device))
                         {
@@ -313,9 +238,6 @@ impl HostHandle {
     }
 }
 
-/// Answers a handshake frame whose phase changed while its handler awaited
-/// outside the table section: superseded connections get the typed stale
-/// rejection, everything else the typed phase rejection.
 fn phase_rejection(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     if live
         .authority
@@ -328,27 +250,6 @@ fn phase_rejection(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     }
 }
 
-/// Maps a durable attribution to its wire fact, the one projection every
-/// `PresenceAttribution` publisher uses: the handshake acceptance below
-/// distributes it on an auth/recovery, and the summon attach in the submit
-/// path distributes it on a formal-presence transition (IPC §12.2). Both
-/// read the durable fact, so a Client observes the same mapping whichever
-/// path taught it the current generation.
-///
-/// The companion ref renders the handle-issued projection (resolvable
-/// back through [`HostHandle::resolve_companion`]), the client ref is a
-/// one-way opaque projection, and generation travels as a value copy.
-/// Reporting only, never authority: no Host path parses these strings into
-/// domain ids — companion refs resolve through the mapping, and Clients
-/// must treat both as opaque.
-///
-/// The client projection reuses the `device_client` recipe — `UUIDv5` over
-/// a kind-separated label — so it is stable across restarts without any
-/// mapping table, while remaining non-reversible. It stays one-way (rather
-/// than mapped) because nothing ever echoes it back: no inbound DTO carries
-/// a `ClientWireRef`, so a mapping would be write-only. The Client's
-/// operative wire identity remains the device projection plus incarnation,
-/// resolved table-side.
 pub(crate) fn attribution_to_wire(
     handle: &HostHandle,
     attribution: &ene_presence::PresenceAttribution,

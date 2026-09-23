@@ -1,42 +1,3 @@
-//! Targeted Deletion management surface (`Stage 6` A1b).
-//!
-//! [Targeted Deletion Lifecycle](../../../docs/design/concrete/targeted-deletion-lifecycle.md)
-//! §15 and [IPC](../../../docs/design/concrete/host-client-ipc.md) §18 / §18.1
-//! split this surface into three paths that must never collapse into one:
-//!
-//! - **Advisory wire intent** (`RequestDeletionBackupRestoreReset` with a
-//!   `deletion:{purpose}:{exact-text}` target): the Host parses the grammar,
-//!   re-validates the purpose and the current deletion surface mark, and stages
-//!   a durable request. It answers
-//!   [`NeedsClarification`](ene_api::v1::management::ManagementOutcome::NeedsClarification)
-//!   (the Host PC still has to confirm) or
-//!   [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation)
-//!   when an equivalent deletion is already in progress. No wire payload can
-//!   reach the admission: the confirmation type has no wire form.
-//! - **Bounded status read** (`DeletionStatusRequest` /
-//!   `DeletionStatusResponse`): one keyset-paged page of operation phase,
-//!   purpose, hold class, current sweep, and participant progress, plus the
-//!   surface mark an intent builds on. No target text, no search material, no
-//!   credential, and no participant payload beyond the participant-owned
-//!   progress tokens.
-//! - **Host-local trusted inlet** (IPC §18.1): list staged requests, confirm
-//!   one, read the same status page. `confirm_targeted_deletion` is the only
-//!   path to a destructive admission, it writes the durable Owner
-//!   confirmation, and it runs the canonical preservation producer. The Client
-//!   never learns a request identity, so it cannot name — let alone confirm —
-//!   one. The confirmation must execute in the serving process: the required
-//!   participant snapshot includes every Client incarnation with durable
-//!   body-delivery evidence, and the fan-out resolves its reachability from
-//!   that process's connection table (lifecycle §8.1). The serving
-//!   composition exposes it through [`crate::host_control`], and no offline
-//!   path admits a confirmation.
-//!
-//! The management intent journal never stores the Owner's exact text: the
-//! deletion fingerprint names the family and purpose only, and the staged
-//! durable request is the single scope record. A reused intent id with a
-//! different body therefore observes the first decision instead of adopting
-//! new text.
-
 use ene_api::v1::deletion::{
     DELETION_STATUS_CURSOR_PREFIX, DELETION_TARGET_PREFIX, DeletionHoldWire,
     DeletionOperationStatusView, DeletionParticipantReportWire, DeletionParticipantStatusWire,
@@ -63,10 +24,6 @@ use crate::presentation::{checked_limit, field_reject};
 use crate::serve::{CoreError, HostHandle, LiveInput, outgoing_frame, reject_frame};
 use crate::setup::outcome_frame;
 
-/// Why one bounded status read could not answer a page.
-///
-/// Malformed wire usage stays a rejection or an explicit `Unavailable`
-/// response; it is never rendered as an empty page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeletionStatusQueryError {
     InvalidLimit,
@@ -110,10 +67,6 @@ fn mint_status_cursor(operation: DeletionOperationId) -> DeletionStatusCursorWir
     ))
 }
 
-/// Progress token of one durable participant row (lifecycle §8).
-///
-/// The tokens are the owner's own class names; the view closes no set of its
-/// own and never interprets them.
 fn progress_token(progress: ene_preservation::ParticipantProgress) -> String {
     match progress {
         ene_preservation::ParticipantProgress::Pending => String::from("pending"),
@@ -154,26 +107,10 @@ fn status_view(
 }
 
 impl HostHandle {
-    /// Journal discriminator for the Targeted Deletion inlet (see
-    /// [`Self::deletion_intent_fingerprint`]).
     const INTENT_KIND_DELETION: &str = "deletion-targeted";
 
-    /// Body-free journal target for an inadmissible deletion inlet target.
-    ///
-    /// It names the inlet family only: even a target the grammar refuses may
-    /// carry the Owner's text (an unknown purpose token, an over-long body),
-    /// and the journal must never keep it.
     const DELETION_JOURNAL_FAMILY: &str = "deletion-family";
 
-    /// Advisory staging fingerprint: the journal must never keep the Owner's
-    /// exact text.
-    ///
-    /// It names the intent family and the declared purpose, and drops the
-    /// rationale quote (the exact text is the scope, and the durable staged
-    /// request is its single record). A reused intent id with a different body
-    /// therefore observes the first decision instead of adopting new text; a
-    /// new target requires a new intent id, exactly like every other command
-    /// key.
     pub(crate) fn deletion_intent_fingerprint(
         intent: &ManagementIntent,
         purpose: DeletionPurposeWire,
@@ -184,9 +121,6 @@ impl HostHandle {
         )
     }
 
-    /// The journal fingerprint of a `RequestDeletionBackupRestoreReset` target
-    /// that is not an admissible deletion scope: family only, never the raw
-    /// target body, never the rationale quote.
     fn inadmissible_deletion_fingerprint(intent: &ManagementIntent) -> IntentFingerprint {
         Self::deletion_fingerprint_on(intent, String::from(Self::DELETION_JOURNAL_FAMILY))
     }
@@ -202,12 +136,6 @@ impl HostHandle {
         }
     }
 
-    /// Advisory Targeted Deletion request inlet (lifecycle §4, §15).
-    ///
-    /// The Client intent is a proposal: the Host re-parses the target grammar,
-    /// re-checks the surface mark the intent was built on, and stages at most
-    /// one durable request per scope. Nothing destructive can happen on this
-    /// path — the Owner's final confirmation is a Host-local act (IPC §18.1).
     pub(crate) async fn targeted_deletion_intent(
         &self,
         frame: &WireFrame,
@@ -215,12 +143,6 @@ impl HostHandle {
         live: &LiveInput,
     ) -> Vec<WireFrame> {
         let Some(request) = parse_deletion_target(&intent.target) else {
-            // Backup / restore / reset targets have no producer in this
-            // slice. Clarify, recorded under the inlet's discriminator so a
-            // retried id observes one answer, instead of borrowing the
-            // deletion grammar's authority. The recorded fingerprint is
-            // body-free even here: an inadmissible target may still carry the
-            // Owner's text.
             return vec![outcome_frame(
                 frame,
                 live,
@@ -239,9 +161,6 @@ impl HostHandle {
         {
             return answer;
         }
-        // Currentness of the advisory premise: the Client must have built the
-        // intent on the live deletion surface. A stale mark decides nothing
-        // (and is not recorded), so the Client re-reads and retries.
         let mark = match self.store.deletion_surface_mark().await {
             Ok(mark) => mark,
             Err(_) => {
@@ -268,9 +187,6 @@ impl HostHandle {
                 mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
                     request.exact_text().to_string(),
                 )),
-                // Exploration hints are an owner-side search aid with no wire
-                // grammar in this slice; a Client can never widen the
-                // confirmed scope through staging.
                 semantic_hints: Vec::new(),
             },
             purpose_from_wire(request.purpose()),
@@ -288,11 +204,6 @@ impl HostHandle {
                     .await,
             )],
             Ok(StageTargetedDeletionRequestOutcome::Confirmed(request)) => {
-                // The Owner already confirmed this durable request (a crash
-                // between confirmation and admission). The intent adds no
-                // authority; it only lets the canonical admission finish. An
-                // unreadable evidence snapshot admits nothing: the intent
-                // records no outcome so a later retry can still admit.
                 let required = match self.required_deletion_participants().await {
                     Ok(required) => required,
                     Err(_) => {
@@ -310,11 +221,6 @@ impl HostHandle {
                     .await
                 {
                     Ok(StartTargetedDeletionOutcome::Started(_)) => {
-                        // The durable Owner confirmation already admitted this
-                        // operation (a crash between confirmation and
-                        // admission): the bounded kick starts the fan-out now
-                        // instead of waiting for the next serving tick. It is
-                        // best-effort and never a completion claim.
                         self.kick_targeted_deletion().await;
                         vec![outcome_frame(
                             frame,
@@ -341,9 +247,6 @@ impl HostHandle {
                         self.record_decided(fingerprint, IntentOutcome::HeldByOperation)
                             .await,
                     )],
-                    // Not decided: a missing durable premise (or an
-                    // unreadable store) records nothing, so a later retry can
-                    // still admit.
                     Ok(StartTargetedDeletionOutcome::ConfirmationRequired) | Err(_) => {
                         vec![outcome_frame(
                             frame,
@@ -361,9 +264,6 @@ impl HostHandle {
                 frame,
                 live,
                 intent,
-                // An equivalent deletion is already in progress. This answer
-                // never means completed: the covering operation's phase is
-                // read through the status view.
                 self.record_decided(fingerprint, IntentOutcome::HeldByOperation)
                     .await,
             )],
@@ -374,7 +274,6 @@ impl HostHandle {
                 self.record_decided(fingerprint, IntentOutcome::NeedsClarification)
                     .await,
             )],
-            // Nothing was decided, so a retry is safe.
             Err(_) => vec![outcome_frame(
                 frame,
                 live,
@@ -384,7 +283,6 @@ impl HostHandle {
         }
     }
 
-    /// Wire dispatch entry for the bounded deletion status read.
     pub(crate) async fn deletion_status_wire(
         &self,
         frame: &WireFrame,
@@ -409,7 +307,6 @@ impl HostHandle {
                 RejectKind::UnsupportedFieldValue,
                 String::from("cursor is not a deletion-status cursor"),
             )],
-            // A torn or unreadable surface is explicit, never "no operations".
             Err(DeletionStatusQueryError::Unavailable) => vec![outgoing_frame(
                 frame,
                 live,
@@ -418,13 +315,6 @@ impl HostHandle {
         }
     }
 
-    /// Bounded participant progress for one operation's status view (A2 §8).
-    ///
-    /// The durable `deletion_participant` registry is the only source: the
-    /// view never fabricates progress and a failed read fails the whole page
-    /// closed instead of rendering as `NotReported`. Every operation carries a
-    /// non-empty snapshot from admission, so a `Reported` page always names
-    /// the required owners.
     async fn participant_report(
         &self,
         record: &DeletionOperationRecord,
@@ -440,10 +330,6 @@ impl HostHandle {
                 .map(|participant| DeletionParticipantStatusWire {
                     owner: participant.participant.owner.storage_name(),
                     progress: progress_token(participant.progress),
-                    // Pending rows carry no progress sweep in the vocabulary;
-                    // the durable row tracks the operation's current sweep
-                    // (validate refuses any other shape), so the operation's
-                    // sweep is the row's premise, never a guess.
                     sweep: participant
                         .progress
                         .sweep()
@@ -453,11 +339,6 @@ impl HostHandle {
         ))
     }
 
-    /// One bounded page of the deletion surface plus its live mark.
-    ///
-    /// Pure read: no startup, repair, re-evaluation, or presented-update runs
-    /// here. The cursor is a Host-issued keyset position bound to this query
-    /// by its prefix; any other value is rejected.
     async fn read_deletion_status(
         &self,
         cursor: Option<&DeletionStatusCursorWire>,
@@ -502,15 +383,6 @@ impl HostHandle {
         }))
     }
 
-    /// Host-local read of the exact bounded page the wire view renders: the
-    /// Owner's trusted console and the Client must never see different
-    /// deletion status.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CoreError::Deletion`] for a malformed cursor or limit, and an
-    /// unreadable surface, so the caller can distinguish "nothing to show" from
-    /// "cannot show".
     pub async fn deletion_status_page(
         &self,
         cursor: Option<&str>,
@@ -532,18 +404,6 @@ impl HostHandle {
             })
     }
 
-    /// Host-local trusted inlet (IPC §18.1): every staged request still
-    /// awaiting the Owner's final confirmation, keyset-paged by canonical
-    /// request identity (`limit` is 1..=100).
-    ///
-    /// Each entry carries its protected mechanical target so the Owner can
-    /// review exactly what would be deleted before confirming; the target
-    /// never travels further than that console.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CoreError::Store`] when the durable request journal is
-    /// unreadable.
     pub async fn pending_targeted_deletions(
         &self,
         after: Option<DeletionRequestId>,
@@ -555,29 +415,6 @@ impl HostHandle {
             .map_err(|error| CoreError::Store(error.to_string()))
     }
 
-    /// Host-local trusted inlet (IPC §18.1): record the Owner's final
-    /// confirmation for one staged request and run the canonical admission.
-    ///
-    /// This is the only path from a request to a destructive operation, and
-    /// it must run in the serving composition: the Client-incarnation demand
-    /// resolves reachability from that process's connection table, and the
-    /// Host-local trusted inlet is the only path that may record the Owner's
-    /// confirmation (IPC §18.1). The delivery evidence the snapshot reads is
-    /// durable, so a restart still names every incarnation that may hold a
-    /// target-bearing copy (lifecycle §8.1). The Owner reaches it through
-    /// [`crate::host_control`]; an offline
-    /// CLI refusal is deliberate, never a fallback. An unknown or malformed
-    /// identity answers
-    /// [`Missing`](ConfirmTargetedDeletionOutcome::Missing) and changes
-    /// nothing; a duplicate confirmation observes the same single operation.
-    /// When the admission starts the operation, a bounded fan-out drive runs
-    /// immediately, so erasure begins at the confirmation instead of waiting
-    /// for the next serving tick; the drive is best-effort and never turns the
-    /// confirmation into a completion claim.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CoreError::Store`] when the durable journals are unreadable.
     pub async fn confirm_targeted_deletion(
         &self,
         request: &str,
@@ -585,9 +422,6 @@ impl HostHandle {
         let Some(request) = parse_request_id(request) else {
             return Ok(ConfirmTargetedDeletionOutcome::Missing);
         };
-        // An unreadable evidence snapshot fails the admission before any
-        // confirmation row is written: a destructive operation never starts
-        // with an incomplete required-participant set.
         let required = self.required_deletion_participants().await?;
         let outcome = self
             .store
@@ -600,16 +434,6 @@ impl HostHandle {
         Ok(outcome)
     }
 
-    /// Owner-initiated resume of a Held Targeted Deletion operation.
-    ///
-    /// The operation was already admitted. This reopens a retryable
-    /// `Held(Unavailable)` hold and kicks fan-out; `GenerationExhausted`
-    /// stays held. A stale sweep or completed operation is refused without
-    /// rewriting durable state.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CoreError::Store`] when the durable journals are unreadable.
     pub async fn resume_targeted_deletion(
         &self,
         operation: &str,
@@ -633,30 +457,24 @@ impl HostHandle {
         Ok(outcome)
     }
 
-    /// Parks the sealed finalizing boundary so a GUI test can observe
-    /// `Finalizing` as distinct from `Completed`.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn arm_deletion_finalizing_park_for_tests(&self) {
         self.store.arm_deletion_finalizing_park_for_tests();
     }
 
-    /// Waits until the armed deletion-finalizing park has a waiter.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub async fn wait_deletion_finalizing_park_for_tests(&self) {
         self.store.wait_deletion_finalizing_park_for_tests().await;
     }
 
-    /// Releases the parked deletion-finalizing attempt.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn release_deletion_finalizing_park_for_tests(&self) {
         self.store.release_deletion_finalizing_park_for_tests();
     }
 
-    /// Commits the sealed `Finalizing` marker so a GUI test can observe that
-    /// phase as distinct from `Active` and `Completed`.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub async fn begin_deletion_finalizing_for_tests(

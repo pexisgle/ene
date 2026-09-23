@@ -1,7 +1,3 @@
-//! Bounded report queries and read-only separation: the Task/Action/History
-//! report reads page in canonical order with SQL bounds, mutate nothing, and
-//! start no runner, reconciliation, or lifecycle transition.
-
 use super::*;
 
 use ene_action::{ActionCertainty, EffectGrounds};
@@ -13,7 +9,6 @@ use rusqlite::{OptionalExtension, params};
 
 use super::task_result::{finalize, seed_workspace_execution, settle, start_attempt};
 
-/// One fixed set of durable facts the read-only checks compare against.
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {
     total_changes: u64,
@@ -123,8 +118,6 @@ async fn report_reads_are_read_only_over_a_running_and_stopped_store() {
         EffectGrounds::ObservedAtTarget,
     )
     .await;
-    // A sealed result that is deliberately left unadopted: a reconciliation
-    // pass would evaluate it, so the read-only check can see the difference.
     let result = finalize(&store, delegation, "sealed, not adopted")
         .await
         .result;
@@ -170,8 +163,6 @@ async fn report_reads_are_read_only_over_a_running_and_stopped_store() {
         "a running store keeps its presence generation, revision, statuses, and adoption"
     );
 
-    // The same reads over a stopped companion return the saved facts and
-    // mutate nothing; the reads are not lifecycle-gated.
     {
         let guard = match store.conn.lock() {
             Ok(locked) => locked,
@@ -243,7 +234,6 @@ async fn report_rows_order_attempts_before_results_and_page_by_keyset() {
         "a recorded result is not adopted"
     );
 
-    // A one-row page walks the same order through the cursor.
     let mut paged: Vec<(TaskReportRowKind, String)> = Vec::new();
     let mut after: Option<TaskReportRowCursor> = None;
     loop {
@@ -311,8 +301,6 @@ async fn report_source_pages_are_byte_bounded_on_utf8_boundaries() {
     assert_eq!(third.text, "語");
     assert_eq!(third.next, None, "the body is drained");
 
-    // Past the end is an empty page with no next, and a missing row reports
-    // absence instead of an empty success.
     let past_end = store
         .load_report_source_bounded(TaskReportSourceRef::ResultBody(result), 99, 16)
         .await
@@ -330,7 +318,6 @@ async fn report_source_pages_are_byte_bounded_on_utf8_boundaries() {
         .unwrap();
     assert_eq!(missing, None);
 
-    // The revision purpose snapshot is read from the same byte-bounded path.
     let purpose = store
         .load_report_source_bounded(
             TaskReportSourceRef::RevisionPurpose {

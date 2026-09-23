@@ -1,10 +1,3 @@
-//! Stage 7 E: GUI as presentation / erasure / secret participant.
-//!
-//! Real Host, fake provider, barrier-gated where needed. The same
-//! [`DesktopRuntime`] the Slint window projects is driven here. Run with
-//! `--test-threads=1`. Windows 11 / NixOS 26.11 / live IME / overlay probes:
-//! 未実施. Empty-seat occupancy is not authenticity.
-
 #![cfg(any(unix, windows))]
 #![allow(
     clippy::expect_used,
@@ -215,8 +208,6 @@ async fn drive_gui_until(desktop: &mut DesktopRuntime, handle: &HostHandle, need
             desktop.snapshot().deletion_body
         );
         handle.wake_deletion_driver_for_tests();
-        // Pump the Client while the tick waits: a sequential tick-then-refresh
-        // only ever answers an already-abandoned demand.
         let mut drive = std::pin::pin!(handle.run_targeted_deletion_tick());
         loop {
             tokio::select! {
@@ -293,8 +284,6 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
         "presenting chat stores a receipt the demand must invalidate"
     );
 
-    // Two surface copies and the task pane remain live until their asynchronous
-    // erasure acknowledgment arrives. Host must not receive a premature wiped.
     let surfaces = Arc::new(Mutex::new(vec![desktop.surface_snapshot(); 3]));
     let erased = Arc::new(AtomicUsize::new(0));
     desktop.attach_surface_erasure({
@@ -516,8 +505,6 @@ async fn killing_body_leaves_chat_settings_and_cancel_alive() {
     assert!(wait_for_control(dir.path()).await);
     let asset = dir.path().join(ene_desktop::BUNDLED_SAMPLE_ASSET);
     std::fs::create_dir_all(asset.parent().expect("asset parent")).expect("asset directory");
-    // This deliberately invalid test-only file opens the process/isolation
-    // path. AssetFail is expected and is not VRM or product acceptance.
     std::fs::write(&asset, b"invalid isolation fixture").expect("asset fixture");
     let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
     pair_and_setup(&mut desktop, &handle).await;
