@@ -4,16 +4,11 @@ use ene_preservation::PreservationTechnicalError;
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{OptionalExtension, params};
 
-use crate::codec::{decode_id, encode_id, lock_shared};
+use crate::codec::{
+    decode_id, encode_id, lock_shared, preservation_corrupt as corrupt,
+    preservation_storage as storage,
+};
 use crate::{Store, run_blocking};
-
-fn storage(_: rusqlite::Error) -> PreservationTechnicalError {
-    PreservationTechnicalError::StorageUnavailable
-}
-
-fn corrupt() -> PreservationTechnicalError {
-    PreservationTechnicalError::CorruptState
-}
 
 impl Store {
     pub async fn note_client_delivery_evidence(

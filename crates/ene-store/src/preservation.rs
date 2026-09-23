@@ -14,17 +14,12 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, param
 
 use crate::{
     Store,
-    codec::{decode_id, encode_id, lock_shared},
+    codec::{
+        decode_id, encode_id, lock_shared, preservation_corrupt as corrupt,
+        preservation_storage as storage,
+    },
     run_blocking, run_deletion_blocking,
 };
-
-fn storage(_: rusqlite::Error) -> PreservationTechnicalError {
-    PreservationTechnicalError::StorageUnavailable
-}
-
-fn corrupt() -> PreservationTechnicalError {
-    PreservationTechnicalError::CorruptState
-}
 
 pub(crate) fn check_page_limit(limit: u32) -> Result<(), PreservationTechnicalError> {
     if !(1..=100).contains(&limit) {
@@ -355,6 +350,21 @@ fn unreconciled_operations(
     Ok(candidates)
 }
 
+/// The protected exact target of one operation, `None` when the material row
+/// is absent (completion wipe or missing row).
+fn load_exact_target(
+    conn: &Connection,
+    operation: &str,
+) -> Result<Option<String>, PreservationTechnicalError> {
+    conn.query_row(
+        "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
+        [operation],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(storage)
+}
+
 /// The unreconciled operations' protected targets, as
 /// `(operation_id, sweep, exact_text)` in `operation_id` order.
 ///
@@ -366,14 +376,7 @@ fn unreconciled_targets(
     let mut targets = Vec::new();
     for (id, sweep) in unreconciled_operations(conn)? {
         validate(conn, &id)?;
-        let target: Option<String> = conn
-            .query_row(
-                "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                [&id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
+        let target = load_exact_target(conn, &id)?;
         targets.push((id, sweep, target.ok_or_else(corrupt)?));
     }
     Ok(targets)
@@ -463,14 +466,7 @@ fn current_operation_targets(
     let mut targets = Vec::with_capacity(ids.len());
     for (id, sweep) in ids {
         validate(conn, &id)?;
-        let target: Option<String> = conn
-            .query_row(
-                "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                [&id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
+        let target = load_exact_target(conn, &id)?;
         targets.push((decode_ref(&id, sweep)?.condition(), target));
     }
     Ok(targets)
@@ -479,10 +475,10 @@ fn current_operation_targets(
 /// One mechanical text verdict against the canonical current conditions
 /// (lifecycle §7/§11).
 ///
-/// [`Self::Target`] carries the protected exact target that matched; it is
-/// compared in place by the owning boundary and never rendered into a log, an
-/// outcome, a completion fact, or an audit row. [`Self::Unreadable`] is a
-/// current condition with no readable protected target: production never
+/// [`Self::Target`] means a current condition's protected exact target occurs
+/// in the text; the target itself is never copied out of the store or rendered
+/// into a log, an outcome, a completion fact, or an audit row. [`Self::Unreadable`]
+/// is a current condition with no readable protected target: production never
 /// observes this shape (the completion wipe runs in the same transaction that
 /// commits `completed`), so it is a defensive branch for torn state. Should a
 /// wipe ever be observable before the completed commit, the condition still
@@ -490,7 +486,7 @@ fn current_operation_targets(
 /// closed (refuse; a collecting owner stores a body-free marker) rather than
 /// treating an unreadable target as "not covering".
 pub(crate) enum TextCoverage {
-    Target(String),
+    Target,
     Unreadable,
 }
 
@@ -553,8 +549,7 @@ pub(crate) fn covering_text(
     Ok(targets
         .iter()
         .find(|target| text.contains(target.as_str()))
-        .cloned()
-        .map(TextCoverage::Target))
+        .map(|_| TextCoverage::Target))
 }
 
 pub(crate) fn covering_text_condition(
@@ -569,7 +564,7 @@ pub(crate) fn covering_text_condition(
             // covered with no readable target.
             None => return Ok(Some((condition, TextCoverage::Unreadable))),
             Some(target) if !target.is_empty() && text.contains(&target) => {
-                return Ok(Some((condition, TextCoverage::Target(target))));
+                return Ok(Some((condition, TextCoverage::Target)));
             }
             Some(_) => {}
         }
@@ -597,29 +592,45 @@ pub(crate) fn covering_sources(
 ///
 /// This is the "erase collection" side of the A4 boundary contract for bodies
 /// whose objective fact must survive (a Task result arrival seals its
-/// delegation): the fact is committed, the body is not. Each pass makes the
-/// selected target absent from `current` (the redaction guarantees this,
-/// falling back to outright removal when the target overlaps the marker); the
-/// loop exits when no current condition's target occurs.
+/// delegation): the fact is committed, the body is not. A marker inserted for
+/// one target can carry another (`"a"` and `"e"` both occur in the marker), so a
+/// later pass can re-create an earlier target and the marker phase has no
+/// fixpoint; it is therefore bounded at one pass per target. Residual coverage
+/// falls back to removal, which strictly shortens the value (a joined
+/// occurrence is removed on a later iteration) and so always reaches a
+/// body-free fixpoint instead of growing without limit.
 pub(crate) fn redact_covered_text(
     conn: &Connection,
     text: &str,
 ) -> Result<String, PreservationTechnicalError> {
+    let premise = TextCoveragePremise::read(conn)?;
+    let Some(targets) = premise.targets.as_ref() else {
+        return Ok(String::from(crate::erasure::ERASED_MARKER));
+    };
     let mut current = text.to_owned();
-    loop {
-        let Some(coverage) = covering_text(conn, &current)? else {
+    for _ in 0..=targets.len() {
+        let Some(target) = targets
+            .iter()
+            .find(|target| current.contains(target.as_str()))
+        else {
             return Ok(current);
         };
-        let target = match coverage {
-            TextCoverage::Target(target) => target,
-            TextCoverage::Unreadable => {
-                return Ok(String::from(crate::erasure::ERASED_MARKER));
-            }
-        };
-        match crate::erasure::redact_exact(&current, &target) {
+        match crate::erasure::redact_exact(&current, target) {
             Some((redacted, _)) => current = redacted,
+            // The premise matched the target, so a missing occurrence would be
+            // an inconsistent mechanical predicate; fail closed rather than
+            // storing a body that is still covered.
             None => return Err(corrupt()),
         }
+    }
+    loop {
+        let Some(target) = targets
+            .iter()
+            .find(|target| current.contains(target.as_str()))
+        else {
+            return Ok(current);
+        };
+        current = current.replace(target.as_str(), "");
     }
 }
 
@@ -916,18 +927,7 @@ fn scope_covered(
 ) -> Result<bool, PreservationTechnicalError> {
     let mut covered = true;
     for source in sources {
-        let found: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM erasure_condition_source WHERE operation_id=?1 AND sweep=?2 AND source=?3)",
-                params![
-                    encode_id(current.operation.as_raw()),
-                    current.sweep.as_u64() as i64,
-                    encode_id(*source)
-                ],
-                |r| r.get(0),
-            )
-            .map_err(storage)?;
-        covered &= found;
+        covered &= source_is_covered(tx, current.condition(), *source)?;
     }
     for hint in hints {
         let found: bool = tx
@@ -1005,17 +1005,22 @@ pub(crate) const KNOWN_SOURCE_IDENTITIES: &[KnownSourceIdentity] = &[
     },
 ];
 
+/// Initializes the durable reconciliation cursors for one operation + sweep:
+/// exactly one row per known identity table, incomplete.
+///
+/// The confirmed admission path publishes its first bounded pages in the same
+/// transaction and the durable cursors carry the walk to its end; a row set
+/// that does not match the known table set is torn state and fails closed
+/// through [`validate`].
 fn insert_reconciliation_rows(
     tx: &rusqlite::Transaction<'_>,
     operation: &str,
     sweep: i64,
-    complete: bool,
 ) -> Result<(), PreservationTechnicalError> {
-    let complete = i64::from(complete);
     for identity in KNOWN_SOURCE_IDENTITIES {
         tx.execute(
-            "INSERT INTO deletion_reconciliation (operation_id,sweep,identity_table,cursor,complete) VALUES (?1,?2,?3,'',?4)",
-            params![operation, sweep, identity.table, complete],
+            "INSERT INTO deletion_reconciliation (operation_id,sweep,identity_table,cursor,complete) VALUES (?1,?2,?3,'',0)",
+            params![operation, sweep, identity.table],
         )
         .map_err(storage)?;
     }
@@ -2065,10 +2070,22 @@ fn durable_client_incarnations(
         .collect()
 }
 
+/// The canonical admission body for a durably confirmed staged request:
+/// duplicate detection plus the durable-before-enforce insert of operation,
+/// protected material, initial condition, and source correlations
+/// (lifecycle §4.1).
+///
+/// `request` is the Host-local request whose Owner confirmation is already
+/// durable; `deletion_operation.request_id` is `UNIQUE`, so one request can
+/// never start two operations. Admission enumerates the covered source
+/// correlations already durable in this store and publishes them with the
+/// operation (§4.1 point 4): the implementation walks the owner's durable
+/// identity rows whose stored text carries the confirmed exact target, in
+/// bounded pages. A Client, model output, or caller never names a source.
 fn admit_deletion(
     tx: &rusqlite::Transaction<'_>,
     command: &StartTargetedDeletionCommand,
-    request: Option<DeletionRequestId>,
+    request: DeletionRequestId,
 ) -> Result<StartTargetedDeletionOutcome, PreservationTechnicalError> {
     if command.required_participants().is_empty()
         || command
@@ -2110,7 +2127,7 @@ fn admit_deletion(
     };
     let id = encode_id(current.operation.as_raw());
     let at = command.requested_at().to_rfc3339();
-    let request_text = request.map(|request| encode_id(request.as_raw()));
+    let request_text = encode_id(request.as_raw());
     tx.execute(
         "INSERT INTO deletion_operation (operation_id,request_id,sweep,phase,purpose,started_at) VALUES (?1,?2,1,'active',?3,?4)",
         params![id, request_text, command.purpose().as_str(), at],
@@ -2134,24 +2151,23 @@ fn admit_deletion(
         params![id, at],
     )
     .map_err(storage)?;
-    let enumerates = request.is_some();
-    insert_reconciliation_rows(tx, &id, 1, !enumerates)?;
-    if enumerates {
-        reconcile_admission_pages(
-            tx,
-            &id,
-            1,
-            material.expose_for_erasure(),
-            DELETION_RECONCILIATION_PAGE_SIZE,
-        )?;
-    }
-    for source in command.known_sources() {
-        tx.execute(
-            "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
-            params![id, encode_id(*source)],
-        )
-        .map_err(storage)?;
-    }
+    // §4.1 point 4: admission initializes the durable reconciliation cursors
+    // and publishes the first bounded page of every known identity table in
+    // this same transaction as the operation, the protected material, and the
+    // initial condition. The page is a work bound, not a correctness bound:
+    // the durable cursors carry the continuation, and completion refuses while
+    // any table is still incomplete.
+    insert_reconciliation_rows(tx, &id, 1)?;
+    reconcile_admission_pages(
+        tx,
+        &id,
+        1,
+        material.expose_for_erasure(),
+        DELETION_RECONCILIATION_PAGE_SIZE,
+    )?;
+    // The surveyed covered occurrence identities are published in the same
+    // transaction: the occurrence identity is the durable name of the
+    // observed source, never its body.
     for observation in &covered_observations {
         tx.execute(
             "INSERT OR IGNORE INTO erasure_condition_source (operation_id,sweep,source) VALUES (?1,1,?2)",
@@ -2263,7 +2279,7 @@ fn open_next_sweep(
         [id],
     )
     .map_err(storage)?;
-    insert_reconciliation_rows(tx, id, next, false)?;
+    insert_reconciliation_rows(tx, id, next)?;
     tx.execute(
         "UPDATE deletion_operation SET sweep=?2,phase='active',hold_reason=NULL WHERE operation_id=?1",
         params![id, next],
@@ -2482,7 +2498,7 @@ impl PreservationRepository for Store {
             else {
                 return Ok(StartTargetedDeletionOutcome::ConfirmationRequired);
             };
-            let outcome = admit_deletion(&tx, &command, Some(request))?;
+            let outcome = admit_deletion(&tx, &command, request)?;
             if matches!(outcome, StartTargetedDeletionOutcome::Started(_)) {
                 tx.commit().map_err(storage)?;
             }
@@ -2858,25 +2874,12 @@ impl PreservationRepository for Store {
             if phase == "completed" {
                 return Ok(DeletionMaterialOutcome::Destroyed);
             }
-            let material_exists: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM deletion_search_material WHERE operation_id=?1)",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .map_err(storage)?;
-            if !material_exists {
+            let Some(exact) = load_exact_target(&tx, &id)? else {
+                // `validate` refuses an active or held operation without
+                // material, so only a finalizing operation that already ran its
+                // wipe reaches this branch (§12); a read must not resurrect it.
                 return Ok(DeletionMaterialOutcome::Destroyed);
-            }
-            let exact: Option<String> = tx
-                .query_row(
-                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
-            let exact = exact.ok_or_else(corrupt)?;
+            };
             let mut statement = tx
                 .prepare(
                     "SELECT material FROM deletion_semantic_hint WHERE operation_id=?1 ORDER BY ordinal",
@@ -3116,15 +3119,10 @@ impl PreservationRepository for Store {
             if reconciliation_is_complete(&tx, &id, sweep)? {
                 return Ok(DeletionReconciliationOutcome::Complete);
             }
-            let exact: Option<String> = tx
-                .query_row(
-                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
-            let exact = exact.ok_or_else(corrupt)?;
+            // `validate` refuses an active/held operation without protected
+            // material, so the exact target is readable while the walk runs:
+            // reconciliation happens before completion destroys it.
+            let exact = load_exact_target(&tx, &id)?.ok_or_else(corrupt)?;
             let Some(identity) = next_incomplete_identity(&tx, &id, sweep)? else {
                 return Err(corrupt());
             };
@@ -3184,15 +3182,14 @@ impl PreservationRepository for Store {
             if !reconciliation_is_complete(&tx, &id, sweep)? {
                 return Ok(DeletionFinalizationOutcome::ReconciliationIncomplete);
             }
-            let exact: String = tx
-                .query_row(
-                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(storage)?
-                .ok_or_else(corrupt)?;
+            // `validate` refuses an active operation without protected
+            // material, so the exact target is present while the sweep is
+            // being verified.
+            let exact = load_exact_target(&tx, &id)?.ok_or_else(corrupt)?;
+            // §12 step 1 before entering Finalizing: a generation that still
+            // has collected target data never finalizes. Returning to Active
+            // happens before any material is destroyed, so the new sweep keeps
+            // the material its participants need (§12).
             if system_remainder(&tx, &exact)? > 0 {
                 let outcome = return_to_active_for_remainder(&tx, &id, sweep)?;
                 tx.commit().map_err(storage)?;
@@ -3255,20 +3252,17 @@ impl PreservationRepository for Store {
             let purpose = decode_purpose(&purpose)?;
             let started_at = parse_time(&started_at)?;
             let erased_total = u64::try_from(erased_total).map_err(|_| corrupt())?;
-            let exact_row: Option<String> = tx
-                .query_row(
-                    "SELECT exact_text FROM deletion_search_material WHERE operation_id=?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
-            let Some(exact) = exact_row else {
+            let Some(exact) = load_exact_target(&tx, &id)? else {
+                // No readable target: the system-wide mechanical probe cannot
+                // run, so completion fails closed instead of guessing the
+                // target away (§12).
                 return Ok(DeletionFinalizationOutcome::UnverifiableMaterial);
             };
-            if !reconciliation_is_complete(&tx, &id, sweep)? {
-                return Ok(DeletionFinalizationOutcome::ReconciliationIncomplete);
-            }
+            // §12 step 1, inside the commit transaction: the current
+            // generation must not have grown a delayed arrival or remainder
+            // after verification. A remainder returns the operation to
+            // Active on a new sweep *without* destroying material, so a later
+            // verification can never lack what it needs.
             if system_remainder(&tx, &exact)? > 0 {
                 let outcome = return_to_active_for_remainder(&tx, &id, sweep)?;
                 tx.commit().map_err(storage)?;

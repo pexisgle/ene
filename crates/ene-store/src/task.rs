@@ -83,9 +83,55 @@ fn delegation_correspondence(
     .map_err(task_unavailable)
 }
 
-const SQL_SELECT_RESULT_BY_ID: &str = "SELECT result_id, task_id, task_revision, delegation_id, body, adopted_revision, recorded_at FROM task_result WHERE result_id = ?1";
+/// Whether the sealed delegation exists and its stored `(task_id,
+/// task_revision)` equals the result's copied correspondence. `Ok(false)` means
+/// the delegation row is absent; a disagreement is a technical error.
+fn result_delegation_correspondence(
+    conn: &Connection,
+    delegation_text: &str,
+    task_text: &str,
+    revision_raw: i64,
+) -> Result<bool, TaskTechnicalError> {
+    let Some((delegation_task, delegation_revision)) =
+        delegation_correspondence(conn, delegation_text)?
+    else {
+        return Ok(false);
+    };
+    if decode_id(&delegation_task).map_err(task_unavailable)?
+        != decode_id(task_text).map_err(task_unavailable)?
+        || decode_revision(delegation_revision)? != decode_revision(revision_raw)?
+    {
+        return Err(task_unavailable(
+            "result delegation correspondence disagrees with the recorded result",
+        ));
+    }
+    Ok(true)
+}
 
-const SQL_SELECT_RESULT_BY_DELEGATION: &str = "SELECT result_id, task_id, task_revision, delegation_id, body, adopted_revision, recorded_at FROM task_result WHERE delegation_id = ?1";
+/// The one seven-column `task_result` projection both result reads share, so a
+/// projection change cannot drift between the identity and delegation lookups.
+macro_rules! result_projection {
+    () => {
+        "result_id, task_id, task_revision, delegation_id, body, adopted_revision, recorded_at"
+    };
+}
+
+const SQL_SELECT_RESULT_BY_ID: &str = concat!(
+    "SELECT ",
+    result_projection!(),
+    " FROM task_result WHERE result_id = ?1"
+);
+
+const SQL_SELECT_RESULT_BY_DELEGATION: &str = concat!(
+    "SELECT ",
+    result_projection!(),
+    " FROM task_result WHERE delegation_id = ?1"
+);
+
+/// The one-result-per-delegation invariant as an existence probe: the result
+/// body is not needed to answer whether the delegation is already sealed.
+const SQL_DELEGATION_IS_SEALED: &str =
+    "SELECT EXISTS(SELECT 1 FROM task_result WHERE delegation_id = ?1)";
 
 const SQL_DELEGATION_HAS_STARTED_WORK: &str = "SELECT EXISTS(SELECT 1 FROM inference_attempt WHERE delegation_id = ?1 UNION ALL SELECT 1 FROM action_attempt WHERE delegation_id = ?1)";
 
@@ -502,17 +548,12 @@ fn forward_steering_sync(
     let current_adopted = decode_revision(current.purpose_adopted_revision)?;
     // The forward must never normalize a D1/D2 pair that every read rejects,
     // so the pair the commit depends on is validated before any write.
-    let snapshot = load_revision_snapshot(&tx, &task_text, current.revision)?;
-    if decode_revision(snapshot.purpose_adopted_revision)? != current_adopted {
-        return Err(task_unavailable(
-            "task revision purpose does not match the current purpose",
-        ));
-    }
-    if decode_assignee(&snapshot.assignee)? != decode_assignee(&current.assignee)? {
-        return Err(task_unavailable(
-            "task revision assignee does not match the current assignee",
-        ));
-    }
+    let snapshot = load_agreed_revision_snapshot(&tx, &task_text, current.revision, &current)?;
+    // The adopted-purpose entry every read resolves must be exactly one row
+    // for the current revision and agree with the D1 pointer. Validating it
+    // before the first write keeps the forward from normalizing a unit the
+    // reads reject; the validated row also supplies the carry-forward
+    // provenance when the purpose does not change.
     let current_purpose_entry =
         validated_adopted_purpose_entry(&tx, &task_text, current.revision, current_adopted)?;
     if let Some(instruction) = &premise.adopted_instruction
@@ -936,6 +977,31 @@ fn load_revision_snapshot(
     .ok_or_else(|| task_unavailable("task revision snapshot missing for the current revision"))
 }
 
+/// Reads the revision snapshot a D1 row must have and checks it against the
+/// current D1 pair: a missing row, a different purpose identity, or a different
+/// assignee is an inconsistent unit, never a synthesized or normalized one.
+fn load_agreed_revision_snapshot(
+    conn: &Connection,
+    task_text: &str,
+    revision_raw: i64,
+    current: &RawTask,
+) -> Result<RawTaskRevision, TaskTechnicalError> {
+    let snapshot = load_revision_snapshot(conn, task_text, revision_raw)?;
+    if decode_revision(snapshot.purpose_adopted_revision)?
+        != decode_revision(current.purpose_adopted_revision)?
+    {
+        return Err(task_unavailable(
+            "task revision purpose does not match the current purpose",
+        ));
+    }
+    if decode_assignee(&snapshot.assignee)? != decode_assignee(&current.assignee)? {
+        return Err(task_unavailable(
+            "task revision assignee does not match the current assignee",
+        ));
+    }
+    Ok(snapshot)
+}
+
 /// Reads the 0..1 workspace association of one Task; more than one row is a
 /// violated invariant and a technical error, never a silent first-row pick.
 fn load_workspace_assoc(
@@ -1160,27 +1226,15 @@ fn load_task_sync(
         task,
         adopted_revision: decode_revision(raw_task.purpose_adopted_revision)?,
     };
-    // The snapshot is keyed by the D1 current revision, so a row can only be
-    // the record of that revision; a missing row is an incomplete unit.
-    let snapshot = load_revision_snapshot(&guard, &task_text, raw_task.revision)?;
     // The D1 current row and its D2 snapshot must describe the same purpose
     // and assignee. A mismatch is an inconsistent unit, never a TaskRecord.
+    let snapshot = load_agreed_revision_snapshot(&guard, &task_text, raw_task.revision, &raw_task)?;
     let revision_purpose = TaskPurposeRef {
         task,
         adopted_revision: decode_revision(snapshot.purpose_adopted_revision)?,
     };
-    if revision_purpose != purpose {
-        return Err(task_unavailable(
-            "task revision purpose does not match the current purpose",
-        ));
-    }
     let task_assignee = decode_assignee(&raw_task.assignee)?;
     let revision_assignee = decode_assignee(&snapshot.assignee)?;
-    if revision_assignee != task_assignee {
-        return Err(task_unavailable(
-            "task revision assignee does not match the current assignee",
-        ));
-    }
     let progress = decode_progress(raw_task.progress.as_deref())?;
     let adopted_result = load_adopted_result(&guard, &task_text, reference.revision, progress)?;
     let revision = TaskRevisionRecord {
@@ -1392,15 +1446,9 @@ fn compose_result(
         recorded_at,
     } = raw;
     let result = TaskResultId::from_raw(decode_id(&result).map_err(task_unavailable)?);
-    let correspondence = delegation_correspondence(conn, &delegation)?;
-    let Some((delegation_task, delegation_revision)) = correspondence else {
+    if !result_delegation_correspondence(conn, &delegation, &task, task_revision)? {
         return Err(task_unavailable(
             "result delegation correspondence is missing",
-        ));
-    };
-    if delegation_task != task || delegation_revision != task_revision {
-        return Err(task_unavailable(
-            "result delegation correspondence disagrees with the recorded result",
         ));
     }
     let attempt_refs = load_result_attempts(conn, &encode_id(result.as_raw()))?;
@@ -1430,15 +1478,6 @@ fn compose_result(
     let task_id = TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?);
     let delegation_id = DelegationId::from_raw(decode_id(&delegation).map_err(task_unavailable)?);
     let relied_revision = decode_revision(task_revision)?;
-    // Re-derive the authoritative set from the sealed delegation for the exact
-    // comparison. Only a stored non-empty set (or an adopted stamp) is
-    // compared, so the documented ambiguity of an all-empty unstamped first
-    // evaluation stays untouched.
-    let authoritative = || -> Result<Vec<RawId>, TaskTechnicalError> {
-        let attempts =
-            enumerate_delegation_attempts(conn, delegation_id, task_id, relied_revision)?;
-        Ok(attempts.into_iter().map(|(attempt, _)| attempt).collect())
-    };
     if let Some(adopted_stamp) = adopted_revision {
         // The adopted stamp only means the completed unit is readable while
         // the current Task still agrees with it; the same checks the retry and
@@ -1458,7 +1497,13 @@ fn compose_result(
         // that no longer matches is a truncated or extended durable set, never
         // an empty first evaluation. A fully wiped adopted set is durable
         // corruption, never an initial empty evaluation.
-        require_stamped_attempts_exact(&attempt_refs, &authoritative()?)?;
+        require_stamped_attempts_exact(
+            &attempt_refs,
+            &enumerate_delegation_attempts(conn, delegation_id, task_id, relied_revision)?
+                .into_iter()
+                .map(|(attempt, _)| attempt)
+                .collect::<Vec<RawId>>(),
+        )?;
     }
     Ok(TaskResultRecord {
         result,
@@ -1535,15 +1580,13 @@ fn record_task_result_arrival_sync(
         tx.commit().map_err(task_unavailable)?;
         return Ok(TaskResultArrivalOutcome::Recorded(record));
     }
-    let sealed: Option<RawResult> = tx
-        .query_row(
-            SQL_SELECT_RESULT_BY_DELEGATION,
-            params![delegation_text],
-            raw_result_row,
-        )
-        .optional()
+    let sealed: bool = tx
+        .query_row(SQL_DELEGATION_IS_SEALED, params![delegation_text], |row| {
+            row.get::<_, bool>(0)
+        })
         .map_err(task_unavailable)?;
-    if sealed.is_some() {
+    if sealed {
+        // Durable invariant: one delegation has at most one final result.
         return Err(task_unavailable(
             "delegation already sealed by another final result",
         ));
@@ -1594,20 +1637,26 @@ fn record_task_result_arrival_sync(
     }))
 }
 
+/// Reads one stored result through the given one-parameter identity lookup and
+/// composes it, or answers absent.
+fn load_stored_result(
+    conn: &Connection,
+    sql: &str,
+    param_text: &str,
+) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
+    let found: Option<RawResult> = conn
+        .query_row(sql, params![param_text], raw_result_row)
+        .optional()
+        .map_err(task_unavailable)?;
+    found.map(|raw| compose_result(conn, raw)).transpose()
+}
+
 fn load_task_result_sync(
     conn: &Mutex<Connection>,
     result: TaskResultId,
 ) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
     let guard = lock_shared(conn);
-    let found: Option<RawResult> = guard
-        .query_row(
-            SQL_SELECT_RESULT_BY_ID,
-            params![encode_id(result.as_raw())],
-            raw_result_row,
-        )
-        .optional()
-        .map_err(task_unavailable)?;
-    found.map(|raw| compose_result(&guard, raw)).transpose()
+    load_stored_result(&guard, SQL_SELECT_RESULT_BY_ID, &encode_id(result.as_raw()))
 }
 
 fn record_task_agent_observation_sync(
@@ -1859,16 +1908,7 @@ fn load_result_adoption_claim_sync(
     let task_id = TaskId::from_raw(decode_id(&task).map_err(task_unavailable)?);
     let relied_revision = decode_revision(revision)?;
     let delegation_id = DelegationId::from_raw(decode_id(&delegation).map_err(task_unavailable)?);
-    let delegation_correspondence = delegation_correspondence(&guard, &delegation)?;
-    if let Some((delegation_task, delegation_revision)) = delegation_correspondence {
-        let agrees = decode_id(&delegation_task).map_err(task_unavailable)? == task_id.as_raw()
-            && decode_revision(delegation_revision)? == relied_revision;
-        if !agrees {
-            return Err(task_unavailable(
-                "result delegation correspondence disagrees with the recorded result",
-            ));
-        }
-    }
+    let _ = result_delegation_correspondence(&guard, &delegation, &task, revision)?;
     let attempt_refs =
         enumerate_delegation_attempts(&guard, delegation_id, task_id, relied_revision)?
             .into_iter()
@@ -2046,11 +2086,6 @@ fn list_task_report_rows_after_sync(
                 "task_result" => TaskReportRowKind::TaskResult,
                 _ => return Err(task_unavailable("unknown task report row kind")),
             };
-            if kind == TaskReportRowKind::ActionAttempt && adopted.is_some() {
-                return Err(task_unavailable(
-                    "action attempt report row carries an adoption marker",
-                ));
-            }
             Ok(TaskReportRow {
                 kind,
                 id: decode_id(&id_text).map_err(task_unavailable)?,
@@ -2119,15 +2154,11 @@ fn load_delegation_result_sync(
     delegation: DelegationId,
 ) -> Result<Option<TaskResultRecord>, TaskTechnicalError> {
     let guard = lock_shared(conn);
-    let found: Option<RawResult> = guard
-        .query_row(
-            SQL_SELECT_RESULT_BY_DELEGATION,
-            params![encode_id(delegation.as_raw())],
-            raw_result_row,
-        )
-        .optional()
-        .map_err(task_unavailable)?;
-    found.map(|raw| compose_result(&guard, raw)).transpose()
+    load_stored_result(
+        &guard,
+        SQL_SELECT_RESULT_BY_DELEGATION,
+        &encode_id(delegation.as_raw()),
+    )
 }
 
 fn enumerate_delegation_attempts(
@@ -2321,16 +2352,13 @@ fn adopt_result_sync(
     let task_id = TaskId::from_raw(decode_id(&raw.task).map_err(task_unavailable)?);
     let relied_revision = decode_revision(raw.task_revision)?;
     let delegation = DelegationId::from_raw(decode_id(&raw.delegation).map_err(task_unavailable)?);
-    let correspondence = delegation_correspondence(&tx, &encode_id(delegation.as_raw()))?;
-    let Some((delegation_task, delegation_revision)) = correspondence else {
+    if !result_delegation_correspondence(
+        &tx,
+        &encode_id(delegation.as_raw()),
+        &raw.task,
+        raw.task_revision,
+    )? {
         return Ok(TaskResultAcceptance::MissingDelegation { delegation });
-    };
-    if decode_id(&delegation_task).map_err(task_unavailable)? != task_id.as_raw()
-        || decode_revision(delegation_revision)? != relied_revision
-    {
-        return Err(task_unavailable(
-            "result delegation correspondence disagrees with the recorded result",
-        ));
     }
     let authoritative = enumerate_delegation_attempts(&tx, delegation, task_id, relied_revision)?;
     claim_matches_authoritative(&claim.attempt_refs, &authoritative)?;
@@ -2459,7 +2487,6 @@ enum ResumeSourceVerdict {
 fn validate_resume_source(
     tx: &rusqlite::Transaction<'_>,
     instruction: &ResumeInstructionSource,
-    task: TaskId,
     expected: TaskRef,
     purpose: TaskPurposeRef,
     assignee: AssigneeRef,
@@ -2536,7 +2563,7 @@ fn validate_resume_source(
                     "resume activity record missing its selected task",
                 ));
             };
-            if decode_id(&task_text).map_err(task_unavailable)? != task.as_raw()
+            if decode_id(&task_text).map_err(task_unavailable)? != expected.task.as_raw()
                 || decode_revision(task_revision)? != expected.revision
                 || decode_revision(purpose_revision)? != purpose.adopted_revision
             {
@@ -2631,7 +2658,6 @@ fn commit_task_resume_sync(
     let source = validate_resume_source(
         &tx,
         &premise.command.instruction,
-        task,
         premise.command.premise.expected,
         TaskPurposeRef {
             task,
@@ -2714,20 +2740,7 @@ fn commit_task_resume_sync(
             "workspace association missing after the hold",
         ));
     };
-    let snapshot = load_revision_snapshot(&tx, &task_text, current.revision)?;
-    // A revision forward resolves its new rows from the transaction's current
-    // rows, so an inconsistent durable snapshot is a technical error, never a
-    // normalized unit.
-    if decode_revision(snapshot.purpose_adopted_revision)? != current_purpose {
-        return Err(task_unavailable(
-            "task revision purpose does not match the current purpose",
-        ));
-    }
-    if decode_assignee(&snapshot.assignee)? != decode_assignee(&current.assignee)? {
-        return Err(task_unavailable(
-            "task revision assignee does not match the current assignee",
-        ));
-    }
+    let snapshot = load_agreed_revision_snapshot(&tx, &task_text, current.revision, &current)?;
     // The purpose is carried over: the adopted identity stays, the text
     // stays the snapshot's, and only the entry identity is new. A purpose
     // under a canonical current condition is materialized body-free instead

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use ene_inference::InferenceTicketId;
 use ene_inference::cost::{Money, UsageEstimate};
 use ene_inference::pricing::PricingSnapshot;
-use ene_inference::{InferenceTicketId, UsageReservation};
 use ene_permission::{
     PermissionTechnicalError, SetUsageCapCommand, SetUsageCapOutcome, UsageCap,
     UsageCapConsumption, UsageCapId, UsageCapRepository, UsageCapRevision, UsageCapScope,
@@ -14,21 +14,19 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{
-    decode_currency, decode_id, decode_pricing_reference, decode_u64, decode_wall_clock, encode_id,
-    encode_u64, encode_wall_clock, lock_shared, permission_unavailable,
+    decode_currency, decode_u64, encode_id, encode_u64, encode_wall_clock, lock_shared,
+    permission_unavailable,
 };
 use crate::run_blocking;
 
 const SQL_SELECT_CAP: &str = "SELECT revision, currency, limit_micros FROM usage_cap WHERE scope = ?1 AND provider = ?2 AND window = ?3";
 
-const SQL_INSERT_CAP: &str = "INSERT INTO usage_cap (scope, provider, window, revision, currency, limit_micros) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+const SQL_UPSERT_CAP: &str = "INSERT INTO usage_cap (scope, provider, window, revision, currency, limit_micros) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(scope, provider, window) DO UPDATE SET revision = excluded.revision, currency = excluded.currency, limit_micros = excluded.limit_micros";
 
-const SQL_UPDATE_CAP: &str = "UPDATE usage_cap SET revision = ?4, currency = ?5, limit_micros = ?6 WHERE scope = ?1 AND provider = ?2 AND window = ?3";
-
-/// Every stored cap, deterministically ordered for the status read.
-const SQL_SELECT_ALL_CAPS: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap ORDER BY scope, provider, window";
-
-const SQL_SELECT_CAPS_FOR_PROVIDER: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap WHERE scope = 'system' OR (scope = 'provider' AND provider = ?1) ORDER BY scope, provider, window";
+/// Every cap applying to one provider route, or every stored cap when no
+/// provider filter is bound (`?1` is SQL `NULL`), deterministically ordered
+/// for the status read.
+const SQL_SELECT_CAPS: &str = "SELECT scope, provider, window, revision, currency, limit_micros FROM usage_cap WHERE (?1 IS NULL OR scope = 'system' OR (scope = 'provider' AND provider = ?1)) ORDER BY scope, provider, window";
 
 /// Reservations opened inside `[?1, ?2)`; the provider-scoped sum additionally
 /// filters `provider = ?3`. The decode loop owns the rule that `released` rows
@@ -37,10 +35,10 @@ const SQL_SELECT_WINDOW_CONSUMPTION: &str = "SELECT state, currency, upper_bound
 
 const SQL_SELECT_WINDOW_CONSUMPTION_PROVIDER: &str = "SELECT state, currency, upper_bound_micros, committed_currency, committed_micros FROM usage_reservation WHERE opened_at >= ?1 AND opened_at < ?2 AND provider = ?3";
 
-pub(crate) const SQL_SELECT_RESERVATION_BY_TICKET: &str = "SELECT ticket, reservation_id, provider, model, pricing_snapshot, currency, upper_bound_micros, state, committed_currency, committed_micros, opened_at FROM usage_reservation WHERE ticket = ?1";
+pub(crate) const SQL_SELECT_RESERVATION_BY_TICKET: &str = "SELECT ticket, provider, model, pricing_snapshot, state FROM usage_reservation WHERE ticket = ?1";
 
 /// Every reservation still `reserved`, for Host-startup reconciliation.
-pub(crate) const SQL_SELECT_ORPHANED_RESERVATIONS: &str = "SELECT ticket, reservation_id, provider, model, pricing_snapshot, currency, upper_bound_micros, state, committed_currency, committed_micros, opened_at FROM usage_reservation WHERE state = 'reserved'";
+pub(crate) const SQL_SELECT_ORPHANED_RESERVATIONS: &str = "SELECT ticket, provider, model, pricing_snapshot, state FROM usage_reservation WHERE state = 'reserved'";
 
 const SQL_INSERT_RESERVATION: &str = "INSERT INTO usage_reservation (reservation_id, ticket, provider, model, pricing_snapshot, currency, upper_bound_micros, state, opened_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reserved', ?8)";
 
@@ -113,7 +111,7 @@ fn select_cap(
 /// multi-cap violation always answers with the same cap reference.
 fn select_applicable_caps(tx: &Transaction<'_>, provider: &str) -> Result<Vec<UsageCap>, String> {
     let mut statement = tx
-        .prepare(SQL_SELECT_CAPS_FOR_PROVIDER)
+        .prepare(SQL_SELECT_CAPS)
         .map_err(|error| error.to_string())?;
     let rows: Vec<(String, String, String, i64, String, i64)> = statement
         .query_map(params![provider], cap_fields)
@@ -333,65 +331,23 @@ pub(crate) fn admit_reservation(
     Ok(ReservationAdmission::Reserved)
 }
 
+/// One stored reservation row, narrowed to the columns its readers use:
+/// settlement reads the state, recovery reads the route and binding.
 pub(crate) struct ReservationRow {
     pub(crate) ticket: String,
-    pub(crate) reservation_id: String,
     pub(crate) provider: String,
     pub(crate) model: String,
     pub(crate) pricing_snapshot: String,
-    pub(crate) currency: String,
-    pub(crate) upper_bound_micros: i64,
     pub(crate) state: String,
-    pub(crate) committed_currency: Option<String>,
-    pub(crate) committed_micros: Option<i64>,
-    pub(crate) opened_at: String,
 }
 
 pub(crate) fn reservation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReservationRow> {
     Ok(ReservationRow {
         ticket: row.get(0)?,
-        reservation_id: row.get(1)?,
-        provider: row.get(2)?,
-        model: row.get(3)?,
-        pricing_snapshot: row.get(4)?,
-        currency: row.get(5)?,
-        upper_bound_micros: row.get(6)?,
-        state: row.get(7)?,
-        committed_currency: row.get(8)?,
-        committed_micros: row.get(9)?,
-        opened_at: row.get(10)?,
-    })
-}
-
-pub(crate) fn decode_reservation(raw: &ReservationRow) -> Result<UsageReservation, String> {
-    let state = UsageReservationState::from_name(&raw.state)
-        .ok_or_else(|| String::from("unknown usage reservation state"))?;
-    let upper_bound = Money::from_micros(
-        decode_currency(&raw.currency)?,
-        decode_u64(raw.upper_bound_micros)?,
-    );
-    let committed = match (state, &raw.committed_currency, raw.committed_micros) {
-        (UsageReservationState::CommittedReported, Some(currency), Some(micros)) => Some(
-            Money::from_micros(decode_currency(currency)?, decode_u64(micros)?),
-        ),
-        (UsageReservationState::CommittedReported, _, _) => {
-            return Err(String::from("committed reservation is missing its amount"));
-        }
-        (_, None, None) => None,
-        (_, _, _) => {
-            return Err(String::from("uncommitted reservation carries an amount"));
-        }
-    };
-    Ok(UsageReservation {
-        reference: UsageReservationRef(decode_id(&raw.reservation_id)?),
-        ticket: InferenceTicketId(decode_id(&raw.ticket)?),
-        provider: raw.provider.clone(),
-        model: raw.model.clone(),
-        pricing: decode_pricing_reference(&raw.pricing_snapshot)?,
-        upper_bound,
-        state,
-        committed,
-        opened_at: decode_wall_clock(&raw.opened_at)?,
+        provider: row.get(1)?,
+        model: row.get(2)?,
+        pricing_snapshot: row.get(3)?,
+        state: row.get(4)?,
     })
 }
 
@@ -436,36 +392,18 @@ impl UsageCapRepository for Store {
             let provider_text = command.scope.provider().unwrap_or("");
             let window_text = command.window.as_str();
             let revision_raw = encode_u64(revision.as_u64()).map_err(permission_unavailable)?;
-            match &current {
-                None => {
-                    tx.execute(
-                        SQL_INSERT_CAP,
-                        params![
-                            scope_text,
-                            provider_text,
-                            window_text,
-                            revision_raw,
-                            cap.limit().currency().as_str(),
-                            encode_u64(cap.limit().micros()).map_err(permission_unavailable)?,
-                        ],
-                    )
-                    .map_err(|error| permission_unavailable(error.to_string()))?;
-                }
-                Some(_) => {
-                    tx.execute(
-                        SQL_UPDATE_CAP,
-                        params![
-                            scope_text,
-                            provider_text,
-                            window_text,
-                            revision_raw,
-                            cap.limit().currency().as_str(),
-                            encode_u64(cap.limit().micros()).map_err(permission_unavailable)?,
-                        ],
-                    )
-                    .map_err(|error| permission_unavailable(error.to_string()))?;
-                }
-            }
+            tx.execute(
+                SQL_UPSERT_CAP,
+                params![
+                    scope_text,
+                    provider_text,
+                    window_text,
+                    revision_raw,
+                    cap.limit().currency().as_str(),
+                    encode_u64(cap.limit().micros()).map_err(permission_unavailable)?,
+                ],
+            )
+            .map_err(|error| permission_unavailable(error.to_string()))?;
             tx.commit()
                 .map_err(|error| permission_unavailable(error.to_string()))?;
             Ok(SetUsageCapOutcome::StoredAs(cap.reference()))
@@ -481,22 +419,13 @@ impl UsageCapRepository for Store {
         run_blocking(move || {
             let guard = lock_shared(&conn);
             let mut statement = guard
-                .prepare(match query.provider {
-                    None => SQL_SELECT_ALL_CAPS,
-                    Some(_) => SQL_SELECT_CAPS_FOR_PROVIDER,
-                })
+                .prepare(SQL_SELECT_CAPS)
                 .map_err(|error| permission_unavailable(error.to_string()))?;
-            let rows: Vec<(String, String, String, i64, String, i64)> = match &query.provider {
-                None => statement
-                    .query_map((), cap_fields)
-                    .map_err(|error| permission_unavailable(error.to_string()))?
-                    .collect::<Result<Vec<_>, _>>(),
-                Some(provider) => statement
-                    .query_map(params![provider], cap_fields)
-                    .map_err(|error| permission_unavailable(error.to_string()))?
-                    .collect::<Result<Vec<_>, _>>(),
-            }
-            .map_err(|error| permission_unavailable(error.to_string()))?;
+            let rows: Vec<(String, String, String, i64, String, i64)> = statement
+                .query_map(params![query.provider.as_deref()], cap_fields)
+                .map_err(|error| permission_unavailable(error.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| permission_unavailable(error.to_string()))?;
             let mut statuses = Vec::with_capacity(rows.len());
             for (scope, provider, window, revision, currency, limit_micros) in &rows {
                 let cap = decode_cap(scope, provider, window, *revision, currency, *limit_micros)

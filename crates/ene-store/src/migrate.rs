@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior};
 
-pub(crate) const CURRENT_VERSION: i64 = 41;
+pub(crate) const CURRENT_VERSION: i64 = 42;
 
 const SCHEMA: &str = "
 CREATE TABLE action_attempt (
@@ -521,6 +521,11 @@ save_target TEXT
 CREATE INDEX idx_action_attempt_delegation ON action_attempt (delegation_id);
 CREATE INDEX idx_action_attempt_task ON action_attempt (task_id);
 CREATE INDEX idx_erasure_condition_source_source ON erasure_condition_source (source);
+-- The per-read unfinished-operation probe and the keyset walk read only the
+-- unfinished set. Completed operations are retained forever (lifecycle §13),
+-- so without this partial index the probe scans every completed row.
+CREATE INDEX idx_deletion_operation_unfinished ON deletion_operation (operation_id)
+ WHERE phase != 'completed';
 -- Admission associates already-claimed uses by joining their ordered source
 -- correlation against the operation's covered sources; this index serves that
 -- probe from the (bounded) covered set instead of scanning every attempt's
@@ -692,7 +697,7 @@ mod tests {
             7
         );
         for version in [
-            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
         ] {
             conn.pragma_update(None, "user_version", version).unwrap();
             assert!(run(&mut conn).is_err());

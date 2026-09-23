@@ -14,11 +14,10 @@ use ene_credential::{
 use ene_permission::{
     CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord, ConsentRepository, ConsentRevision,
     ConsumerKind, DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision,
-    PermissionTechnicalError, PurposeKind, UsageReservationRef, UsageReservationState,
-    check_live_authorization,
+    PermissionTechnicalError, PurposeKind, check_live_authorization,
 };
 use ene_primitive::{RawId, RevisionInner, WallClockWithTz};
-use pricing::{PricingCatalog, PricingResolution, PricingSnapshot, PricingSnapshotRef};
+use pricing::{PricingCatalog, PricingResolution, PricingSnapshot};
 use thiserror::Error;
 
 pub use usage_query::{
@@ -204,43 +203,31 @@ impl DeltaSink for DiscardSink {
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait UsageRepository: Send + Sync {
+    /// Persist the first complete settlement for a claimed ticket. Duplicate
+    /// arrivals are idempotent; an Unknown settlement is not revised later.
+    /// Reject orphan tickets, route mismatches, and inconsistent token facts.
+    ///
+    /// The same transaction settles the ticket's usage reservation when one
+    /// exists: a reported fact commits it as
+    /// [`ene_permission::UsageReservationState::CommittedReported`] with the
+    /// actual cost derived from the bound pricing snapshot (releasing the
+    /// unused reservation), and an unknown fact commits it as
+    /// [`ene_permission::UsageReservationState::CommittedUnknown`], which
+    /// keeps the reserved upper bound counted against every cap. The first
+    /// settlement wins; a duplicate never revises a terminal reservation.
     async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError>;
 
-    async fn load_usage_cost(
-        &self,
-        ticket: InferenceTicketId,
-    ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError>;
-
-    /// Loads the ticket's usage reservation, if the admission created one.
+    /// Settles every non-terminal usage reservation as
+    /// [`ene_permission::UsageReservationState::CommittedUnknown`]
+    /// (`usage-cost-cap` §15).
     ///
-    /// `Ok(None)` means no reservation exists: no cap applied to the route, so
-    /// there is no reserved amount. A malformed or internally inconsistent row
-    /// is a technical error. This read settles nothing.
-    async fn load_usage_reservation(
-        &self,
-        ticket: InferenceTicketId,
-    ) -> Result<Option<UsageReservation>, InferenceTechnicalError>;
-
-    async fn reconcile_orphaned_usage_reservations(&self) -> Result<u64, InferenceTechnicalError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UsageReservation {
-    pub reference: UsageReservationRef,
-    pub ticket: InferenceTicketId,
-    pub provider: String,
-    pub model: String,
-    pub pricing: PricingSnapshotRef,
-    pub upper_bound: cost::Money,
-    pub state: UsageReservationState,
-    pub committed: Option<cost::Money>,
-    pub opened_at: WallClockWithTz,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UsageCostRecord {
-    pub usage: UsageFact,
-    pub cost: cost::UsageCostFact,
+    /// This is the Host-startup re-evaluation of reservations orphaned by a
+    /// crash: external consumption cannot be denied, so the reserved upper
+    /// bound stays counted and the ticket settles an Unknown token usage
+    /// fact; a crash never releases a reservation and never zeroes usage.
+    /// Terminal reservations are not re-counted or re-inserted. The operation
+    /// is idempotent.
+    async fn reconcile_orphaned_usage_reservations(&self) -> Result<(), InferenceTechnicalError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -848,8 +835,8 @@ mod dispatch_tests {
         InferenceAttempt, InferenceAttemptRecord, InferenceAttemptRepository,
         InferenceDispatchOutcome, InferenceResultArrival, InferenceTechnicalError,
         InferenceTicketId, MAX_INPUT_CHARS, NotSentReason, ProviderRequest, ProviderResponse,
-        ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageCostRecord, UsageEstimate,
-        UsageFact, UsageRepository, UsageReservation, UsageSource, dispatch_authorized,
+        ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageEstimate, UsageFact,
+        UsageRepository, UsageSource, dispatch_authorized,
     };
     use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
@@ -1152,35 +1139,9 @@ mod dispatch_tests {
             clippy::unused_async_trait_impl,
             reason = "in-test fake; async matches the repository contract"
         )]
-        async fn load_usage_cost(
-            &self,
-            _ticket: InferenceTicketId,
-        ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError> {
-            Err(InferenceTechnicalError::StorageUnavailable {
-                reason: String::from("usage store down"),
-            })
-        }
-
-        #[expect(
-            clippy::unused_async_trait_impl,
-            reason = "in-test fake; async matches the repository contract"
-        )]
-        async fn load_usage_reservation(
-            &self,
-            _ticket: InferenceTicketId,
-        ) -> Result<Option<UsageReservation>, InferenceTechnicalError> {
-            Err(InferenceTechnicalError::StorageUnavailable {
-                reason: String::from("usage store down"),
-            })
-        }
-
-        #[expect(
-            clippy::unused_async_trait_impl,
-            reason = "in-test fake; async matches the repository contract"
-        )]
         async fn reconcile_orphaned_usage_reservations(
             &self,
-        ) -> Result<u64, InferenceTechnicalError> {
+        ) -> Result<(), InferenceTechnicalError> {
             Err(InferenceTechnicalError::StorageUnavailable {
                 reason: String::from("usage store down"),
             })
@@ -1265,32 +1226,10 @@ mod dispatch_tests {
             clippy::unused_async_trait_impl,
             reason = "in-test fake; async matches the repository contract"
         )]
-        async fn load_usage_cost(
-            &self,
-            _ticket: InferenceTicketId,
-        ) -> Result<Option<UsageCostRecord>, InferenceTechnicalError> {
-            Ok(None)
-        }
-
-        #[expect(
-            clippy::unused_async_trait_impl,
-            reason = "in-test fake; async matches the repository contract"
-        )]
-        async fn load_usage_reservation(
-            &self,
-            _ticket: InferenceTicketId,
-        ) -> Result<Option<UsageReservation>, InferenceTechnicalError> {
-            Ok(None)
-        }
-
-        #[expect(
-            clippy::unused_async_trait_impl,
-            reason = "in-test fake; async matches the repository contract"
-        )]
         async fn reconcile_orphaned_usage_reservations(
             &self,
-        ) -> Result<u64, InferenceTechnicalError> {
-            Ok(0)
+        ) -> Result<(), InferenceTechnicalError> {
+            Ok(())
         }
     }
 

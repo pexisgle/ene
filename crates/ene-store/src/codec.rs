@@ -20,6 +20,7 @@ use ene_presence::{
     ClientId, PresenceAttribution, PresenceGeneration, PresenceState, PresenceTechnicalError,
     RelocationHint, ThinMoveReason,
 };
+use ene_preservation::PreservationTechnicalError;
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -142,6 +143,9 @@ pub(crate) fn encode_round_intent(intent: &RoundIntentMark) -> (&'static str, Op
     }
 }
 
+/// `None` intent means the row carries no command key (replies): the caller
+/// fail-closes on replay instead of guessing. A kind and reference that
+/// disagree are a malformed row, never defaulted.
 pub(crate) fn decode_round_intent(
     kind: Option<&str>,
     reference: Option<String>,
@@ -421,20 +425,30 @@ pub(crate) fn encode_move_reason(reason: ThinMoveReason) -> &'static str {
     }
 }
 
-pub(crate) fn presence_unavailable(reason: String) -> PresenceTechnicalError {
-    PresenceTechnicalError::StorageUnavailable { reason }
+pub(crate) fn presence_unavailable(reason: impl core::fmt::Display) -> PresenceTechnicalError {
+    PresenceTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
 }
 
-pub(crate) fn companion_unavailable(reason: String) -> CompanionTechnicalError {
-    CompanionTechnicalError::StorageUnavailable { reason }
+pub(crate) fn companion_unavailable(reason: impl core::fmt::Display) -> CompanionTechnicalError {
+    CompanionTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
 }
 
-pub(crate) fn undelivered_unavailable(reason: String) -> UndeliveredTechnicalError {
-    UndeliveredTechnicalError::StorageUnavailable { reason }
+pub(crate) fn undelivered_unavailable(
+    reason: impl core::fmt::Display,
+) -> UndeliveredTechnicalError {
+    UndeliveredTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
 }
 
-pub(crate) fn permission_unavailable(reason: String) -> PermissionTechnicalError {
-    PermissionTechnicalError::StorageUnavailable { reason }
+pub(crate) fn permission_unavailable(reason: impl core::fmt::Display) -> PermissionTechnicalError {
+    PermissionTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
 }
 
 pub(crate) fn credential_unavailable(reason: impl core::fmt::Display) -> CredentialTechnicalError {
@@ -443,8 +457,18 @@ pub(crate) fn credential_unavailable(reason: impl core::fmt::Display) -> Credent
     }
 }
 
-pub(crate) fn inference_unavailable(reason: String) -> InferenceTechnicalError {
-    InferenceTechnicalError::StorageUnavailable { reason }
+pub(crate) fn inference_unavailable(reason: impl core::fmt::Display) -> InferenceTechnicalError {
+    InferenceTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
+}
+
+pub(crate) fn preservation_storage(_: rusqlite::Error) -> PreservationTechnicalError {
+    PreservationTechnicalError::StorageUnavailable
+}
+
+pub(crate) fn preservation_corrupt() -> PreservationTechnicalError {
+    PreservationTechnicalError::CorruptState
 }
 
 pub(crate) fn select_consent(
@@ -664,6 +688,10 @@ pub(crate) fn decode_pending_credential(
     })
 }
 
+/// `None` command text means no replay key; `None` wire projection is
+/// unreadable stored state (every current writer persists one); the
+/// incarnation appears only when both counter and random are present and
+/// decode; `local_id` is correspondence metadata only.
 pub(crate) fn decode_history_message(
     companion: CompanionId,
     row: HistoryRow,

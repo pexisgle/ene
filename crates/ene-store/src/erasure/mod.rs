@@ -479,5 +479,5 @@ impl ErasureParticipant for LocalErasureParticipant {
 /// Test-support alias of the system-wide mechanical probe (see
 /// [`remainder::system_remainder`]). Tests assert `0` after an erasure pass
 /// instead of re-implementing the canonical content-surface list.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub(crate) use remainder::system_remainder as exact_remainder_probe;
