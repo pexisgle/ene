@@ -360,6 +360,12 @@ mod tests {
         while !stop.load(Ordering::Relaxed) {
             match load_stored_device(&reader_dir) {
                 DeviceFileState::Loaded(_) | DeviceFileState::Missing => {}
+                #[cfg(windows)]
+                DeviceFileState::Unreadable => {
+                    // Windows can deny a read while rename replaces the
+                    // destination. That says nothing about the bytes made
+                    // visible before or after the replacement.
+                }
                 other => panic!("a partial document was observed: {other:?}"),
             }
             observed += 1;
