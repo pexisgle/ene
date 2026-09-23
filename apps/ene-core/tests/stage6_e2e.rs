@@ -2326,7 +2326,7 @@ async fn confirm_deletion_via_serving_control(served: &mut Served) -> DeletionOp
     }
 }
 
-#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn local_deletion_page(handle: &HostHandle) -> DeletionStatusPage {
     handle
         .deletion_status_page(None, 20)

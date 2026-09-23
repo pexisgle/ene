@@ -100,7 +100,9 @@ pub enum TaskProposalOutcome {
     Superseded,
     /// The relied-on revision or purpose does not match the durable current
     /// state; nothing was changed and the caller re-evaluates.
-    StalePremise { current: TaskRef },
+    StalePremise {
+        current: TaskRef,
+    },
     /// The Task is terminal (`Completed` / `Failed` / `Cancelled`); the revision and
     /// context are unchanged. Absorbing, so it is distinct from revision
     /// staleness.

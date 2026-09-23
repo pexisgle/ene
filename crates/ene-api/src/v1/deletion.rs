@@ -163,10 +163,7 @@ pub struct DeletionParticipantStatusWire {
     pub sweep: u64,
 }
 
-string_wire_ref!(
-    DeletionDemandWireId,
-    "Host-minted correlation identity of one Client local-erasure demand (IPC §17.1). The Host mints it per demand, the Client echoes it on the LocalErasureResult, and a result whose identity names no outstanding demand for that incarnation is ignored. It is an opaque string, never parsed."
-);
+string_wire_ref!(DeletionDemandWireId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ClientTempClass {

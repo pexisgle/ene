@@ -34,7 +34,9 @@ pub enum ActionOutput {
     /// The created marker of a successful `Create`, carrying the exact
     /// [`RealTargetRef`] the attempt was recorded and executed under; the
     /// request path is never reconstructed into the result.
-    Created { target: RealTargetRef },
+    Created {
+        target: RealTargetRef,
+    },
     /// The updated marker of a successful `Edit`.
     Updated,
 }

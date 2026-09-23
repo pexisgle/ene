@@ -102,7 +102,9 @@ pub struct ExperienceCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormationDecision {
-    Formed { summary: SummaryId },
+    Formed {
+        summary: SummaryId,
+    },
     NoChangesApplied,
     DeclinedAsNoEndValue,
     DeferredForContext,

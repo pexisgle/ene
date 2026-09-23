@@ -7,7 +7,10 @@
 
 #![allow(
     dead_code,
-    reason = "each integration-test binary compiles this module alone; not every binary calls every helper"
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "each integration-test binary compiles this module alone; helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
 )]
 
 use std::path::Path;

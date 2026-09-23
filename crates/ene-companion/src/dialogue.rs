@@ -124,12 +124,8 @@ impl core::fmt::Debug for DialogueTurn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogueBegin {
     Ready(Box<DialogueTurn>),
-    Replayed {
-        round_wire: Option<String>,
-    },
-    StaleExpected {
-        current: PresenceGeneration,
-    },
+    Replayed { round_wire: Option<String> },
+    StaleExpected { current: PresenceGeneration },
     StaleConsent,
     StaleCredentialSet,
     Conflict,
@@ -164,7 +160,9 @@ impl core::fmt::Debug for DialogueOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayClassification {
     /// The stored row proves an exact retry: answer its original accept.
-    Replay { round_wire: Option<String> },
+    Replay {
+        round_wire: Option<String>,
+    },
     /// The stored row proves a different request under the same key.
     Conflict,
     None,

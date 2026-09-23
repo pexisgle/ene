@@ -153,7 +153,9 @@ pub enum ActivationOutcome {
         retired: Option<SecretVersionId>,
     },
     /// Another writer advanced the revision first; nothing changed here.
-    Stale { current_revision: u64 },
+    Stale {
+        current_revision: u64,
+    },
     /// The store cannot resolve the id to an activatable, undecided mutation
     /// of the required kind and phase: unknown id, no candidate version, or a
     /// phase/kind this operation cannot decide.

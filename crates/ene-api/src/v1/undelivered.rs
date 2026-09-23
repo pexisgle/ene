@@ -3,26 +3,11 @@ use serde::{Deserialize, Serialize};
 use super::refs::{CompanionWireRef, RoundWireId, string_wire_ref};
 use super::round::PresentationStatus;
 
-string_wire_ref!(
-    PresentationReceiptWireRef,
-    "Opaque presentation receipt, Host-issued per Companion presentation. Echo only; one live receipt per Companion."
-);
-string_wire_ref!(
-    UndeliveredWireRef,
-    "Opaque undelivered-item reference, Host-issued per connection query. Echo only."
-);
-string_wire_ref!(
-    TaskWireRef,
-    "Opaque Task reference, Host-issued per connection query. Echo only; never a TaskId."
-);
-string_wire_ref!(
-    ReportSourceWireRef,
-    "Opaque report-source reference, Host-issued per connection query. Echo only."
-);
-string_wire_ref!(
-    PageCursorWire,
-    "Opaque page cursor, Host-issued and bound to its query and Task. Echo only; reuse across queries answers StaleBaseView."
-);
+string_wire_ref!(PresentationReceiptWireRef);
+string_wire_ref!(UndeliveredWireRef);
+string_wire_ref!(TaskWireRef);
+string_wire_ref!(ReportSourceWireRef);
+string_wire_ref!(PageCursorWire);
 
 pub const DEFAULT_PAGE_LIMIT: u32 = 50;
 pub const MAX_PAGE_LIMIT: u32 = 50;
@@ -103,7 +88,9 @@ pub enum UndeliveredResponse {
     FrameTooLarge,
     NoCurrentPresence,
     UnknownCompanion,
-    StaleBaseView { current: Option<PageCursorWire> },
+    StaleBaseView {
+        current: Option<PageCursorWire>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -114,9 +101,13 @@ pub struct UndeliveredAck {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UndeliveredAckOutcome {
-    Presented { presented: u32 },
+    Presented {
+        presented: u32,
+    },
     AlreadyPresented,
-    ReturnedToPending { count: u32 },
+    ReturnedToPending {
+        count: u32,
+    },
     KeptUnknown,
     UnknownRef,
     StalePresentation,
