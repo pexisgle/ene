@@ -1,10 +1,4 @@
 #![cfg(unix)]
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration-test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
-)]
 
 use std::collections::{BTreeSet, VecDeque};
 use std::future::Future;
@@ -38,6 +32,7 @@ use ene_task::TaskRepository as _;
 const DESCRIPTOR: &str = "stage5 e2e";
 const MODEL: &str = "gpt-slice-test";
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn memory_store() -> MemoryCredentialStore {
     let store = MemoryCredentialStore::new();
     store.insert(
@@ -77,6 +72,7 @@ impl GateTransport {
             .remove(&call);
     }
 
+    #[expect(clippy::unwrap_used, reason = "test fixture helper")]
     fn fail(&self, call: usize) {
         self.failures.lock().unwrap().insert(call);
         self.unblock(call);
@@ -102,6 +98,7 @@ impl GateTransport {
 }
 
 impl ProviderTransport for GateTransport {
+    #[expect(clippy::unwrap_used, reason = "test fixture helper")]
     fn complete(
         &self,
         req: ProviderRequest,
@@ -151,6 +148,7 @@ fn task_reply(directive: serde_json::Value) -> String {
     format!("[task-control] {directive}")
 }
 
+#[expect(clippy::unwrap_used, reason = "test fixture helper")]
 async fn open_host(dir: &std::path::Path) -> Arc<HostHandle> {
     let opened = HostHandle::open_with_cred_store(dir, CredStore::Memory(memory_store())).await;
     assert!(opened.is_ok(), "host must open");
@@ -330,6 +328,7 @@ impl ServingTask {
         }
     }
 
+    #[expect(clippy::expect_used, reason = "test fixture helper")]
     async fn shutdown_and_join(self) {
         self.shutdown.send_replace(true);
         tokio::time::timeout(Duration::from_secs(30), self.task)
@@ -348,6 +347,7 @@ impl ServingTask {
     }
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn serve_and_setup(
     dir: std::path::PathBuf,
     transport: Arc<GateTransport>,
@@ -582,6 +582,7 @@ async fn restart_host(
     start_restarted_host(dir, transport).await
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn start_restarted_host(
     dir: &std::path::Path,
     transport: Arc<GateTransport>,
@@ -614,6 +615,7 @@ async fn wait_presence(dir: &std::path::Path, wanted: &str) {
     }
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn table_count(dir: &std::path::Path, table: &str) -> i64 {
     let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
     conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), (), |row| {
@@ -622,6 +624,7 @@ fn table_count(dir: &std::path::Path, table: &str) -> i64 {
     .expect("the probe count must read")
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn presence_row(dir: &std::path::Path) -> (String, i64) {
     let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
     conn.query_row(
@@ -819,6 +822,7 @@ async fn s5_05_old_close_never_clears_new_current_both_orders() {
     server_b.abort();
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn only_task_uuid(dir: &std::path::Path) -> String {
     task_uuids(dir)
         .into_iter()
@@ -826,6 +830,7 @@ fn only_task_uuid(dir: &std::path::Path) -> String {
         .expect("one task must exist")
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn task_uuids(dir: &std::path::Path) -> Vec<String> {
     let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
     let mut statement = conn
@@ -1217,6 +1222,7 @@ async fn s5_17_18_resume_gates_and_retry_idempotency() {
     server.abort();
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn delegation_ids(dir: &std::path::Path, task: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
     let mut statement = conn
@@ -1229,6 +1235,7 @@ fn delegation_ids(dir: &std::path::Path, task: &str) -> Vec<String> {
         .expect("delegation ids must decode")
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn task_results(dir: &std::path::Path) -> Vec<(String, i64, String, Option<i64>)> {
     let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
     let mut statement = conn

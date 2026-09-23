@@ -1,10 +1,4 @@
 #![cfg(any(unix, windows))]
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration-test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
-)]
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -96,6 +90,7 @@ impl ServingTask {
         Self { shutdown, task }
     }
 
+    #[expect(clippy::expect_used, reason = "test fixture helper")]
     async fn shutdown_and_join(self) {
         self.shutdown.send_replace(true);
         tokio::time::timeout(Duration::from_secs(30), self.task)
@@ -106,6 +101,7 @@ impl ServingTask {
     }
 }
 
+#[expect(clippy::panic, reason = "test fixture helper")]
 async fn open_host(dir: &Path) -> Arc<HostHandle> {
     match HostHandle::open_with_cred_store(
         dir,
@@ -140,6 +136,7 @@ async fn wait_for_control(dir: &Path) -> bool {
     false
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
     let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
     desktop
@@ -155,6 +152,7 @@ async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
     }
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn pair_and_setup(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
     pair_and_seat(desktop, handle).await;
     desktop.set_secret(String::from(SECRET));
@@ -178,6 +176,7 @@ async fn pair_and_setup(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) 
     );
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn unpresented_count(handle: &HostHandle) -> usize {
     let companion = handle
         .store_for_tests()

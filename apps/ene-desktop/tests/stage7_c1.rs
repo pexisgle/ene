@@ -1,10 +1,4 @@
 #![cfg(any(unix, windows))]
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration-test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
-)]
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -64,6 +58,7 @@ impl LearningTransport {
             .push_back(answer.to_owned());
     }
 
+    #[expect(clippy::expect_used, reason = "test fixture helper")]
     async fn wait_learning(&self) {
         let permit = self
             .learning_calls
@@ -180,6 +175,7 @@ impl ServingTask {
         Self { shutdown, task }
     }
 
+    #[expect(clippy::expect_used, reason = "test fixture helper")]
     async fn shutdown_and_join(self) {
         self.shutdown.send_replace(true);
         tokio::time::timeout(Duration::from_secs(30), self.task)
@@ -190,6 +186,7 @@ impl ServingTask {
     }
 }
 
+#[expect(clippy::panic, reason = "test fixture helper")]
 async fn open_host(dir: &Path) -> Arc<HostHandle> {
     match HostHandle::open_with_cred_store(
         dir,
@@ -224,6 +221,7 @@ async fn wait_for_control(dir: &Path) -> bool {
     false
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
     let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
     desktop
@@ -239,6 +237,7 @@ async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
     }
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn complete_setup(desktop: &mut DesktopRuntime) {
     desktop.set_secret(String::from(SECRET));
     desktop
@@ -262,6 +261,7 @@ async fn complete_setup(desktop: &mut DesktopRuntime) {
     assign_learning(desktop).await;
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn assign_learning(desktop: &mut DesktopRuntime) {
     let mut client = desktop.take_client().expect("paired client");
     let view = session::fetch_setup_view(&mut client)
@@ -301,11 +301,13 @@ async fn assign_learning(desktop: &mut DesktopRuntime) {
     }
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn say(desktop: &mut DesktopRuntime, text: &str) {
     desktop.composer_mut().set_draft(text.to_owned());
     desktop.send_text().await.expect("chat turn must complete");
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn wait_for_memory(desktop: &mut DesktopRuntime, expected: &str) {
     for _ in 0..100 {
         desktop.refresh_memory().await.expect("memory list");
@@ -327,6 +329,7 @@ async fn wait_for_memory(desktop: &mut DesktopRuntime, expected: &str) {
     );
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn wait_for_revisions(desktop: &mut DesktopRuntime, expected: &str) {
     for _ in 0..100 {
         desktop.refresh_memory().await.expect("memory list");

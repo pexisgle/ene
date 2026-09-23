@@ -1,11 +1,4 @@
 #![cfg(any(unix, windows))]
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration-test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
-)]
-
 use std::time::Duration;
 
 use ene_body::ipc::PoseHint;

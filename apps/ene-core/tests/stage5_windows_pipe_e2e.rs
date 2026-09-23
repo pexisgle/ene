@@ -1,10 +1,4 @@
 #![cfg(windows)]
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration-test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
-)]
 
 use std::future::Future;
 use std::os::windows::io::AsRawHandle as _;
@@ -41,6 +35,7 @@ const DESCRIPTOR: &str = "stage5 pipe e2e";
 const MODEL: &str = "gpt-slice-test";
 const REPLY: &str = "hello back over the real named pipe";
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn memory_store() -> MemoryCredentialStore {
     let store = MemoryCredentialStore::new();
     store.insert(
@@ -102,6 +97,7 @@ impl ProviderTransport for ScriptedTransport {
     }
 }
 
+#[expect(clippy::unwrap_used, reason = "test fixture helper")]
 async fn open_host(dir: &Path) -> Arc<HostHandle> {
     let opened = HostHandle::open_with_cred_store(dir, CredStore::Memory(memory_store())).await;
     assert!(opened.is_ok(), "host must open");
@@ -271,6 +267,7 @@ async fn setup_flow(client: &mut Client, approver: &HostHandle) -> Result<(), St
     Ok(())
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn serve_and_setup(
     dir: PathBuf,
     transport: Arc<ScriptedTransport>,
@@ -380,6 +377,7 @@ async fn fetch_summary(client: &mut Client, what: &str) -> Result<UndeliveredSum
     Ok(summary)
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn expect_stale_connection(client: &mut Client, payload: WirePayload, what: &str) {
     let answer = ask(client, payload, what)
         .await
@@ -394,6 +392,7 @@ async fn expect_stale_connection(client: &mut Client, payload: WirePayload, what
     );
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn presence_row(dir: &Path) -> Option<(String, i64)> {
     let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
     conn.query_row(

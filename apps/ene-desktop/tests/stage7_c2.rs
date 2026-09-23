@@ -1,10 +1,4 @@
 #![cfg(any(unix, windows))]
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration-test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
-)]
 
 use std::collections::{BTreeSet, VecDeque};
 use std::future::Future;
@@ -148,6 +142,7 @@ impl ServingTask {
         Self { shutdown, task }
     }
 
+    #[expect(clippy::expect_used, reason = "test fixture helper")]
     async fn shutdown_and_join(self) {
         self.shutdown.send_replace(true);
         tokio::time::timeout(Duration::from_secs(30), self.task)
@@ -158,6 +153,7 @@ impl ServingTask {
     }
 }
 
+#[expect(clippy::panic, reason = "test fixture helper")]
 async fn open_host(dir: &Path) -> Arc<HostHandle> {
     match HostHandle::open_with_cred_store(
         dir,
@@ -192,6 +188,7 @@ async fn wait_for_control(dir: &Path) -> bool {
     false
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
     let channel = host_control::seat_test_gui_for_tests(handle).expect("private channel");
     desktop
@@ -207,6 +204,7 @@ async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle>) {
     }
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn complete_setup(desktop: &mut DesktopRuntime) {
     desktop.set_secret(String::from(SECRET));
     desktop
@@ -229,17 +227,20 @@ async fn complete_setup(desktop: &mut DesktopRuntime) {
     );
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn say(desktop: &mut DesktopRuntime, text: &str) {
     desktop.composer_mut().set_draft(text.to_owned());
     desktop.send_text().await.expect("chat turn must complete");
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn workspace_with_input() -> tempfile::TempDir {
     let workspace = tempfile::tempdir().expect("workspace directory");
     std::fs::write(workspace.path().join("input.txt"), b"notes").expect("input fixture");
     workspace
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn wait_listed(desktop: &mut DesktopRuntime, needle: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -269,6 +270,7 @@ async fn wait_path(path: &Path) {
     }
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn select_first_task(desktop: &mut DesktopRuntime) {
     desktop.open_tasks().await.expect("open tasks");
     desktop

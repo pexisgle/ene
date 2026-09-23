@@ -1,10 +1,3 @@
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration-test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
-)]
-
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -47,6 +40,7 @@ const TARGET: &str = "TS6-DELETION-CANARY-9137";
 const SECRET: &str = "sk-stage6-secret-marker-8821";
 const ROTATED_SECRET: &str = "sk-stage6-rotated-marker-4477";
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn memory_store_with(secret: &str) -> MemoryCredentialStore {
     let store = MemoryCredentialStore::new();
     store.insert(
@@ -60,6 +54,7 @@ fn memory_store() -> MemoryCredentialStore {
     memory_store_with("sk-test-only")
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn memory_store_with_rotated(main: &str, rotated: &str) -> MemoryCredentialStore {
     let store = memory_store_with(main);
     store.insert(
@@ -274,6 +269,7 @@ async fn open_host(dir: &Path) -> Arc<HostHandle> {
     open_host_with(dir, memory_store()).await
 }
 
+#[expect(clippy::unwrap_used, reason = "test fixture helper")]
 async fn open_host_with(dir: &Path, store: MemoryCredentialStore) -> Arc<HostHandle> {
     let opened = HostHandle::open_with_cred_store(dir, CredStore::Memory(store)).await;
     assert!(opened.is_ok(), "host must open");
@@ -309,6 +305,7 @@ async fn dial_until_pending(dir: &Path) -> Result<PendingPairingClient, String> 
     }
 }
 
+#[expect(clippy::panic, reason = "test fixture helper")]
 async fn connect(dir: &Path) -> Client {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
@@ -445,6 +442,7 @@ async fn setup_flow(
     Ok(())
 }
 
+#[expect(clippy::panic, reason = "test fixture helper")]
 async fn wait_until(mut ready: impl FnMut() -> bool, mut what: impl FnMut() -> String) {
     for _ in 0..1_000_000 {
         if ready() {
@@ -498,6 +496,7 @@ struct Served {
 }
 
 impl Served {
+    #[expect(clippy::expect_used, reason = "test fixture helper")]
     async fn start(
         dir: PathBuf,
         cred_store: MemoryCredentialStore,
@@ -539,14 +538,17 @@ impl Served {
         }
     }
 
+    #[expect(clippy::expect_used, reason = "test fixture helper")]
     fn client(&mut self) -> &mut Client {
         self.client.as_mut().expect("a live client")
     }
 
+    #[expect(clippy::expect_used, reason = "test fixture helper")]
     fn handle(&self) -> &HostHandle {
         self.handle.as_ref().expect("a live HostHandle")
     }
 
+    #[expect(clippy::expect_used, reason = "test fixture helper")]
     fn handle_arc(&self) -> Arc<HostHandle> {
         Arc::clone(self.handle.as_ref().expect("a live HostHandle"))
     }
@@ -567,6 +569,7 @@ impl Served {
         }
     }
 
+    #[expect(clippy::panic, reason = "test fixture helper")]
     async fn join_listener(&mut self) {
         let finished = std::mem::replace(
             &mut self.server,
@@ -587,6 +590,7 @@ impl Served {
         drop(std::fs::remove_file(conn::socket_path(&self.dir)));
     }
 
+    #[expect(clippy::expect_used, reason = "test fixture helper")]
     async fn serve(&mut self) -> Client {
         wait_until_deletion_drivers(self.handle(), 0).await;
         wait_until_deletion_blocking(self.handle(), 0).await;
@@ -628,6 +632,7 @@ impl Served {
         self.serve().await
     }
 
+    #[expect(clippy::expect_used, reason = "test fixture helper")]
     async fn canonical_remainder(&self, needle: &str) -> u64 {
         let store = ene_store::Store::open(&self.dir.join("app.db"))
             .await
@@ -890,6 +895,7 @@ async fn request_deletion(client: &mut Client, text: &str) -> Result<ManagementO
     Ok(outcome)
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn confirm_deletion(handle: &HostHandle) -> DeletionOperationRef {
     let pending = handle
         .pending_targeted_deletions(None, 10)
@@ -949,6 +955,7 @@ async fn drive_until(
     }
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn db_target_hits(db: &Path, needle: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(db).expect("the state database opens for scanning");
     conn.busy_timeout(Duration::from_secs(30))
@@ -1029,6 +1036,7 @@ fn formation_update() -> String {
     formation_update_with(TARGET)
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn plant_target_fixture(served: &mut Served) {
     let dir = served.dir.clone();
     let client = served.client();
@@ -1102,6 +1110,7 @@ async fn wait_for_memory_revision_at_least(client: &mut Client, wanted: u64) {
     }
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn history_texts(client: &mut Client) -> Vec<String> {
     let companion = client.companion_ref();
     let history = ask(
@@ -1117,6 +1126,7 @@ async fn history_texts(client: &mut Client) -> Vec<String> {
     items.into_iter().map(|item| item.text).collect()
 }
 
+#[expect(clippy::panic, reason = "test fixture helper")]
 async fn memory_view(client: &mut Client) -> String {
     let answer = ask(
         client,
@@ -1134,6 +1144,7 @@ async fn memory_view(client: &mut Client) -> String {
         .unwrap_or_default()
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn wait_for_summary_with(client: &mut Client, needle: &str) -> UndeliveredSummary {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
@@ -1169,6 +1180,7 @@ fn assert_target_is_planted(served: &Served) {
     );
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn assert_completed_reads_are_clean(served: &mut Served, sends_at_confirmation: usize) {
     let client = served.client();
     let texts = history_texts(client).await;
@@ -1867,6 +1879,7 @@ fn client_incarnation_participant(
         .find(|participant| participant.owner.starts_with("client_incarnation:"))
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn render_single_pending_request(handle: &HostHandle) -> String {
     let pending = handle
         .pending_targeted_deletions(None, 10)
@@ -1881,6 +1894,7 @@ async fn render_single_pending_request(handle: &HostHandle) -> String {
         .to_string()
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn confirm_deletion_via_serving_control(served: &mut Served) -> DeletionOperationRef {
     let request = render_single_pending_request(served.handle()).await;
     let dir = served.dir.clone();
@@ -1942,6 +1956,7 @@ async fn confirm_deletion_via_serving_control(served: &mut Served) -> DeletionOp
     }
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn local_deletion_page(handle: &HostHandle) -> DeletionStatusPage {
     match handle
         .deletion_status_page(None, 20)
@@ -1953,6 +1968,7 @@ async fn local_deletion_page(handle: &HostHandle) -> DeletionStatusPage {
     }
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn drive_until_local(handle: &HostHandle, wanted: DeletionPhaseWire) -> DeletionStatusPage {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
     loop {
@@ -1973,6 +1989,7 @@ async fn drive_until_local(handle: &HostHandle, wanted: DeletionPhaseWire) -> De
     }
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn deliver_target_copy(served: &mut Served) {
     let first = format!("please remember {TARGET} for me");
     let (_round, _stream, reply) = send_round(served.client(), &first)
@@ -2226,6 +2243,7 @@ async fn stage6_management_view_memory_body_is_a_required_client_participant() {
     served.server.abort();
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn usage_page(client: &mut Client) -> UsageSummaryPage {
     let answer = ask(
         client,
@@ -2266,6 +2284,7 @@ async fn wait_for_usage_consumer(client: &mut Client, consumer: &str) {
     }
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn usage_page_for(client: &mut Client, provider: &str) -> UsageSummaryPage {
     let answer = ask(
         client,
@@ -2290,6 +2309,7 @@ async fn usage_page_for(client: &mut Client, provider: &str) -> UsageSummaryPage
     page
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn set_provider_monthly_cap(
     client: &mut Client,
     intent_id: CommandWireId,
@@ -2321,6 +2341,7 @@ async fn set_provider_monthly_cap(
     outcome
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn set_system_daily_cap(
     client: &mut Client,
     intent_id: CommandWireId,
@@ -2761,6 +2782,7 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     served.server.abort();
 }
 
+#[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]
 async fn set_system_daily_cap_mark(
     client: &mut Client,
     intent_id: CommandWireId,
@@ -2790,6 +2812,7 @@ async fn set_system_daily_cap_mark(
 
 const DIALOGUE_RACE_PARAPHRASE: &str = "I still keep that detail in mind.";
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn dialogue_race_drive_deletion_to_completed(handle: &HostHandle) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
     loop {
@@ -3649,6 +3672,7 @@ async fn stage6_reconciliation_erases_paraphrase_pinned_past_the_page() {
     );
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn transient_observation_rows(db: &Path) -> i64 {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
     conn.busy_timeout(Duration::from_secs(30))
@@ -3659,6 +3683,7 @@ fn transient_observation_rows(db: &Path) -> i64 {
     .expect("the observation probe must run")
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn transient_observation_body_observed(db: &Path) -> bool {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
     conn.busy_timeout(Duration::from_secs(30))
@@ -3671,6 +3696,7 @@ fn transient_observation_body_observed(db: &Path) -> bool {
     .expect("the observation body-observed probe must run")
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn transient_action_success_rows(db: &Path) -> i64 {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
     conn.busy_timeout(Duration::from_secs(30))
@@ -3683,6 +3709,7 @@ fn transient_action_success_rows(db: &Path) -> i64 {
     .expect("the certainty probe must run")
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn transient_task_delegation_holds(db: &Path) -> i64 {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
     conn.busy_timeout(Duration::from_secs(30))
@@ -3695,6 +3722,7 @@ fn transient_task_delegation_holds(db: &Path) -> i64 {
     .expect("the hold probe must run")
 }
 
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn transient_sole_result_body(db: &Path) -> String {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
     conn.busy_timeout(Duration::from_secs(30))
