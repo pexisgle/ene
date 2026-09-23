@@ -476,9 +476,6 @@ impl ErasureParticipant for LocalErasureParticipant {
     }
 }
 
-#[cfg(test)]
-pub(crate) use task_action_inference::ERASED_LOCATOR;
-
 /// Test-support alias of the system-wide mechanical probe (see
 /// [`remainder::system_remainder`]). Tests assert `0` after an erasure pass
 /// instead of re-implementing the canonical content-surface list.

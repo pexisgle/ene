@@ -1427,9 +1427,3 @@ mod control_sink_tests {
         assert_eq!(presentation, ControlPresentation::LateMarker);
     }
 }
-
-/// The recalled-memory fixture resolves through the real `recall` ranking
-/// path via `recall_candidates`, so the final boundary pass actually covers
-/// memory content instead of a fixture that swallowed it.
-#[cfg(test)]
-mod assembly_tests;

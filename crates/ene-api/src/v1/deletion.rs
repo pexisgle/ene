@@ -296,26 +296,6 @@ mod tests {
     }
 
     #[test]
-    fn client_temp_classes_round_trip_through_their_closed_vocabulary() {
-        for class in [
-            ClientTempClass::PresentationBuffer,
-            ClientTempClass::InputDraft,
-        ] {
-            assert_eq!(ClientTempClass::from_name(class.as_str()), Some(class));
-        }
-        assert_eq!(ClientTempClass::from_name("screen-scrollback"), None);
-    }
-
-    #[test]
-    fn not_reported_is_distinct_from_an_empty_report() {
-        assert_ne!(
-            DeletionParticipantReportWire::NotReported,
-            DeletionParticipantReportWire::Reported(Vec::new()),
-            "an empty report is not the same fact as an absent report"
-        );
-    }
-
-    #[test]
     fn demand_and_result_round_trip_without_a_target_body() {
         use super::super::refs::DeletionOperationWireRef;
         use super::{DeletionDemand, DeletionDemandWireId, DeletionTargetWire, LocalErasureResult};

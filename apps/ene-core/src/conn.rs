@@ -394,28 +394,6 @@ impl ConnectionTable {
         })
     }
 
-    /// Whether `device` currently has an authenticated connection.
-    ///
-    /// The presence fallback trigger is this absence, not a zero live-socket
-    /// count: a lingering superseded or unauthenticated socket never satisfies
-    /// it (#1384).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "presence/Client-dependent admission consumes this predicate in the presence slice; slice A tests it directly"
-        )
-    )]
-    pub(crate) fn current_authenticated(&self, device: &str) -> bool {
-        let table = crate::lock_unpoison(&self.inner);
-        table.device_current.get(device).is_some_and(|id| {
-            table
-                .records
-                .get(id)
-                .is_some_and(|record| record.phase == ConnectionPhase::Authenticated)
-        })
-    }
-
     /// Whether `id` is still its device's current authenticated connection.
     ///
     /// The synchronous currentness predicate for operations that only need
@@ -503,44 +481,6 @@ impl ConnectionTable {
             return None;
         }
         Some(commit())
-    }
-
-    /// Test-only: pins one incarnation on an accepted record exactly as the
-    /// first admitted frame would, so Client-lifecycle tests need no transport.
-    #[cfg(test)]
-    pub(crate) fn pin_incarnation_for_tests(
-        &self,
-        id: &ConnectionWireId,
-        counter: u64,
-        random: u64,
-    ) -> bool {
-        let mut table = crate::lock_unpoison(&self.inner);
-        let Some(record) = table.records.get_mut(id) else {
-            return false;
-        };
-        if record.incarnation.is_some() {
-            return false;
-        }
-        record.incarnation = Some(ClientIncarnationId { counter, random });
-        true
-    }
-
-    /// Test-only pending-challenge snapshot.
-    #[cfg(test)]
-    pub(crate) fn challenge_nonce_of(&self, id: &ConnectionWireId) -> Option<String> {
-        crate::lock_unpoison(&self.inner)
-            .records
-            .get(id)
-            .and_then(|record| record.nonce.clone())
-    }
-
-    /// Test-only negotiated-terms snapshot.
-    #[cfg(test)]
-    pub(crate) fn negotiated_of(&self, id: &ConnectionWireId) -> Option<NegotiatedConnection> {
-        crate::lock_unpoison(&self.inner)
-            .records
-            .get(id)
-            .and_then(|record| record.negotiated.clone())
     }
 
     /// [`LiveInput`] snapshot for a connection, without an envelope.
@@ -697,12 +637,6 @@ pub(crate) async fn wait_for_shutdown(shutdown: &mut tokio::sync::watch::Receive
 
 #[cfg(any(unix, windows))]
 async fn serving_failure(_handle: &HostHandle) -> CoreError {
-    #[cfg(test)]
-    {
-        _handle.serving_test.fail.notified().await;
-        CoreError::Bind("injected serving-loop failure".into())
-    }
-    #[cfg(not(test))]
     std::future::pending().await
 }
 
@@ -778,8 +712,6 @@ fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) -> DeletionDriver {
     let (stop, mut shutdown) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(async move {
         let _live = DeletionDriverLive::enter(Arc::clone(&handle));
-        #[cfg(test)]
-        handle.serving_test.ready.notify_one();
         let mut period = tokio::time::interval_at(
             tokio::time::Instant::now() + DELETION_DRIVE_PERIOD,
             DELETION_DRIVE_PERIOD,
@@ -865,8 +797,6 @@ where
         handle: &HostHandle,
         result: Result<(), CoreError>,
     ) -> Result<(), CoreError> {
-        #[cfg(test)]
-        handle.serving_test.shutdown_started.notify_one();
         let handler_result = self.handlers.stop_and_join().await;
         // The Owner's confirmation surface may have an admitted operation still
         // running; it finishes before this process stops owning the authority.
@@ -1195,8 +1125,6 @@ async fn serve_connection<S, T>(
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     T: ProviderTransport + Send + Sync + 'static,
 {
-    #[cfg(test)]
-    handle.serving_test.device_started.notify_one();
     let Some(mut pairing_provisions) = handle.pairing_deliveries.register(&connection) else {
         handle.close_connection(&table, connection).await;
         return;
@@ -1305,11 +1233,6 @@ async fn serve_connection<S, T>(
                         let worker_handle = Arc::clone(&handle);
                         let worker_transport = Arc::clone(&transport);
                         learning.spawn(async move {
-                            #[cfg(test)]
-                            if worker_handle.serving_test.park_learning.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                                worker_handle.serving_test.learning_entered.notify_one();
-                                worker_handle.serving_test.learning_release.notified().await;
-                            }
                             worker_handle
                                 .run_pending_learning(worker_transport.as_ref())
                                 .await;
@@ -1426,8 +1349,6 @@ async fn serve_connection<S, T>(
         .filter(|error| !error.is_cancelled());
     handle.close_connection(&table, connection).await;
     let learning_failure = drain_learning(&mut learning, learning_failure).await;
-    #[cfg(test)]
-    handle.serving_test.device_finished.notify_one();
     if let Some(payload) = panicked {
         // The teardown above always ran; surface the handler panic through
         // the task `JoinError` exactly as before.
@@ -1564,9 +1485,3 @@ pub async fn run_until_shutdown(
 ) -> Result<(), CoreError> {
     Err(CoreError::UnsupportedPlatform("no supported listener"))
 }
-
-#[cfg(all(test, unix))]
-mod tests;
-
-#[cfg(all(test, any(unix, windows)))]
-pub(crate) mod shutdown_tests;

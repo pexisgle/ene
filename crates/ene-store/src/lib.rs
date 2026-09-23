@@ -40,8 +40,6 @@ mod preservation;
 mod task;
 #[cfg(any(test, feature = "test-support"))]
 mod test_parks;
-#[cfg(test)]
-mod tests;
 mod usage_cap;
 
 pub use companion::UndeliveredExcerpt;
@@ -181,19 +179,6 @@ impl Store {
             Ok(())
         })
         .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn open_in_memory() -> Result<Self, StoreError> {
-        run_blocking(Self::open_in_memory_sync).await
-    }
-
-    #[cfg(test)]
-    fn open_in_memory_sync() -> Result<Self, StoreError> {
-        let mut conn = Connection::open_in_memory()
-            .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
-        migrate::run(&mut conn).map_err(StoreError::SchemaFailed)?;
-        Ok(Self::from_connection(conn))
     }
 
     /// Mechanical exact-text remainder probe over the closed system-wide

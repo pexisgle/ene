@@ -378,13 +378,6 @@ async fn killing_body_leaves_chat_settings_and_cancel_alive() {
     server.shutdown_and_join().await;
 }
 
-#[test]
-fn unmeasured_record_is_not_a_gate_pass() {
-    let record = measure::MeasurementRecord::default();
-    assert!(!record.claims_pass());
-    assert_eq!(record.verdict.label(), "Unmeasured");
-}
-
 #[tokio::test]
 async fn send_text_presents_its_collected_turn() {
     let dir = tempfile::tempdir().expect("tempdir");

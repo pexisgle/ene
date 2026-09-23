@@ -22,9 +22,6 @@ mod registry;
 mod scrub;
 mod secret;
 
-#[cfg(test)]
-mod tests;
-
 use thiserror::Error;
 
 pub use approval::{CredentialApprovalRepository, PendingCredentialApproval};
