@@ -16,19 +16,17 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-    GetNamedSecurityInfoW, SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
-    GetTokenInformation, IsValidSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    SECURITY_ATTRIBUTES, SetFileSecurityW, TOKEN_QUERY, TOKEN_USER,
+    DACL_SECURITY_INFORMATION, GetTokenInformation, IsValidSid, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SetFileSecurityW, TOKEN_QUERY, TOKEN_USER,
+    TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_NONE,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-const ACCESS_ALLOWED: u8 = 0;
 const SDDL_REVISION_1: u32 = 1;
 
 fn wide(value: &str) -> Vec<u16> {
@@ -81,7 +79,7 @@ fn sid_to_string(sid: PSID) -> Option<String> {
 }
 
 fn current_user_sid_string() -> std::io::Result<String> {
-    let mut token: HANDLE = 0;
+    let mut token: HANDLE = std::ptr::null_mut();
     // SAFETY: `token` is an out-parameter the API initializes on success.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(last_error("OpenProcessToken"));
@@ -93,7 +91,7 @@ fn current_user_sid_string() -> std::io::Result<String> {
     if unsafe {
         GetTokenInformation(
             token,
-            TOKEN_USER,
+            TokenUser,
             buffer.as_mut_ptr().cast::<c_void>(),
             buffer.len() as u32,
             &mut returned,
@@ -102,7 +100,9 @@ fn current_user_sid_string() -> std::io::Result<String> {
     {
         return Err(last_error("GetTokenInformation"));
     }
-    let user = std::ptr::from_ref(buffer.as_ptr().cast::<TOKEN_USER>());
+    // SAFETY: `buffer` outlives the pointer and GetTokenInformation reported
+    // success, so `User.Sid` points into the filled buffer.
+    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
     // SAFETY: `buffer` outlives the pointer and GetTokenInformation reported
     // success, so `User.Sid` points into the filled buffer.
     unsafe { sid_to_string((*user).User.Sid) }.ok_or_else(|| last_error("ConvertSidToStringSidW"))
@@ -162,7 +162,7 @@ pub(crate) fn create_owner_only(path: &Path) -> std::io::Result<std::fs::File> {
             &attributes,
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL,
-            0,
+            std::ptr::null_mut(),
         )
     };
     // SAFETY: descriptor came from owner_only_descriptor and is freed once.
@@ -196,6 +196,12 @@ pub(crate) fn create_owner_only_dir(path: &Path) -> std::io::Result<()> {
     if path.is_dir() {
         return apply_owner_only(path);
     }
+    if path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "the data directory path is occupied by a non-directory",
+        ));
+    }
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
         && !path.exists()
@@ -216,77 +222,4 @@ pub(crate) fn create_owner_only_dir(path: &Path) -> std::io::Result<()> {
         return apply_owner_only(path);
     }
     Err(last_error("CreateDirectoryW"))
-}
-
-/// Fail-closed protection check: the object must be owned by this user and
-/// every allow ACE must grant only this user.
-pub(crate) fn owner_only_ok(path: &Path) -> std::io::Result<bool> {
-    let mut owner: PSID = std::ptr::null_mut();
-    let mut group: PSID = std::ptr::null_mut();
-    let mut dacl: *mut ACL = std::ptr::null_mut();
-    let mut sacl: *mut ACL = std::ptr::null_mut();
-    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    // SAFETY: all out-pointers are live locals; the returned descriptor is
-    // freed once at the end of this function.
-    let status = unsafe {
-        GetNamedSecurityInfoW(
-            wide_path(path).as_ptr(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner,
-            &mut group,
-            &mut dacl,
-            &mut sacl,
-            &mut descriptor,
-        )
-    };
-    let outcome = (|| {
-        if status != 0 {
-            return Err(last_error("GetNamedSecurityInfoW"));
-        }
-        if owner.is_null() || dacl.is_null() {
-            return Ok(false);
-        }
-        let sid = current_user_sid_string()?;
-        // SAFETY: `owner` comes from GetNamedSecurityInfoW and is valid until
-        // the descriptor is freed below.
-        let owner_text = unsafe { sid_to_string(owner) };
-        if owner_text.as_deref() != Some(sid.as_str()) {
-            return Ok(false);
-        }
-        // SAFETY: `dacl` comes from GetNamedSecurityInfoW and is valid until
-        // the descriptor is freed below.
-        let ace_count = unsafe { (*dacl).AceCount };
-        for index in 0..ace_count {
-            let mut ace: *mut c_void = std::ptr::null_mut();
-            // SAFETY: `dacl` is valid and `ace` is an out-pointer.
-            if unsafe { GetAce(dacl, u32::from(index), &mut ace) } == 0 {
-                return Ok(false);
-            }
-            let header = ace.cast::<ACE_HEADER>();
-            // SAFETY: `ace` addresses at least the ACE header written by GetAce.
-            if unsafe { (*header).AceType } != ACCESS_ALLOWED {
-                // Fail closed: this process only ever creates plain allow
-                // ACEs, so anything else is not one of our files.
-                return Ok(false);
-            }
-            let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
-            // SAFETY: for an allow ACE the SID begins at SidStart; the ACE
-            // body written by GetAce covers it.
-            let ace_sid = unsafe { std::ptr::from_ref(&(*allowed).SidStart) }.cast::<c_void>();
-            // SAFETY: pointer provenance as above; sid_to_string validates
-            // the SID before reading it.
-            let ace_text = unsafe { sid_to_string(ace_sid) };
-            if ace_text.as_deref() != Some(sid.as_str()) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    })();
-    if !descriptor.is_null() {
-        // SAFETY: descriptor was allocated by GetNamedSecurityInfoW and is
-        // freed exactly once here.
-        unsafe { LocalFree(descriptor.cast::<c_void>()) };
-    }
-    outcome
 }

@@ -17,6 +17,7 @@ use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+const PROBE_DEADLINE: Duration = Duration::from_secs(5);
 const RESPONSE_CAP: usize = 8 * 1024;
 
 fn base64_key(bytes: &[u8; 16]) -> String {
@@ -56,6 +57,7 @@ fn base64_key(bytes: &[u8; 16]) -> String {
 }
 
 pub(crate) fn probe_serving_host(data_dir: &Path) -> bool {
+    let started = std::time::Instant::now();
     let Ok(runtime) = crate::runtime_info::load_host_runtime(data_dir) else {
         return false;
     };
@@ -93,7 +95,7 @@ pub(crate) fn probe_serving_host(data_dir: &Path) -> bool {
     let mut response = Vec::new();
     let mut byte = [0_u8; 1];
     while !response.windows(4).any(|window| window == b"\r\n\r\n") {
-        if response.len() >= RESPONSE_CAP {
+        if response.len() >= RESPONSE_CAP || started.elapsed() > PROBE_DEADLINE {
             return false;
         }
         match stream.read(&mut byte) {
