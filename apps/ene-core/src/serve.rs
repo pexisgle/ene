@@ -255,14 +255,14 @@ enum GateDecision {
     Unpaired,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug)]
-pub(crate) struct TestGate {
+pub struct TestGate {
     entered: tokio::sync::Semaphore,
     release: tokio::sync::Semaphore,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Default for TestGate {
     fn default() -> Self {
         Self {
@@ -272,12 +272,27 @@ impl Default for TestGate {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestGate {
     pub(crate) async fn pause(&self) {
         self.entered.add_permits(1);
-        let permit = self.release.acquire().await.expect("gate stays open");
+        let Ok(permit) = self.release.acquire().await else {
+            return;
+        };
         permit.forget();
+    }
+
+    #[doc(hidden)]
+    pub async fn wait_until_entered_for_tests(&self) {
+        let Ok(permit) = self.entered.acquire().await else {
+            return;
+        };
+        permit.forget();
+    }
+
+    #[doc(hidden)]
+    pub fn release_for_tests(&self) {
+        self.release.add_permits(1);
     }
 }
 
@@ -344,7 +359,7 @@ pub struct HostHandle {
     pub(crate) submit_accept_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
     #[cfg(test)]
     pub(crate) submit_open_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) submit_publish_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
     #[cfg(test)]
     pub(crate) confirm_commit_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
@@ -508,7 +523,7 @@ impl HostHandle {
             submit_accept_gate: StdMutex::new(None),
             #[cfg(test)]
             submit_open_gate: StdMutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             submit_publish_gate: StdMutex::new(None),
             #[cfg(test)]
             confirm_commit_gate: StdMutex::new(None),
@@ -1440,6 +1455,13 @@ impl HostHandle {
     #[cfg(test)]
     pub(crate) fn delivery_evidence_gate(&self) -> Option<std::sync::Arc<TestGate>> {
         crate::lock_unpoison(&self.delivery_evidence_gate).clone()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn arm_submit_publish_gate_for_tests(&self) -> std::sync::Arc<TestGate> {
+        let gate = std::sync::Arc::new(TestGate::default());
+        *crate::lock_unpoison(&self.submit_publish_gate) = Some(std::sync::Arc::clone(&gate));
+        gate
     }
 
     #[cfg(test)]

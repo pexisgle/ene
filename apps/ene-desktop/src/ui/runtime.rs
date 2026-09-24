@@ -21,7 +21,10 @@ use crate::i18n::Locale;
 use crate::measure::WaylandFeedbackTraceLine;
 use crate::motion::{self, MotionEnvironment};
 use crate::secret::SecretIntake;
-use crate::session::{self, ChatSendReport, ChatSessionOutcome, SETUP_PROVIDER_OPENAI, SetupFacts};
+use crate::session::{
+    self, ChatDeliveryPhase, ChatOperation, ChatSendReport, ChatSessionOutcome,
+    ChatTechnicalFailure, SETUP_PROVIDER_OPENAI, SetupFacts,
+};
 use crate::ui::deletion::DeletionPanel;
 use crate::ui::tasks::TaskPanel;
 use crate::ui::usage::UsagePanel;
@@ -653,23 +656,28 @@ impl DesktopRuntime {
 
     pub async fn send_text(&mut self) -> Result<ChatSendReport, DesktopError> {
         if self.client.is_none() {
-            return Ok(ChatSendReport::NotConnected);
+            return Ok(ChatSendReport::NotSent { failure: None });
         }
-        let Some(text) = self.composer.take_sendable() else {
+        if self.composer.draft().trim().is_empty() {
             return Ok(ChatSendReport::NoDraft);
-        };
+        }
         self.project_body_pose(PoseHint::Listening);
         let lang = self.locale.as_tag().to_string();
-        let collected = match self.client.as_mut() {
-            Some(client) => session::submit_and_collect(client, &text, &lang).await,
-            None => {
-                self.composer.restore_unsent(text);
-                return Ok(ChatSendReport::NotConnected);
+        let collected = {
+            let text = self.composer.draft();
+            match self.client.as_mut() {
+                Some(client) => session::submit_and_collect(client, text, &lang).await,
+                None => {
+                    return Ok(ChatSendReport::NotSent { failure: None });
+                }
             }
         };
         match collected {
-            Ok(ChatSessionOutcome::Completed(turn)) => {
+            ChatSessionOutcome::Completed(turn) => {
                 self.project_body_pose(PoseHint::Speaking);
+                let Some(text) = self.composer.take_sendable() else {
+                    return Ok(ChatSendReport::NotSent { failure: None });
+                };
                 self.timeline.push(super::presentation::Message {
                     round: turn.round.clone(),
                     owner: true,
@@ -695,38 +703,68 @@ impl DesktopRuntime {
                     }
                 }
                 self.flush_pending_erasure().await;
-                if self.refresh_history().await.is_err() {
-                    Ok(ChatSendReport::ReplyShownHistoryRefreshFailed)
-                } else {
-                    Ok(ChatSendReport::Completed)
+                match self.refresh_history().await {
+                    Ok(()) => Ok(ChatSendReport::Completed),
+                    Err(error) => Ok(ChatSendReport::ReplyShownHistoryRefreshFailed {
+                        failure: ChatTechnicalFailure {
+                            operation: ChatOperation::HistoryRefresh,
+                            phase: ChatDeliveryPhase::Accepted,
+                            error,
+                        },
+                    }),
                 }
             }
-            Ok(ChatSessionOutcome::Refused(refusal)) => {
+            ChatSessionOutcome::Refused(refusal) => {
                 self.project_body_pose(PoseHint::Attention);
-                self.composer.restore_unsent(text);
                 self.flush_pending_erasure().await;
                 Ok(ChatSendReport::Refused(refusal))
             }
-            Ok(ChatSessionOutcome::StreamEnded { round, end }) => {
+            ChatSessionOutcome::NotSent(failure) => {
                 self.project_body_pose(PoseHint::Attention);
-                self.timeline.push(super::presentation::Message {
-                    round,
-                    owner: true,
-                    text,
-                    caption: String::new(),
-                });
                 self.flush_pending_erasure().await;
-                Ok(ChatSendReport::StreamEnded(end))
+                Ok(ChatSendReport::NotSent {
+                    failure: Some(failure),
+                })
             }
-            Err(error) => {
+            ChatSessionOutcome::OutcomeUnknown(failure) => {
                 self.project_body_pose(PoseHint::Attention);
-                self.timeline.push(super::presentation::Message {
-                    owner: true,
-                    text,
-                    ..Default::default()
-                });
+                self.composer.discard_sendable();
                 self.flush_pending_erasure().await;
-                Err(error)
+                Ok(ChatSendReport::OutcomeUnknown(failure))
+            }
+            ChatSessionOutcome::AcceptedFailure { round, failure } => {
+                self.project_body_pose(PoseHint::Attention);
+                if let Some(text) = self.composer.take_sendable() {
+                    self.timeline.push(super::presentation::Message {
+                        round: round.clone(),
+                        owner: true,
+                        text,
+                        caption: String::new(),
+                    });
+                }
+                self.flush_pending_erasure().await;
+                if self.refresh_history().await.is_err() {
+                    // The accepted owner projection remains round-aware even
+                    // when the follow-up history read is unavailable.
+                }
+                Ok(ChatSendReport::AcceptedFailure { round, failure })
+            }
+            ChatSessionOutcome::StreamEnded { round, end } => {
+                self.project_body_pose(PoseHint::Attention);
+                if let Some(text) = self.composer.take_sendable() {
+                    self.timeline.push(super::presentation::Message {
+                        round: round.clone(),
+                        owner: true,
+                        text,
+                        caption: String::new(),
+                    });
+                }
+                self.flush_pending_erasure().await;
+                if self.refresh_history().await.is_err() {
+                    // The accepted owner projection remains round-aware even
+                    // when the follow-up history read is unavailable.
+                }
+                Ok(ChatSendReport::StreamEnded { round, end })
             }
         }
     }
@@ -1307,7 +1345,7 @@ mod tests {
         runtime.composer_mut().set_draft(String::from("keep me"));
         let result = runtime.send_text().await;
         assert!(
-            matches!(result, Ok(ChatSendReport::NotConnected)),
+            matches!(result, Ok(ChatSendReport::NotSent { failure: None })),
             "a disconnected send must report the no-client outcome: {result:?}"
         );
         let snapshot = runtime.snapshot();

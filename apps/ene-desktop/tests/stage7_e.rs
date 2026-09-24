@@ -10,15 +10,18 @@ use std::time::Duration;
 
 use ene_api::v1::management::ManagementOutcome;
 use ene_api::v1::round::PresentationStatus;
-use ene_companion::{CompanionRepository as _, UNDELIVERED_PAGE_MAX, UndeliveredRepository as _};
+use ene_companion::{
+    CompanionRepository as _, HistoryRepository as _, UNDELIVERED_PAGE_MAX,
+    UndeliveredRepository as _,
+};
 use ene_core::host_control;
 use ene_core::serve::HostHandle;
 use ene_desktop::body_supervise::BodySupervisor;
-use ene_desktop::session::{self, ChatSendReport, ChatSessionOutcome, ChatStreamEnd};
-use ene_desktop::ui::{DesktopRuntime, Page};
-use ene_inference::{
-    InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport,
+use ene_desktop::session::{
+    self, ChatDeliveryPhase, ChatSendReport, ChatSessionOutcome, ChatStreamEnd,
 };
+use ene_desktop::ui::{DesktopRuntime, Page};
+use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
 
 mod common;
@@ -32,7 +35,8 @@ const TARGET: &str = "stage7-e-keyword-omega";
 struct GateTransport {
     replies: Mutex<VecDeque<String>>,
     sends: AtomicUsize,
-    fail_next_response: AtomicBool,
+    fail_after_next_delta: AtomicBool,
+    accepted_deltas: AtomicUsize,
 }
 
 impl GateTransport {
@@ -40,7 +44,8 @@ impl GateTransport {
         Arc::new(Self {
             replies: Mutex::new(replies.iter().map(|text| (*text).to_string()).collect()),
             sends: AtomicUsize::new(0),
-            fail_next_response: AtomicBool::new(false),
+            fail_after_next_delta: AtomicBool::new(false),
+            accepted_deltas: AtomicUsize::new(0),
         })
     }
 
@@ -48,8 +53,12 @@ impl GateTransport {
         self.sends.load(Ordering::SeqCst)
     }
 
-    fn fail_next_response(&self) {
-        self.fail_next_response.store(true, Ordering::SeqCst);
+    fn fail_after_next_delta(&self) {
+        self.fail_after_next_delta.store(true, Ordering::SeqCst);
+    }
+
+    fn accepted_deltas(&self) -> usize {
+        self.accepted_deltas.load(Ordering::SeqCst)
     }
 }
 
@@ -68,11 +77,6 @@ impl ProviderTransport for GateTransport {
         let _ = req;
         Box::pin(async move {
             self.sends.fetch_add(1, Ordering::SeqCst);
-            if self.fail_next_response.swap(false, Ordering::SeqCst) {
-                return Err(InferenceTechnicalError::ProviderTransportFailed(
-                    String::from("fixture provider response was lost"),
-                ));
-            }
             let reply = self
                 .replies
                 .lock()
@@ -84,7 +88,13 @@ impl ProviderTransport for GateTransport {
                 usage: None,
             };
             match sink.push_delta(&response.text).await {
-                ene_inference::DeltaFlow::Continue => Ok(response),
+                ene_inference::DeltaFlow::Continue => {
+                    self.accepted_deltas.fetch_add(1, Ordering::SeqCst);
+                    if self.fail_after_next_delta.swap(false, Ordering::SeqCst) {
+                        return Err(ene_inference::InferenceTechnicalError::ResponseLost);
+                    }
+                    Ok(response)
+                }
                 ene_inference::DeltaFlow::Abort(reason) => {
                     Err(ene_inference::InferenceTechnicalError::StreamAborted {
                         reason: reason.to_owned(),
@@ -260,9 +270,7 @@ async fn receive_without_present_is_not_presented_ack() {
         panic!("draft must send");
     };
     let mut client = desktop.take_client().expect("paired client");
-    let outcome = session::submit_and_collect(&mut client, &text, "en")
-        .await
-        .expect("receive stream");
+    let outcome = session::submit_and_collect(&mut client, &text, "en").await;
     let ChatSessionOutcome::Completed(turn) = outcome else {
         panic!("the fixture stream must complete: {outcome:?}");
     };
@@ -418,10 +426,94 @@ async fn send_text_presents_its_collected_turn() {
 }
 
 #[tokio::test]
-async fn interrupted_provider_stream_keeps_the_typed_outcome_and_discards_partial_reply() {
+async fn closed_writer_is_not_sent_and_keeps_the_draft() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transport = GateTransport::with_replies(&["unused"]);
+    let handle = open_host(dir.path()).await;
+    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
+    assert!(wait_for_control(dir.path()).await);
+    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    pair_and_setup(&mut desktop, &handle).await;
+
+    let mut client = desktop.take_client().expect("paired client");
+    client.abort_writer_for_tests().await;
+    desktop.restore_client(client);
+    desktop
+        .composer_mut()
+        .set_draft(String::from("keep this unsent draft"));
+    let report = desktop.send_text().await.expect("not-sent report");
+    assert!(
+        matches!(
+            &report,
+            ChatSendReport::NotSent {
+                failure: Some(failure),
+            } if failure.diagnostic().phase == ChatDeliveryPhase::NotSent
+        ),
+        "a closed writer must be a typed not-sent outcome: {report:?}"
+    );
+    let snapshot = desktop.snapshot();
+    assert_eq!(snapshot.draft, "keep this unsent draft");
+    assert!(snapshot.timeline.is_empty());
+    assert_eq!(transport.sends(), 0);
+    server.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn durable_owner_commit_before_acceptance_is_outcome_unknown() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transport = GateTransport::with_replies(&["unused"]);
+    let handle = open_host(dir.path()).await;
+    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
+    assert!(wait_for_control(dir.path()).await);
+    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    pair_and_setup(&mut desktop, &handle).await;
+    let publish_gate = handle.arm_submit_publish_gate_for_tests();
+    let text = String::from("durable before acceptance");
+    let mut client = desktop.take_client().expect("paired client");
+    {
+        let request = session::submit_and_collect_with_timeout(
+            &mut client,
+            &text,
+            "en",
+            Duration::from_millis(200),
+        );
+        tokio::pin!(request);
+        tokio::select! {
+            _ = publish_gate.wait_until_entered_for_tests() => {}
+            outcome = &mut request => panic!("the request completed before the publication barrier: {outcome:?}"),
+        }
+        let companion = handle
+            .store_for_tests()
+            .ensure_running_companion()
+            .await
+            .expect("companion");
+        let history = handle
+            .store_for_tests()
+            .load_recent_timeline(companion, 50)
+            .await
+            .expect("durable history");
+        assert!(history.iter().any(|item| item.text == text));
+        assert_eq!(transport.sends(), 0);
+        let outcome = request.as_mut().await;
+        assert!(
+            matches!(
+                &outcome,
+                ChatSessionOutcome::OutcomeUnknown(failure)
+                    if failure.diagnostic().phase == ChatDeliveryPhase::OutcomeUnknown
+            ),
+            "a durable commit before acceptance publication must remain unknown: {outcome:?}"
+        );
+    }
+    publish_gate.release_for_tests();
+    desktop.restore_client(client);
+    server.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn interrupted_provider_stream_discards_received_partial_frame() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transport = GateTransport::with_replies(&["partial reply"]);
-    transport.fail_next_response();
+    transport.fail_after_next_delta();
     let handle = open_host(dir.path()).await;
     let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
     assert!(wait_for_control(dir.path()).await);
@@ -432,12 +524,14 @@ async fn interrupted_provider_stream_keeps_the_typed_outcome_and_discards_partia
         .composer_mut()
         .set_draft(String::from("do not lose this input"));
     let result = desktop.send_text().await;
+    let (round, end) = match result {
+        Ok(ChatSendReport::StreamEnded { round, end }) => (round, end),
+        other => panic!("an accepted stream must retain its round and close reason: {other:?}"),
+    };
+    assert_eq!(end, ChatStreamEnd::Interrupted);
     assert!(
-        matches!(
-            result,
-            Ok(ChatSendReport::StreamEnded(ChatStreamEnd::Interrupted))
-        ),
-        "an interrupted provider stream must retain its close reason: {result:?}"
+        !round.is_empty(),
+        "accepted round identity must be retained"
     );
     let snapshot = desktop.snapshot();
     assert!(
@@ -446,13 +540,21 @@ async fn interrupted_provider_stream_keeps_the_typed_outcome_and_discards_partia
             .iter()
             .any(|line| line == "[owner] do not lose this input")
     );
+    assert_eq!(transport.accepted_deltas(), 1);
+    assert_eq!(transport.sends(), 1);
+    assert!(!desktop.has_chat_receipt());
+    desktop
+        .refresh_history()
+        .await
+        .expect("history after partial");
     assert!(
-        !snapshot
-            .timeline
+        !desktop
+            .snapshot()
+            .history
             .iter()
             .any(|line| line.contains("partial reply"))
     );
-    assert_eq!(transport.sends(), 1);
+    assert_eq!(unpresented_count(&handle).await, 0);
     server.shutdown_and_join().await;
 }
 

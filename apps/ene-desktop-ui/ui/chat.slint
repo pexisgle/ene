@@ -29,6 +29,7 @@ export component ChatWindow inherits Window {
     in property <bool> connected: false;
     in property <bool> has-task: false;
     callback open-management();
+    callback draft-invalidated();
     callback refresh-history();
     callback refresh-tasks();
     callback select-task(string);
@@ -36,8 +37,12 @@ export component ChatWindow inherits Window {
     callback workspace(string);
     callback resume(string);
     callback cancel-task();
+    public function clear-draft() {
+        root.draft = "";
+        root.draft-invalidated();
+    }
     public function clear-copies() {
-        root.draft = ""; root.workspace-draft = ""; root.instruction-draft = "";
+        root.clear-draft(); root.workspace-draft = ""; root.instruction-draft = "";
         root.messages = []; root.tasks = []; root.details = []; root.selected-task = "";
         root.notice = ""; root.task-notice = "";
     }
@@ -115,6 +120,7 @@ export component ChatWindow inherits Window {
                             composer := LineEdit {
                                 horizontal-stretch: 1;
                                 text <=> root.draft;
+                                edited(_text) => { root.draft-invalidated(); }
                                 placeholder-text: root.japanese ? "ene にメッセージ…" : "Message ene…";
                                 accepted => { if !root.busy && root.connected && root.draft != "" { root.send(root.draft); } }
                             }

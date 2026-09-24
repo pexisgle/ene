@@ -7,9 +7,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ene_api::codec::{
-    CodecError, DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame,
-};
+use ene_api::codec::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 use ene_api::runtime::HostRuntimeInfo;
 use ene_api::v1::deletion::{DeletionDemand, LocalErasureResult};
 use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender};
@@ -25,7 +23,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::device;
-use crate::error::ClientError;
+use crate::error::{ClientError, EnqueueFailure, RequestFailure, ResponseWaitFailure};
 
 use super::frames::{
     PreparedRequest, capability_frame, frame_for, pairing_frame, proof_frame,
@@ -52,6 +50,7 @@ const READ_AHEAD_FRAMES: usize = 8;
 /// the pump task indefinitely, and a write past the bound fails the
 /// connection because the sink may be left mid-frame.
 const WRITE_WAIT: Duration = Duration::from_secs(30);
+const ENQUEUE_WAIT: Duration = Duration::from_secs(15);
 
 type WsClient =
     tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
@@ -192,7 +191,7 @@ struct Transport {
     probe: TransportProbe,
     #[cfg(test)]
     reader_task: tokio::task::JoinHandle<()>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     writer_task: tokio::task::JoinHandle<()>,
 }
 
@@ -249,7 +248,7 @@ impl Transport {
             probe,
             #[cfg(test)]
             reader_task: _reader_task,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             writer_task: _writer_task,
         }
     }
@@ -260,12 +259,25 @@ impl Transport {
     }
 
     async fn write(&self, frame: &WireFrame) -> Result<(), ClientError> {
-        let body = encode_frame(frame)
-            .map_err(|error: CodecError| ClientError::Codec(format!("encode failed: {error}")))?;
-        self.outbound
-            .send(body)
+        self.enqueue(frame).await.map_err(|error| match error {
+            EnqueueFailure::Encode(error) => ClientError::Codec(format!("encode failed: {error}")),
+            EnqueueFailure::QueueWaitTimedOut => {
+                ClientError::Transport(String::from("the outbound request queue timed out"))
+            }
+            EnqueueFailure::WriterClosed => {
+                ClientError::Transport(String::from("the connection to the Host ended"))
+            }
+        })
+    }
+
+    async fn enqueue(&self, frame: &WireFrame) -> Result<(), EnqueueFailure> {
+        let body = encode_frame(frame).map_err(EnqueueFailure::Encode)?;
+        let permit = tokio::time::timeout(ENQUEUE_WAIT, self.outbound.reserve())
             .await
-            .map_err(|_| ClientError::Transport(String::from("the connection to the Host ended")))
+            .map_err(|_| EnqueueFailure::QueueWaitTimedOut)?
+            .map_err(|_| EnqueueFailure::WriterClosed)?;
+        permit.send(body);
+        Ok(())
     }
 
     async fn read(&mut self) -> Result<DecodedFrame, ClientError> {
@@ -631,10 +643,35 @@ async fn connect_ws(runtime: &HostRuntimeInfo, pin: &str) -> Result<Transport, C
     Ok(Transport::spawn(socket))
 }
 
+pub struct EnqueuedRequest {
+    own_message_id: WireMessageId,
+}
+
 pub struct Client {
     transport: Transport,
     sender: WireSender,
     state: SessionState,
+}
+
+fn map_enqueue_error(error: EnqueueFailure) -> ClientError {
+    match error {
+        EnqueueFailure::Encode(error) => ClientError::Codec(format!("encode failed: {error}")),
+        EnqueueFailure::QueueWaitTimedOut => {
+            ClientError::Transport(String::from("the outbound request queue timed out"))
+        }
+        EnqueueFailure::WriterClosed => {
+            ClientError::Transport(String::from("the connection to the Host ended"))
+        }
+    }
+}
+
+fn map_response_error(error: ResponseWaitFailure) -> ClientError {
+    match error {
+        ResponseWaitFailure::TimedOut => {
+            ClientError::Transport(String::from("the Host response timed out"))
+        }
+        ResponseWaitFailure::Client(error) => error,
+    }
 }
 
 pub enum ConnectProgress {
@@ -786,8 +823,65 @@ impl Client {
         &mut self,
         prepared: &PreparedRequest,
     ) -> Result<WirePayload, ClientError> {
-        self.pump(prepared.frame(self.sender, self.state.generation()))
+        let pending = self
+            .enqueue_request(prepared)
             .await
+            .map_err(map_enqueue_error)?;
+        self.resolve_request(pending)
+            .await
+            .map_err(map_response_error)
+    }
+
+    pub async fn enqueue_request(
+        &mut self,
+        prepared: &PreparedRequest,
+    ) -> Result<EnqueuedRequest, EnqueueFailure> {
+        let frame = prepared.frame(self.sender, self.state.generation());
+        let own_message_id = frame.envelope.message_id;
+        self.transport.enqueue(&frame).await?;
+        drop(frame);
+        Ok(EnqueuedRequest { own_message_id })
+    }
+
+    pub async fn resolve_request(
+        &mut self,
+        pending: EnqueuedRequest,
+    ) -> Result<WirePayload, ResponseWaitFailure> {
+        loop {
+            let incoming = match self
+                .transport
+                .read()
+                .await
+                .map_err(ResponseWaitFailure::Client)?
+            {
+                DecodedFrame::Known(frame) => frame,
+                DecodedFrame::Unsupported { envelope, reason } => {
+                    self.reject_unsupported(&envelope, &reason)
+                        .await
+                        .map_err(ResponseWaitFailure::Client)?;
+                    continue;
+                }
+            };
+            if self
+                .answer_deletion_demand_if_any(&incoming.payload)
+                .await
+                .map_err(ResponseWaitFailure::Client)?
+            {
+                continue;
+            }
+            match decide_frame(pending.own_message_id, &incoming) {
+                FrameDecision::AbsorbPresence(fact) => self.state.observe_presence(&fact),
+                FrameDecision::AbsorbBodyHint => {}
+                FrameDecision::Answer(payload) => {
+                    if let Some(current) = stale_generation_of(&payload) {
+                        self.state.note_stale_generation(current);
+                    }
+                    self.state.observe_intake(&payload);
+                    return Ok(payload);
+                }
+                FrameDecision::Defer => self.state.push_deferred(incoming),
+            }
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -817,39 +911,40 @@ impl Client {
 
         let mut frame = observed_frame(payload, self.sender, generation, round);
         frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
-        self.pump(frame).await
+        let pending = self.enqueue_frame(frame).await.map_err(map_enqueue_error)?;
+        self.resolve_request(pending)
+            .await
+            .map_err(map_response_error)
     }
 
-    async fn pump(&mut self, frame: WireFrame) -> Result<WirePayload, ClientError> {
+    async fn enqueue_frame(&mut self, frame: WireFrame) -> Result<EnqueuedRequest, EnqueueFailure> {
         let own_message_id = frame.envelope.message_id;
-        self.transport.write(&frame).await?;
-        loop {
-            let incoming = match self.transport.read().await? {
-                DecodedFrame::Known(frame) => frame,
-                DecodedFrame::Unsupported { envelope, reason } => {
-                    self.reject_unsupported(&envelope, &reason).await?;
-                    continue;
-                }
-            };
-            if self
-                .answer_deletion_demand_if_any(&incoming.payload)
-                .await?
-            {
-                continue;
-            }
-            match decide_frame(own_message_id, &incoming) {
-                FrameDecision::AbsorbPresence(fact) => self.state.observe_presence(&fact),
-                FrameDecision::AbsorbBodyHint => {}
-                FrameDecision::Answer(payload) => {
-                    if let Some(current) = stale_generation_of(&payload) {
-                        self.state.note_stale_generation(current);
-                    }
-                    self.state.observe_intake(&payload);
-                    return Ok(payload);
-                }
-                FrameDecision::Defer => self.state.push_deferred(incoming),
-            }
+        self.transport.enqueue(&frame).await?;
+        drop(frame);
+        Ok(EnqueuedRequest { own_message_id })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn abort_writer_for_tests(&mut self) {
+        self.transport.writer_task.abort();
+        while !self.transport.writer_task.is_finished() {
+            tokio::task::yield_now().await;
         }
+    }
+
+    pub async fn request_classified(
+        &mut self,
+        payload: WirePayload,
+    ) -> Result<WirePayload, RequestFailure> {
+        let prepared = self.prepare(payload);
+        let pending = self
+            .enqueue_request(&prepared)
+            .await
+            .map_err(RequestFailure::NotSent)?;
+        self.resolve_request(pending)
+            .await
+            .map_err(RequestFailure::OutcomeUnknown)
     }
 
     async fn reject_unsupported(
@@ -1464,5 +1559,79 @@ mod tests {
             .await
             .expect("the application writer must stop once the transport is gone")
             .expect("the writer task must not panic");
+    }
+
+    #[tokio::test]
+    async fn closed_writer_is_not_sent() {
+        let (socket, _server) = ws_pair(false).await;
+        let transport = Transport::spawn_stream(socket);
+        transport.writer_task.abort();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !transport.writer_task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the writer must stop");
+        let frame = frame_for(
+            WirePayload::PairingRequest(PairingRequest {
+                device_descriptor: String::from("closed-writer"),
+            }),
+            WireSender {
+                device_id: None,
+                incarnation_id: ClientIncarnationId {
+                    counter: 1,
+                    random: 2,
+                },
+                connection_id: None,
+            },
+        );
+        let mut client = Client {
+            transport,
+            sender: WireSender {
+                device_id: None,
+                incarnation_id: ClientIncarnationId {
+                    counter: 1,
+                    random: 2,
+                },
+                connection_id: None,
+            },
+            state: SessionState::default(),
+        };
+        let prepared = client.prepare(frame.payload);
+        let result = client.enqueue_request(&prepared).await;
+        assert!(matches!(result, Err(EnqueueFailure::WriterClosed)));
+    }
+
+    #[tokio::test]
+    async fn response_failure_after_enqueue_is_outcome_unknown() {
+        let (socket, mut server) = ws_pair(false).await;
+        let transport = Transport::spawn_stream(socket);
+        let mut client = Client {
+            transport,
+            sender: WireSender {
+                device_id: None,
+                incarnation_id: ClientIncarnationId {
+                    counter: 1,
+                    random: 2,
+                },
+                connection_id: None,
+            },
+            state: SessionState::default(),
+        };
+        let request = client.request_classified(WirePayload::PairingRequest(PairingRequest {
+            device_descriptor: String::from("unknown-outcome"),
+        }));
+        let close = async move {
+            let _ = server.next().await;
+            drop(server);
+        };
+        let (result, ()) = tokio::join!(request, close);
+        assert!(matches!(
+            result,
+            Err(RequestFailure::OutcomeUnknown(ResponseWaitFailure::Client(
+                _
+            )))
+        ));
     }
 }
