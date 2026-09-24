@@ -350,8 +350,6 @@ pub struct HostHandle {
     pub(crate) host_control_confirm_gate: StdMutex<Option<Arc<TestGate>>>,
     pub(crate) transient_fence: Arc<crate::transient_erasure::TransientErasureFence>,
     pub(crate) client_transients: Arc<crate::transient_erasure::ClientTransientRegistry>,
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) shutdown_test_barrier: Arc<crate::conn::ShutdownTestBarrier>,
     #[cfg(test)]
     pub(crate) task_control_gate:
         StdMutex<Option<std::sync::Arc<crate::task_control::TestTaskControlGate>>>,
@@ -517,8 +515,6 @@ impl HostHandle {
             host_control_confirm_gate: StdMutex::new(None),
             transient_fence: Arc::clone(&transient_fence),
             client_transients,
-            #[cfg(any(test, feature = "test-support"))]
-            shutdown_test_barrier: Arc::new(crate::conn::ShutdownTestBarrier::default()),
             #[cfg(test)]
             task_control_gate: StdMutex::new(None),
             #[cfg(test)]

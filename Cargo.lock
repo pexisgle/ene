@@ -1520,7 +1520,6 @@ dependencies = [
  "clap",
  "ene-action",
  "ene-api",
- "ene-client",
  "ene-companion",
  "ene-config",
  "ene-credential",

@@ -584,113 +584,6 @@ pub(crate) async fn wait_for_shutdown(shutdown: &mut tokio::sync::watch::Receive
     drop(shutdown.wait_for(|stop| *stop).await);
 }
 
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Debug)]
-pub(crate) struct ShutdownTestBarrier {
-    armed: std::sync::atomic::AtomicBool,
-    signal_state: tokio::sync::watch::Sender<bool>,
-    connection_state: tokio::sync::watch::Sender<bool>,
-    release_state: tokio::sync::watch::Sender<bool>,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl Default for ShutdownTestBarrier {
-    fn default() -> Self {
-        Self {
-            armed: std::sync::atomic::AtomicBool::new(false),
-            signal_state: tokio::sync::watch::channel(false).0,
-            connection_state: tokio::sync::watch::channel(false).0,
-            release_state: tokio::sync::watch::channel(false).0,
-        }
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl ShutdownTestBarrier {
-    fn arm(&self) {
-        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
-        self.signal_state.send_replace(false);
-        self.connection_state.send_replace(false);
-        self.release_state.send_replace(false);
-    }
-
-    fn note_signal(&self) {
-        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
-            self.signal_state.send_replace(true);
-        }
-    }
-
-    async fn wait_for_signal(&self) {
-        wait_for_test_flag(&self.signal_state).await;
-    }
-
-    async fn wait_for_connection(&self) {
-        wait_for_test_flag(&self.connection_state).await;
-    }
-
-    fn note_connection(&self) {
-        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
-            self.connection_state.send_replace(true);
-        }
-    }
-
-    async fn wait_for_release(&self) {
-        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
-            wait_for_test_flag(&self.release_state).await;
-        }
-    }
-
-    fn release(&self) {
-        self.release_state.send_replace(true);
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-async fn wait_for_test_flag(state: &tokio::sync::watch::Sender<bool>) {
-    let mut state = state.subscribe();
-    while !*state.borrow_and_update() {
-        if state.changed().await.is_err() {
-            return;
-        }
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl HostHandle {
-    #[doc(hidden)]
-    pub fn arm_shutdown_boundary_for_tests(&self) {
-        self.shutdown_test_barrier.arm();
-    }
-
-    #[doc(hidden)]
-    pub async fn wait_shutdown_boundary_signal_for_tests(&self) {
-        self.shutdown_test_barrier.wait_for_signal().await;
-    }
-
-    #[doc(hidden)]
-    pub async fn wait_shutdown_boundary_connection_for_tests(&self) {
-        self.shutdown_test_barrier.wait_for_connection().await;
-    }
-
-    #[doc(hidden)]
-    pub fn release_shutdown_boundary_for_tests(&self) {
-        self.shutdown_test_barrier.release();
-    }
-
-    pub(crate) fn note_shutdown_admission_signal(&self) {
-        self.shutdown_test_barrier.note_signal();
-    }
-
-    pub(crate) async fn pause_shutdown_before_abort_for_tests(&self) {
-        self.shutdown_test_barrier.wait_for_release().await;
-    }
-
-    pub(crate) async fn pause_connection_at_shutdown_for_tests(&self) {
-        self.shutdown_test_barrier.note_connection();
-        self.shutdown_test_barrier.wait_for_release().await;
-    }
-}
-
 struct ServingHandlers {
     stop: tokio::sync::watch::Sender<bool>,
     tasks: tokio::task::JoinSet<()>,
@@ -842,10 +735,6 @@ where
         // connections and requesters, then cooperatively abort dispatches,
         // and only then join handlers and their owned business work.
         self.handlers.stop_admission(&self.table);
-        #[cfg(any(test, feature = "test-support"))]
-        handle.note_shutdown_admission_signal();
-        #[cfg(any(test, feature = "test-support"))]
-        handle.pause_shutdown_before_abort_for_tests().await;
         self.abort.abort();
         let (handler_result, task_result) =
             tokio::join!(self.handlers.join(), self.launcher.shutdown_and_join());
@@ -1269,8 +1158,6 @@ async fn serve_connection(
             tokio::select! {
                 biased;
                 () = wait_for_shutdown(&mut shutdown) => {
-                    #[cfg(any(test, feature = "test-support"))]
-                    handle.pause_connection_at_shutdown_for_tests().await;
                     break 'connection;
                 }
                 () = tokio::time::sleep_until(monitor_at) => {
