@@ -5307,6 +5307,10 @@ impl WssClient {
         raw.write_all(&second)
             .await
             .expect("second fragment must write");
+        // `write_all` on a TLS stream can complete with records still sitting
+        // in the TLS buffer; without this flush the Host never receives the
+        // whole fragmented message and has nothing to reject.
+        drop(raw.flush().await);
         expect_host_close(&mut raw).await;
     }
 
@@ -5368,7 +5372,6 @@ async fn expect_host_close(raw: &mut tokio_rustls::client::TlsStream<tokio::net:
         "the Host must close the connection after the crafted WebSocket message"
     );
 }
-
 async fn raw_dial(dir: &Path) -> WssClient {
     tokio::time::timeout(Duration::from_secs(15), WssClient::connect(dir))
         .await
