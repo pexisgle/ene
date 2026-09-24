@@ -6,8 +6,8 @@
 
 ## F1: 通常 wire の unknown 値と round 指定
 
-- [Host–Client IPC §7.2](../../design/concrete/host-client-ipc.md) の negotiated 範囲で、未知 message type / enum value を該当 message の `UnsupportedMessage` / `UnsupportedFieldValue` にし、connection を維持する。現行の closed `WirePayload` 全体 decode は domain ingress 前に失敗するため、discriminator 先読みによる framing か raw catch-all を設計し、codec と Host ingress の両方でテストする。旧版互換シムは追加しない。WSS 化だけで完了としない。
-- `SubmitTextInput` の `round: Option<_>` と `fresh: bool` の不正な組合せをなくす。IPC §13.1 で `Auto`（既存 join / 無ければ mint）を正式に採るか、Desktop に `Existing` / `New` の明示選択を求めるか決め、tagged `RoundTarget` と DTO / Host / GUI の意味をそろえる。A2 と Voice 入力接続前に設計・テストを行い、未決の既存挙動を仕様とみなさない。
+- [Host–Client IPC §7.2](../../design/concrete/host-client-ipc.md) の negotiated 範囲で、未知 message type / enum value を該当 message の `UnsupportedMessage` / `UnsupportedFieldValue` にし、connection を維持する。discriminator 先読みによる framing で codec と Host ingress の両方をテストし、旧版互換シムは追加しない。**決定: 実装済み**（envelope と payload の両方の型識別子を先読みし、既知だけ型付き decode、未知・未知 enum 値・必須欠落は型付き reject で接続を維持）。
+- `SubmitTextInput` の `round: Option<_>` と `fresh: bool` の不正な組合せをなくす。**決定: tagged `RoundTarget { New | Existing(RoundWireId) }` を正式に採用した（A2 PR）。** wire に `Auto` は載せず、第一者 Client は接続単位の open round を追跡してターゲットを明示し、`observed.round_view` をターゲットと一致させる（IPC §13.1）。Host は不一致を `StaleRound` とする。CLI は既定で `New`（旧 Auto の実挙動と一致）、`--round` で `Existing` を選び、既定と重複する `--new` は外した。A2 と Voice 入力接続前に設計・テストを行い、未決の既存挙動を仕様とみなさない。
 
 ## F2: `ene-primitive` の共有範囲
 

@@ -3,12 +3,16 @@ use serde::{Deserialize, Serialize};
 use super::refs::RevalidationReasonWire;
 use super::refs::{ClientLocalId, CompanionWireRef, RoundWireId, StreamWireId, TextLangWire};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RoundTarget {
+    New,
+    Existing(RoundWireId),
+}
+
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SubmitTextInput {
     pub companion: CompanionWireRef,
-    pub round: Option<RoundWireId>,
-    #[serde(default)]
-    pub fresh: bool,
+    pub target: RoundTarget,
     pub local_id: ClientLocalId,
     pub body: TextBodyWire,
 }
@@ -18,8 +22,7 @@ impl core::fmt::Debug for SubmitTextInput {
         formatter
             .debug_struct("SubmitTextInput")
             .field("companion", &self.companion)
-            .field("round", &self.round)
-            .field("fresh", &self.fresh)
+            .field("target", &self.target)
             .field("local_id", &self.local_id)
             .field("body", &"[redacted]")
             .finish()
@@ -173,14 +176,13 @@ pub enum HistoryResponse {
 mod tests {
     use super::super::refs::{ClientLocalId, CompanionWireRef, RoundWireId, TextLangWire};
     use super::{ConfirmPresentationWire, HistoryItem, HistoryRole, PresentationStatus};
-    use super::{SubmitTextInput, TextBodyWire, TextStreamFrameWire};
+    use super::{RoundTarget, SubmitTextInput, TextBodyWire, TextStreamFrameWire};
     use uuid::Uuid;
 
     fn input() -> SubmitTextInput {
         SubmitTextInput {
             companion: CompanionWireRef(String::from("companion-1")),
-            round: Some(RoundWireId(String::from("round-1"))),
-            fresh: false,
+            target: RoundTarget::Existing(RoundWireId(String::from("round-1"))),
             local_id: ClientLocalId(String::from("local-1")),
             body: TextBodyWire {
                 text: String::from("hello companion"),
@@ -196,6 +198,18 @@ mod tests {
         assert!(rendered.contains("round-1"));
         assert!(rendered.contains("local-1"));
         assert!(!rendered.contains("hello companion"));
+    }
+
+    #[test]
+    fn round_target_is_one_tagged_field() {
+        use super::RoundTarget;
+
+        let new = RoundTarget::New;
+        let existing = RoundTarget::Existing(RoundWireId(String::from("round-2")));
+        assert_ne!(new, existing, "the two intents stay distinct");
+        let encoded = serde_json::to_string(&existing).expect("target must serialize");
+        let decoded: RoundTarget = serde_json::from_str(&encoded).expect("target must deserialize");
+        assert_eq!(decoded, existing, "targets roundtrip as tagged values");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use ene_api::v1::refs::{BaseViewMark, CommandWireId, WireMessageId};
 use ene_api::v1::refs::{
     ClientIncarnationId, ClientLocalId, CompanionWireRef, RoundWireId, TextLangWire,
 };
-use ene_api::v1::round::{HistoryRequest, SubmitTextInput, TextBodyWire};
+use ene_api::v1::round::{HistoryRequest, RoundTarget, SubmitTextInput, TextBodyWire};
 use ene_plugin_ipc::{DecodedFrame, WireFrame};
 
 use super::frames::{
@@ -38,15 +38,13 @@ fn history_request(companion: &str, limit: u64) -> HistoryRequest {
 
 fn submit_input(
     companion: &str,
-    round: Option<String>,
-    fresh: bool,
+    target: RoundTarget,
     text: String,
     lang: String,
 ) -> SubmitTextInput {
     SubmitTextInput {
         companion: CompanionWireRef(companion.to_string()),
-        round: round.map(RoundWireId),
-        fresh,
+        target,
         local_id: ClientLocalId(String::from("local-1")),
         body: TextBodyWire {
             text,
@@ -363,8 +361,7 @@ fn session_frames_stamp_only_text_inputs() {
     };
     let input = WirePayload::SubmitTextInput(submit_input(
         "companion-1",
-        None,
-        false,
+        RoundTarget::New,
         String::from("hello"),
         String::from("en"),
     ));
@@ -373,11 +370,29 @@ fn session_frames_stamp_only_text_inputs() {
         stamped.envelope.observed.presence_generation_view == Some(6),
         "text input carries the session generation"
     );
+    assert!(
+        stamped.envelope.observed.round_view.is_none(),
+        "a New target observes no round"
+    );
+    let continuing = frame_for_session(
+        WirePayload::SubmitTextInput(submit_input(
+            "companion-1",
+            RoundTarget::Existing(RoundWireId(String::from("round-1"))),
+            String::from("hello"),
+            String::from("en"),
+        )),
+        sender,
+        Some(6),
+    );
+    assert_eq!(
+        continuing.envelope.observed.round_view,
+        Some(RoundWireId(String::from("round-1"))),
+        "an Existing target carries its observed round premise"
+    );
     let bootstrap = frame_for_session(
         WirePayload::SubmitTextInput(submit_input(
             "companion-1",
-            None,
-            false,
+            RoundTarget::New,
             String::from("hello"),
             String::from("en"),
         )),
@@ -630,8 +645,7 @@ fn prepare_keeps_command_identity_and_leaves_requests_unstamped() -> Result<(), 
     let submit = || {
         WirePayload::SubmitTextInput(submit_input(
             "companion-1",
-            None,
-            false,
+            RoundTarget::New,
             String::from("hi"),
             String::from("en"),
         ))
@@ -690,8 +704,7 @@ fn prepared_retry_reuses_command_with_fresh_transport_ids() {
     let input = || {
         WirePayload::SubmitTextInput(submit_input(
             "companion-1",
-            None,
-            false,
+            RoundTarget::New,
             String::from("hi"),
             String::from("en"),
         ))
@@ -1159,4 +1172,52 @@ mod unknown_wire {
             );
         }
     }
+}
+
+#[test]
+fn the_session_tracks_the_open_round_until_a_stale_round_clears_it() {
+    use ene_api::v1::round::RoundIntakeOutcomeWire;
+
+    use super::session::SessionState;
+
+    let mut state = SessionState::default();
+    assert_eq!(
+        state.round_target(),
+        RoundTarget::New,
+        "a fresh session starts a new round"
+    );
+    state.observe_intake(&WirePayload::RoundIntakeOutcome(
+        RoundIntakeOutcomeWire::AcceptedForRound {
+            round: RoundWireId(String::from("round-1")),
+        },
+    ));
+    assert_eq!(
+        state.open_round().map(|round| round.0.as_str()),
+        Some("round-1"),
+        "an accepted round becomes the session's premise"
+    );
+    assert_eq!(
+        state.round_target(),
+        RoundTarget::Existing(RoundWireId(String::from("round-1"))),
+        "the next send continues the accepted round"
+    );
+    state.observe_intake(&WirePayload::RoundIntakeOutcome(
+        RoundIntakeOutcomeWire::HeldForTransition,
+    ));
+    assert_eq!(
+        state.open_round().map(|round| round.0.as_str()),
+        Some("round-1"),
+        "a held intake does not invalidate the open round"
+    );
+    state.observe_intake(&WirePayload::RoundIntakeOutcome(
+        RoundIntakeOutcomeWire::StaleRound {
+            current_round: None,
+            current_generation: 3,
+        },
+    ));
+    assert!(
+        state.open_round().is_none(),
+        "a stale round clears the premise so the next send starts fresh"
+    );
+    assert_eq!(state.round_target(), RoundTarget::New);
 }

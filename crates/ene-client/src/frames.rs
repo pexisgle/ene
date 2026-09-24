@@ -4,6 +4,7 @@ use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{
     ClientIncarnationId, CommandWireId, DeviceWireId, RequestWireId, WireMessageType,
 };
+use ene_api::v1::round::RoundTarget;
 use ene_plugin_ipc::WireFrame;
 
 pub fn proof_frame(
@@ -72,8 +73,12 @@ pub fn frame_for_session(
     generation: Option<u64>,
 ) -> WireFrame {
     let mut frame = frame_for(payload, sender);
-    if matches!(frame.payload, WirePayload::SubmitTextInput(_)) {
+    if let WirePayload::SubmitTextInput(submit) = &frame.payload {
         frame.envelope.observed.presence_generation_view = generation;
+        frame.envelope.observed.round_view = match &submit.target {
+            RoundTarget::New => None,
+            RoundTarget::Existing(round) => Some(round.clone()),
+        };
     }
     frame
 }

@@ -18,7 +18,7 @@ use ene_api::v1::refs::{
 };
 use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::{
-    ConfirmPresentationWire, PresentationStatus, RoundIntakeOutcomeWire, StreamClose,
+    ConfirmPresentationWire, PresentationStatus, RoundIntakeOutcomeWire, RoundTarget, StreamClose,
 };
 use ene_api::v1::undelivered::{UndeliveredResponse, UndeliveredSummary};
 use ene_core::conn;
@@ -305,12 +305,12 @@ async fn send_round(
     text: &str,
 ) -> Result<(String, Option<StreamWireId>, String), String> {
     let companion = client.companion_ref();
+    let target = client.round_target();
     let send = ask(
         client,
         WirePayload::SubmitTextInput(cmds::submit_input(
             &companion,
-            None,
-            false,
+            target,
             String::from(text),
             String::from("en"),
         )),
@@ -556,8 +556,7 @@ async fn superseded_pipe_connection_answers_typed_stale_connection() {
         &mut c2,
         WirePayload::SubmitTextInput(cmds::submit_input(
             &companion,
-            Some(round1.clone()),
-            false,
+            RoundTarget::Existing(RoundWireId(round1.clone())),
             String::from("join c1 round over the pipe"),
             String::from("en"),
         )),
@@ -574,12 +573,12 @@ async fn superseded_pipe_connection_answers_typed_stale_connection() {
     );
 
     let companion = c1.companion_ref();
+    let target = c1.round_target();
     expect_stale_connection(
         &mut c1,
         WirePayload::SubmitTextInput(cmds::submit_input(
             &companion,
-            None,
-            false,
+            target,
             String::from("replay over the pipe"),
             String::from("en"),
         )),

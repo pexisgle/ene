@@ -698,12 +698,12 @@ async fn send_round_raw(
     String,
 > {
     let companion = client.companion_ref();
+    let target = client.round_target();
     let send = ask(
         client,
         WirePayload::SubmitTextInput(cmds::submit_input(
             &companion,
-            None,
-            false,
+            target,
             String::from(text),
             String::from("en"),
         )),
@@ -754,12 +754,12 @@ async fn send_round(
 
 async fn submit_expect_hold(client: &mut Client, text: &str) -> Result<(), String> {
     let companion = client.companion_ref();
+    let target = client.round_target();
     let answer = ask(
         client,
         WirePayload::SubmitTextInput(cmds::submit_input(
             &companion,
-            None,
-            false,
+            target,
             String::from(text),
             String::from("en"),
         )),

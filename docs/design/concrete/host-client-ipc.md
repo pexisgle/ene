@@ -485,7 +485,7 @@ enum MoveOutcome {
 
 | 電文名 | 通信方向 | パターン | 意味・役割 |
 |---|---|---|---|
-| `SubmitTextInput` | Client → Host | コマンド | ユーザーのテキスト入力候補（対象キャラクター参照・Round 参照または新規開始の None・`ClientInputLocalId`・本文）。受理ではなく提案 |
+| `SubmitTextInput` | Client → Host | コマンド | ユーザーのテキスト入力候補（対象キャラクター参照・tagged `RoundTarget`（`New` / `Existing(RoundWireId)`）・`ClientInputLocalId`・本文）。受理ではなく提案 |
 | `RoundIntakeOutcome` | Host → Client | 受付確認（ドメイン結果） | `AcceptedForRound \| StaleRound \| HeldForTransition \| NeedsRevalidation`。古い Round に対する入力は元の Round に対応付け、新 Round へすり替えない |
 | `TextStreamOpen` | Host → Client | ストリーム開始 | 応答テキストストリームの開始（`StreamWireId`・Round・世代番号付き）。開始成功は提示完了やタスク達成ではない |
 | `TextStreamFrame` | Host → Client | ストリームフレーム | 逐次出力されるテキスト差分（連番 `seq`・差分文字列・完了フラグ `is_final`）。Client は `seq` 順に提示する |
@@ -494,8 +494,8 @@ enum MoveOutcome {
 
 - **入力の帰属 (Input Attribution)**: 入力電文には「どの Client 端末の、どのやり取り（Round）において、どの世代のキャラクターに対して送られたか」という厳密な対応情報を含めます。これをもって生体認証的な「話者認証」が完了したと過剰に解釈してはなりません。
 - **やり取りの識別 (Round Identity)**: Round は Host が発行する `RoundWireId` で識別します。移動、切断、再起動が発生したからといって、古い Round の入力や未提示の出力を新しい Round へ勝手に付け替えてはなりません。
-- **新規対話の開始**: 会話の最初の入力では、`SubmitTextInput.round = None` を指定して新しい Round の開始を要求できます（`observed.presence_generation_view` は必須、`observed.round_view` は None）。Host 側の `ene-presentation::round` が現在の接続、帰属、権限許可、停止・保留状態を厳格に照合した上で新しい Round を発行し、`AcceptedForRound { round }` を返します。通信マッピング層が勝手に Round ID を発行してはなりません。以降のその対話に対する入力は、払い出された `Some(round)` を使用し、古い Round が拒否されたからといって勝手に None で再送してチェックを迂回してはなりません。
-- **新規 Round 要求の再試行と冪等性**: 初回入力（round = None）がネットワーク不調で再送された場合、第6.2節の冪等性ルールに従います。同一セッション内で同じ `command_id` かつ同じフィンガープリントの再送であれば、Host は初回に発行した Round ID と結果をそのまま返し、2つ目の異なる Round を勝手に発行してはなりません。セッションが有効である間はこの対応を確実に保持します。
+- **新規対話の開始と追加入力**: Round の指定は tagged `RoundTarget` で1つのフィールドに集約し、`round: Option<_>` と `fresh: bool` のような別々のフラグ組合せは持ちません（基盤計画 F1）。`RoundTarget::New` で新しい Round の開始を要求し、`RoundTarget::Existing(round)` で払い出された Round への追加入力を指定します。`observed.presence_generation_view` は必須、`observed.round_view` は `New` では None（有れば `StaleRound`）、`Existing` では指定した Round と同じ写し（不一致は `StaleRound`）とし、第一者 Client はターゲットと一致する写しを必ず載せます。Host 側の `ene-presentation::round` が現在の接続、帰属、権限許可、停止・保留状態を厳格に照合した上で Round を解決し、`AcceptedForRound { round }` を返します。通信マッピング層が勝手に Round ID を発行してはいけません。以降のその対話への追加入力は `Existing` に払い出された ID を指定し、古い Round が拒否されたからといってターゲットを `New` へすり替えて再送し、チェックを迂回してはいけません（再送は同一 `command_id`・同一ターゲットのまま行います）。
+- **新規 Round 要求の再試行と冪等性**: 初回入力（`RoundTarget::New`）がネットワーク不調で再送された場合、第6.2節の冪等性ルールに従います。同一セッション内で同じ `command_id` かつ同じフィンガープリントの再送であれば、Host は初回に発行した Round ID と結果をそのまま返し、2つ目の異なる Round を勝手に発行してはなりません。セッションが有効である間はこの対応を確実に保持します。
 - **逐次出力の完了条件**: テキストのストリーミングは `StreamWireId` ＋ `seq` ＋ `is_final` で順序制御します。`is_final = true` を伴わないフレームの到着をもって出力を完了とみなしてはなりません。
 - **未提示メッセージの引き継ぎ**: テキスト表示・音声再生のいずれも成立する前に切断等が発生した未提示の出力は、後述の `UndeliveredSummary`（第18節、W-3）に引き継がれ、次に接続した Client 端末上で、最新の状況や削除状態と照合された上で要約報告されます。送信や受信の完了をもって「報告完了」とみなしてはなりません。
 
@@ -780,9 +780,13 @@ struct PresenceAttributionWire {
 }
 
 // ---- テキスト対話 (Text) ----
+enum RoundTarget {
+    New,
+    Existing(RoundWireId),
+}
 struct SubmitTextInput {
     companion: CompanionWireRef,
-    round: Option<RoundWireId>,
+    target: RoundTarget,
     local_id: ClientLocalId,
     body: TextBodyWire,
 }
@@ -899,7 +903,7 @@ struct ManagementViewWire {
 
 | 通信 DTO | マッピング先のドメイン構造体（前提情報） | 判定を行う担当責任者 |
 |---|---|---|
-| `SubmitTextInput` | §13.1 の規則に従い入出力・提示担当が None を新規 `RoundId` へ解決した後、`SubmitClientInputCandidate { companion, client, claimed_generation, round }`（IB X-B） | 入出力・提示担当（Round 発行）＋ 個体調整担当（対話受理）＋ 接続・存在担当（帰属照合） |
+| `SubmitTextInput` | §13.1 の規則に従い入出力・提示担当が `RoundTarget::New` を新規 `RoundId` へ解決した後、`SubmitClientInputCandidate { companion, client, claimed_generation, round }`（IB X-B） | 入出力・提示担当（Round 発行）＋ 個体調整担当（対話受理）＋ 接続・存在担当（帰属照合） |
 | `ConfirmPresentation` | 該当 Round の未伝達報告状況の更新（提示 Round と presented / unknown。wire の `Failed` は presented=false の unknown として記録） | 個体調整担当（報告状況）＋ 入出力・提示担当 |
 | `MoveIntent` | `RequestMoveCommand`（IB X-A） | 接続・存在担当 |
 | `CaptureFrame` | `PublishObservationCandidate` の Client 由来部分（IB X-E） | 共有観測担当 |
@@ -994,7 +998,7 @@ struct ManagementViewWire {
 
 ### V-2 Owner Text → Host → response stream → presentation acknowledgement
 
-1. クライアントが `SubmitTextInput`（初回は round = None、現在の世代番号の写し、local_id、入力本文）を送信します。ホストは §13.1 の照合とラウンド（対話の一区切り）の発行を行い、受理時に返したラウンドIDを、その後の同一ラウンド内での追加入力に使用します。メッセージの送信成功は、ホストでの受理を意味しません。
+1. クライアントが `SubmitTextInput`（初回は `RoundTarget::New`、現在の世代番号の写し、local_id、入力本文）を送信します。ホストは §13.1 の照合とラウンド（対話の一区切り）の発行を行い、受理時に返したラウンドIDを、その後の同一ラウンドへの追加入力（`RoundTarget::Existing`）に使用します。メッセージの送信成功は、ホストでの受理を意味しません。
 2. ホスト側のマッピング層が入力検証を行い、ドメイン候補型（`SubmitClientInputCandidate`）へ変換します。ホストは現在の在席帰属、現行の接続、実行許可、停止中や保留中のフラグを照合し、問題がなければ `RoundIntakeOutcome::AcceptedForRound` を返します。古いラウンドに対する追加入力であれば `StaleRound` として拒絶し、勝手に新しいラウンドへ付け替えてはなりません。
 3. 確認応答（Ack）がネットワーク上で失われ、同一の送信者エポック内で初回 None のコマンドが同一のフィンガープリントで再送されてきた場合、ホストは保持している同一 `command_id` のマーカーや過去の結果から、前回と同じ `AcceptedForRound { round }` を返し、余計な2つ目のラウンドを発行しません。もし同一のIDでありながら本文や対象、前提条件が異なっていた場合は、ドメイン処理に入る前に通信境界で `CommandIdConflict` として拒絶します。
 4. ホストはクライアントへテキストをストリーミング送信します（`TextStreamOpen` → `Frame(seq, is_final)` → `Close(Completed)`）。モデルによる文章生成の完了、ネットワーク送信、クライアントでの受信完了は、それぞれ別の事実として厳格に区別します。
@@ -1056,7 +1060,7 @@ struct ManagementViewWire {
 ### V-12 duplicate / delayed message and idempotency retention
 
 1. 同一の `message_id` を持つ重複メッセージが届いた場合、通信層の短期間キャッシュによって静かに破棄します（副作用の再実行は行わず、必要に応じて前回のAckのみを再送）。なお、この通信キャッシュが破棄（eviction）された後であっても、業務上の同一性を保証する `command_id` のマーカーは別の長期契約に基づいて安全に残り続けます。
-2. 現在の送信者エポック内で、同一の `command_id` に新しい `message_id` が付与された再試行が同一のフィンガープリントで届いた場合、ホストは過去の結果（prior outcome）をそのまま返し、二重実行を確実に防ぎます。たとえば `SubmitTextInput.round = None` の初回要求であれば、最初に発行したラウンドIDを返し、不要な2つ目のラウンドを発行しません。
+2. 現在の送信者エポック内で、同一の `command_id` に新しい `message_id` が付与された再試行が同一のフィンガープリントで届いた場合、ホストは過去の結果（prior outcome）をそのまま返し、二重実行を確実に防ぎます。たとえば `RoundTarget::New` の初回要求であれば、最初に発行したラウンドIDを返し、不要な2つ目のラウンドを発行しません。
 3. 同じ `(sender epoch, command_id)` の組み合わせでありながら、メッセージのフィンガープリントが異なっていた場合は、`CommandReplayRejectWire::CommandIdConflict` として処理し、いかなる副作用も発生させずに直ちに拒絶します。`RoundIntakeOutcomeWire` などの既存ドメインの enum に、無関係な汎用エラーバリアントを混ぜてはなりません。
 4. 送信者エポックが有効である間は、再実行抑止マーカーを決して破棄（eviction）してはなりません。過去の詳細な結果データをメモリ節約のために要約（compact）する場合であっても、「再実行を禁止するマーカー」と「識別子発行型コマンドに必要な最小限の結果情報」は確実に保持・復元できなければなりません。過去の詳細結果を保持しない非識別子発行型のコマンドに限り、`AlreadyProcessed`（処理済み）を返すことができます。
 5. コネクションや化身が交代して送信者エポックが期限切れ（stale）になった後は、古いメッセージを同一性検索やドメイン処理へ回す手前で、安全に stale として拒絶できます。この条件が確実に成立して初めて、古いマーカーをクリーンアップして構いません。

@@ -44,8 +44,7 @@ fn ene_ctl_command() -> clap::Command {
         )
         .subcommand(
             clap::Command::new("send")
-                .about("Send one text input; `--` ends option parsing")
-                .arg(Arg::new("new").long("new").action(ArgAction::SetTrue))
+                .about("Send one text input (a new round unless `--round` says otherwise); `--` ends option parsing")
                 .arg(Arg::new("round").long("round").value_name("ROUND"))
                 .arg(Arg::new("text").value_name("TEXT").num_args(1..)),
         )
@@ -441,21 +440,16 @@ fn setup_mode(sub: &clap::ArgMatches) -> Result<cmds::SetupMode, CliError> {
 }
 
 fn send_args(sub: &clap::ArgMatches) -> Result<cmds::SendArgs, CliError> {
-    let fresh = sub.get_flag("new");
     let round = sub.get_one::<String>("round").cloned();
     let words: Vec<&str> = sub
         .get_many::<String>("text")
         .map(|values| values.map(String::as_str).collect())
         .unwrap_or_default();
-    if fresh && round.is_some() {
-        return Err(usage_error("--new and --round must not be combined"));
-    }
     if words.is_empty() {
         return Err(usage_error("send requires message text"));
     }
     Ok(cmds::SendArgs {
         round,
-        fresh,
         text: words.join(" "),
     })
 }
@@ -1129,8 +1123,7 @@ async fn run_send(
 ) -> Result<(), CliError> {
     let input = cmds::submit_input(
         &session.companion_ref(),
-        send.round,
-        send.fresh,
+        cmds::send_target(send.round),
         send.text,
         String::from(language),
     );
@@ -1373,7 +1366,6 @@ mod tests {
             joined.command
                 == super::cmds::Command::Send(super::cmds::SendArgs {
                     round: None,
-                    fresh: false,
                     text: String::from("hello world"),
                 })
         );
@@ -1382,7 +1374,6 @@ mod tests {
             literal.command
                 == super::cmds::Command::Send(super::cmds::SendArgs {
                     round: None,
-                    fresh: false,
                     text: String::from("--foo"),
                 }),
             "`--` must carry option-like text, got {:?}",
@@ -1391,23 +1382,13 @@ mod tests {
         let round = parse(&["send", "--round", "round-7", "hi"]).expect("send --round");
         assert!(matches!(
             round.command,
-            super::cmds::Command::Send(super::cmds::SendArgs {
-                round: Some(_),
-                fresh: false,
-                ..
-            })
-        ));
-        let fresh = parse(&["send", "--new", "hi"]).expect("send --new");
-        assert!(matches!(
-            fresh.command,
-            super::cmds::Command::Send(super::cmds::SendArgs { fresh: true, .. })
+            super::cmds::Command::Send(super::cmds::SendArgs { round: Some(_), .. })
         ));
         let post_text = parse(&["send", "hi", "--round", "round-7"]).expect("flag after text");
         assert!(
             post_text.command
                 == super::cmds::Command::Send(super::cmds::SendArgs {
                     round: Some(String::from("round-7")),
-                    fresh: false,
                     text: String::from("hi"),
                 }),
             "a flag after the first text word still parses: {:?}",
@@ -1415,7 +1396,7 @@ mod tests {
         );
         for words in [
             &["send"][..],
-            &["send", "--new", "--round", "r", "hi"][..],
+            &["send", "--new", "hi"][..],
             &["send", "--round"][..],
             &["send", "--unknown", "hi"][..],
         ] {

@@ -13,7 +13,7 @@ use ene_api::v1::refs::{
 };
 use ene_api::v1::round::{
     HistoryItem, HistoryRequest, HistoryResponse, HistoryRole, PresentationStatus,
-    RoundIntakeOutcomeWire, SubmitTextInput, TextBodyWire,
+    RoundIntakeOutcomeWire, RoundTarget, SubmitTextInput, TextBodyWire,
 };
 use ene_api::v1::undelivered::{
     GetReportSource, GetTaskReport, ListTasks, PageCursorWire, ReportSourcePageView,
@@ -112,7 +112,6 @@ pub enum SetupMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendArgs {
     pub round: Option<String>,
-    pub fresh: bool,
     pub text: String,
 }
 
@@ -150,17 +149,23 @@ pub fn history_request(companion: &str, round: Option<&str>, limit: u64) -> Hist
     }
 }
 
+#[must_use]
+pub fn send_target(round: Option<String>) -> RoundTarget {
+    match round {
+        Some(round) => RoundTarget::Existing(RoundWireId(round)),
+        None => RoundTarget::New,
+    }
+}
+
 pub fn submit_input(
     companion: &str,
-    round: Option<String>,
-    fresh: bool,
+    target: RoundTarget,
     text: String,
     lang: String,
 ) -> SubmitTextInput {
     SubmitTextInput {
         companion: CompanionWireRef(companion.to_string()),
-        round: round.map(RoundWireId),
-        fresh,
+        target,
         local_id: new_local_id(),
         body: TextBodyWire {
             text,
@@ -803,7 +808,7 @@ mod tests {
         SETUP_PROVIDER_OPENAI, assignment_intent, consent_target_for, credential_id_for,
         credential_intent, credential_target_for, describe_intake, describe_management,
         history_request, memory_view_request, new_local_id, render_history, render_view,
-        setup_view_request, submit_input,
+        send_target, setup_view_request, submit_input,
     };
     use ene_client::ClientError;
 
@@ -1036,8 +1041,7 @@ mod tests {
         );
         let input = submit_input(
             "companion-1",
-            Some(String::from("round-1")),
-            false,
+            send_target(Some(String::from("round-1"))),
             String::from("hello"),
             String::from("en"),
         );
@@ -1045,25 +1049,22 @@ mod tests {
             input.companion.0 == "companion-1",
             "input echoes the learned companion: {input:?}"
         );
-        let round = input.round.as_ref().unwrap();
+        let ene_api::v1::round::RoundTarget::Existing(round) = &input.target else {
+            panic!("--round must travel to the wire as Existing: {input:?}");
+        };
         assert!(
             round.0 == "round-1",
             "input keeps the premise round: {input:?}"
         );
         let fresh = submit_input(
             "companion-1",
-            None,
-            true,
+            send_target(None),
             String::from("hello"),
             String::from("en"),
         );
         assert!(
-            fresh.round.is_none(),
-            "no premise round keeps no hint: {fresh:?}"
-        );
-        assert!(
-            fresh.fresh,
-            "the force flag must travel to the wire: {fresh:?}"
+            matches!(fresh.target, ene_api::v1::round::RoundTarget::New),
+            "without --round the send starts a new round: {fresh:?}"
         );
     }
 

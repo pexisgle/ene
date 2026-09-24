@@ -292,6 +292,16 @@ impl Client {
         self.state.companion_ref()
     }
 
+    #[must_use]
+    pub fn open_round(&self) -> Option<ene_api::v1::refs::RoundWireId> {
+        self.state.open_round().cloned()
+    }
+
+    #[must_use]
+    pub fn round_target(&self) -> ene_api::v1::round::RoundTarget {
+        self.state.round_target()
+    }
+
     pub fn take_undelivered(&mut self) -> Vec<WireFrame> {
         self.state.take_undelivered()
     }
@@ -352,6 +362,7 @@ impl Client {
                     if let Some(current) = stale_generation_of(&payload) {
                         self.state.note_stale_generation(current);
                     }
+                    self.state.observe_intake(&payload);
                     return Ok(payload);
                 }
                 FrameDecision::Defer => self.state.push_deferred(incoming),

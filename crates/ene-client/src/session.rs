@@ -4,7 +4,7 @@ use ene_api::v1::deletion::{ClientTempClass, DeletionDemand};
 use ene_api::v1::handshake::AuthResult;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::presence::PresenceAttributionWire;
-use ene_api::v1::refs::{ConnectionWireId, WireMessageId};
+use ene_api::v1::refs::{ConnectionWireId, RoundWireId, WireMessageId};
 use ene_api::v1::round::RoundIntakeOutcomeWire;
 use ene_plugin_ipc::WireFrame;
 
@@ -18,6 +18,7 @@ pub const PENDING_ERASURE_CAP: usize = 32;
 pub struct SessionState {
     generation: Option<u64>,
     companion: Option<String>,
+    open_round: Option<RoundWireId>,
     deferred: VecDeque<WireFrame>,
     defer_erasure: bool,
     pending_erasure: VecDeque<DeletionDemand>,
@@ -29,6 +30,7 @@ impl core::fmt::Debug for SessionState {
             .debug_struct("SessionState")
             .field("generation", &self.generation)
             .field("companion", &self.companion)
+            .field("open_round", &self.open_round)
             .field("deferred_len", &self.deferred.len())
             .field("defer_erasure", &self.defer_erasure)
             .field("pending_erasure_len", &self.pending_erasure.len())
@@ -54,6 +56,32 @@ impl SessionState {
 
     pub fn note_stale_generation(&mut self, current: u64) {
         self.generation = Some(current);
+    }
+
+    pub fn open_round(&self) -> Option<&RoundWireId> {
+        self.open_round.as_ref()
+    }
+
+    pub fn observe_intake(&mut self, payload: &WirePayload) {
+        let WirePayload::RoundIntakeOutcome(outcome) = payload else {
+            return;
+        };
+        match outcome {
+            RoundIntakeOutcomeWire::AcceptedForRound { round } => {
+                self.open_round = Some(round.clone());
+            }
+            RoundIntakeOutcomeWire::StaleRound { .. } => self.open_round = None,
+            RoundIntakeOutcomeWire::HeldForTransition
+            | RoundIntakeOutcomeWire::NeedsRevalidation { .. } => {}
+        }
+    }
+
+    #[must_use]
+    pub fn round_target(&self) -> ene_api::v1::round::RoundTarget {
+        match &self.open_round {
+            Some(round) => ene_api::v1::round::RoundTarget::Existing(round.clone()),
+            None => ene_api::v1::round::RoundTarget::New,
+        }
     }
 
     pub fn push_deferred(&mut self, frame: WireFrame) {
