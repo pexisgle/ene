@@ -16,10 +16,8 @@ pub struct WorkspaceEffectRequest {
     pub target: String,
     pub operation: String,
     pub content: Option<Vec<u8>>,
-    #[serde(default)]
     pub staging_directory: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
-    #[serde(default)]
     pub test_pause_after_staging: Option<WorkspaceEffectStagingPause>,
 }
 
