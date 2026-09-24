@@ -508,6 +508,9 @@ pub(crate) async fn serve_requester<S>(
                 Ok(Ok(None) | Err(_)) | Err(_) => break,
             },
         };
+        if *shutdown.borrow() {
+            break;
+        }
         let reply = dispatch_requester(&handle, request).await;
         if write_message(&mut stream, &reply).await.is_err() {
             break;

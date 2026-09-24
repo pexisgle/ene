@@ -333,6 +333,8 @@ pub struct HostHandle {
     pub(crate) host_control_confirm_gate: StdMutex<Option<Arc<TestGate>>>,
     pub(crate) transient_fence: Arc<crate::transient_erasure::TransientErasureFence>,
     pub(crate) client_transients: Arc<crate::transient_erasure::ClientTransientRegistry>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) shutdown_test_barrier: Arc<crate::conn::ShutdownTestBarrier>,
     #[cfg(test)]
     pub(crate) task_control_gate:
         StdMutex<Option<std::sync::Arc<crate::task_control::TestTaskControlGate>>>,
@@ -496,6 +498,8 @@ impl HostHandle {
             host_control_confirm_gate: StdMutex::new(None),
             transient_fence: Arc::clone(&transient_fence),
             client_transients,
+            #[cfg(any(test, feature = "test-support"))]
+            shutdown_test_barrier: Arc::new(crate::conn::ShutdownTestBarrier::default()),
             #[cfg(test)]
             task_control_gate: StdMutex::new(None),
             #[cfg(test)]
@@ -806,7 +810,11 @@ impl HostHandle {
         live: LiveInput,
         transport: &impl ProviderTransport,
         sink: &tokio::sync::mpsc::Sender<WireFrame>,
+        abort: &ene_inference::DispatchAbort,
     ) {
+        if !live.authority.admission_open() {
+            return;
+        }
         let negotiated_version = live.negotiated.as_ref().map(|terms| terms.version);
         match (negotiated_version, frame.envelope().protocol) {
             (Some(want), got) if got != want => {
@@ -901,7 +909,7 @@ impl HostHandle {
                 {
                     return emit_end(sink, refusal);
                 }
-                self.submit_text(&frame, submit, &live, transport, sink)
+                self.submit_text(&frame, submit, &live, transport, sink, abort)
                     .await;
             }
             WirePayload::ConfirmPresentation(confirm) => {
@@ -1047,6 +1055,9 @@ impl HostHandle {
     }
 
     fn gate(frame: &WireFrame, live: &LiveInput) -> GateDecision {
+        if live.authed && !live.authority.is_current_authenticated(&live.connection_id) {
+            return GateDecision::Stale;
+        }
         if live.phase.is_superseded() {
             return GateDecision::Stale;
         }

@@ -103,6 +103,16 @@ struct Call {
     reply: String,
     usage: Option<RawUsage>,
     lost: bool,
+    stream: Option<StreamScript>,
+}
+
+/// A provider call that keeps emitting deltas at `pace` until every chunk is
+/// pushed, so a business response stream stays active across whole clock
+/// windows instead of parking with zero output.
+#[derive(Clone)]
+struct StreamScript {
+    chunks: Vec<String>,
+    pace: Duration,
 }
 
 impl Call {
@@ -111,6 +121,7 @@ impl Call {
             reply: reply.into(),
             usage: None,
             lost: false,
+            stream: None,
         }
     }
 
@@ -123,6 +134,7 @@ impl Call {
                 output_tokens: output,
             }),
             lost: false,
+            stream: None,
         }
     }
 
@@ -131,6 +143,16 @@ impl Call {
             reply: String::new(),
             usage: None,
             lost: true,
+            stream: None,
+        }
+    }
+
+    fn stream(reply: impl Into<String>, chunks: Vec<String>, pace: Duration) -> Self {
+        Self {
+            reply: reply.into(),
+            usage: None,
+            lost: false,
+            stream: Some(StreamScript { chunks, pace }),
         }
     }
 }
@@ -161,6 +183,7 @@ struct ScriptedTransport {
     blocks: Mutex<BTreeSet<usize>>,
     block_matches: Mutex<Vec<Matcher>>,
     parked: AtomicUsize,
+    streaming: AtomicUsize,
     inputs: Mutex<Vec<String>>,
     sends: AtomicUsize,
     estimate: Option<UsageEstimate>,
@@ -174,6 +197,7 @@ impl ScriptedTransport {
             blocks: Mutex::new(blocks.iter().copied().collect()),
             block_matches: Mutex::new(Vec::new()),
             parked: AtomicUsize::new(0),
+            streaming: AtomicUsize::new(0),
             inputs: Mutex::new(Vec::new()),
             sends: AtomicUsize::new(0),
             estimate: None,
@@ -212,6 +236,17 @@ impl ScriptedTransport {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+    }
+
+    fn parked_count(&self) -> usize {
+        self.parked.load(Ordering::SeqCst)
+    }
+
+    /// Provider calls currently inside a stream script. It decrements when
+    /// the script ends on its own, so a lingering count means the call was
+    /// neither finished nor dropped yet.
+    fn streaming_count(&self) -> usize {
+        self.streaming.load(Ordering::SeqCst)
     }
 
     fn input_texts(&self) -> Vec<String> {
@@ -283,6 +318,26 @@ impl ProviderTransport for ScriptedTransport {
             });
             if call_script.lost {
                 return Err(ene_inference::InferenceTechnicalError::ResponseLost);
+            }
+            if let Some(script) = call_script.stream {
+                self.streaming.fetch_add(1, Ordering::SeqCst);
+                for chunk in &script.chunks {
+                    match sink.push_delta(chunk).await {
+                        ene_inference::DeltaFlow::Continue => {}
+                        ene_inference::DeltaFlow::Abort(reason) => {
+                            self.streaming.fetch_sub(1, Ordering::SeqCst);
+                            return Err(ene_inference::InferenceTechnicalError::StreamAborted {
+                                reason: reason.to_owned(),
+                            });
+                        }
+                    }
+                    tokio::time::sleep(script.pace).await;
+                }
+                self.streaming.fetch_sub(1, Ordering::SeqCst);
+                return Ok(ProviderResponse {
+                    text: call_script.reply,
+                    usage: call_script.usage,
+                });
             }
             let response = ProviderResponse {
                 text: call_script.reply,
@@ -654,6 +709,25 @@ impl Served {
         }
     }
 
+    /// Awaits the listener for at most `limit` and reports whether it
+    /// finished. On timeout the handle stays owned, so the same shutdown can
+    /// be joined again later.
+    #[expect(clippy::panic, reason = "test fixture helper")]
+    async fn join_listener_within(&mut self, limit: Duration) -> bool {
+        let finished = tokio::time::timeout(limit, &mut self.server).await;
+        let Ok(finished) = finished else {
+            return false;
+        };
+        self.server = tokio::spawn(async { Ok::<(), CoreError>(()) });
+        match finished {
+            Ok(Ok(())) => {}
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => panic!("the listener panicked: {error}"),
+            Ok(Err(error)) => panic!("the listener failed: {error}"),
+        }
+        true
+    }
+
     async fn abort_listener(&mut self) {
         self.client = None;
         tokio::task::yield_now().await;
@@ -688,7 +762,7 @@ impl Served {
                     tokio::time::Instant::now() < deadline,
                     "the listener never bound after the restart: {failure:?}"
                 );
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
                 continue;
             }
             wait_until_deletion_drivers(&handle, 1).await;
@@ -5141,6 +5215,38 @@ impl WssClient {
         Self::handshake_on(&runtime, tcp, token, pin, origin, generation).await
     }
 
+    /// Dials with fixed kernel socket buffers, so a test can make one
+    /// direction stall at a known bound instead of depending on autotuning.
+    async fn connect_sized(
+        dir: &Path,
+        recv_buffer: Option<u32>,
+        send_buffer: Option<u32>,
+    ) -> Result<Self, String> {
+        let runtime = Self::load_runtime(dir).await?;
+        let port = runtime
+            .local_port()
+            .ok_or("runtime is not a local wss url")?;
+        let socket = tokio::net::TcpSocket::new_v4().map_err(|error| format!("socket: {error}"))?;
+        if let Some(size) = recv_buffer {
+            socket
+                .set_recv_buffer_size(size)
+                .map_err(|error| format!("receive buffer: {error}"))?;
+        }
+        if let Some(size) = send_buffer {
+            socket
+                .set_send_buffer_size(size)
+                .map_err(|error| format!("send buffer: {error}"))?;
+        }
+        let tcp = socket
+            .connect(std::net::SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                port,
+            )))
+            .await
+            .map_err(|error| format!("connect: {error}"))?;
+        Self::handshake_on(&runtime, tcp, None, None, false, None).await
+    }
+
     /// Drives TLS and the WebSocket upgrade over an already-connected stream,
     /// so a test can hold the stream between TCP connect and handshake.
     async fn handshake_on(
@@ -5258,24 +5364,28 @@ impl WssClient {
         raw.write_all(&header)
             .await
             .expect("oversize header must write");
-        let closed = tokio::time::timeout(Duration::from_secs(10), async {
-            let mut chunk = [0_u8; 1024];
-            loop {
-                match raw.read(&mut chunk).await {
-                    Ok(0) | Err(_) => return,
-                    Ok(read) => {
-                        if chunk[..read].windows(2).any(|pair| pair[0] & 0x0f == 0x8) {
-                            return;
-                        }
-                    }
-                }
-            }
-        })
-        .await;
-        assert!(
-            closed.is_ok(),
-            "an oversize frame must make the Host close the connection"
-        );
+        expect_host_close(&mut raw).await;
+    }
+
+    /// Sends one binary message split across two fragments whose reassembled
+    /// size crosses the wire cap, over the raw TLS stream underneath the
+    /// upgraded socket.
+    async fn send_fragmented_oversize_and_expect_close(self) {
+        let mut raw = self.socket.into_inner();
+        let mask = [0x11_u8, 0x22, 0x33, 0x44];
+        let first = masked_fragment(0x02, 200 * 1024, &mask);
+        raw.write_all(&first)
+            .await
+            .expect("first fragment must write");
+        let second = masked_fragment(0x80, 100 * 1024, &mask);
+        raw.write_all(&second)
+            .await
+            .expect("second fragment must write");
+        // `write_all` on a TLS stream can complete with records still sitting
+        // in the TLS buffer; without this flush the Host never receives the
+        // whole fragmented message and has nothing to reject.
+        drop(raw.flush().await);
+        expect_host_close(&mut raw).await;
     }
 
     async fn expect_reject(&mut self, reply_to: WireMessageId, kind: RejectKind) {
@@ -5302,6 +5412,40 @@ impl WssClient {
     }
 }
 
+/// A masked, non-final (`0x02`) or continuation-final (`0x80`) fragment
+/// header plus `length` bytes of payload.
+fn masked_fragment(opcode: u8, length: usize, mask: &[u8; 4]) -> Vec<u8> {
+    let mut fragment = vec![opcode, 0x80 | 127];
+    fragment.extend_from_slice(&(length as u64).to_be_bytes());
+    fragment.extend_from_slice(mask);
+    let payload: Vec<u8> = (0..length)
+        .map(|index| (index % 251) as u8 ^ mask[index % 4])
+        .collect();
+    fragment.extend_from_slice(&payload);
+    fragment
+}
+
+/// Reads the raw TLS stream until the Host closes the connection.
+async fn expect_host_close(raw: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>) {
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut chunk = [0_u8; 1024];
+        loop {
+            match raw.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(read) => {
+                    if chunk[..read].windows(2).any(|pair| pair[0] & 0x0f == 0x8) {
+                        return;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the Host must close the connection after the crafted WebSocket message"
+    );
+}
 async fn raw_dial(dir: &Path) -> WssClient {
     tokio::time::timeout(Duration::from_secs(15), WssClient::connect(dir))
         .await
@@ -6140,6 +6284,1551 @@ async fn pending_pairings_are_capped_with_a_typed_denial() {
         "the {MIRRORED_MAX_PENDING_PAIRINGS}th pending pairing must be refused"
     );
     drop(held);
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+// Mirrors `crate::serve::STREAM_BUFFER_FRAMES`; integration tests cannot
+// name pub(crate) items, so a drift breaks these tests instead of silently
+// weakening production.
+const MIRRORED_STREAM_BUFFER_FRAMES: usize = 32;
+// Mirrors `crate::conn::READ_AHEAD_FRAMES`: the reader's bounded window on
+// top of the business queue. Queue + read-ahead together are the application
+// capacity; one frame past that boundary must fail the connection.
+const MIRRORED_READ_AHEAD_FRAMES: usize = 8;
+
+/// Boots a serving Host with one completed summon round, arms the scripted
+/// barrier on the next dialogue, and returns once that dialogue's provider
+/// call is parked inside the connection's business handler.
+async fn serve_and_park_dialogue(
+    dir: PathBuf,
+    transport: Arc<ScriptedTransport>,
+    summon_text: &str,
+    park_text: &str,
+) -> Served {
+    let mut served = serve_and_setup(dir, transport.clone(), &[cmds::CAPABILITY_DIALOGUE]).await;
+    // The summon round intentionally skips the presentation confirmation: a
+    // receipt would arm the connection's receipt timer, and this helper's
+    // callers drive the liveness window through the tokio clock.
+    let (_round, _stream, _reply) = send_round(served.client(), summon_text)
+        .await
+        .expect("the summon round must complete");
+    wait_presence(&served.dir, "present").await;
+
+    transport.block_input(on_latest_owner(park_text));
+    let client = served.client();
+    let companion = client.companion_ref();
+    let target = client.round_target();
+    let intake = ask(
+        client,
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            target,
+            String::from(park_text),
+            String::from("en"),
+        )),
+        "park submit",
+    )
+    .await
+    .expect("the park submit must be answered while the intake precedes the provider call");
+    let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round: _ }) =
+        intake
+    else {
+        panic!("the park submit must be accepted, got {intake:?}");
+    };
+    transport.wait_parked(1).await;
+    served
+}
+
+/// One frame more than the mirrored queue capacity: with the business handler
+/// parked this leaves the business frame queue full and one frame in the
+/// read-ahead window — below the queue + read-ahead overload boundary.
+async fn saturate_the_application_queue(served: &mut Served) {
+    notify_some(served, MIRRORED_STREAM_BUFFER_FRAMES + 1).await;
+}
+
+/// Exactly the mirrored application capacity — business queue plus the full
+/// read-ahead window — with the business handler parked. The connection is
+/// saturated but still at capacity, not over it.
+async fn saturate_queue_and_read_ahead(served: &mut Served) {
+    notify_some(
+        served,
+        MIRRORED_STREAM_BUFFER_FRAMES + MIRRORED_READ_AHEAD_FRAMES,
+    )
+    .await;
+}
+
+async fn notify_some(served: &mut Served, count: usize) {
+    for _ in 0..count {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            served
+                .client()
+                .notify(WirePayload::HistoryRequest(cmds::history_request(
+                    "default", None, 1,
+                ))),
+        )
+        .await
+        .expect("the saturating write must be accepted by the client")
+        .expect("the saturating write must reach the transport");
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+}
+
+/// Moves only the clock across more than the liveness window while every
+/// socket operation stays on the real clock.
+async fn cross_the_liveness_window() {
+    // Let in-flight socket work settle on the real clock before the clock
+    // freezes, so the window measures liveness instead of setup races.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::pause();
+    for _ in 0..12 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+    tokio::time::resume();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+#[tokio::test]
+async fn a_business_handler_over_the_liveness_window_keeps_ping_and_the_connection_alive() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_park_dialogue(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        "summon for liveness",
+        "park beyond the liveness window",
+    )
+    .await;
+
+    // The business handler now runs past the liveness window while the client
+    // only answers the Host's pings: those pings must keep flowing, and the
+    // pongs must keep the responsive connection live.
+    cross_the_liveness_window().await;
+    assert!(
+        matches!(
+            presence_row(dir.path()),
+            Some((ref state, _)) if state == "present"
+        ),
+        "a responsive client must not be liveness-closed while its handler is parked"
+    );
+
+    // Completing the parked handler lets the Host re-check liveness against
+    // activity that stopped at the park: without transport pings inside the
+    // window this would be over the liveness window already.
+    transport.release_blocked();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        matches!(
+            presence_row(dir.path()),
+            Some((ref state, _)) if state == "present"
+        ),
+        "the liveness re-check after the parked handler must not close a client that kept answering"
+    );
+    let companion = served.client().companion_ref();
+    let answer = ask(
+        served.client(),
+        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
+        "history after the parked handler",
+    )
+    .await
+    .expect("the same connection must still answer past the liveness window");
+    assert!(
+        matches!(answer, WirePayload::HistoryResponse(_)),
+        "got {answer:?}"
+    );
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn client_close_during_a_parked_handler_closes_promptly_and_never_returns_to_current() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner("summon for close"),
+                Call::text("SUMMON-REPLY"),
+            ),
+            (
+                on_latest_owner("reconnect round"),
+                Call::text("RECONNECT-REPLY"),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = serve_and_park_dialogue(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        "summon for close",
+        "park before the client leaves",
+    )
+    .await;
+
+    // The client leaves while its business operation is still parked: the
+    // connection must close promptly, not when the operation finishes.
+    drop(served.client.take());
+    let (_, fallen_back) = wait_presence(dir.path(), "no_active").await;
+
+    // The old connection no longer passes current admission: a fresh
+    // connection authenticates and serves while the old handler is parked.
+    let mut replacement = connect(dir.path()).await;
+    assert_eq!(
+        presence_row(dir.path()),
+        Some((String::from("no_active"), fallen_back)),
+        "authentication alone must not restore attribution"
+    );
+    let (round, stream, text) = send_round(&mut replacement, "reconnect round")
+        .await
+        .expect("the replacement connection must serve");
+    assert_eq!(text, "RECONNECT-REPLY", "the new round must stream");
+    confirm_round(&mut replacement, &round, stream).await;
+    let (_, live_generation) = wait_presence(dir.path(), "present").await;
+
+    // Completing the old operation must not be adopted as current work.
+    transport.release_blocked();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let texts = history_texts(&mut replacement).await;
+    assert!(
+        !texts.iter().any(|text| text == "acknowledged"),
+        "the closed connection's provider reply must not be committed: {texts:?}"
+    );
+    assert_eq!(
+        presence_row(dir.path()),
+        Some((String::from("present"), live_generation)),
+        "the old connection's completion must not move presence"
+    );
+    drop(replacement);
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn a_saturated_application_queue_still_moves_pongs_and_close() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_park_dialogue(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        "summon for saturation",
+        "park under saturation",
+    )
+    .await;
+    saturate_the_application_queue(&mut served).await;
+
+    // Past the liveness window the Host still pings and still reads the pongs
+    // behind the saturated application queue: the connection stays present.
+    cross_the_liveness_window().await;
+    assert!(
+        matches!(
+            presence_row(dir.path()),
+            Some((ref state, _)) if state == "present"
+        ),
+        "a saturated queue must not stop the pong reads that prove liveness"
+    );
+
+    // The reader also keeps processing EOF behind the saturated queue.
+    drop(served.client.take());
+    let (_, fallen_back) = wait_presence(dir.path(), "no_active").await;
+
+    transport.release_blocked();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        presence_row(dir.path()),
+        Some((String::from("no_active"), fallen_back)),
+        "the closed connection's completion must not resurrect presence"
+    );
+    let mut replacement = connect(dir.path()).await;
+    let (round, stream, _text) =
+        send_round(&mut replacement, "after the saturated connection closed")
+            .await
+            .expect("the replacement connection must serve after saturation closed the old one");
+    confirm_round(&mut replacement, &round, stream).await;
+    drop(replacement);
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn an_unparked_burst_dispatches_before_held_overflow_and_answers_ping() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let input = "unparked burst input";
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner(input),
+            Call::stream(
+                "BURST-STREAM-REPLY",
+                (0..8).map(|index| format!("burst-{index} ")).collect(),
+                Duration::from_millis(20),
+            ),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let companion = served.client().companion_ref();
+    let target = served.client().round_target();
+    let first = served
+        .client()
+        .prepare(WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            target,
+            String::from(input),
+            String::from("en"),
+        )));
+    served
+        .client()
+        .send_prepared_for_tests(&first)
+        .await
+        .expect("the first application frame must enter the transport");
+
+    // Keep the application burst ahead of the first business operation. The
+    // provider is actively streaming, not parked; the old select order could
+    // nevertheless keep pulling frames into `held` before dispatching it.
+    let burst = MIRRORED_STREAM_BUFFER_FRAMES + MIRRORED_READ_AHEAD_FRAMES - 1;
+    let ping_payload = b"unparked-burst-ping";
+    let probe = served.client().transport_probe_for_tests();
+    for index in 0..burst {
+        if index == 8 {
+            served.client().send_transport_ping_for_tests(ping_payload);
+        }
+        let request = served
+            .client()
+            .prepare(WirePayload::HistoryRequest(cmds::history_request(
+                &companion, None, 1,
+            )));
+        served
+            .client()
+            .send_prepared_for_tests(&request)
+            .await
+            .expect("every bounded application burst frame must be accepted");
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while transport.sends() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first business operation must dispatch before held overflow");
+    assert!(
+        transport.sends() >= 1,
+        "the burst must not close the connection before business dispatch"
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if probe.take_pongs().iter().any(|pong| pong == ping_payload) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the Host must answer the burst's Client Ping with a bounded Pong");
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let WirePayload::TextStreamClose(close) = served
+                .client()
+                .next_frame()
+                .await
+                .expect("the connection must remain usable after the burst")
+            {
+                assert_eq!(
+                    close.status,
+                    ene_api::v1::round::StreamClose::Completed,
+                    "the first burst operation must complete normally"
+                );
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the active business stream must finish after the burst");
+
+    let answer = ask(
+        served.client(),
+        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
+        "history after the unparked burst",
+    )
+    .await
+    .expect("the same connection must answer a later request after the burst");
+    assert!(
+        matches!(answer, WirePayload::HistoryResponse(_)),
+        "got {answer:?}"
+    );
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn an_application_frame_past_the_read_ahead_window_fails_the_connection() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_park_dialogue(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        "summon for the overload",
+        "park under the overload",
+    )
+    .await;
+
+    // Saturation, not queue-full alone: the business queue and the whole
+    // read-ahead window are both full. At exactly this capacity the control
+    // plane still moves — the Host's pings reach the client and the pongs
+    // come back past the liveness window.
+    saturate_queue_and_read_ahead(&mut served).await;
+    cross_the_liveness_window().await;
+    assert!(
+        matches!(
+            presence_row(dir.path()),
+            Some((ref state, _)) if state == "present"
+        ),
+        "a fully saturated application backlog must not stop the pong reads that prove liveness"
+    );
+
+    // One application frame past that boundary is the explicit bounded
+    // failure: the connection ends instead of waiting for the parked handler
+    // or dropping the frame in silence. The write itself may already be
+    // refused by the closing Host; either outcome is the bounded failure.
+    let over_capacity = tokio::time::timeout(
+        Duration::from_secs(5),
+        served
+            .client()
+            .notify(WirePayload::HistoryRequest(cmds::history_request(
+                "default", None, 1,
+            ))),
+    )
+    .await;
+    drop(over_capacity);
+    let (_, fallen_back) = wait_presence(dir.path(), "no_active").await;
+    assert_eq!(
+        presence_row(dir.path()),
+        Some((String::from("no_active"), fallen_back)),
+        "the over-capacity frame must close the connection's currentness"
+    );
+
+    // The serving composition does not hang: while the old handler is still
+    // parked, a replacement connection is accepted and serves normally.
+    let mut replacement = connect(dir.path()).await;
+    let (round, stream, _text) =
+        send_round(&mut replacement, "after the overloaded connection closed")
+            .await
+            .expect("the replacement must serve after the overload closed the old connection");
+    confirm_round(&mut replacement, &round, stream).await;
+    drop(replacement);
+
+    transport.release_blocked();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    served.stop().await;
+}
+
+#[expect(clippy::expect_used, reason = "test fixture helper")]
+fn db_scalar(db: &Path, sql: &str) -> u64 {
+    let conn = rusqlite::Connection::open(db).expect("the store file must open");
+    let counted: i64 = conn
+        .query_row(sql, [], |row| row.get(0))
+        .expect("the store query must answer");
+    u64::try_from(counted).expect("a row count never goes negative")
+}
+
+#[tokio::test]
+async fn graceful_shutdown_aborts_a_parked_dialogue_dispatch_and_keeps_the_unknown_fact() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner("summon before shutdown"),
+            // Reported usage for the completed summon, so the only unknown
+            // usage fact in this test is the aborted post-claim attempt.
+            Call::reported("SUMMON-REPLY", 120, 0, 30),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_park_dialogue(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        "summon before shutdown",
+        "park across the shutdown",
+    )
+    .await;
+    // The barrier is the dispatch's own provider call: the attempt claim is
+    // durably `Started` before the fixture can park, so the shutdown below
+    // aborts a post-claim dispatch.
+    transport.wait_parked(1).await;
+    assert_eq!(transport.parked_count(), 1);
+
+    served.request_graceful_stop();
+    // Concurrency Control shutdown owns the running dispatch: without ever
+    // releasing the provider fixture, the Host-lifecycle cooperative abort
+    // alone must let the shutdown finish — joining the business task inside
+    // the Host lifecycle instead of detaching it.
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "graceful shutdown must quiesce the parked dispatch through the cooperative abort"
+    );
+    assert_eq!(
+        transport.parked_count(),
+        1,
+        "the provider fixture was never released; only the abort ended the wait"
+    );
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+
+    // The post-claim durable outcome: exactly one attempt per dispatch, the
+    // aborted claim keeps its unknown usage fact, the owner input stays
+    // persisted, and no reply commits as a success.
+    let db = dir.path().join("app.db");
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
+        2,
+        "the summon and the aborted dispatch claim exactly one attempt each"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM usage_fact WHERE source = 'unknown'"
+        ),
+        1,
+        "the aborted post-claim attempt records its unknown usage fact"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM history_message WHERE role = 'owner'"
+        ),
+        2,
+        "both accepted owner inputs stay committed"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM history_message WHERE role = 'companion'"
+        ),
+        1,
+        "only the completed summon commits a reply; the aborted dispatch never does"
+    );
+
+    // With the business task joined, nothing derived from it may still
+    // mutate the store after the shutdown completed.
+    let settled = served.canonical_remainder("park across the shutdown").await;
+    assert!(settled > 0, "the accepted owner input must be persisted");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        served.canonical_remainder("park across the shutdown").await,
+        settled,
+        "no store mutation may appear from the joined business task after shutdown"
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn graceful_shutdown_stops_admission_before_abort_and_joins_without_new_ingress() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner("summon before the shutdown boundary"),
+            Call::reported("SUMMON-BOUNDARY-REPLY", 10, 0, 1),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let (_round, _stream, _reply) =
+        send_round(served.client(), "summon before the shutdown boundary")
+            .await
+            .expect("the setup round must complete");
+    wait_presence(&served.dir, "present").await;
+    let summary = fetch_summary(served.client(), "the boundary receipt")
+        .await
+        .expect("the setup round must produce a receipt");
+    assert_eq!(served.handle().receipts_held_for_tests(), 1);
+
+    let db = dir.path().join("app.db");
+    let owner_rows_before = db_scalar(
+        &db,
+        "SELECT COUNT(*) FROM history_message WHERE role = 'owner'",
+    );
+    let attempts_before = db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt");
+    let task_rows_before = db_scalar(&db, "SELECT COUNT(*) FROM task");
+    let sends_before = transport.sends();
+    let inputs_before = transport.input_texts().len();
+
+    served.handle().arm_shutdown_boundary_for_tests();
+    served.request_graceful_stop();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        served.handle().wait_shutdown_boundary_signal_for_tests(),
+    )
+    .await
+    .expect("shutdown must publish the admission-stop signal");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        served
+            .handle()
+            .wait_shutdown_boundary_connection_for_tests(),
+    )
+    .await
+    .expect("the existing connection must observe the admission-stop signal");
+
+    let companion = served.client().companion_ref();
+    let target = served.client().round_target();
+    let submit = tokio::time::timeout(
+        Duration::from_secs(5),
+        served
+            .client()
+            .notify(WirePayload::SubmitTextInput(cmds::submit_input(
+                &companion,
+                target,
+                String::from("input after the shutdown boundary"),
+                String::from("en"),
+            ))),
+    )
+    .await;
+    assert!(
+        submit.is_ok(),
+        "the post-boundary input attempt must be bounded, got {submit:?}"
+    );
+    let control = tokio::time::timeout(
+        Duration::from_secs(5),
+        served.client().notify(WirePayload::ConfirmPresentation(
+            ene_api::v1::round::ConfirmPresentationWire {
+                round: summary.round,
+                stream: None,
+                status: PresentationStatus::Presented,
+                detail: None,
+            },
+        )),
+    )
+    .await;
+    assert!(
+        control.is_ok(),
+        "the post-boundary control attempt must be bounded, got {control:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM history_message WHERE role = 'owner'"
+        ),
+        owner_rows_before,
+        "input after the admission boundary must not commit an owner row"
+    );
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
+        attempts_before,
+        "input after the admission boundary must not create an inference attempt"
+    );
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM task"),
+        task_rows_before,
+        "control input after the admission boundary must not mutate task state"
+    );
+    assert_eq!(
+        transport.sends(),
+        sends_before,
+        "input after the admission boundary must not reach the provider"
+    );
+    assert_eq!(
+        transport.input_texts().len(),
+        inputs_before,
+        "input after the admission boundary must not add provider input"
+    );
+    assert_eq!(
+        served.handle().receipts_held_for_tests(),
+        1,
+        "control input after the admission boundary must not settle the receipt"
+    );
+
+    served.handle().release_shutdown_boundary_for_tests();
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "admission stop must precede abort and the handler join"
+    );
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+    let settled = (
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM history_message WHERE role = 'owner'",
+        ),
+        db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
+        db_scalar(&db, "SELECT COUNT(*) FROM task"),
+        transport.sends(),
+        transport.input_texts().len(),
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        settled,
+        (
+            db_scalar(
+                &db,
+                "SELECT COUNT(*) FROM history_message WHERE role = 'owner'"
+            ),
+            db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
+            db_scalar(&db, "SELECT COUNT(*) FROM task"),
+            transport.sends(),
+            transport.input_texts().len(),
+        ),
+        "no store or provider mutation may appear after conn::run() returns"
+    );
+}
+
+#[tokio::test]
+async fn graceful_shutdown_aborts_a_parked_learning_dispatch_and_keeps_the_unknown_fact() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let dir = temp.path().to_path_buf();
+    let first = format!("please remember {TARGET} for me");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (on_learning_formation(true), Call::text(formation_create())),
+            (
+                on_latest_owner(&first),
+                Call::text(format!("I will keep {TARGET} in mind.")),
+            ),
+        ],
+        &[],
+    ));
+    transport.block_input(on_learning_formation(true));
+    let mut served = serve_and_setup(
+        dir,
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    let (_round, _stream, reply) = send_round(served.client(), &first)
+        .await
+        .expect("the first round must complete");
+    assert!(reply.contains(TARGET));
+    // The formation provider call runs inside the learning dispatch after its
+    // claim, so parking it parks a post-claim attempt.
+    transport.wait_parked(1).await;
+
+    served.request_graceful_stop();
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "the cooperative abort must bound a parked learning dispatch"
+    );
+    assert_eq!(
+        transport.parked_count(),
+        1,
+        "the learning fixture was never released; only the abort ended the wait"
+    );
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+
+    let db = temp.path().join("app.db");
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM inference_attempt WHERE consumer = 'companion_learning'"
+        ),
+        1,
+        "the parked learning dispatch had claimed exactly one attempt"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM usage_fact f JOIN inference_attempt a ON f.ticket = a.ticket \
+             WHERE f.source = 'unknown' AND a.consumer = 'companion_learning'"
+        ),
+        1,
+        "the aborted learning claim keeps its unknown usage fact"
+    );
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM learning_formation"),
+        0,
+        "the settled formation leaves no dangling in-flight claim"
+    );
+    assert!(
+        !db_target_hits(&db, TARGET)
+            .iter()
+            .any(|hit| hit.starts_with("learning_memory.") || hit.starts_with("learning_summary.")),
+        "an aborted learning result must never commit as success: {:?}",
+        db_target_hits(&db, TARGET)
+    );
+    // The join above is the worker's lifecycle proof: the learning worker
+    // ended inside the Host lifecycle, not outside it.
+}
+
+#[tokio::test]
+async fn shutdown_before_the_learning_claim_creates_no_attempt_and_no_provider_io() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let dir = temp.path().to_path_buf();
+    let first = format!("please remember {TARGET} for me");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (on_learning_formation(true), Call::text(formation_create())),
+            (
+                on_latest_owner(&first),
+                Call::text(format!("I will keep {TARGET} in mind.")),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir,
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    // The store park sits after the queue take and before the formation and
+    // the claim: whatever continues afterwards is a genuine pre-claim abort.
+    served
+        .handle()
+        .store_for_tests()
+        .arm_learning_take_park_for_tests();
+    let (_round, _stream, _reply) = send_round(served.client(), &first)
+        .await
+        .expect("the first round must complete");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        served
+            .handle()
+            .store_for_tests()
+            .wait_learning_take_park_for_tests(),
+    )
+    .await
+    .expect("the learning worker must reach the pre-claim park");
+    let sends_before = transport.sends();
+
+    served.request_graceful_stop();
+    // Stop first, then release: presence falls back only after the shutdown
+    // has fired the cooperative abort, so the released worker observes the
+    // stop before any claim or provider call.
+    let (_, fallen_back) = wait_presence(served.dir.as_path(), "no_active").await;
+    assert_eq!(
+        presence_row(served.dir.as_path()),
+        Some((String::from("no_active"), fallen_back)),
+        "the shutdown must close currentness before the worker continues"
+    );
+    served
+        .handle()
+        .store_for_tests()
+        .release_learning_take_park_for_tests();
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "the pre-claim stop must let the shutdown finish"
+    );
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+
+    let db = temp.path().join("app.db");
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM inference_attempt WHERE consumer = 'companion_learning'"
+        ),
+        0,
+        "a stop before the claim never fabricates an attempt"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM usage_fact f JOIN inference_attempt a ON f.ticket = a.ticket \
+             WHERE f.source = 'unknown' AND a.consumer = 'companion_learning'"
+        ),
+        0,
+        "a never-claimed use records no usage fact"
+    );
+    assert_eq!(
+        transport.sends(),
+        sends_before,
+        "no provider call may start after the stop won"
+    );
+    assert!(
+        !transport
+            .input_texts()
+            .iter()
+            .any(|input| input.contains("learning formation pass")),
+        "a pre-claim abort must never reach the provider"
+    );
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM learning_formation"),
+        0,
+        "the pre-claim stop settles the formation it never claimed"
+    );
+}
+
+/// Continuous business streaming — not a parked provider — across more than
+/// the receipt deadline: transport control, liveness, and the monotonic
+/// deadline keep progressing the whole time, and the business stream itself
+/// is neither starved by the control priority nor reordered.
+#[tokio::test]
+async fn continuous_business_streaming_keeps_transport_control_and_the_receipt_deadline_moving() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let stream_text = "stream across the receipt deadline";
+    let chunk_script: Vec<String> = (0..2000)
+        .map(|index| format!("[stream {index:05}]"))
+        .collect();
+    let expected_stream: String = chunk_script.concat();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner("summon before the stream"),
+                Call::text("SUMMON-STREAM-REPLY"),
+            ),
+            (
+                on_latest_owner(stream_text),
+                // 2000 chunks × 20 ms ≈ 40 seconds of continuously
+                // produced business frames — well past the 30-second
+                // receipt deadline.
+                Call::stream(
+                    "STREAM-COMPLETE-REPLY",
+                    chunk_script,
+                    Duration::from_millis(20),
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let (round, stream, _reply) = send_round(served.client(), "summon before the stream")
+        .await
+        .expect("the summon round must complete");
+    wait_presence(&served.dir, "present").await;
+    confirm_round(served.client(), &round, stream).await;
+
+    // A receipt is issued on this connection and never acknowledged during
+    // the stream.
+    let stale = fetch_summary(served.client(), "the unacked receipt")
+        .await
+        .expect("the subscription must answer");
+    assert!(
+        !stale.receipt.0.is_empty(),
+        "the fixture must issue a receipt"
+    );
+    assert_eq!(served.handle().receipts_held_for_tests(), 1);
+    let receipt_issued_at = std::time::Instant::now();
+
+    let companion = served.client().companion_ref();
+    let target = served.client().round_target();
+    let intake = ask(
+        served.client(),
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            target,
+            String::from(stream_text),
+            String::from("en"),
+        )),
+        "stream submit",
+    )
+    .await
+    .expect("the stream submit must be answered while the intake precedes the provider call");
+    assert!(
+        matches!(
+            intake,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+        ),
+        "the stream submit must be accepted, got {intake:?}"
+    );
+
+    let probe = served.client().transport_probe_for_tests();
+    let pings_at_stream_start = probe.host_pings();
+    let pongs_at_stream_start = probe.pongs_sent();
+    let started = std::time::Instant::now();
+
+    let mut ping_sent_at: Option<std::time::Instant> = None;
+    let mut pong_observed = false;
+    let mut host_ping_observed = false;
+    let mut receipt_expired = false;
+    let mut checkpoint_at_15s: Option<usize> = None;
+    let mut opened = false;
+    let mut frames = 0usize;
+    let mut previous_seq: Option<u64> = None;
+    let mut text_out = String::new();
+    let close_status = loop {
+        match tokio::time::timeout(Duration::from_millis(500), served.client().next_frame()).await {
+            Ok(Ok(WirePayload::TextStreamOpen(_))) => opened = true,
+            Ok(Ok(WirePayload::TextStreamFrame(frame))) => {
+                assert!(
+                    previous_seq.is_none_or(|previous| frame.seq == previous + 1),
+                    "stream frames must order by seq across the control traffic"
+                );
+                previous_seq = Some(frame.seq);
+                text_out.push_str(&frame.delta);
+                frames += 1;
+            }
+            Ok(Ok(WirePayload::TextStreamClose(close))) => break close.status,
+            Ok(Ok(WirePayload::PresenceAttribution(_))) => {}
+            Ok(Ok(other)) => panic!("unexpected payload during the stream: {other:?}"),
+            Ok(Err(error)) => panic!("the stream must keep reading: {error:?}"),
+            Err(_) => {}
+        };
+        let elapsed = started.elapsed();
+        if ping_sent_at.is_none() && elapsed >= Duration::from_secs(3) {
+            served
+                .client()
+                .send_transport_ping_for_tests(b"control-under-stream");
+            ping_sent_at = Some(std::time::Instant::now());
+        }
+        if let Some(sent_at) = ping_sent_at
+            && !pong_observed
+        {
+            if probe
+                .take_pongs()
+                .iter()
+                .any(|pong| pong == b"control-under-stream")
+            {
+                pong_observed = true;
+            } else {
+                assert!(
+                    sent_at.elapsed() < Duration::from_secs(3),
+                    "the Host must answer a client ping with a bounded pong while business frames stream"
+                );
+            }
+        }
+        if !host_ping_observed && elapsed >= Duration::from_secs(16) {
+            assert!(
+                probe.host_pings() > pings_at_stream_start,
+                "the Host must keep pinging while the business stream runs"
+            );
+            host_ping_observed = true;
+        }
+        if checkpoint_at_15s.is_none() && elapsed >= Duration::from_secs(15) {
+            assert!(
+                frames >= 100,
+                "business frames must keep flowing across the window, got {frames}"
+            );
+            checkpoint_at_15s = Some(frames);
+        }
+        if let Some(at_15s) = checkpoint_at_15s
+            && elapsed >= Duration::from_secs(25)
+            && frames <= at_15s
+        {
+            panic!("the transport-control priority must not starve business delivery");
+        }
+        if !receipt_expired && receipt_issued_at.elapsed() >= Duration::from_secs(31) {
+            assert_eq!(
+                transport.streaming_count(),
+                1,
+                "the business stream must still be running at the receipt deadline"
+            );
+            assert_eq!(
+                served.handle().receipts_held_for_tests(),
+                0,
+                "the receipt must expire at its monotonic 30-second deadline while business frames keep streaming"
+            );
+            assert!(
+                matches!(presence_row(dir.path()), Some((ref state, _)) if state == "present"),
+                "the streaming connection must stay current"
+            );
+            receipt_expired = true;
+        }
+    };
+
+    assert!(opened, "the stream must open before it frames");
+    assert!(
+        receipt_expired,
+        "the receipt deadline must be observed during the stream"
+    );
+    assert!(
+        pong_observed,
+        "the bounded client-ping pong must be observed during the stream"
+    );
+    assert!(
+        host_ping_observed,
+        "the Host ping must be observed during the stream"
+    );
+    assert_eq!(
+        close_status,
+        ene_api::v1::round::StreamClose::Completed,
+        "the business stream must complete rather than starve"
+    );
+    assert_eq!(
+        text_out, expected_stream,
+        "the streamed deltas must arrive complete and in order"
+    );
+    let host_pings_during_stream = probe.host_pings() - pings_at_stream_start;
+    assert!(
+        host_pings_during_stream >= 2,
+        "at least two Host pings must cross the 40-second stream, got {host_pings_during_stream}"
+    );
+    assert!(
+        probe.pongs_sent() - pongs_at_stream_start >= host_pings_during_stream,
+        "the client must pong every Host ping while streaming"
+    );
+
+    // The late acknowledgement of the expired receipt is stale, and the same
+    // connection keeps serving after prioritizing transport control.
+    let acked = ack_summary(served.client(), &stale)
+        .await
+        .expect("the late ack must answer");
+    assert_eq!(
+        acked,
+        UndeliveredAckOutcome::StalePresentation,
+        "an ack after the receipt deadline must be stale"
+    );
+    let companion = served.client().companion_ref();
+    let answer = ask(
+        served.client(),
+        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
+        "history after the stream",
+    )
+    .await
+    .expect("the connection must still answer after the stream");
+    assert!(
+        matches!(answer, WirePayload::HistoryResponse(_)),
+        "got {answer:?}"
+    );
+    served.stop().await;
+}
+
+/// The client leaves mid-stream: currentness drops promptly while the
+/// handler is provably still inside the provider's stream, and the Host
+/// shutdown afterwards bounds the leftover operation with the cooperative
+/// abort instead of waiting for the provider.
+#[tokio::test]
+async fn client_eof_during_a_stream_drops_currentness_before_the_handler_finishes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sentinel = "EOF-STREAM-SENTINEL";
+    let stream_text = "stream until the client leaves";
+    let chunk_script: Vec<String> = (0..3).map(|index| format!("{sentinel}-{index}")).collect();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner("summon before the eof"),
+                // Reported usage for the completed summon, so the only
+                // unknown usage fact is the aborted stream attempt.
+                Call::reported("SUMMON-EOF-REPLY", 120, 0, 30),
+            ),
+            (
+                on_latest_owner(stream_text),
+                // Each chunk is pushed and then the provider sleeps for the
+                // whole window, so the handler provably cannot finish on its
+                // own while the test observes it.
+                Call::stream(
+                    "NEVER-COMMITTED-EOF-REPLY",
+                    chunk_script,
+                    Duration::from_secs(30),
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let (_round, _stream, _reply) = send_round(served.client(), "summon before the eof")
+        .await
+        .expect("the summon round must complete");
+    wait_presence(&served.dir, "present").await;
+
+    let companion = served.client().companion_ref();
+    let target = served.client().round_target();
+    let intake = ask(
+        served.client(),
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            target,
+            String::from(stream_text),
+            String::from("en"),
+        )),
+        "eof stream submit",
+    )
+    .await
+    .expect("the stream submit must be answered while the intake precedes the provider call");
+    assert!(
+        matches!(
+            intake,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+        ),
+        "the stream submit must be accepted, got {intake:?}"
+    );
+    let open = ask_stream(served.client())
+        .await
+        .expect("the stream must open");
+    assert!(
+        matches!(open, WirePayload::TextStreamOpen(_)),
+        "got {open:?}"
+    );
+    let first = ask_stream(served.client())
+        .await
+        .expect("the first streamed frame must arrive");
+    assert!(
+        matches!(first, WirePayload::TextStreamFrame(_)),
+        "got {first:?}"
+    );
+    assert_eq!(
+        transport.streaming_count(),
+        1,
+        "the provider must be inside the stream"
+    );
+
+    // EOF mid-stream: `wait_presence` is bounded well below the provider's
+    // 30-second sleep, so reaching `no_active` here proves the connection
+    // stopped being current without waiting for the handler.
+    drop(served.client.take());
+    let (_, fallen_back) = wait_presence(dir.path(), "no_active").await;
+    assert_eq!(
+        presence_row(dir.path()),
+        Some((String::from("no_active"), fallen_back)),
+        "the closed connection must fall back promptly"
+    );
+    assert_eq!(
+        transport.streaming_count(),
+        1,
+        "currentness must drop while the handler is still inside the stream"
+    );
+
+    // Host shutdown sends the cooperative abort; the provider is never
+    // released by the test.
+    served.request_graceful_stop();
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "the cooperative abort must bound the shutdown"
+    );
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+
+    let db = dir.path().join("app.db");
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM usage_fact WHERE source = 'unknown'"
+        ),
+        1,
+        "the aborted stream attempt keeps its unknown usage fact"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM history_message WHERE role = 'companion'"
+        ),
+        1,
+        "only the completed summon commits a reply"
+    );
+    assert_eq!(
+        served.canonical_remainder(sentinel).await,
+        0,
+        "the streamed reply must never commit"
+    );
+}
+
+/// Moves only the clock forward in small steps so timers fire at their
+/// boundaries while every socket operation stays on the real clock.
+async fn advance_clock_in_steps(span: Duration) {
+    let mut left = span;
+    while left > Duration::ZERO {
+        let take = Duration::from_secs(5).min(left);
+        tokio::time::advance(take).await;
+        left -= take;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_receipt_expires_while_the_business_handler_is_parked() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let park_text = "park past the receipt deadline";
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner(park_text),
+            Call::text(format!("REPLY-DONE {park_text}")),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let (round, stream, _reply) = send_round(served.client(), "summon for the receipt")
+        .await
+        .expect("the summon round must complete");
+    wait_presence(&served.dir, "present").await;
+    confirm_round(served.client(), &round, stream).await;
+
+    // A receipt is issued on this connection and never acknowledged.
+    let stale = fetch_summary(served.client(), "the unacked receipt")
+        .await
+        .expect("the subscription must answer");
+    assert!(
+        !stale.receipt.0.is_empty(),
+        "the fixture must issue a receipt"
+    );
+    assert_eq!(served.handle().receipts_held_for_tests(), 1);
+
+    transport.block_input(on_latest_owner(park_text));
+    let companion = served.client().companion_ref();
+    let target = served.client().round_target();
+    let intake = ask(
+        served.client(),
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            target,
+            String::from(park_text),
+            String::from("en"),
+        )),
+        "park submit",
+    )
+    .await
+    .expect("the park submit must be answered while the intake precedes the provider call");
+    assert!(
+        matches!(
+            intake,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+        ),
+        "the park submit must be accepted, got {intake:?}"
+    );
+    transport.wait_parked(1).await;
+    assert_eq!(
+        served.handle().receipts_held_for_tests(),
+        1,
+        "the receipt is still held when the park begins"
+    );
+
+    // The deadline is 30 seconds from the receipt's commit on the monotonic
+    // clock. Only the clock moves here; the handler stays parked throughout,
+    // and the receipt's state transition never waits for it.
+    tokio::time::pause();
+    advance_clock_in_steps(Duration::from_secs(25)).await;
+    assert_eq!(
+        transport.parked_count(),
+        1,
+        "the handler must still be parked before the deadline"
+    );
+    assert_eq!(
+        served.handle().receipts_held_for_tests(),
+        1,
+        "the receipt is still held before its 30-second deadline"
+    );
+    advance_clock_in_steps(Duration::from_secs(10)).await;
+    tokio::time::resume();
+    assert_eq!(
+        transport.parked_count(),
+        1,
+        "the handler must still be parked at the deadline"
+    );
+    assert_eq!(
+        served.handle().receipts_held_for_tests(),
+        0,
+        "the receipt must expire at its deadline while the business handler is parked"
+    );
+
+    transport.release_blocked();
+    // The late acknowledgement of the expired receipt is stale — it is never
+    // adopted as the presentation of anything current.
+    let acked = ack_summary(served.client(), &stale)
+        .await
+        .expect("the late ack must answer");
+    assert_eq!(
+        acked,
+        UndeliveredAckOutcome::StalePresentation,
+        "an ack after the receipt deadline must be stale"
+    );
+
+    // After the business work completes, the subsequent undelivered page
+    // becomes deliverable in order: the reply row exists only once the
+    // parked round has committed, and the page acknowledges without
+    // replaying the parked provider call.
+    let inputs_before = transport
+        .input_texts()
+        .iter()
+        .filter(|input| input.contains(park_text))
+        .count();
+    assert_eq!(inputs_before, 1, "the parked call ran exactly once");
+    let next = wait_for_summary_with(served.client(), "REPLY-DONE").await;
+    assert!(
+        next.items
+            .iter()
+            .any(|item| item.excerpt.contains("REPLY-DONE")),
+        "the page after the expired receipt must carry the completed round: {next:?}"
+    );
+    assert_eq!(
+        transport
+            .input_texts()
+            .iter()
+            .filter(|input| input.contains(park_text))
+            .count(),
+        1,
+        "delivering the subsequent page must not replay the parked work"
+    );
+    assert_eq!(transport.parked_count(), 0, "the handler is done");
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn a_stalled_peer_write_is_bounded_and_the_serving_task_exits() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+
+    // A tiny receive window on this raw client lets the Host's pong writes
+    // fill the TCP path quickly; the pending pairing keeps the connection in
+    // the owner-confirmation window so only the write wait may close it.
+    let mut client = WssClient::connect_sized(dir.path(), Some(2048), Some(1024 * 1024))
+        .await
+        .expect("a same-machine client with the current token must upgrade");
+    let mut pairing = WireFrame {
+        envelope: crafted_envelope("PairingRequest"),
+        payload: WirePayload::PairingRequest(PairingRequest {
+            device_descriptor: String::from("stalled writer"),
+        }),
+    };
+    pairing.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
+    client.send_wire(&pairing).await;
+    let reply = client.recv_wire().await;
+    assert!(
+        matches!(
+            reply.payload,
+            WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation { .. })
+        ),
+        "the pairing must pend before the stall, got {}",
+        reply.payload.message_type()
+    );
+
+    use futures_util::StreamExt as _;
+    let (mut sink, mut reader) = client.socket.split();
+    let pinger = tokio::spawn(async move {
+        use futures_util::SinkExt as _;
+        let payload = vec![0x5a_u8; 120];
+        for _ in 0..20_000 {
+            if sink
+                .send(Message::Ping(payload.clone().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // The client never reads: the Host's pong write parks on the socket, and
+    // the write wait bound must still end the connection instead of owning
+    // the serving task forever.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(32)).await;
+    tokio::time::resume();
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match reader.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the stalled write must be bounded by the write wait and close the connection"
+    );
+    pinger.abort();
+
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn the_host_answers_a_transport_ping_with_a_pong_and_closes_on_close() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let mut client = raw_dial(dir.path()).await;
+    use futures_util::{SinkExt as _, StreamExt as _};
+
+    let expected = vec![0x37_u8; 64];
+    client
+        .socket
+        .send(Message::Ping(expected.clone().into()))
+        .await
+        .expect("the ping must send");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match client.socket.next().await {
+                Some(Ok(Message::Pong(payload))) if payload.as_ref() == expected.as_slice() => {
+                    return;
+                }
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => {
+                    panic!("the ping must be answered before the connection ends")
+                }
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await
+    .expect("the Host must answer a transport ping with a matching pong");
+
+    client
+        .socket
+        .send(Message::Close(None))
+        .await
+        .expect("close");
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match client.socket.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "a Close frame must end the connection");
+
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn a_fragmented_message_over_the_limit_closes_the_connection() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let host = raw_dial(dir.path()).await;
+    host.send_fragmented_oversize_and_expect_close().await;
     stop.send_replace(true);
     let joined = tokio::time::timeout(Duration::from_secs(30), server)
         .await

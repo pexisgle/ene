@@ -329,6 +329,10 @@ impl DeltaSink for ControlHoldingSink<'_> {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the turn's repositories, sink, currentness premise, and cooperative stop are each owned by a different boundary; a parameter struct would only restate the same wiring"
+)]
 pub async fn finish_turn(
     turn: Box<DialogueTurn>,
     history: &impl HistoryRepository,
@@ -337,6 +341,7 @@ pub async fn finish_turn(
     task_control: &impl DialogueTaskControlPort,
     sink: &mut (dyn ene_inference::DeltaSink + Send),
     is_current: &(dyn Fn() -> bool + Send + Sync),
+    abort: Option<&ene_inference::DispatchAbort>,
 ) -> DialogueOutcome {
     let DialogueTurn {
         input,
@@ -350,7 +355,7 @@ pub async fn finish_turn(
     };
     let mut holder = ControlHoldingSink::new(sink);
     match inference
-        .dispatch(authorized, prompt.into_prompt(), &mut holder, None)
+        .dispatch(authorized, prompt.into_prompt(), &mut holder, abort)
         .await
     {
         Ok(InferenceDispatchOutcome::Completed {
@@ -624,13 +629,15 @@ pub async fn propose_experience(
     learning: &impl LearningRepository,
     inference: &impl InferenceExecutor,
     scrubber: &impl SecretScrubber,
+    abort: Option<&ene_inference::DispatchAbort>,
 ) -> Result<FormationDecision, LearningTechnicalError> {
-    let adapter = LearningInferenceAdapter { inference };
+    let adapter = LearningInferenceAdapter { inference, abort };
     ene_learning::form_experience(learning, &adapter, scrubber, candidate).await
 }
 
 struct LearningInferenceAdapter<'a, I> {
     inference: &'a I,
+    abort: Option<&'a ene_inference::DispatchAbort>,
 }
 
 impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInferenceAdapter<'_, I> {
@@ -647,7 +654,7 @@ impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInference
             Ok(Admission::Admitted(authorized)) => {
                 match self
                     .inference
-                    .dispatch(*authorized, prompt, &mut DiscardSink, None)
+                    .dispatch(*authorized, prompt, &mut DiscardSink, self.abort)
                     .await
                 {
                     Ok(InferenceDispatchOutcome::Completed {

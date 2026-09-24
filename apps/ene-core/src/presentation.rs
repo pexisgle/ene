@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use ene_api::codec::WireFrame;
 use ene_api::v1::command::CommandReplayRejectWire;
@@ -88,6 +90,8 @@ struct Receipt {
     round_wire: String,
     generation: u64,
     selected: Vec<UndeliveredId>,
+    // Receipts expire on the tokio clock: the connection loop sleeps this
+    // deadline on that clock, so expiry and the wakeup can never disagree.
     expires_at: Instant,
 }
 
@@ -2091,6 +2095,11 @@ impl HostHandle {
         for key in receipts {
             state.remove_receipt(&key);
         }
+    }
+
+    #[doc(hidden)]
+    pub fn receipts_held_for_tests(&self) -> usize {
+        crate::lock_unpoison(&self.presentations).receipts.len()
     }
 
     pub(crate) fn expire_due_receipts(&self, connection: &ConnectionWireId) {
