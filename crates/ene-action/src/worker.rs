@@ -1,6 +1,14 @@
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+pub const WORKSPACE_EFFECT_PROTOCOL_GENERATION: u32 = 1;
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceEffectHandshake {
+    pub generation: u32,
+}
 
 #[cfg(any(test, feature = "test-support"))]
 use crate::WorkspaceEffectStagingPause;
@@ -138,13 +146,20 @@ fn decode_output(
 
 #[doc(hidden)]
 pub fn run_workspace_effect_worker() {
-    use std::io::{Read, Write};
+    let stdin = std::io::stdin();
+    let mut input = BufReader::new(stdin.lock());
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    if negotiate_handshake(&mut input, &mut output).is_none() {
+        std::process::exit(6);
+    }
+    drop(output);
 
-    let mut input = Vec::new();
-    if std::io::stdin().read_to_end(&mut input).is_err() {
+    let mut request = Vec::new();
+    if input.read_to_end(&mut request).is_err() {
         std::process::exit(2);
     }
-    let request = match serde_json::from_slice(&input) {
+    let request = match serde_json::from_slice(&request) {
         Ok(request) => request,
         Err(_) => std::process::exit(2),
     };
@@ -159,5 +174,51 @@ pub fn run_workspace_effect_worker() {
     let mut stdout = std::io::stdout().lock();
     if stdout.write_all(&encoded).is_err() || stdout.flush().is_err() {
         std::process::exit(5);
+    }
+}
+
+fn negotiate_handshake(input: &mut impl BufRead, output: &mut impl Write) -> Option<u32> {
+    let mut line = String::new();
+    if input.read_line(&mut line).is_err() {
+        return None;
+    }
+    let handshake = serde_json::from_str::<WorkspaceEffectHandshake>(line.trim()).ok()?;
+    let response = serde_json::to_string(&WorkspaceEffectHandshake {
+        generation: WORKSPACE_EFFECT_PROTOCOL_GENERATION,
+    })
+    .ok()?;
+    if output
+        .write_all(response.as_bytes())
+        .and_then(|()| output.write_all(b"\n"))
+        .and_then(|()| output.flush())
+        .is_err()
+    {
+        return None;
+    }
+    (handshake.generation == WORKSPACE_EFFECT_PROTOCOL_GENERATION)
+        .then_some(WORKSPACE_EFFECT_PROTOCOL_GENERATION)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        WORKSPACE_EFFECT_PROTOCOL_GENERATION, WorkspaceEffectHandshake, negotiate_handshake,
+    };
+
+    #[test]
+    fn mismatch_response_reports_the_worker_generation() {
+        let request = format!(
+            "{{\"generation\":{}}}\n",
+            WORKSPACE_EFFECT_PROTOCOL_GENERATION + 1
+        );
+        let mut input = std::io::BufReader::new(request.as_bytes());
+        let mut output = Vec::new();
+
+        assert_eq!(negotiate_handshake(&mut input, &mut output), None);
+
+        let response: WorkspaceEffectHandshake =
+            serde_json::from_slice(output.strip_suffix(b"\n").expect("handshake newline"))
+                .expect("handshake response");
+        assert_eq!(response.generation, WORKSPACE_EFFECT_PROTOCOL_GENERATION);
     }
 }

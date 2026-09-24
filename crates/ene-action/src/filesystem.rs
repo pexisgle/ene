@@ -167,6 +167,52 @@ impl WorkspaceRoot {
         }
     }
 
+    pub fn validate_staging_directory(&self, path: &Path) -> Result<(), String> {
+        if !path.is_absolute() || !path.starts_with(&self.root) {
+            return Err(String::from("staging path is outside the workspace"));
+        }
+        if staging_path_has_reparse(&self.root, path) {
+            return Err(String::from("staging path contains a reparse point"));
+        }
+        let canonical = fs::canonicalize(path)
+            .map_err(|error| format!("staging directory is unavailable: {error}"))?;
+        if canonical != path || !canonical.starts_with(&self.root) {
+            return Err(String::from(
+                "staging path is not the expected workspace path",
+            ));
+        }
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("staging directory metadata is unavailable: {error}"))?;
+        if metadata_is_reparse(&metadata) || !metadata.is_dir() {
+            return Err(String::from("staging path is not a real directory"));
+        }
+        let target_metadata = fs::metadata(&canonical)
+            .map_err(|error| format!("staging directory target is unavailable: {error}"))?;
+        if !self.boundary_holds(&canonical, &target_metadata) {
+            return Err(String::from(
+                "staging path crosses the workspace filesystem boundary",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_staging_tree(&self, path: &Path) -> Result<(), String> {
+        self.validate_staging_directory(path)?;
+        #[cfg(target_os = "linux")]
+        {
+            let mounts = linux_mount_points()
+                .map_err(|error| format!("staging mount boundary is unavailable: {error}"))?;
+            if mounts.iter().any(|mount| mount.starts_with(path)) {
+                return Err(String::from("staging tree crosses a Linux mount boundary"));
+            }
+        }
+        #[cfg(windows)]
+        if staging_tree_contains_reparse(path)? {
+            return Err(String::from("staging tree contains a reparse point"));
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub(crate) fn execute(
         &self,
@@ -284,8 +330,9 @@ impl WorkspaceRoot {
         };
         let temporary_directory = options.staging_directory.as_deref().unwrap_or(parent);
         if options.staging_directory.is_some()
-            && (!temporary_directory.is_absolute()
-                || fs::create_dir_all(temporary_directory).is_err())
+            && self
+                .validate_staging_directory(temporary_directory)
+                .is_err()
         {
             return refused();
         }
@@ -298,6 +345,13 @@ impl WorkspaceRoot {
             if file.write_all(bytes).is_err() || file.sync_all().is_err() {
                 return refused();
             }
+        }
+        if options.staging_directory.is_some()
+            && self
+                .validate_staging_directory(temporary_directory)
+                .is_err()
+        {
+            return refused();
         }
         #[cfg(any(test, feature = "test-support"))]
         if let Some(pause) = options.pause_after_staging.as_ref()
@@ -425,6 +479,69 @@ impl WorkspaceRoot {
         }
         Some(serial)
     }
+}
+
+fn staging_path_has_reparse(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    let mut current = root.to_path_buf();
+    if fs::symlink_metadata(&current)
+        .map(|metadata| metadata_is_reparse(&metadata))
+        .unwrap_or(true)
+    {
+        return true;
+    }
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if fs::symlink_metadata(&current)
+            .map(|metadata| metadata_is_reparse(&metadata))
+            .unwrap_or(true)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn staging_tree_contains_reparse(path: &Path) -> Result<bool, String> {
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(candidate) = pending.pop() {
+        let metadata = fs::symlink_metadata(&candidate)
+            .map_err(|error| format!("staging tree metadata is unavailable: {error}"))?;
+        if metadata_is_reparse(&metadata) {
+            return Ok(true);
+        }
+        if metadata.is_dir() {
+            let entries = fs::read_dir(&candidate)
+                .map_err(|error| format!("staging tree is unavailable: {error}"))?;
+            for entry in entries {
+                pending.push(
+                    entry
+                        .map_err(|error| format!("staging tree entry is unavailable: {error}"))?
+                        .path(),
+                );
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(target_os = "linux")]

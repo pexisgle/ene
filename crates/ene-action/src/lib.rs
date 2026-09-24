@@ -20,6 +20,7 @@ pub use run::{
     start_workspace_action,
 };
 pub use worker::{
-    WorkspaceEffectRequest, WorkspaceEffectResponse, WorkspaceEffectWorkerError,
-    execute_workspace_effect, run_workspace_effect_worker,
+    WORKSPACE_EFFECT_PROTOCOL_GENERATION, WorkspaceEffectHandshake, WorkspaceEffectRequest,
+    WorkspaceEffectResponse, WorkspaceEffectWorkerError, execute_workspace_effect,
+    run_workspace_effect_worker,
 };

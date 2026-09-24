@@ -48,6 +48,10 @@ jobs:
         run: cargo build --locked --workspace --bins
       - name: Run tests
         run: cargo nextest run --locked --workspace --no-fail-fast
+      - name: Run Host test-support regressions
+        run: |
+          cargo test --locked -p ene-core --features test-support --lib action::supervisor_tests
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e
       # nextest does not run doctests.
       - name: Run doctests
         run: cargo test --locked --workspace --doc
@@ -63,3 +67,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - name: Run tests
         run: cargo test --locked --workspace --no-fail-fast
+      - name: Run Host test-support regressions
+        run: |
+          cargo test --locked -p ene-core --features test-support --lib action::supervisor_tests
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e

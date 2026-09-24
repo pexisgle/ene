@@ -80,10 +80,33 @@ const ROTATED_SECRET: &str = "sk-stage6-rotated-marker-4477";
 #[test]
 #[ignore = "subprocess fixture for Task Agent shutdown escalation"]
 fn uncooperative_task_effect_worker_fixture() {
+    use std::io::{Read, Write};
+
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .expect("protocol handshake");
+    let handshake = serde_json::from_str::<serde_json::Value>(&input).expect("handshake json");
+    let generation = std::env::var("ENE_TEST_WORKER_GENERATION")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_else(|| handshake["generation"].as_u64().expect("generation"));
+    let response = serde_json::json!({ "generation": generation });
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{response}").expect("handshake response");
+    stdout.flush().expect("handshake flush");
+    if generation != handshake["generation"].as_u64().expect("generation") {
+        return;
+    }
+
     let entered = std::env::var_os("ENE_TEST_EFFECT_ENTERED").expect("entered path");
     let release = std::env::var_os("ENE_TEST_EFFECT_RELEASE").expect("release path");
     let mutation = std::env::var_os("ENE_TEST_EFFECT_MUTATION").expect("mutation path");
     std::fs::write(entered, b"entered").unwrap();
+    let mut request = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut request)
+        .expect("effect request");
     while !std::path::Path::new(&release).exists() {
         std::thread::yield_now();
     }
@@ -6909,6 +6932,144 @@ async fn missing_worker_fails_closed_before_action_claim() {
     served.stop().await;
 }
 
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn stale_worker_protocol_is_rejected_before_au5_and_staging() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"stale-worker.md","content":"blocked"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served
+        .handle()
+        .install_uncooperative_task_effect_runtime_for_tests(
+            std::env::current_exe().unwrap(),
+            vec![
+                String::from("--ignored"),
+                String::from("--exact"),
+                String::from("uncooperative_task_effect_worker_fixture"),
+                String::from("--nocapture"),
+            ],
+            vec![(
+                String::from("ENE_TEST_WORKER_GENERATION"),
+                String::from("0"),
+            )],
+        );
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while served.handle().running_task_executions_for_tests() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the stale worker must fail before the action claim");
+    assert_eq!(
+        db_scalar(
+            &temp.path().join("app.db"),
+            "SELECT COUNT(*) FROM action_attempt",
+        ),
+        0,
+    );
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/stale-worker.md")
+            .exists()
+    );
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/.ene-action-staging")
+            .exists()
+    );
+    served.stop().await;
+}
+
+#[cfg(all(feature = "test-support", windows))]
+#[tokio::test]
+async fn windows_junction_staging_root_is_rejected_without_deleting_its_target() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"junction.md","content":"blocked"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    let workspace = temp.path().join("shutdown-task-workspace");
+    let outside = temp.path().join("junction-target");
+    std::fs::create_dir(&outside).unwrap();
+    let sentinel = outside.join("keep.txt");
+    std::fs::write(&sentinel, b"keep").unwrap();
+    let junction = workspace.join(".ene-action-staging");
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&outside)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the Windows junction fixture must be created"
+    );
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while served.handle().running_task_executions_for_tests() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reparse staging root must fail the Task Agent promptly");
+    assert!(!workspace.join("junction.md").exists());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    assert!(std::fs::symlink_metadata(&junction).is_ok());
+    served.stop().await;
+}
+
 #[tokio::test]
 async fn graceful_shutdown_aborts_a_parked_task_agent_preserves_unknown_and_does_not_replay() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -7096,8 +7257,25 @@ async fn host_shutdown_kills_reaps_and_joins_uncooperative_task_effect_before_re
         .set_task_agent_quiesce_timeout_for_tests(Duration::from_millis(100));
     propose_shutdown_task(&mut served).await;
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !entered.exists() {
-            tokio::task::yield_now().await;
+        tokio::select! {
+            () = async {
+                while !entered.exists() {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+            () = async {
+                while served.handle().running_task_executions_for_tests() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            } => {
+                let attempts = db_scalar(
+                    &temp.path().join("app.db"),
+                    "SELECT COUNT(*) FROM action_attempt",
+                );
+                panic!(
+                    "the Task Agent ended before the effect barrier with {attempts} attempt(s)"
+                );
+            }
         }
     })
     .await
