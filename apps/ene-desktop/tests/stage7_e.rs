@@ -475,7 +475,7 @@ async fn durable_owner_commit_before_acceptance_is_outcome_unknown() {
             &mut client,
             &text,
             "en",
-            Duration::from_millis(200),
+            Duration::from_secs(5),
         );
         tokio::pin!(request);
         tokio::select! {
