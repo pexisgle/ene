@@ -1,47 +1,44 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+#[cfg(unix)]
+use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
+
+use futures_util::{SinkExt as _, StreamExt as _};
+use tokio_tungstenite::tungstenite::Message;
 
 use ene_inference::ProviderTransport;
 
 use crate::serve::{CoreError, HostHandle, outgoing_fact, outgoing_frame_pre_auth};
+use crate::wss::{self, HostSink, HostStream, HostWebSocket};
 
-const SOCKET_NAME: &str = "ene.sock";
-
-#[cfg(unix)]
-const SINGLETON_PROBE_MILLIS: u64 = 200;
-
-#[cfg(any(unix, windows))]
 const DELETION_DRIVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
 
-#[must_use]
-pub fn socket_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(SOCKET_NAME)
-}
-
-#[cfg(any(unix, windows))]
-use ene_api::codec::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
-#[cfg(any(unix, windows))]
+use crate::serve::LiveInput;
+use ene_api::codec::{DecodedFrame, WireFrame, decode_frame, encode_frame};
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::handshake::NegotiatedConnection;
-#[cfg(any(unix, windows))]
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageId};
-#[cfg(unix)]
-use tokio::net::{UnixListener, UnixStream};
 
-#[cfg(any(unix, windows))]
-use crate::serve::LiveInput;
-
-#[cfg(any(unix, windows))]
 const SEEN_MESSAGE_CAP: usize = 128;
 
-#[cfg(any(unix, windows))]
 #[derive(Debug, Clone)]
 pub(crate) enum LiveDecision {
     Ready(LiveInput),
     Duplicate,
     Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportClass {
+    SameMachine,
+    #[expect(
+        dead_code,
+        reason = "the explicit remote listener arrives with Stage 14; the local listener admits SameMachine only"
+    )]
+    Remote,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +87,10 @@ pub(crate) enum InstallOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConnectionRecord {
+    class: TransportClass,
     phase: ConnectionPhase,
+    preauth_deadline: tokio::time::Instant,
+    awaiting_owner_confirmation: bool,
     paired_device: Option<String>,
     incarnation: Option<ClientIncarnationId>,
     negotiated: Option<NegotiatedConnection>,
@@ -122,13 +122,15 @@ impl ConnectionTableInner {
 }
 
 impl ConnectionTable {
-    #[cfg(any(unix, windows))]
-    pub(crate) fn note_accept(&self) -> ConnectionWireId {
+    pub(crate) fn note_accept(&self, class: TransportClass) -> ConnectionWireId {
         let id = ConnectionWireId(uuid::Uuid::new_v4());
         crate::lock_unpoison(&self.inner).records.insert(
             id,
             ConnectionRecord {
+                class,
                 phase: ConnectionPhase::Accepted,
+                preauth_deadline: tokio::time::Instant::now() + wss::AUTH_DEADLINE,
+                awaiting_owner_confirmation: false,
                 paired_device: None,
                 incarnation: None,
                 negotiated: None,
@@ -149,7 +151,36 @@ impl ConnectionTable {
         }
         record.paired_device = Some(device_wire.to_string());
         record.phase = ConnectionPhase::Paired;
+        // The owner already confirmed; only the machine-controlled
+        // capability/auth exchange may still stall.
+        record.preauth_deadline = tokio::time::Instant::now() + wss::AUTH_DEADLINE;
         true
+    }
+
+    /// The first pairing request on this connection switches the pre-auth
+    /// bound from a machine handshake timeout to the owner-confirmation
+    /// limit (IPC §10.2); later resends of the same pending never extend it.
+    pub(crate) fn note_awaiting_owner_confirmation(&self, id: &ConnectionWireId) {
+        let mut table = crate::lock_unpoison(&self.inner);
+        let Some(record) = table.records.get_mut(id) else {
+            return;
+        };
+        if record.awaiting_owner_confirmation {
+            return;
+        }
+        record.awaiting_owner_confirmation = true;
+        record.preauth_deadline = tokio::time::Instant::now() + wss::OWNER_CONFIRMATION_LIMIT;
+    }
+
+    pub(crate) fn preauth_expired(&self, id: &ConnectionWireId) -> bool {
+        let table = crate::lock_unpoison(&self.inner);
+        let Some(record) = table.records.get(id) else {
+            return false;
+        };
+        matches!(
+            record.phase,
+            ConnectionPhase::Accepted | ConnectionPhase::Paired | ConnectionPhase::Challenged
+        ) && tokio::time::Instant::now() > record.preauth_deadline
     }
 
     pub(crate) fn note_challenged(
@@ -247,14 +278,13 @@ impl ConnectionTable {
         }
     }
 
-    #[cfg(any(unix, windows))]
     pub(crate) fn live_for(
         self: &Arc<Self>,
         id: &ConnectionWireId,
         envelope: &WireEnvelope,
     ) -> LiveDecision {
         let mut table = crate::lock_unpoison(&self.inner);
-        let (device, phase, negotiated) = {
+        let (class, device, phase, negotiated) = {
             let Some(record) = table.records.get_mut(id) else {
                 return LiveDecision::Invalid;
             };
@@ -272,6 +302,7 @@ impl ConnectionTable {
                 Some(_) => {}
             }
             (
+                record.class,
                 record.paired_device.clone(),
                 record.phase,
                 record.negotiated.clone(),
@@ -294,7 +325,7 @@ impl ConnectionTable {
         LiveDecision::Ready(LiveInput {
             client_ref,
             connection_live: true,
-            peer_uid_ok: true,
+            peer_uid_ok: class == TransportClass::SameMachine,
             paired_device: device,
             connection_known: true,
             authed,
@@ -313,7 +344,6 @@ impl ConnectionTable {
         table.current_authenticated(id, record.phase, record.paired_device.as_deref())
     }
 
-    #[cfg(any(unix, windows))]
     pub(crate) fn note_closed(
         &self,
         id: &ConnectionWireId,
@@ -374,7 +404,6 @@ impl ConnectionTable {
         Some(commit())
     }
 
-    #[cfg(any(unix, windows))]
     pub(crate) fn snapshot(self: &Arc<Self>, id: &ConnectionWireId) -> Option<LiveInput> {
         let table = crate::lock_unpoison(&self.inner);
         let record = table.records.get(id)?;
@@ -390,7 +419,7 @@ impl ConnectionTable {
                     .unwrap_or_else(|| String::from("unpaired"))
             }),
             connection_live: true,
-            peer_uid_ok: true,
+            peer_uid_ok: record.class == TransportClass::SameMachine,
             paired_device: device,
             connection_known: true,
             authed,
@@ -401,6 +430,12 @@ impl ConnectionTable {
         })
     }
 }
+
+#[cfg(unix)]
+const SINGLETON_PROBE_MILLIS: u64 = 200;
+
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(unix)]
 pub(crate) async fn bind_singleton(socket: &Path) -> Result<UnixListener, CoreError> {
@@ -437,12 +472,10 @@ async fn probe_and_rebind(socket: &Path) -> Result<UnixListener, CoreError> {
 }
 
 #[must_use = "dropping this guard aborts the owned task"]
-#[cfg(any(unix, windows))]
 struct AbortOnDrop {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
-#[cfg(any(unix, windows))]
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
@@ -451,7 +484,6 @@ impl Drop for AbortOnDrop {
     }
 }
 
-#[cfg(any(unix, windows))]
 impl AbortOnDrop {
     async fn join(mut self) -> Result<(), tokio::task::JoinError> {
         let Some(task) = self.task.as_mut() else {
@@ -463,10 +495,8 @@ impl AbortOnDrop {
     }
 }
 
-#[cfg(any(unix, windows))]
 struct CatchUnwind<F>(F);
 
-#[cfg(any(unix, windows))]
 impl<F: std::future::Future> std::future::Future for CatchUnwind<F> {
     type Output = Result<F::Output, Box<dyn std::any::Any + Send>>;
 
@@ -485,13 +515,11 @@ impl<F: std::future::Future> std::future::Future for CatchUnwind<F> {
     }
 }
 
-#[cfg(any(unix, windows))]
 struct DeletionDriver {
     stop: tokio::sync::watch::Sender<bool>,
     task: AbortOnDrop,
 }
 
-#[cfg(any(unix, windows))]
 impl DeletionDriver {
     async fn stop_and_join(self) -> Result<(), CoreError> {
         self.stop.send_replace(true);
@@ -502,29 +530,24 @@ impl DeletionDriver {
     }
 }
 
-#[cfg(any(unix, windows))]
 pub(crate) async fn wait_for_shutdown(shutdown: &mut tokio::sync::watch::Receiver<bool>) {
     drop(shutdown.wait_for(|stop| *stop).await);
 }
 
-#[cfg(any(unix, windows))]
 struct ServingHandlers {
     stop: tokio::sync::watch::Sender<bool>,
     tasks: tokio::task::JoinSet<()>,
     failure: Option<CoreError>,
 }
 
-#[cfg(any(unix, windows))]
 struct TaskAgentOwner<T>(Arc<crate::task_run::BackgroundTaskAgent<T>>);
 
-#[cfg(any(unix, windows))]
 impl<T> Drop for TaskAgentOwner<T> {
     fn drop(&mut self) {
         self.0.abort();
     }
 }
 
-#[cfg(any(unix, windows))]
 impl ServingHandlers {
     fn new() -> Self {
         let (stop, _) = tokio::sync::watch::channel(false);
@@ -553,12 +576,10 @@ impl ServingHandlers {
 }
 
 #[must_use = "the driver liveness ends when this guard is dropped"]
-#[cfg(any(unix, windows))]
 struct DeletionDriverLive {
     handle: Arc<HostHandle>,
 }
 
-#[cfg(any(unix, windows))]
 impl DeletionDriverLive {
     fn enter(handle: Arc<HostHandle>) -> Self {
         handle.begin_deletion_driver();
@@ -566,7 +587,6 @@ impl DeletionDriverLive {
     }
 }
 
-#[cfg(any(unix, windows))]
 impl Drop for DeletionDriverLive {
     fn drop(&mut self) {
         self.handle.end_deletion_driver();
@@ -574,7 +594,6 @@ impl Drop for DeletionDriverLive {
 }
 
 #[must_use = "the driver is cancelled when this guard is dropped; bind it for the listener lifetime"]
-#[cfg(any(unix, windows))]
 fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) -> DeletionDriver {
     let (stop, mut shutdown) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(async move {
@@ -611,7 +630,6 @@ fn spawn_targeted_deletion_driver(handle: Arc<HostHandle>) -> DeletionDriver {
     }
 }
 
-#[cfg(any(unix, windows))]
 struct ServingComposition<T> {
     launcher: Arc<crate::task_run::BackgroundTaskAgent<T>>,
     table: Arc<ConnectionTable>,
@@ -620,7 +638,6 @@ struct ServingComposition<T> {
     _task_owner: TaskAgentOwner<T>,
 }
 
-#[cfg(any(unix, windows))]
 impl<T> ServingComposition<T>
 where
     T: ProviderTransport + Send + Sync + 'static,
@@ -661,7 +678,6 @@ where
     }
 }
 
-#[cfg(unix)]
 pub async fn run<T>(
     data_dir: PathBuf,
     handle: Arc<HostHandle>,
@@ -674,7 +690,6 @@ where
     run_until_shutdown(data_dir, handle, transport, shutdown).await
 }
 
-#[cfg(unix)]
 pub async fn run_until_shutdown<T>(
     data_dir: PathBuf,
     handle: Arc<HostHandle>,
@@ -684,14 +699,15 @@ pub async fn run_until_shutdown<T>(
 where
     T: ProviderTransport + Send + Sync + 'static,
 {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let socket = socket_path(&data_dir);
-    let listener = bind_singleton(&socket).await?;
-    let owner = std::fs::metadata(&socket)
-        .map_err(|error| CoreError::Bind(format!("read socket metadata: {error}")))?
-        .uid();
+    let wss = wss::WssListener::prepare(&data_dir, &handle.cred_store).await?;
+    #[cfg(unix)]
     let control = crate::host_control::ControlListener::bind(&data_dir).await?;
+    #[cfg(windows)]
+    let control = crate::host_control::ControlListener::bind(&data_dir)?;
+    #[cfg(unix)]
+    let control = control;
+    #[cfg(windows)]
+    let mut control = control;
     let mut composition = ServingComposition::start(&handle, &transport);
     let table = Arc::clone(&composition.table);
     let result = loop {
@@ -705,26 +721,30 @@ where
                     break Ok(());
                 }
             }
-            accepted = listener.accept() => {
-                let (stream, _) = match accepted {
-                    Ok(accepted) => accepted,
-                    Err(error) => break Err(CoreError::Bind(format!("accept: {error}"))),
-                };
-                let peer_ok = match stream.peer_cred() {
-                    Ok(cred) => cred.uid() == owner,
-                    Err(_) => false,
-                };
-                if !peer_ok {
-                    continue;
+            accepted = wss.accept() => {
+                match accepted {
+                    Err(error) => break Err(error),
+                    Ok(None) => {}
+                    Ok(Some(pending)) => {
+                        let mut stop = composition.handlers.stop.subscribe();
+                        let handle = Arc::clone(&handle);
+                        let transport = Arc::clone(&transport);
+                        let table = Arc::clone(&table);
+                        composition.handlers.tasks.spawn(async move {
+                            let upgraded = tokio::select! {
+                                biased;
+                                () = wait_for_shutdown(&mut stop) => None,
+                                upgraded = pending.finish() => upgraded,
+                            };
+                            let Some((socket, permit)) = upgraded else {
+                                return;
+                            };
+                            let connection = table.note_accept(TransportClass::SameMachine);
+                            serve_connection(socket, connection, handle, transport, table, stop, permit)
+                                .await;
+                        });
+                    }
                 }
-                let connection = table.note_accept();
-                let handle = Arc::clone(&handle);
-                let transport = Arc::clone(&transport);
-                let table = Arc::clone(&table);
-                let stop = composition.handlers.stop.subscribe();
-                composition.handlers.tasks.spawn(async move {
-                    serve_connection(stream, connection, handle, transport, table, stop).await;
-                });
             }
             accepted = control.accept() => {
                 match accepted {
@@ -743,84 +763,97 @@ where
             }
         }
     };
-    composition.quiesce(&handle, result).await
+    let runtime_cleanup = wss::remove_runtime(&data_dir);
+    let quiesced = composition.quiesce(&handle, result).await;
+    runtime_cleanup.and(quiesced)
 }
 
-#[cfg(any(unix, windows))]
 use crate::serve::STREAM_BUFFER_FRAMES;
 
-#[cfg(any(unix, windows))]
 async fn write_response(
-    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+    sink: &mut HostSink,
     response: WireFrame,
     terminal: &mut bool,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> bool {
-    use tokio::io::AsyncWriteExt as _;
-
     if matches!(
         response.payload,
         WirePayload::DisconnectNotice(_) | WirePayload::IncompatibleProtocol(_)
     ) {
         *terminal = true;
     }
-    let Ok(body) = encode_frame(&response).map(zeroize::Zeroizing::new) else {
+    let Ok(body) = encode_frame(&response) else {
         return false;
     };
-    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(4 + body.len()));
-    bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    bytes.extend_from_slice(&body);
+    send_transport_message(sink, Message::Binary(body.into()), shutdown).await
+}
+
+async fn send_transport_message(
+    sink: &mut HostSink,
+    message: Message,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
     tokio::select! {
         biased;
         () = wait_for_shutdown(shutdown) => false,
-        result = stream.write_all(&bytes) => result.is_ok(),
+        result = sink.send(message) => result.is_ok(),
     }
 }
 
-#[cfg(any(unix, windows))]
-#[cfg(any(unix, windows))]
-async fn read_frames<R>(mut read: R, frames: tokio::sync::mpsc::Sender<DecodedFrame>)
-where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-    use tokio::io::AsyncReadExt as _;
-
-    let mut prefix = [0_u8; 4];
-    loop {
-        if read.read_exact(&mut prefix).await.is_err() {
-            break;
-        }
-        let claimed = u32::from_be_bytes(prefix) as usize;
-        if claimed > MAX_FRAME_BYTES {
-            break;
-        }
-        let mut body = vec![0_u8; claimed];
-        if read.read_exact(&mut body).await.is_err() {
-            break;
-        }
-        let Ok(frame) = decode_frame(&body) else {
-            break;
-        };
-        if frames.send(frame).await.is_err() {
-            break;
+async fn read_ws_frames(
+    mut stream: HostStream,
+    frames: tokio::sync::mpsc::Sender<DecodedFrame>,
+    peer_pings: tokio::sync::mpsc::Sender<Vec<u8>>,
+    last_activity: Arc<StdMutex<tokio::time::Instant>>,
+) {
+    while let Some(message) = stream.next().await {
+        match message {
+            Ok(Message::Binary(body)) => {
+                touch_activity(&last_activity);
+                let Ok(frame) = decode_frame(&body) else {
+                    break;
+                };
+                if frames.send(frame).await.is_err() {
+                    break;
+                }
+            }
+            Ok(Message::Ping(payload)) => {
+                touch_activity(&last_activity);
+                if peer_pings.send(payload.to_vec()).await.is_err() {
+                    break;
+                }
+            }
+            Ok(Message::Pong(_)) => touch_activity(&last_activity),
+            Ok(Message::Text(_)) | Ok(Message::Close(_)) | Ok(Message::Frame(_)) | Err(_) => break,
         }
     }
 }
 
-#[cfg(any(unix, windows))]
+/// Liveness uses the tokio clock so the monitor and paused-time tests read
+/// the same timeline; a transport pong only refreshes this stamp and never
+/// counts as presence or a presentation acknowledgement.
+fn touch_activity(last_activity: &StdMutex<tokio::time::Instant>) {
+    let mut stamp = crate::lock_unpoison(last_activity);
+    *stamp = tokio::time::Instant::now();
+}
+
+fn activity_idle(last_activity: &StdMutex<tokio::time::Instant>) -> std::time::Duration {
+    let stamp = *crate::lock_unpoison(last_activity);
+    tokio::time::Instant::now().saturating_duration_since(stamp)
+}
+
 #[derive(Clone, Copy)]
 enum PendingEmission {
     Subscription,
     ClientDemand,
 }
 
-#[cfg(any(unix, windows))]
 #[expect(
     clippy::too_many_arguments,
     reason = "connection output state is intentionally explicit"
 )]
-async fn emit_unsolicited<W>(
-    write_half: &mut W,
+async fn emit_unsolicited(
+    write_half: &mut HostSink,
     handle: &HostHandle,
     table: &Arc<ConnectionTable>,
     connection: &ConnectionWireId,
@@ -828,10 +861,7 @@ async fn emit_unsolicited<W>(
     terminal: &mut bool,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
     kind: PendingEmission,
-) -> bool
-where
-    W: tokio::io::AsyncWrite + Unpin,
-{
+) -> bool {
     let Some((frame, _)) = template else {
         return true;
     };
@@ -858,13 +888,12 @@ where
     write_response(write_half, frame, terminal, shutdown).await
 }
 
-#[cfg(any(unix, windows))]
 #[expect(
     clippy::too_many_arguments,
     reason = "connection output state is intentionally explicit"
 )]
-async fn advance_output<W>(
-    write_half: &mut W,
+async fn advance_output(
+    write_half: &mut HostSink,
     handle: &HostHandle,
     table: &Arc<ConnectionTable>,
     connection: &ConnectionWireId,
@@ -872,9 +901,7 @@ async fn advance_output<W>(
     terminal: &mut bool,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
     push_blocked: &mut bool,
-) where
-    W: tokio::io::AsyncWrite + Unpin,
-{
+) {
     if *push_blocked {
         return;
     }
@@ -909,27 +936,39 @@ async fn advance_output<W>(
     }
 }
 
-async fn serve_connection<S, T>(
-    stream: S,
+async fn serve_connection<T>(
+    socket: HostWebSocket,
     connection: ConnectionWireId,
     handle: Arc<HostHandle>,
     transport: Arc<T>,
     table: Arc<ConnectionTable>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 ) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     T: ProviderTransport + Send + Sync + 'static,
 {
     let Some(mut pairing_provisions) = handle.pairing_deliveries.register(&connection) else {
         handle.close_connection(&table, connection).await;
         return;
     };
-    let (read_half, mut write_half) = tokio::io::split(stream);
+    let (mut write_half, read_half) = socket.split();
     let (frames_tx, mut frames_rx) =
         tokio::sync::mpsc::channel::<DecodedFrame>(STREAM_BUFFER_FRAMES);
+    let (peer_ping_tx, mut peer_ping_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let last_activity = Arc::new(StdMutex::new(tokio::time::Instant::now()));
     let reader = AbortOnDrop {
-        task: Some(tokio::spawn(read_frames(read_half, frames_tx))),
+        task: Some(tokio::spawn(read_ws_frames(
+            read_half,
+            frames_tx,
+            peer_ping_tx,
+            Arc::clone(&last_activity),
+        ))),
     };
+    let mut next_ping = tokio::time::Instant::now() + wss::PING_INTERVAL;
+    let mut suspected = false;
+    let mut held: std::collections::VecDeque<DecodedFrame> = std::collections::VecDeque::new();
+    let mut monitor = tokio::time::interval(wss::MONITOR_TICK);
+    monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut learning = tokio::task::JoinSet::new();
     let mut learning_failure = None;
     let mut wake = handle.undelivered_wakeup();
@@ -959,6 +998,15 @@ async fn serve_connection<S, T>(
                 maybe = frames_rx.recv() => {
                     let Some(frame) = maybe else {
                         break 'connection;
+                    };
+                    if held.len() >= STREAM_BUFFER_FRAMES {
+                        break 'connection;
+                    }
+                    held.push_back(frame);
+                }
+                () = std::future::ready(()), if !suspected && !held.is_empty() => {
+                    let Some(frame) = held.pop_front() else {
+                        continue;
                     };
                     let live = match table.live_for(&connection, frame.envelope()) {
                         LiveDecision::Ready(live) => live,
@@ -1035,6 +1083,14 @@ async fn serve_connection<S, T>(
                     )
                     .await;
                 }
+                peer_ping = peer_ping_rx.recv() => {
+                    let Some(payload) = peer_ping else {
+                        break 'connection;
+                    };
+                    if !send_transport_message(&mut write_half, Message::Pong(payload.into()), &mut shutdown).await {
+                        break 'connection;
+                    }
+                }
                 provision = pairing_provisions.recv(), if pairing_delivery_open => {
                     let Some(provision) = provision else {
                         pairing_delivery_open = false;
@@ -1106,6 +1162,31 @@ async fn serve_connection<S, T>(
                     )
                     .await;
                 }
+                _ = monitor.tick() => {
+                    let idle = activity_idle(&last_activity);
+                    if idle >= wss::LIVENESS_LIMIT {
+                        break 'connection;
+                    }
+                    // Liveness is transport-level only: it never becomes a
+                    // presentation ACK or presence, and a suspected connection
+                    // holds new inbound work in `held` instead of dispatching it.
+                    suspected = idle >= wss::SUSPECT_AFTER;
+                    if table.preauth_expired(&connection) {
+                        break 'connection;
+                    }
+                    if tokio::time::Instant::now() >= next_ping {
+                        next_ping = tokio::time::Instant::now() + wss::PING_INTERVAL;
+                        if !send_transport_message(
+                            &mut write_half,
+                            Message::Ping(Default::default()),
+                            &mut shutdown,
+                        )
+                        .await
+                        {
+                            break 'connection;
+                        }
+                    }
+                }
             }
         }
     };
@@ -1131,7 +1212,6 @@ async fn serve_connection<S, T>(
     }
 }
 
-#[cfg(any(unix, windows))]
 async fn drain_learning(
     tasks: &mut tokio::task::JoinSet<()>,
     mut failure: Option<tokio::task::JoinError>,
@@ -1144,109 +1224,114 @@ async fn drain_learning(
     failure
 }
 
-#[cfg(windows)]
-pub async fn run<T>(
-    data_dir: PathBuf,
-    handle: Arc<HostHandle>,
-    transport: Arc<T>,
-) -> Result<(), CoreError>
-where
-    T: ProviderTransport + Send + Sync + 'static,
-{
-    let (_keep_alive, shutdown) = tokio::sync::watch::channel(false);
-    run_until_shutdown(data_dir, handle, transport, shutdown).await
-}
+#[cfg(test)]
+mod connection_deadline_tests {
+    use std::time::Duration;
 
-#[cfg(windows)]
-pub async fn run_until_shutdown<T>(
-    data_dir: PathBuf,
-    handle: Arc<HostHandle>,
-    transport: Arc<T>,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> Result<(), CoreError>
-where
-    T: ProviderTransport + Send + Sync + 'static,
-{
-    use std::os::windows::io::AsRawHandle as _;
+    use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender, new_outgoing_envelope};
+    use ene_api::v1::handshake::NegotiatedConnection;
+    use ene_api::v1::refs::{ClientIncarnationId, WireMessageType};
 
-    let pipe = ene_plugin_ipc::pipe_name(&data_dir);
-    let mut server = crate::conn_pipe::create_first_server(&pipe)?;
-    let mut control = crate::host_control::ControlListener::bind(&data_dir)?;
-    let mut composition = ServingComposition::start(&handle, &transport);
-    let table = Arc::clone(&composition.table);
-    let result: Result<(), CoreError> = async {
-        loop {
-            if *shutdown.borrow() {
-                return Ok(());
-            }
-            tokio::select! {
-                biased;
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() {
-                        return Ok(());
-                    }
-                }
-                connected = server.connect() => {
-                    if connected.is_err() {
-                        server = crate::conn_pipe::create_next_server(&pipe)?;
-                        continue;
-                    }
-                    let peer_ok = crate::conn_pipe::peer_same_user(server.as_raw_handle());
-                    let next = crate::conn_pipe::create_next_server(&pipe)?;
-                    let current = std::mem::replace(&mut server, next);
-                    if !peer_ok {
-                        continue;
-                    }
-                    let connection = table.note_accept();
-                    let handle = Arc::clone(&handle);
-                    let transport = Arc::clone(&transport);
-                    let table = Arc::clone(&table);
-                    let stop = composition.handlers.stop.subscribe();
-                    composition.handlers.tasks.spawn(async move {
-                        serve_connection(current, connection, handle, transport, table, stop).await;
-                    });
-                }
-                accepted = control.accept() => {
-                    if let Some(stream) = accepted? {
-                        let stop = composition.handlers.stop.subscribe();
-                        composition.handlers.tasks.spawn(crate::host_control::serve_requester(
-                            stream, Arc::clone(&handle), stop,
-                        ));
-                    }
-                }
-                joined = composition.handlers.tasks.join_next(), if !composition.handlers.tasks.is_empty() => {
-                    composition.handlers.record(joined);
-                }
-            }
-        }
+    use super::{ChallengeOutcome, ConnectionTable, InstallOutcome, LiveDecision, TransportClass};
+    use crate::wss::{AUTH_DEADLINE, OWNER_CONFIRMATION_LIMIT};
+
+    fn envelope() -> WireEnvelope {
+        new_outgoing_envelope(
+            ProtocolVersion::V1,
+            WireSender {
+                device_id: None,
+                incarnation_id: ClientIncarnationId {
+                    counter: 1,
+                    random: 2,
+                },
+                connection_id: None,
+            },
+            WireMessageType(String::from("TestMessage")),
+        )
     }
-    .await;
-    composition.quiesce(&handle, result).await
-}
 
-#[cfg(not(any(unix, windows)))]
-#[expect(
-    clippy::unused_async,
-    reason = "stub mirrors the async listener signature; no transport exists here"
-)]
-pub async fn run(
-    _data_dir: PathBuf,
-    _handle: Arc<HostHandle>,
-    _transport: Arc<impl ProviderTransport>,
-) -> Result<(), CoreError> {
-    Err(CoreError::UnsupportedPlatform("no supported listener"))
-}
+    #[tokio::test(start_paused = true)]
+    async fn the_machine_deadline_bounds_pre_auth_until_the_owner_confirms() {
+        let table = ConnectionTable::default();
 
-#[cfg(not(any(unix, windows)))]
-#[expect(
-    clippy::unused_async,
-    reason = "stub mirrors the async listener signature; no transport exists here"
-)]
-pub async fn run_until_shutdown(
-    _data_dir: PathBuf,
-    _handle: Arc<HostHandle>,
-    _transport: Arc<impl ProviderTransport>,
-    _shutdown: tokio::sync::watch::Receiver<bool>,
-) -> Result<(), CoreError> {
-    Err(CoreError::UnsupportedPlatform("no supported listener"))
+        let stalled = table.note_accept(TransportClass::SameMachine);
+        assert!(!table.preauth_expired(&stalled));
+        tokio::time::advance(AUTH_DEADLINE + Duration::from_millis(1)).await;
+        assert!(
+            table.preauth_expired(&stalled),
+            "a silent machine handshake must expire at the auth deadline"
+        );
+
+        let waiting = table.note_accept(TransportClass::SameMachine);
+        table.note_awaiting_owner_confirmation(&waiting);
+        tokio::time::advance(AUTH_DEADLINE + Duration::from_millis(1)).await;
+        assert!(
+            !table.preauth_expired(&waiting),
+            "owner confirmation outlives the machine deadline"
+        );
+        table.note_awaiting_owner_confirmation(&waiting);
+        tokio::time::advance(OWNER_CONFIRMATION_LIMIT).await;
+        assert!(
+            table.preauth_expired(&waiting),
+            "the owner wait is still bounded, and resends never extend it"
+        );
+
+        let approved = table.note_accept(TransportClass::SameMachine);
+        table.note_awaiting_owner_confirmation(&approved);
+        assert!(table.note_paired(&approved, "device-1"));
+        tokio::time::advance(AUTH_DEADLINE + Duration::from_millis(1)).await;
+        assert!(
+            table.preauth_expired(&approved),
+            "after the owner confirms, only the machine exchange may stall"
+        );
+
+        let authed = table.note_accept(TransportClass::SameMachine);
+        assert!(matches!(
+            table.note_challenged(
+                &authed,
+                Some("device-2"),
+                NegotiatedConnection {
+                    version: ProtocolVersion::V1
+                },
+                String::from("nonce")
+            ),
+            ChallengeOutcome::Challenged
+        ));
+        assert!(matches!(
+            table.install_authenticated(&authed),
+            InstallOutcome::Installed { .. }
+        ));
+        tokio::time::advance(OWNER_CONFIRMATION_LIMIT).await;
+        assert!(
+            !table.preauth_expired(&authed),
+            "authenticated connections leave the pre-auth bound"
+        );
+    }
+
+    #[test]
+    fn a_closed_connection_carries_no_liveness_or_deadline_into_the_next_one() {
+        let table = std::sync::Arc::new(ConnectionTable::default());
+        let first = table.note_accept(TransportClass::SameMachine);
+        assert!(matches!(
+            table.live_for(&first, &envelope()),
+            LiveDecision::Ready(live) if live.peer_uid_ok
+        ));
+        assert_eq!(table.note_closed(&first, |_| {}), None);
+        assert!(matches!(
+            table.live_for(&first, &envelope()),
+            LiveDecision::Invalid
+        ));
+        assert!(!table.preauth_expired(&first));
+
+        let second = table.note_accept(TransportClass::SameMachine);
+        assert_ne!(first, second, "every accept is its own connection record");
+        assert!(matches!(
+            table.live_for(&second, &envelope()),
+            LiveDecision::Ready(live) if live.peer_uid_ok
+        ));
+        assert!(
+            !table.preauth_expired(&second),
+            "the closing connection's elapsed deadline never leaks to the next one"
+        );
+    }
 }

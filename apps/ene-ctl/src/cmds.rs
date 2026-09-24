@@ -41,6 +41,9 @@ pub const SETUP_PROVIDER_OPENAI: &str = "openai";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    TrustHost {
+        pin: String,
+    },
     Setup(SetupMode),
     Send(SendArgs),
     Watch {

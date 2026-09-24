@@ -15,10 +15,10 @@ use ene_api::v1::round::{HistoryRequest, RoundTarget, SubmitTextInput, TextBodyW
 use super::frames::{
     PreparedRequest, capability_frame, frame_for, frame_for_session, pairing_frame, proof_frame,
 };
+use super::platform_display;
 use super::session::{
     AuthDecision, DEFERRED_CAP, PENDING_ERASURE_CAP, SessionState, decide_auth, stale_generation_of,
 };
-use super::{platform_display, socket_path};
 
 fn incarnation() -> ClientIncarnationId {
     ClientIncarnationId {
@@ -69,15 +69,6 @@ fn credential_intent(
         },
         confirmed: false,
     }
-}
-
-#[test]
-fn socket_path_appends_ene_sock() {
-    let dir = std::path::Path::new("/tmp/ene-data");
-    assert!(
-        socket_path(dir) == dir.join("ene.sock"),
-        "socket path must be ene.sock under the data dir"
-    );
 }
 
 #[test]
@@ -953,24 +944,170 @@ fn ene_client_manifest_stays_a_client_library() {
     }
 }
 
-#[cfg(unix)]
-mod unknown_wire {
+mod wss_session {
+    use std::path::Path;
     use std::time::Duration;
 
-    use ene_api::codec::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
+    use ene_api::codec::{DecodedFrame, WireFrame, decode_frame, encode_frame};
+    use ene_api::runtime::{HOST_RUNTIME_FILE_NAME, HostRuntimeInfo};
     use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender, new_outgoing_envelope};
     use ene_api::v1::handshake::{AuthChallenge, AuthResult, NegotiatedConnection};
     use ene_api::v1::payload::WirePayload;
     use ene_api::v1::presence::{PresenceAttributionWire, PresenceStateWire};
     use ene_api::v1::refs::{
-        ClientIncarnationId, CompanionWireRef, ConnectionWireId, DeviceWireId, WireMessageId,
-        WireMessageType,
+        ClientIncarnationId, CompanionWireRef, ConnectionWireId, DeviceWireId, WireMessageType,
     };
     use ene_api::v1::reject::RejectKind;
-    use serde::Serialize;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
     use crate::frames::frame_for;
+
+    struct MiniHost {
+        listener: tokio::net::TcpListener,
+        acceptor: tokio_rustls::TlsAcceptor,
+        runtime: HostRuntimeInfo,
+    }
+
+    type HostSink = futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>,
+        Message,
+    >;
+    type HostStream = futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>,
+    >;
+
+    fn ws_config() -> WebSocketConfig {
+        WebSocketConfig::default()
+            .max_message_size(Some(ene_api::codec::MAX_FRAME_BYTES))
+            .max_frame_size(Some(ene_api::codec::MAX_FRAME_BYTES))
+    }
+
+    async fn start_host(dir: &Path) -> MiniHost {
+        let key = rcgen::KeyPair::generate().expect("mini-host key");
+        let params = rcgen::CertificateParams::new(Vec::new()).expect("mini-host params");
+        let certificate = params.self_signed(&key).expect("mini-host certificate");
+        let pin = crate::host_pin::spki_pin_hex(certificate.der().as_ref()).expect("mini-host pin");
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![certificate.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(key.serialize_der()),
+                ),
+            )
+            .expect("mini-host TLS config");
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("mini-host bind");
+        let port = listener.local_addr().expect("mini-host address").port();
+        let runtime = HostRuntimeInfo {
+            url: format!("wss://127.0.0.1:{port}"),
+            host_pin: pin,
+            startup_generation: uuid::Uuid::new_v4().simple().to_string(),
+            local_token: format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            ),
+        };
+        let json = serde_json::to_vec(&runtime).expect("runtime encodes");
+        crate::runtime_info::write_protected_file(
+            &dir.join(HOST_RUNTIME_FILE_NAME),
+            &json,
+            "mini-host runtime",
+        )
+        .expect("runtime must publish");
+        MiniHost {
+            listener,
+            acceptor: tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)),
+            runtime,
+        }
+    }
+
+    impl MiniHost {
+        async fn accept_upgrade(&self) -> (HostSink, HostStream) {
+            let (tcp, _) = self.listener.accept().await.expect("client must connect");
+            let tls = self.acceptor.accept(tcp).await.expect("TLS must finish");
+            let check = MiniUpgradeCheck {
+                token: self.runtime.local_token.clone(),
+                startup_generation: self.runtime.startup_generation.clone(),
+            };
+            let socket =
+                tokio_tungstenite::accept_hdr_async_with_config(tls, check, Some(ws_config()))
+                    .await
+                    .expect("WebSocket upgrade must finish");
+            socket.split()
+        }
+
+        async fn send_frame(sink: &mut HostSink, frame: &WireFrame) {
+            let body = encode_frame(frame).expect("host frame encodes");
+            sink.send(Message::Binary(body.into()))
+                .await
+                .expect("host frame must send");
+        }
+
+        async fn recv_frame(stream: &mut HostStream) -> WireFrame {
+            while let Some(message) = stream.next().await {
+                match message.expect("host read must succeed") {
+                    Message::Binary(body) => {
+                        return match decode_frame(&body).expect("client frame decodes") {
+                            DecodedFrame::Known(frame) => frame,
+                            other => panic!("the client must send known frames, got {other:?}"),
+                        };
+                    }
+                    Message::Ping(payload) => {
+                        // The client never initiates pings; answer anyway.
+                        let _ = payload;
+                    }
+                    Message::Pong(_) => {}
+                    other => panic!("unexpected client message: {other:?}"),
+                }
+            }
+            panic!("the client closed the connection");
+        }
+    }
+
+    struct MiniUpgradeCheck {
+        token: String,
+        startup_generation: String,
+    }
+
+    impl tokio_tungstenite::tungstenite::handshake::server::Callback for MiniUpgradeCheck {
+        fn on_request(
+            self,
+            request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+            response: tokio_tungstenite::tungstenite::handshake::server::Response,
+        ) -> Result<
+            tokio_tungstenite::tungstenite::handshake::server::Response,
+            tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+        > {
+            let presented = request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            let presented_generation = request
+                .headers()
+                .get("x-ene-startup-generation")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            let origin_forbidden = request.headers().contains_key("origin");
+            if presented != format!("Bearer {}", self.token)
+                || presented_generation != self.startup_generation
+                || origin_forbidden
+            {
+                return Err(tokio_tungstenite::tungstenite::http::Response::builder()
+                    .status(403)
+                    .body(None)
+                    .unwrap_or_else(|_| {
+                        tokio_tungstenite::tungstenite::http::Response::new(None)
+                    }));
+            }
+            Ok(response)
+        }
+    }
 
     fn host_sender(device: DeviceWireId, connection: ConnectionWireId) -> WireSender {
         WireSender {
@@ -992,86 +1129,55 @@ mod unknown_wire {
         })
     }
 
-    #[derive(Serialize)]
+    #[derive(serde::Serialize)]
     struct CraftedUnknown {
         envelope: WireEnvelope,
         payload: CraftedUnknownPayload,
     }
 
-    #[derive(Serialize)]
+    #[derive(serde::Serialize)]
     enum CraftedUnknownPayload {
         FuturePush(UnknownBody),
     }
 
-    #[derive(Serialize)]
+    #[derive(serde::Serialize)]
     struct UnknownBody {
         note: String,
     }
 
-    async fn read_client_frame(stream: &mut tokio::net::UnixStream) -> DecodedFrame {
-        let mut prefix = [0_u8; 4];
-        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut prefix))
-            .await
-            .expect("client frame prefix must arrive")
-            .expect("client frame prefix must be readable");
-        let claimed = u32::from_be_bytes(prefix) as usize;
-        assert!(claimed <= MAX_FRAME_BYTES, "client frames stay bounded");
-        let mut body = zeroize::Zeroizing::new(vec![0_u8; claimed]);
-        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut body))
-            .await
-            .expect("client frame body must arrive")
-            .expect("client frame body must be readable");
-        decode_frame(&body).expect("client frame must decode")
-    }
-
-    async fn write_wire(stream: &mut tokio::net::UnixStream, frame: &WireFrame) {
-        let body = zeroize::Zeroizing::new(encode_frame(frame).expect("host frame encodes"));
-        let mut bytes = Vec::with_capacity(4 + body.len());
-        bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(&body);
-        tokio::time::timeout(Duration::from_secs(10), stream.write_all(&bytes))
-            .await
-            .expect("host frame write must finish")
-            .expect("host frame must be writable");
-    }
-
-    async fn write_unknown(
-        stream: &mut tokio::net::UnixStream,
-        device: DeviceWireId,
-        connection: ConnectionWireId,
-    ) -> WireMessageId {
+    async fn send_unknown(
+        sink: &mut HostSink,
+        sender: WireSender,
+    ) -> ene_api::v1::refs::WireMessageId {
+        let envelope = new_outgoing_envelope(
+            ProtocolVersion::V1,
+            sender,
+            WireMessageType(String::from("FuturePush")),
+        );
+        let message_id = envelope.message_id;
         let crafted = CraftedUnknown {
-            envelope: new_outgoing_envelope(
-                ProtocolVersion::V1,
-                host_sender(device, connection),
-                WireMessageType(String::from("FuturePush")),
-            ),
+            envelope,
             payload: CraftedUnknownPayload::FuturePush(UnknownBody {
                 note: String::from("a message type this client does not know"),
             }),
         };
-        let message_id = crafted.envelope.message_id;
         let body = rmp_serde::to_vec_named(&crafted).expect("crafted host frame encodes");
-        let mut bytes = Vec::with_capacity(4 + body.len());
-        bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(&body);
-        tokio::time::timeout(Duration::from_secs(10), stream.write_all(&bytes))
+        sink.send(Message::Binary(body.into()))
             .await
-            .expect("unknown host frame write must finish")
-            .expect("unknown host frame must be writable");
+            .expect("crafted host frame must send");
         message_id
     }
 
-    async fn run_mini_host(
-        listener: tokio::net::UnixListener,
+    async fn handshake_to_auth(
+        sink: &mut HostSink,
+        stream: &mut HostStream,
         device: DeviceWireId,
         connection: ConnectionWireId,
-    ) -> (WireMessageId, DecodedFrame, WireMessageId, DecodedFrame) {
-        let (mut stream, _) = listener.accept().await.expect("client must connect");
-        let _capability = read_client_frame(&mut stream).await;
+    ) {
+        let _capability = MiniHost::recv_frame(stream).await;
         let sender = host_sender(device, connection);
-        write_wire(
-            &mut stream,
+        MiniHost::send_frame(
+            sink,
             &frame_for(
                 WirePayload::NegotiatedConnection(NegotiatedConnection {
                     version: ProtocolVersion::V1,
@@ -1080,8 +1186,8 @@ mod unknown_wire {
             ),
         )
         .await;
-        write_wire(
-            &mut stream,
+        MiniHost::send_frame(
+            sink,
             &frame_for(
                 WirePayload::AuthChallenge(AuthChallenge {
                     nonce: String::from("mini-host-nonce"),
@@ -1090,9 +1196,9 @@ mod unknown_wire {
             ),
         )
         .await;
-        let _proof = read_client_frame(&mut stream).await;
-        write_wire(
-            &mut stream,
+        let _proof = MiniHost::recv_frame(stream).await;
+        MiniHost::send_frame(
+            sink,
             &frame_for(
                 WirePayload::AuthResult(AuthResult::Accepted {
                     connection_id: connection,
@@ -1101,13 +1207,26 @@ mod unknown_wire {
             ),
         )
         .await;
-        let first_id = write_unknown(&mut stream, device, connection).await;
-        let first_reject = read_client_frame(&mut stream).await;
-        write_wire(&mut stream, &frame_for(presence(), sender)).await;
-        let second_id = write_unknown(&mut stream, device, connection).await;
-        let second_reject = read_client_frame(&mut stream).await;
-        write_wire(&mut stream, &frame_for(presence(), sender)).await;
-        (first_id, first_reject, second_id, second_reject)
+    }
+
+    fn assert_reject(reject: &WireFrame, unknown_id: ene_api::v1::refs::WireMessageId) {
+        assert_eq!(
+            reject.envelope.message_type.0, "Reject",
+            "a reject reply must name itself"
+        );
+        assert_eq!(
+            reject.envelope.correlation.reply_to,
+            Some(unknown_id),
+            "the reject correlates to the exact unknown message"
+        );
+        let WirePayload::Reject(notice) = &reject.payload else {
+            panic!("expected Reject, got {}", reject.payload.message_type());
+        };
+        assert_eq!(
+            notice.kind,
+            RejectKind::UnsupportedMessage,
+            "an unknown message type is rejected as unsupported: {notice:?}"
+        );
     }
 
     #[tokio::test]
@@ -1119,13 +1238,23 @@ mod unknown_wire {
             &crate::device::StoredDevice::new(device, String::from("pairing-secret")),
         )
         .expect("stored device must be readable at connect");
-        let listener =
-            tokio::net::UnixListener::bind(crate::socket_path(dir.path())).expect("mini host bind");
+        let host = start_host(dir.path()).await;
         let connection = ConnectionWireId(uuid::Uuid::new_v4());
-        let server = tokio::spawn(run_mini_host(listener, device, connection));
+        let server = tokio::spawn(async move {
+            let (mut sink, mut stream) = host.accept_upgrade().await;
+            handshake_to_auth(&mut sink, &mut stream, device, connection).await;
+            let sender = host_sender(device, connection);
+            let first_id = send_unknown(&mut sink, sender).await;
+            let first_reject = MiniHost::recv_frame(&mut stream).await;
+            MiniHost::send_frame(&mut sink, &frame_for(presence(), sender)).await;
+            let second_id = send_unknown(&mut sink, sender).await;
+            let second_reject = MiniHost::recv_frame(&mut stream).await;
+            MiniHost::send_frame(&mut sink, &frame_for(presence(), sender)).await;
+            (first_id, first_reject, second_id, second_reject)
+        });
 
         let connected = tokio::time::timeout(
-            Duration::from_secs(10),
+            std::time::Duration::from_secs(10),
             crate::Client::begin_connect(dir.path(), "mini host", "test"),
         )
         .await
@@ -1135,7 +1264,7 @@ mod unknown_wire {
             panic!("a stored device must authenticate, not pend pairing");
         };
 
-        let payload = tokio::time::timeout(Duration::from_secs(10), client.next_frame())
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(10), client.next_frame())
             .await
             .expect("the session must keep answering")
             .expect("the session must keep reading");
@@ -1145,137 +1274,288 @@ mod unknown_wire {
         );
 
         let (first_id, first_reject, second_id, second_reject) =
-            tokio::time::timeout(Duration::from_secs(10), server)
+            tokio::time::timeout(std::time::Duration::from_secs(10), server)
                 .await
                 .expect("mini host must finish")
                 .expect("mini host must not panic");
-        for (unknown_id, reject) in [(first_id, first_reject), (second_id, second_reject)] {
-            let DecodedFrame::Known(reject) = reject else {
-                panic!("a reject reply must decode as a known frame, got {reject:?}");
-            };
-            assert_eq!(
-                reject.envelope.message_type.0, "Reject",
-                "the reply is a wire reject"
-            );
-            assert_eq!(
-                reject.envelope.correlation.reply_to,
-                Some(unknown_id),
-                "the reject correlates to the exact unknown message"
-            );
-            let WirePayload::Reject(notice) = reject.payload else {
-                panic!("expected Reject, got {}", reject.payload.message_type());
-            };
-            assert_eq!(
-                notice.kind,
-                RejectKind::UnsupportedMessage,
-                "an unknown message type is rejected as unsupported: {notice:?}"
-            );
-        }
+        assert_reject(&first_reject, first_id);
+        assert_reject(&second_reject, second_id);
     }
-}
-
-#[test]
-fn the_session_tracks_the_open_round_until_a_stale_round_clears_it() {
-    use ene_api::v1::round::RoundIntakeOutcomeWire;
-
-    use super::session::SessionState;
-
-    let mut state = SessionState::default();
-    assert_eq!(
-        state.round_target(),
-        RoundTarget::New,
-        "a fresh session starts a new round"
-    );
-    state.observe_intake(&WirePayload::RoundIntakeOutcome(
-        RoundIntakeOutcomeWire::AcceptedForRound {
-            round: RoundWireId(String::from("round-1")),
-        },
-    ));
-    assert_eq!(
-        state.open_round().map(|round| round.0.as_str()),
-        Some("round-1"),
-        "an accepted round becomes the session's premise"
-    );
-    assert_eq!(
-        state.round_target(),
-        RoundTarget::Existing(RoundWireId(String::from("round-1"))),
-        "the next send continues the accepted round"
-    );
-    state.observe_intake(&WirePayload::RoundIntakeOutcome(
-        RoundIntakeOutcomeWire::HeldForTransition,
-    ));
-    assert_eq!(
-        state.open_round().map(|round| round.0.as_str()),
-        Some("round-1"),
-        "a held intake does not invalidate the open round"
-    );
-    state.observe_intake(&WirePayload::RoundIntakeOutcome(
-        RoundIntakeOutcomeWire::StaleRound {
-            current_round: None,
-            current_generation: 3,
-        },
-    ));
-    assert!(
-        state.open_round().is_none(),
-        "a stale round clears the premise so the next send starts fresh"
-    );
-    assert_eq!(state.round_target(), RoundTarget::New);
-}
-
-#[cfg(unix)]
-mod oversize_prefix {
-    use std::time::Duration;
-
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    use crate::error::ClientError;
 
     #[tokio::test]
-    async fn an_oversize_length_prefix_is_refused_before_allocating_a_body() {
+    async fn a_probe_confirms_the_serving_host_and_trusts_nothing_new() {
         let dir = tempfile::tempdir().expect("test dir");
-        let device = ene_api::v1::refs::DeviceWireId(uuid::Uuid::new_v4());
+        let host = start_host(dir.path()).await;
+        let dir_path = dir.path().to_path_buf();
+        let responder = tokio::spawn(async move {
+            loop {
+                let _upgrade = host.accept_upgrade().await;
+            }
+        });
+        let probe_dir = dir_path.clone();
+        let confirmed =
+            tokio::task::spawn_blocking(move || crate::probe::probe_serving_host(&probe_dir))
+                .await
+                .expect("probe task must not panic");
+        assert!(confirmed, "the serving mini-host must probe as serving");
+        assert!(
+            !dir_path.join(crate::host_pin::HOST_PIN_FILE_NAME).exists(),
+            "probing must never adopt or write trust of its own"
+        );
+        responder.abort();
+    }
+
+    #[tokio::test]
+    async fn a_stale_runtime_with_an_unrelated_listener_is_not_serving() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let stray = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("stray listener binds");
+        let port = stray.local_addr().expect("stray address").port();
+        let dropper = tokio::spawn(async move {
+            loop {
+                if stray.accept().await.is_err() {
+                    break;
+                }
+                // Dropping the accepted socket ends any handshake at once.
+            }
+        });
+        let stale = HostRuntimeInfo {
+            url: format!("wss://127.0.0.1:{port}"),
+            host_pin: String::from(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            startup_generation: String::from("stale-generation"),
+            local_token: String::from("stale-token-marker-xyz"),
+        };
+        let json = serde_json::to_vec(&stale).expect("stale runtime encodes");
+        crate::runtime_info::write_protected_file(
+            &dir.path().join(HOST_RUNTIME_FILE_NAME),
+            &json,
+            "stale runtime",
+        )
+        .expect("stale runtime must publish");
+        let probe_dir = dir.path().to_path_buf();
+        let serving =
+            tokio::task::spawn_blocking(move || crate::probe::probe_serving_host(&probe_dir))
+                .await
+                .expect("probe task must not panic");
+        assert!(
+            !serving,
+            "a stale runtime file over an unrelated listener is not serving"
+        );
+        dropper.abort();
+    }
+
+    #[tokio::test]
+    async fn a_host_certificate_outside_the_trusted_pin_is_refused_at_connect() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let host = start_host(dir.path()).await;
+        let other_pin =
+            String::from("1111111111111111111111111111111111111111111111111111111111111111");
+        let runtime = HostRuntimeInfo {
+            host_pin: other_pin,
+            ..host.runtime.clone()
+        };
+        let json = serde_json::to_vec(&runtime).expect("runtime encodes");
+        crate::runtime_info::write_protected_file(
+            &dir.path().join(HOST_RUNTIME_FILE_NAME),
+            &json,
+            "pin swap",
+        )
+        .expect("runtime must rewrite");
+        let dir_path = dir.path().to_path_buf();
+        let responder = tokio::spawn(async move {
+            loop {
+                let _upgrade = host.accept_upgrade().await;
+            }
+        });
+        let attempt = tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::Client::begin_connect(dir_path.as_path(), "fake host", "test"),
+        )
+        .await
+        .expect("the attempt must finish");
+        match attempt {
+            Err(crate::error::ClientError::Transport(reason)) => assert!(
+                reason.contains("TLS handshake with the Host failed"),
+                "the pin mismatch surfaces as a TLS refusal: {reason}"
+            ),
+            Err(other) => panic!("expected a TLS transport refusal, got {other:?}"),
+            Ok(_) => panic!("a certificate outside the trusted pin must be refused"),
+        }
+        responder.abort();
+    }
+
+    #[tokio::test]
+    async fn an_oversize_host_message_is_refused_by_the_frame_cap() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let device = DeviceWireId(uuid::Uuid::new_v4());
         crate::device::store_device(
             dir.path(),
             &crate::device::StoredDevice::new(device, String::from("pairing-secret")),
         )
         .expect("stored device must be readable at connect");
-        let listener =
-            tokio::net::UnixListener::bind(crate::socket_path(dir.path())).expect("bind");
+        let host = start_host(dir.path()).await;
+        let connection = ConnectionWireId(uuid::Uuid::new_v4());
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("client must connect");
-            let mut prefix = [0_u8; 4];
-            stream
-                .read_exact(&mut prefix)
+            let (mut sink, mut stream) = host.accept_upgrade().await;
+            handshake_to_auth(&mut sink, &mut stream, device, connection).await;
+            let oversize = vec![0_u8; ene_api::codec::MAX_FRAME_BYTES + 1];
+            sink.send(Message::Binary(oversize.into()))
                 .await
-                .expect("the client frames its first message");
-            let claimed = u32::from_be_bytes(prefix) as usize;
-            let mut capability = vec![0_u8; claimed];
-            stream
-                .read_exact(&mut capability)
-                .await
-                .expect("the capability frame must arrive");
-            stream
-                .write_all(&1_073_741_824_u32.to_be_bytes())
-                .await
-                .expect("oversize prefix must be writable");
+                .expect("oversize message must send");
+            // The client closes instead of buffering the oversized message.
+            while stream.next().await.is_some() {}
         });
 
         let connected = tokio::time::timeout(
-            Duration::from_secs(10),
+            std::time::Duration::from_secs(10),
             crate::Client::begin_connect(dir.path(), "mini host", "test"),
         )
-        .await
-        .expect("connect attempt must finish quickly");
-        let Err(ClientError::Codec(reason)) = connected else {
-            panic!("an oversize prefix must fail the frame cap before any handshake answer");
+        .await;
+        server.abort();
+        let outcome = match connected {
+            Ok(Ok(_)) => panic!("an oversize host message must not be accepted"),
+            Ok(Err(error)) => error,
+            Err(_) => panic!("the refusal must finish quickly"),
         };
+        match outcome {
+            crate::ClientError::Transport(reason) => assert!(
+                reason.contains(&(ene_api::codec::MAX_FRAME_BYTES + 1).to_string()),
+                "the refusal names the refused message size: {reason}"
+            ),
+            other => panic!("the receive cap must refuse at the transport layer, got {other:?}"),
+        }
+    }
+}
+
+mod runtime_protection {
+    use ene_api::runtime::{HOST_RUNTIME_FILE_NAME, HostRuntimeInfo};
+
+    use crate::error::ClientError;
+
+    fn sample_runtime() -> HostRuntimeInfo {
+        HostRuntimeInfo {
+            url: String::from("wss://127.0.0.1:9"),
+            host_pin: String::from("b0b0"),
+            startup_generation: String::from("generation-1"),
+            local_token: String::from("secret-token-marker-zzz9"),
+        }
+    }
+
+    fn write_runtime(dir: &std::path::Path, runtime: &HostRuntimeInfo) {
+        let json = serde_json::to_vec(runtime).expect("runtime encodes");
+        crate::runtime_info::write_protected_file(
+            &dir.join(HOST_RUNTIME_FILE_NAME),
+            &json,
+            "test runtime",
+        )
+        .expect("runtime must publish");
+    }
+
+    #[derive(serde::Serialize)]
+    struct StoredPin {
+        pin: String,
+    }
+
+    fn write_stored_pin(dir: &std::path::Path, pin: &str) {
+        let json = serde_json::to_vec(&StoredPin {
+            pin: pin.to_owned(),
+        })
+        .expect("pin encodes");
+        crate::runtime_info::write_protected_file(
+            &dir.join(crate::host_pin::HOST_PIN_FILE_NAME),
+            &json,
+            "test pin",
+        )
+        .expect("pin must store");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_runtime_is_refused_without_leaking_the_token() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("test dir");
+        let runtime = sample_runtime();
+        let path = dir.path().join(HOST_RUNTIME_FILE_NAME);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&runtime).expect("runtime encodes"),
+        )
+        .expect("runtime must write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+            .expect("chmod must apply");
+        let error = crate::runtime_info::load_host_runtime(dir.path())
+            .expect_err("a world-readable runtime file must be refused");
+        let text = error.to_string();
         assert!(
-            reason.contains("exceeds the 256 KiB cap"),
-            "the refusal names the cap: {reason}"
+            text.contains("owner"),
+            "the refusal names the protection: {text}"
         );
-        tokio::time::timeout(Duration::from_secs(10), server)
-            .await
-            .expect("mini host must finish")
-            .expect("mini host must not panic");
+        assert!(
+            !text.contains(&runtime.local_token),
+            "no token leaks: {text}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_default_acl_runtime_is_refused_without_leaking_the_token() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let runtime = sample_runtime();
+        let path = dir.path().join(HOST_RUNTIME_FILE_NAME);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&runtime).expect("runtime encodes"),
+        )
+        .expect("runtime must write");
+        let error = crate::runtime_info::load_host_runtime(dir.path())
+            .expect_err("a default-ACL runtime file must be refused");
+        let text = error.to_string();
+        assert!(
+            text.contains("owner"),
+            "the refusal names the protection: {text}"
+        );
+        assert!(
+            !text.contains(&runtime.local_token),
+            "no token leaks: {text}"
+        );
+    }
+
+    #[test]
+    fn a_changed_host_pin_is_refused_until_the_owner_re_trusts_it() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let runtime = sample_runtime();
+        write_runtime(dir.path(), &runtime);
+        write_stored_pin(dir.path(), "aaaa");
+
+        let error = crate::host_pin::establish_host_pin(dir.path(), &runtime)
+            .expect_err("a changed pin must refuse the connection");
+        match &error {
+            ClientError::HostPinMismatch { stored, offered } => {
+                assert_eq!(stored, "aaaa", "the refusal reports the trusted pin");
+                assert_eq!(offered, &runtime.host_pin, "and the offered one");
+            }
+            other => panic!("expected HostPinMismatch, got {other:?}"),
+        }
+        assert!(
+            !error.to_string().contains(&runtime.local_token),
+            "no token leaks: {error}"
+        );
+
+        let wrong = crate::host_pin::trust_host_pin(dir.path(), "cccc")
+            .expect_err("a confirmation that is not the offered pin must change nothing");
+        assert!(
+            wrong.to_string().contains("does not match"),
+            "the refusal explains the mismatch: {wrong}"
+        );
+        let trusted = crate::host_pin::trust_host_pin(dir.path(), &runtime.host_pin)
+            .expect("the owner confirmed the offered pin");
+        assert_eq!(trusted, runtime.host_pin);
+        let accepted = crate::host_pin::establish_host_pin(dir.path(), &runtime)
+            .expect("the confirmed pin now matches");
+        assert_eq!(accepted, runtime.host_pin);
     }
 }

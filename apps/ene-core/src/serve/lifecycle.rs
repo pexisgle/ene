@@ -41,7 +41,13 @@ pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
+    crate::win_acl::create_owner_only_dir(data_dir)
+        .map_err(|error| CoreError::Store(format!("protect data directory: {error}")))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     std::fs::create_dir_all(data_dir)
         .map_err(|error| CoreError::Store(format!("create data directory: {error}")))?;

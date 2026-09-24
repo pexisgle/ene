@@ -7,17 +7,26 @@ publish.workspace = true
 
 [dependencies]
 ene-api = { path = "../ene-api" }
-ene-plugin-ipc = { path = "../ene-plugin-ipc" }
+futures-util.workspace = true
 hmac.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+x509-parser.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
+rcgen.workspace = true
 tempfile.workspace = true
 rmp-serde.workspace = true
 

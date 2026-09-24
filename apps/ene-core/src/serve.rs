@@ -67,6 +67,10 @@ pub enum CoreError {
     Deletion(String),
     #[error("host-local control failed: {0}")]
     Control(String),
+    #[error("protected store unavailable: {0}")]
+    ProtectedStore(String),
+    #[error("host runtime information could not be published: {0}")]
+    RuntimeInfo(String),
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(&'static str),
     #[error(
@@ -317,6 +321,7 @@ pub struct HostHandle {
     pub(crate) conversation_tasks: crate::task_control::ConversationTaskProjection,
     pub(crate) presentations: Arc<StdMutex<crate::presentation::PresentationState>>,
     pub(crate) presentation_lock: AsyncMutex<()>,
+    pub(crate) pairing_creation: AsyncMutex<()>,
     pub(crate) trusted_task_premises: crate::task_control::TrustedTaskPremises,
     pub(crate) task_launcher: OnceLock<std::sync::Arc<dyn crate::task_run::TaskAgentLauncher>>,
     pub(crate) targeted_deletion: StdMutex<crate::targeted_deletion::ErasureParticipantRegistry>,
@@ -457,6 +462,7 @@ impl HostHandle {
         let handle = Self {
             store,
             tracker: AsyncMutex::new(EvaluationTracker::new()),
+            pairing_creation: AsyncMutex::new(()),
             open_rounds: StdMutex::new(HashMap::new()),
             rounds: Arc::new(StdMutex::new(HashMap::new())),
             cred_store,

@@ -249,7 +249,17 @@ impl CredentialStore for MemoryVersionedStore {
 }
 
 pub struct MemoryCredentialStore {
-    entries: Mutex<HashMap<CredentialRef, SecretValue>>,
+    entries: std::sync::Arc<Mutex<HashMap<CredentialRef, SecretValue>>>,
+}
+
+/// Cloning shares the entries, so a restarted Host keeps reading the same
+/// backing state that the persistent OS store provides in production.
+impl Clone for MemoryCredentialStore {
+    fn clone(&self) -> Self {
+        Self {
+            entries: std::sync::Arc::clone(&self.entries),
+        }
+    }
 }
 
 impl core::fmt::Debug for MemoryCredentialStore {
@@ -273,7 +283,7 @@ impl MemoryCredentialStore {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            entries: std::sync::Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

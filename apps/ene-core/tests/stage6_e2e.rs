@@ -13,15 +13,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-#[cfg(unix)]
-use ene_api::codec::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
+use ene_api::codec::{DecodedFrame, WireFrame, decode_frame, encode_frame};
+use ene_api::runtime::{HOST_RUNTIME_FILE_NAME, HostRuntimeInfo};
 use ene_api::v1::deletion::{
     DeletionParticipantReportWire, DeletionParticipantStatusWire, DeletionPhaseWire,
     DeletionPurposeWire, DeletionStatusPage, DeletionStatusRequest, DeletionStatusResponse,
 };
-#[cfg(unix)]
 use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender, new_outgoing_envelope};
-#[cfg(unix)]
 use ene_api::v1::handshake::{PairingRequest, PairingResult};
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome,
@@ -29,16 +27,14 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::StreamWireId;
-use ene_api::v1::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, RoundWireId};
-#[cfg(unix)]
 use ene_api::v1::refs::{
-    ClientIncarnationId, CompanionWireRef, RequestWireId, WireMessageId, WireMessageType,
+    BaseViewMark, ClientIncarnationId, CommandWireId, CompanionWireRef, ManagementTargetWire,
+    RequestWireId, RoundWireId, TextLangWire, WireMessageId, WireMessageType,
 };
-#[cfg(unix)]
 use ene_api::v1::reject::RejectKind;
-#[cfg(unix)]
-use ene_api::v1::round::TextBodyWire;
-use ene_api::v1::round::{HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire};
+use ene_api::v1::round::{
+    HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire, RoundTarget, TextBodyWire,
+};
 use ene_api::v1::undelivered::{
     TaskListPage, TaskListResponse, UndeliveredAckOutcome, UndeliveredResponse, UndeliveredSummary,
 };
@@ -54,6 +50,23 @@ use ene_inference::cost::UsageEstimate;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport, RawUsage};
 use ene_preservation::{ConfirmTargetedDeletionOutcome, DeletionOperationRef};
 use ene_primitive::{RawId, WallClockWithTz};
+use rusqlite::OptionalExtension as _;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{
+    CertificateError, ClientConfig, DigitallySignedStruct, Error as TlsError, SignatureScheme,
+};
+use sha2::Digest as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio_rustls::TlsConnector;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+// Mirrors `crate::wss::{AUTH_DEADLINE, MAX_PENDING_PAIRINGS}`; integration
+// tests cannot name pub(crate) items, so a drift breaks these tests instead
+// of silently weakening production.
+const MIRRORED_AUTH_DEADLINE: Duration = Duration::from_secs(15);
+const MIRRORED_MAX_PENDING_PAIRINGS: usize = 8;
 
 const DESCRIPTOR: &str = "stage6 e2e";
 const MODEL: &str = "gpt-4o-mini";
@@ -295,12 +308,38 @@ fn task_reply(directive: serde_json::Value) -> String {
     format!("[task-control] {directive}")
 }
 
+fn shared_memory_store(dir: &Path) -> MemoryCredentialStore {
+    static SHARED: std::sync::LazyLock<
+        Mutex<std::collections::HashMap<PathBuf, MemoryCredentialStore>>,
+    > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    let mut shared = SHARED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(existing) = shared.get(dir) {
+        return existing.clone();
+    }
+    let store = memory_store();
+    shared.insert(dir.to_path_buf(), store.clone());
+    store
+}
+
+fn register_memory_store(dir: &Path, store: &MemoryCredentialStore) {
+    static SHARED: std::sync::LazyLock<
+        Mutex<std::collections::HashMap<PathBuf, MemoryCredentialStore>>,
+    > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    let mut shared = SHARED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    shared.insert(dir.to_path_buf(), store.clone());
+}
+
 async fn open_host(dir: &Path) -> Arc<HostHandle> {
-    open_host_with(dir, memory_store()).await
+    open_host_with(dir, shared_memory_store(dir)).await
 }
 
 #[expect(clippy::unwrap_used, reason = "test fixture helper")]
 async fn open_host_with(dir: &Path, store: MemoryCredentialStore) -> Arc<HostHandle> {
+    register_memory_store(dir, &store);
     let opened = HostHandle::open_with_cred_store(dir, CredStore::Memory(store)).await;
     assert!(opened.is_ok(), "host must open");
     let handle = Arc::new(opened.unwrap());
@@ -534,7 +573,9 @@ impl Served {
         transport: Arc<ScriptedTransport>,
         capabilities: &[&str],
     ) -> Self {
-        let handle = open_host_with(&dir, cred_store()).await;
+        let seed = cred_store();
+        register_memory_store(&dir, &seed);
+        let handle = open_host_with(&dir, seed.clone()).await;
         let (stop, shutdown) = tokio::sync::watch::channel(false);
         let server = tokio::spawn(conn::run_until_shutdown(
             dir.clone(),
@@ -565,7 +606,7 @@ impl Served {
             shutdown: Some(stop),
             client: Some(client),
             transport,
-            cred_store: Box::new(cred_store),
+            cred_store: Box::new(move || seed.clone()),
         }
     }
 
@@ -591,7 +632,6 @@ impl Served {
         self.join_listener().await;
         wait_until_deletion_drivers(self.handle(), 0).await;
         wait_until_deletion_blocking(self.handle(), 0).await;
-        drop(std::fs::remove_file(conn::socket_path(&self.dir)));
     }
 
     fn request_graceful_stop(&self) {
@@ -620,7 +660,6 @@ impl Served {
         self.server.abort();
         self.join_listener().await;
         wait_until_deletion_drivers(self.handle(), 0).await;
-        drop(std::fs::remove_file(conn::socket_path(&self.dir)));
     }
 
     #[expect(clippy::expect_used, reason = "test fixture helper")]
@@ -4942,14 +4981,12 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
     served.server.abort();
 }
 
-#[cfg(unix)]
 #[derive(serde::Serialize)]
 struct IngressCrafted {
     envelope: WireEnvelope,
     payload: IngressPayload,
 }
 
-#[cfg(unix)]
 #[derive(serde::Serialize)]
 enum IngressPayload {
     FutureThing(IngressNote),
@@ -4957,20 +4994,17 @@ enum IngressPayload {
     SubmitTextInput(IngressPartialSubmit),
 }
 
-#[cfg(unix)]
 #[derive(serde::Serialize)]
 struct IngressNote {
     note: String,
 }
 
-#[cfg(unix)]
 #[derive(serde::Serialize)]
 struct IngressClose {
     stream: StreamWireId,
     status: String,
 }
 
-#[cfg(unix)]
 #[derive(serde::Serialize)]
 struct IngressPartialSubmit {
     companion: CompanionWireRef,
@@ -4980,8 +5014,7 @@ struct IngressPartialSubmit {
     body: TextBodyWire,
 }
 
-#[cfg(unix)]
-fn ingress_envelope(message_type: &str) -> WireEnvelope {
+fn crafted_envelope(message_type: &str) -> WireEnvelope {
     new_outgoing_envelope(
         ProtocolVersion::V1,
         WireSender {
@@ -4996,109 +5029,422 @@ fn ingress_envelope(message_type: &str) -> WireEnvelope {
     )
 }
 
-#[cfg(unix)]
-async fn ingress_dial(dir: &Path) -> tokio::net::UnixStream {
-    let path = conn::socket_path(dir);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        match tokio::net::UnixStream::connect(&path).await {
-            Ok(stream) => return stream,
-            Err(error) if tokio::time::Instant::now() < deadline => {
-                drop(error);
-                tokio::time::sleep(Duration::from_millis(20)).await;
+struct RawPinnedVerifier {
+    expected_pin: String,
+}
+
+impl std::fmt::Debug for RawPinnedVerifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RawPinnedVerifier")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ServerCertVerifier for RawPinnedVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, TlsError> {
+        let (_, certificate) = x509_parser::parse_x509_certificate(end_entity.as_ref())
+            .map_err(|_| TlsError::InvalidCertificate(CertificateError::BadEncoding))?;
+        let digest = sha2::Sha256::digest(certificate.public_key().raw);
+        let offered: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        if offered == self.expected_pin {
+            return Ok(rustls::client::danger::ServerCertVerified::assertion());
+        }
+        Err(TlsError::InvalidCertificate(
+            CertificateError::ApplicationVerificationFailure,
+        ))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+struct WssClient {
+    socket:
+        tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+}
+
+impl WssClient {
+    async fn connect(dir: &Path) -> Result<Self, String> {
+        Self::connect_with(dir, None, None, false, None).await
+    }
+
+    async fn load_runtime(dir: &Path) -> Result<HostRuntimeInfo, String> {
+        let runtime_path = dir.join(HOST_RUNTIME_FILE_NAME);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !runtime_path.exists() {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(String::from("runtime information was never published"));
             }
-            Err(error) => panic!("the listener never bound: {error}"),
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let bytes =
+            std::fs::read(&runtime_path).map_err(|error| format!("runtime read: {error}"))?;
+        serde_json::from_slice(&bytes).map_err(|error| format!("runtime parse: {error}"))
+    }
+
+    async fn connect_with(
+        dir: &Path,
+        token: Option<&str>,
+        pin: Option<&str>,
+        origin: bool,
+        generation: Option<&str>,
+    ) -> Result<Self, String> {
+        let runtime = Self::load_runtime(dir).await?;
+        let port = runtime
+            .local_port()
+            .ok_or("runtime is not a local wss url")?;
+        let tcp = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .map_err(|error| format!("connect: {error}"))?;
+        Self::handshake_on(&runtime, tcp, token, pin, origin, generation).await
+    }
+
+    /// Drives TLS and the WebSocket upgrade over an already-connected stream,
+    /// so a test can hold the stream between TCP connect and handshake.
+    async fn handshake_on(
+        runtime: &HostRuntimeInfo,
+        tcp: tokio::net::TcpStream,
+        token: Option<&str>,
+        pin: Option<&str>,
+        origin: bool,
+        generation: Option<&str>,
+    ) -> Result<Self, String> {
+        let port = runtime
+            .local_port()
+            .ok_or("runtime is not a local wss url")?;
+        let expected_pin = pin.unwrap_or(&runtime.host_pin).to_owned();
+        let config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(RawPinnedVerifier {
+                expected_pin,
+            }))
+            .with_no_client_auth();
+        let connector = TlsConnector::from(std::sync::Arc::new(config));
+        let server_name =
+            ServerName::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST).into());
+        let tls = connector
+            .connect(server_name, tcp)
+            .await
+            .map_err(|error| format!("tls: {error}"))?;
+        let presented_token = token.unwrap_or(&runtime.local_token);
+        let presented_generation = generation.unwrap_or(&runtime.startup_generation).to_owned();
+        let mut request = format!("wss://127.0.0.1:{port}/")
+            .into_client_request()
+            .map_err(|error| format!("build request: {error}"))?;
+        let authorization = format!("Bearer {presented_token}")
+            .parse::<tokio_tungstenite::tungstenite::http::HeaderValue>()
+            .map_err(|error| format!("token header: {error}"))?;
+        request.headers_mut().insert("authorization", authorization);
+        let generation = presented_generation
+            .parse::<tokio_tungstenite::tungstenite::http::HeaderValue>()
+            .map_err(|error| format!("generation header: {error}"))?;
+        request
+            .headers_mut()
+            .insert("x-ene-startup-generation", generation);
+        if origin {
+            request.headers_mut().insert(
+                "origin",
+                tokio_tungstenite::tungstenite::http::HeaderValue::from_static(
+                    "https://evil.example",
+                ),
+            );
+        }
+        let socket = tokio_tungstenite::client_async_with_config(request, tls, None)
+            .await
+            .map_err(|error| format!("upgrade refused: {error}"))?;
+        Ok(Self { socket: socket.0 })
+    }
+
+    async fn send_crafted(&mut self, frame: &IngressCrafted) -> WireMessageId {
+        use futures_util::SinkExt as _;
+
+        let message_id = frame.envelope.message_id;
+        let body = rmp_serde::to_vec_named(frame).expect("crafted frame encodes");
+        self.socket
+            .send(Message::Binary(body.into()))
+            .await
+            .expect("crafted frame must send");
+        message_id
+    }
+
+    async fn send_wire(&mut self, frame: &WireFrame) {
+        use futures_util::SinkExt as _;
+
+        let body = encode_frame(frame).expect("wire frame encodes");
+        self.socket
+            .send(Message::Binary(body.into()))
+            .await
+            .expect("wire frame must send");
+    }
+
+    async fn recv_wire(&mut self) -> WireFrame {
+        use futures_util::{SinkExt as _, StreamExt as _};
+
+        while let Some(message) = self.socket.next().await {
+            match message.expect("host message must read") {
+                Message::Binary(body) => {
+                    return match decode_frame(&body).expect("host frame decodes") {
+                        DecodedFrame::Known(frame) => frame,
+                        other => panic!("host must send known frames, got {other:?}"),
+                    };
+                }
+                Message::Ping(payload) => {
+                    self.socket
+                        .send(Message::Pong(payload))
+                        .await
+                        .expect("transport pong must send");
+                }
+                Message::Pong(_) | Message::Frame(_) => {}
+                other => panic!("unexpected host message: {other:?}"),
+            }
+        }
+        panic!("the Host closed the connection");
+    }
+
+    /// Declares an oversize frame without paying for its full payload, over the
+    /// raw TLS stream underneath the upgraded socket.
+    async fn send_oversize_and_expect_close(self) {
+        let mut raw = self.socket.into_inner();
+        let mask = *uuid::Uuid::new_v4().as_bytes();
+        let mut header = vec![0x82, 0x80 | 127];
+        header.extend_from_slice(&(1_073_741_824_u64).to_be_bytes());
+        header.extend_from_slice(&mask);
+        let junk: Vec<u8> = (0..1024)
+            .map(|index: usize| (index % 251) as u8 ^ mask[index % 4])
+            .collect();
+        header.extend_from_slice(&junk);
+        raw.write_all(&header)
+            .await
+            .expect("oversize header must write");
+        let closed = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut chunk = [0_u8; 1024];
+            loop {
+                match raw.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => {
+                        if chunk[..read].windows(2).any(|pair| pair[0] & 0x0f == 0x8) {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "an oversize frame must make the Host close the connection"
+        );
+    }
+
+    async fn expect_reject(&mut self, reply_to: WireMessageId, kind: RejectKind) {
+        let reply = self.recv_wire().await;
+        assert_eq!(
+            reply.envelope.message_type.0, "Reject",
+            "an unsupported value is answered with a wire reject"
+        );
+        assert_eq!(
+            reply.envelope.correlation.reply_to,
+            Some(reply_to),
+            "the reject correlates to the rejected message"
+        );
+        match reply.payload {
+            WirePayload::Reject(notice) => {
+                assert_eq!(
+                    notice.kind, kind,
+                    "the reject carries the typed reason: {notice:?}"
+                );
+                assert!(!notice.detail.is_empty(), "{notice:?}");
+            }
+            other => panic!("expected Reject, got {}", other.message_type()),
         }
     }
 }
 
-#[cfg(unix)]
-async fn ingress_write_bytes(stream: &mut tokio::net::UnixStream, bytes: &[u8]) {
-    use tokio::io::AsyncWriteExt as _;
-    tokio::time::timeout(Duration::from_secs(10), stream.write_all(bytes))
+async fn raw_dial(dir: &Path) -> WssClient {
+    tokio::time::timeout(Duration::from_secs(15), WssClient::connect(dir))
         .await
-        .expect("host connection must accept writes")
-        .expect("frame must be writable");
+        .expect("the dial must finish")
+        .expect("a same-machine client with the current token must upgrade")
 }
 
-#[cfg(unix)]
-async fn ingress_write_crafted(
-    stream: &mut tokio::net::UnixStream,
-    frame: &IngressCrafted,
-) -> WireMessageId {
-    let message_id = frame.envelope.message_id;
-    let body = rmp_serde::to_vec_named(frame).expect("crafted frame must encode");
-    let mut bytes = Vec::with_capacity(4 + body.len());
-    bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    bytes.extend_from_slice(&body);
-    ingress_write_bytes(stream, &bytes).await;
-    message_id
+#[tokio::test]
+async fn a_stalled_pre_auth_connection_does_not_delay_the_next_client() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+
+    let runtime = WssClient::load_runtime(dir.path())
+        .await
+        .expect("runtime must publish");
+    let port = runtime.local_port().expect("a local wss url");
+    // Client A completes the TCP handshake and then never speaks TLS, so its
+    // server-side upgrade stalls for the whole production upgrade timeout.
+    let stalled = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .expect("the stalled client must connect");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Client B must not pay Client A's upgrade timeout (production: 10s).
+    let connected = tokio::time::timeout(Duration::from_secs(5), WssClient::connect(dir.path()))
+        .await
+        .expect("the next client must not wait for the stalled upgrade")
+        .expect("the next client must upgrade");
+    drop(connected);
+
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+    drop(stalled);
 }
 
-#[cfg(unix)]
-async fn ingress_write_wire(stream: &mut tokio::net::UnixStream, frame: &WireFrame) {
-    let body = encode_frame(frame).expect("wire frame must encode");
-    let mut bytes = Vec::with_capacity(4 + body.len());
-    bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    bytes.extend_from_slice(&body);
-    ingress_write_bytes(stream, &bytes).await;
-}
+#[tokio::test]
+async fn an_upgrade_in_progress_survives_unrelated_select_activity() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
 
-#[cfg(unix)]
-async fn ingress_read_reply(stream: &mut tokio::net::UnixStream) -> WireFrame {
-    use tokio::io::AsyncReadExt as _;
+    let runtime = WssClient::load_runtime(dir.path())
+        .await
+        .expect("runtime must publish");
+    let port = runtime.local_port().expect("a local wss url");
+    let tcp = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .expect("the slow client must connect");
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let mut prefix = [0_u8; 4];
-    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut prefix))
-        .await
-        .expect("the host must answer")
-        .expect("the reply prefix must be readable");
-    let claimed = u32::from_be_bytes(prefix) as usize;
-    assert!(claimed <= MAX_FRAME_BYTES, "host replies stay bounded");
-    let mut body = vec![0_u8; claimed];
-    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut body))
-        .await
-        .expect("the host must answer")
-        .expect("the reply body must be readable");
-    let decoded = decode_frame(&body).expect("host reply must decode");
-    match decoded {
-        DecodedFrame::Known(frame) => frame,
-        other => panic!("the host must reply with known frames, got {other:?}"),
+    // Unrelated branches of the serving loop fire while that upgrade is in
+    // flight: other connections are accepted, upgraded, served and closed,
+    // and the control listener takes a requester that immediately leaves.
+    for _ in 0..3 {
+        let other = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .expect("another client must connect");
+        drop(other);
     }
+    drop(
+        tokio::time::timeout(Duration::from_secs(5), WssClient::connect(dir.path()))
+            .await
+            .expect("the other client must not hang either")
+            .expect("another client must upgrade"),
+    );
+    drop(
+        ene_core::host_control::ControlClient::connect(dir.path())
+            .await
+            .expect("the control listener must answer"),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The slow client now finishes its handshake: the in-flight upgrade must
+    // have survived every unrelated branch firing in the meantime.
+    let finished = tokio::time::timeout(
+        Duration::from_secs(5),
+        WssClient::handshake_on(&runtime, tcp, None, None, false, None),
+    )
+    .await
+    .expect("the in-flight upgrade must complete")
+    .expect("the in-flight upgrade must succeed");
+    drop(finished);
+
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
 }
 
-#[cfg(unix)]
-async fn ingress_expect_reject(
-    stream: &mut tokio::net::UnixStream,
-    reply_to: WireMessageId,
-    kind: RejectKind,
-) {
-    let reply = ingress_read_reply(stream).await;
-    assert_eq!(
-        reply.envelope.message_type.0, "Reject",
-        "an unsupported value is answered with a wire reject"
-    );
-    assert_eq!(
-        reply.envelope.correlation.reply_to,
-        Some(reply_to),
-        "the reject correlates to the exact rejected message"
-    );
-    match reply.payload {
-        WirePayload::Reject(notice) => {
-            assert_eq!(
-                notice.kind, kind,
-                "the reject carries the typed reason: {notice:?}"
-            );
-            assert!(
-                !notice.detail.is_empty(),
-                "the reject explains itself without echoing a body: {notice:?}"
-            );
-        }
-        other => panic!("expected Reject, got {}", other.message_type()),
-    }
+#[tokio::test]
+async fn shutdown_joins_a_stalled_pre_auth_upgrade() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+
+    let runtime = WssClient::load_runtime(dir.path())
+        .await
+        .expect("runtime must publish");
+    let port = runtime.local_port().expect("a local wss url");
+    let stalled = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .expect("the stalled client must connect");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    stop.send_replace(true);
+    // Shutdown must stop the stalled upgrade task instead of waiting out its
+    // production timeout.
+    let joined = tokio::time::timeout(Duration::from_secs(6), server)
+        .await
+        .expect("shutdown must not wait out the upgrade timeout")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+    drop(stalled);
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn unknown_wire_values_are_typed_rejects_and_the_connection_stays_usable() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -5111,66 +5457,58 @@ async fn unknown_wire_values_are_typed_rejects_and_the_connection_stays_usable()
         transport,
         shutdown,
     ));
-    let mut stream = ingress_dial(dir.path()).await;
+    let mut host = raw_dial(dir.path()).await;
 
-    let unknown_type = ingress_write_crafted(
-        &mut stream,
-        &IngressCrafted {
-            envelope: ingress_envelope("FutureThing"),
+    let unknown_type = host
+        .send_crafted(&IngressCrafted {
+            envelope: crafted_envelope("FutureThing"),
             payload: IngressPayload::FutureThing(IngressNote {
                 note: String::from("from a newer peer"),
             }),
-        },
-    )
-    .await;
-    ingress_expect_reject(&mut stream, unknown_type, RejectKind::UnsupportedMessage).await;
+        })
+        .await;
+    host.expect_reject(unknown_type, RejectKind::UnsupportedMessage)
+        .await;
 
-    let unknown_value = ingress_write_crafted(
-        &mut stream,
-        &IngressCrafted {
-            envelope: ingress_envelope("TextStreamClose"),
+    let unknown_value = host
+        .send_crafted(&IngressCrafted {
+            envelope: crafted_envelope("TextStreamClose"),
             payload: IngressPayload::TextStreamClose(IngressClose {
                 stream: StreamWireId(uuid::Uuid::new_v4()),
                 status: String::from("Suspended"),
             }),
-        },
-    )
-    .await;
-    ingress_expect_reject(
-        &mut stream,
-        unknown_value,
-        RejectKind::UnsupportedFieldValue,
-    )
-    .await;
+        })
+        .await;
+    host.expect_reject(unknown_value, RejectKind::UnsupportedFieldValue)
+        .await;
 
-    let missing_field = ingress_write_crafted(
-        &mut stream,
-        &IngressCrafted {
-            envelope: ingress_envelope("SubmitTextInput"),
+    let missing_field = host
+        .send_crafted(&IngressCrafted {
+            envelope: crafted_envelope("SubmitTextInput"),
             payload: IngressPayload::SubmitTextInput(IngressPartialSubmit {
                 companion: CompanionWireRef(String::from("default")),
                 round: None,
                 fresh: false,
                 body: TextBodyWire {
                     text: String::from("local_id deliberately absent"),
-                    lang: ene_api::v1::refs::TextLangWire(String::from("en")),
+                    lang: TextLangWire(String::from("en")),
                 },
             }),
-        },
-    )
-    .await;
-    ingress_expect_reject(&mut stream, missing_field, RejectKind::MissingRequiredField).await;
+        })
+        .await;
+    host.expect_reject(missing_field, RejectKind::MissingRequiredField)
+        .await;
 
     let mut pairing = WireFrame {
-        envelope: ingress_envelope("PairingRequest"),
+        envelope: crafted_envelope("PairingRequest"),
         payload: WirePayload::PairingRequest(PairingRequest {
             device_descriptor: String::from("raw ingress"),
         }),
     };
     pairing.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
     let pairing_id = pairing.envelope.message_id;
-    ingress_write_wire(&mut stream, &pairing).await;
-    let reply = ingress_read_reply(&mut stream).await;
+    host.send_wire(&pairing).await;
+    let reply = host.recv_wire().await;
     assert_eq!(
         reply.envelope.correlation.reply_to,
         Some(pairing_id),
@@ -5190,14 +5528,10 @@ async fn unknown_wire_values_are_typed_rejects_and_the_connection_stays_usable()
         .expect("the listener must stop")
         .expect("the listener must not panic");
     joined.expect("the listener must shut down cleanly");
-    drop(std::fs::remove_file(conn::socket_path(dir.path())));
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn an_oversize_length_prefix_closes_the_connection_without_allocating() {
-    use tokio::io::AsyncReadExt as _;
-
+async fn the_host_refuses_an_upgrade_without_the_current_local_token() {
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
     let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
@@ -5208,14 +5542,19 @@ async fn an_oversize_length_prefix_closes_the_connection_without_allocating() {
         transport,
         shutdown,
     ));
-    let mut stream = ingress_dial(dir.path()).await;
-    ingress_write_bytes(&mut stream, &1_073_741_824_u32.to_be_bytes()).await;
-    let mut probe = [0_u8; 1];
-    let outcome =
-        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut probe)).await;
+    let refusal = match tokio::time::timeout(
+        Duration::from_secs(15),
+        WssClient::connect_with(dir.path(), Some("not-the-token"), None, false, None),
+    )
+    .await
+    {
+        Ok(Ok(_)) => panic!("a wrong token must be refused at the upgrade"),
+        Ok(Err(refusal)) => refusal,
+        Err(_) => panic!("the refusal must finish in time"),
+    };
     assert!(
-        matches!(outcome, Ok(Err(_))),
-        "the Host must drop a connection that claims an oversize frame: {outcome:?}"
+        refusal.contains("403"),
+        "the refusal is a forbidden response: {refusal}"
     );
     stop.send_replace(true);
     let joined = tokio::time::timeout(Duration::from_secs(30), server)
@@ -5223,5 +5562,588 @@ async fn an_oversize_length_prefix_closes_the_connection_without_allocating() {
         .expect("the listener must stop")
         .expect("the listener must not panic");
     joined.expect("the listener must shut down cleanly");
-    drop(std::fs::remove_file(conn::socket_path(dir.path())));
+}
+
+#[tokio::test]
+async fn the_host_refuses_an_upgrade_that_carries_an_origin() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let refusal = match tokio::time::timeout(
+        Duration::from_secs(15),
+        WssClient::connect_with(dir.path(), None, None, true, None),
+    )
+    .await
+    {
+        Ok(Ok(_)) => panic!("an Origin-bearing upgrade must be refused"),
+        Ok(Err(refusal)) => refusal,
+        Err(_) => panic!("the refusal must finish in time"),
+    };
+    assert!(
+        refusal.contains("403"),
+        "the refusal is a forbidden response: {refusal}"
+    );
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn an_oversize_ws_frame_closes_the_connection_without_allocating_it() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let host = raw_dial(dir.path()).await;
+    host.send_oversize_and_expect_close().await;
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn the_runtime_information_is_published_while_serving_and_removed_on_graceful_stop() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    dial_until_pending(dir.path())
+        .await
+        .expect("the listener must accept the first pairing");
+    let path = dir.path().join(HOST_RUNTIME_FILE_NAME);
+    let bytes = std::fs::read(&path).expect("runtime information must be published");
+    let runtime: HostRuntimeInfo = serde_json::from_slice(&bytes).expect("runtime must parse");
+    let rendered = format!("{runtime:?}");
+    assert!(
+        !rendered.contains(&runtime.local_token),
+        "runtime Debug must redact the local token: {rendered}"
+    );
+    assert!(
+        runtime.local_port().is_some(),
+        "the published url is a local wss endpoint: {}",
+        runtime.url
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&path)
+            .expect("runtime metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "the runtime file is owner-only");
+    }
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+    assert!(
+        !path.exists(),
+        "a graceful stop removes the runtime information"
+    );
+}
+
+#[expect(clippy::expect_used, reason = "test fixture helper")]
+async fn expect_stale_connection(client: &mut Client, payload: WirePayload, what: &str) {
+    let answer = ask(client, payload, what).await;
+    let WirePayload::Reject(reject) = answer.expect("a superseded connection answers typed") else {
+        panic!("{what} must answer a wire reject");
+    };
+    assert_eq!(
+        reject.kind,
+        RejectKind::StaleConnection,
+        "{what} must name the stale connection"
+    );
+}
+
+#[expect(clippy::expect_used, reason = "test fixture helper")]
+fn presence_row(dir: &Path) -> Option<(String, i64)> {
+    let conn = rusqlite::Connection::open(dir.join("app.db")).expect("the store file must open");
+    conn.query_row(
+        "SELECT state, generation FROM presence_attribution",
+        (),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .expect("the presence attribution must read")
+}
+
+async fn wait_presence(dir: &Path, wanted: &str) -> (String, i64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(row) = presence_row(dir)
+            && row.0 == wanted
+        {
+            return row;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "presence never reached {wanted}: {:?}",
+            presence_row(dir)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_superseded_connection_answers_a_typed_stale_connection() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_setup(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let mut c1 = served.client.take().expect("the started client exists");
+
+    let (round1, stream1, text1) = send_round(&mut c1, "first client round")
+        .await
+        .expect("c1 must serve");
+    confirm_round(&mut c1, &round1, stream1).await;
+
+    let mut c2 = connect(dir.path()).await;
+    let (round2, stream2, _text2) = send_round(&mut c2, "second client round")
+        .await
+        .expect("c2 must serve");
+    confirm_round(&mut c2, &round2, stream2).await;
+
+    let companion = c2.companion_ref();
+    let stale_round = ask(
+        &mut c2,
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            RoundTarget::Existing(RoundWireId(round1.clone())),
+            String::from("join c1's round"),
+            String::from("en"),
+        )),
+        "old round join",
+    )
+    .await
+    .expect("the old-round submit must answer typed");
+    assert!(
+        matches!(
+            stale_round,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::StaleRound { .. })
+        ),
+        "c2 must not inherit c1's open round, got {stale_round:?}"
+    );
+
+    let companion = c1.companion_ref();
+    let target = c1.round_target();
+    expect_stale_connection(
+        &mut c1,
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            target,
+            String::from("replay on the superseded connection"),
+            String::from("en"),
+        )),
+        "superseded input",
+    )
+    .await;
+    expect_stale_connection(
+        &mut c1,
+        WirePayload::ManagementViewRequest(cmds::setup_view_request()),
+        "superseded view",
+    )
+    .await;
+
+    let (round3, stream3, text3) = send_round(&mut c2, "still current")
+        .await
+        .expect("c2 must stay current");
+    confirm_round(&mut c2, &round3, stream3).await;
+    assert_eq!(
+        text3, text1,
+        "the scripted provider reply must stream to the current client"
+    );
+    assert_eq!(
+        transport.sends(),
+        3,
+        "one provider call per accepted round: the stale replays sent nothing"
+    );
+
+    drop(c1);
+    let (round4, stream4, _text4) = send_round(&mut c2, "after the old connection closed")
+        .await
+        .expect("c2 must keep serving after the superseded connection closes");
+    confirm_round(&mut c2, &round4, stream4).await;
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn reconnect_reauths_without_restoring_presence_and_a_fresh_summon_serves() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_setup(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let mut c1 = served.client.take().expect("the started client exists");
+
+    let (round1, stream1, _text1) = send_round(&mut c1, "summon round")
+        .await
+        .expect("the summon round must complete");
+    confirm_round(&mut c1, &round1, stream1).await;
+    wait_presence(dir.path(), "present").await;
+
+    drop(c1);
+    let (_, fallen_back) = wait_presence(dir.path(), "no_active").await;
+
+    let mut c2 = connect(dir.path()).await;
+    assert_eq!(
+        presence_row(dir.path()),
+        Some((String::from("no_active"), fallen_back)),
+        "authentication alone must not restore attribution"
+    );
+
+    let (round2, stream2, _text2) = send_round(&mut c2, "summon again")
+        .await
+        .expect("the post-reconnect summon must complete");
+    confirm_round(&mut c2, &round2, stream2).await;
+    let (state, attached) = presence_row(dir.path()).expect("the attach must commit a row");
+    assert_eq!(state, "present", "the fresh summon attaches presence");
+    assert!(
+        attached > fallen_back,
+        "attaching advances the presence generation: {fallen_back} -> {attached}"
+    );
+    assert_eq!(
+        transport.sends(),
+        2,
+        "one provider call per round: the reconnect and the attach sent nothing"
+    );
+    drop(c2);
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn the_host_refuses_a_stale_startup_generation() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let refusal = match tokio::time::timeout(
+        Duration::from_secs(15),
+        WssClient::connect_with(dir.path(), None, None, false, Some("stale-generation")),
+    )
+    .await
+    {
+        Ok(Ok(_)) => panic!("a stale startup generation must be refused"),
+        Ok(Err(refusal)) => refusal,
+        Err(_) => panic!("the refusal must finish in time"),
+    };
+    assert!(
+        refusal.contains("403"),
+        "the refusal is a forbidden response: {refusal}"
+    );
+    let runtime: HostRuntimeInfo = serde_json::from_slice(
+        &std::fs::read(dir.path().join(HOST_RUNTIME_FILE_NAME)).expect("runtime must read"),
+    )
+    .expect("runtime must parse");
+    assert!(
+        !refusal.contains(&runtime.local_token),
+        "the refusal must not echo the local token: {refusal}"
+    );
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn text_and_malformed_frames_close_the_connection() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    for attempt in 0..2_u8 {
+        let mut client = raw_dial(dir.path()).await;
+        use futures_util::{SinkExt as _, StreamExt as _};
+        if attempt == 0 {
+            client
+                .socket
+                .send(Message::Text("not part of the wire".into()))
+                .await
+                .expect("text must send");
+        } else {
+            client
+                .socket
+                .send(Message::Binary(vec![0xC1_u8, 0x01, 0xAA].into()))
+                .await
+                .expect("malformed body must send");
+        }
+        let closed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match client.socket.next().await {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                    Some(Ok(_)) => continue,
+                }
+            }
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "the Host must close the connection after a {} frame",
+            if attempt == 0 { "text" } else { "malformed" }
+        );
+    }
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn a_pre_auth_connection_that_never_negotiates_is_closed_at_the_machine_deadline() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let mut silent = raw_dial(dir.path()).await;
+    // Freeze only the clock to cross the machine deadline; every socket
+    // operation stays on the real clock.
+    tokio::time::pause();
+    tokio::time::advance(MIRRORED_AUTH_DEADLINE + Duration::from_secs(5)).await;
+    tokio::time::resume();
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        use futures_util::StreamExt as _;
+        loop {
+            match silent.socket.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "a machine-controlled pre-auth stall must be closed at the deadline"
+    );
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn owner_confirmation_may_exceed_the_machine_deadline() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let pending = dial_until_pending(dir.path())
+        .await
+        .expect("the first pairing must pend");
+    // The owner reads the confirmation for longer than the machine deadline.
+    tokio::time::pause();
+    tokio::time::advance(MIRRORED_AUTH_DEADLINE + Duration::from_secs(30)).await;
+    tokio::time::resume();
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let approved = handle
+        .approve_device(pending.pending_id())
+        .await
+        .expect("approval must succeed");
+    assert!(approved.is_some(), "approval must pair");
+    let mut client = pending
+        .complete()
+        .await
+        .expect("the connection must survive an owner wait longer than the machine deadline");
+    let companion = client.companion_ref();
+    let answer = ask(
+        &mut client,
+        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
+        "post-approval history",
+    )
+    .await
+    .expect("the approved connection must answer");
+    assert!(
+        matches!(answer, WirePayload::HistoryResponse(_)),
+        "got {answer:?}"
+    );
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn an_idle_client_keeps_one_connection_alive_past_the_liveness_window() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let pending = dial_until_pending(dir.path())
+        .await
+        .expect("the first pairing must pend");
+    let approved = handle
+        .approve_device(pending.pending_id())
+        .await
+        .expect("approval must succeed");
+    assert!(approved.is_some(), "approval must pair");
+    let mut client = pending
+        .complete()
+        .await
+        .expect("provision must authenticate");
+    // Idle far past the host's liveness window: only the clock moves, and
+    // the transport's background pump keeps answering the Host's pings.
+    tokio::time::pause();
+    for _ in 0..12 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+    tokio::time::resume();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let companion = client.companion_ref();
+    let answer = ask(
+        &mut client,
+        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
+        "history after idle",
+    )
+    .await
+    .expect("the same connection must still answer after more than the liveness window of idling");
+    assert!(
+        matches!(answer, WirePayload::HistoryResponse(_)),
+        "got {answer:?}"
+    );
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn pending_pairings_are_capped_with_a_typed_denial() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let mut held: Vec<WssClient> = Vec::new();
+    let mut denied = false;
+    for index in 0..=MIRRORED_MAX_PENDING_PAIRINGS {
+        let mut client = raw_dial(dir.path()).await;
+        let mut pairing = WireFrame {
+            envelope: crafted_envelope("PairingRequest"),
+            payload: WirePayload::PairingRequest(PairingRequest {
+                device_descriptor: format!("pending-{index}"),
+            }),
+        };
+        pairing.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
+        client.send_wire(&pairing).await;
+        let reply = client.recv_wire().await;
+        match reply.payload {
+            WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation { .. }) => {
+                assert!(
+                    !denied,
+                    "the cap must only refuse once the limit is reached"
+                );
+                held.push(client);
+            }
+            WirePayload::PairingResult(PairingResult::Denied { reason }) => {
+                assert_eq!(
+                    index, MIRRORED_MAX_PENDING_PAIRINGS,
+                    "only the connection past the cap is refused"
+                );
+                assert!(
+                    reason.contains("too many pending pairings"),
+                    "the refusal names the bound: {reason}"
+                );
+                denied = true;
+            }
+            other => panic!(
+                "pairing must answer pending or denied, got {}",
+                other.message_type()
+            ),
+        }
+    }
+    assert!(
+        denied,
+        "the {MIRRORED_MAX_PENDING_PAIRINGS}th pending pairing must be refused"
+    );
+    drop(held);
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
 }

@@ -27,11 +27,18 @@ ene-store = { path = "../../crates/ene-store" }
 ene-task = { path = "../../crates/ene-task" }
 ene-local-control = { path = "../../crates/ene-local-control" }
 chrono.workspace = true
+futures-util.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+x509-parser.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 
@@ -46,7 +53,7 @@ rmp-serde.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 uuid.workspace = true
 ene-ctl = { path = "../ene-ctl" }
 ene-store = { path = "../../crates/ene-store", features = ["test-support"] }
