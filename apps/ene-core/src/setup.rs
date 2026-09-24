@@ -1,4 +1,5 @@
 use ene_action::WorkspaceRoot;
+use ene_api::codec::WireFrame;
 use ene_api::v1::management::{
     ManagementIntent, ManagementIntentKind, ManagementOutcome, ManagementView,
     ManagementViewRequest, RationaleOrigin, SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, ViewSection,
@@ -23,7 +24,6 @@ use ene_permission::{
     IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, IntentResolution, assign_consent,
     consent_view_mark,
 };
-use ene_plugin_ipc::WireFrame;
 use ene_primitive::RawId;
 use ene_task::{
     CancelTaskCommand, ResumeInstructionSource, ResumeTaskCommand, SteeringPremiseRef,

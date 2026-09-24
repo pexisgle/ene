@@ -1,6 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::pairing::pairing_proof_hex;
+#[cfg(any(unix, windows))]
+use ene_api::codec::{
+    CodecError, DecodedFrame, MAX_FRAME_BYTES, UnsupportedReason, WireFrame, decode_frame,
+    encode_frame,
+};
 use ene_api::v1::deletion::{DeletionDemand, LocalErasureResult};
 #[cfg(any(unix, windows))]
 use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender};
@@ -10,11 +15,6 @@ use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::WireMessageId;
 #[cfg(any(unix, windows))]
 use ene_api::v1::reject::IncompatibleProtocol;
-#[cfg(any(unix, windows))]
-use ene_plugin_ipc::{
-    CodecError, DecodedFrame, MAX_FRAME_BYTES, UnsupportedReason, WireFrame, decode_frame,
-    encode_frame,
-};
 
 #[cfg(any(unix, windows))]
 use crate::device;
@@ -457,10 +457,13 @@ async fn write_frame(
     frame: &WireFrame,
 ) -> Result<(), ClientError> {
     use tokio::io::AsyncWriteExt as _;
-    let bytes = zeroize::Zeroizing::new(
+    let body = zeroize::Zeroizing::new(
         encode_frame(frame)
             .map_err(|error: CodecError| ClientError::Codec(format!("encode failed: {error}")))?,
     );
+    let mut bytes = Vec::with_capacity(4 + body.len());
+    bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&body);
     stream.write_all(&bytes).await.map_err(|error| {
         ClientError::Transport(format!("socket write failed: {}", error.kind()))
     })?;
@@ -483,14 +486,12 @@ async fn read_frame(
             "frame body of {claimed} bytes exceeds the 256 KiB cap"
         )));
     }
-    let mut bytes = zeroize::Zeroizing::new(vec![0_u8; 4 + claimed]);
-    bytes[..4].copy_from_slice(&prefix);
+    let mut body = zeroize::Zeroizing::new(vec![0_u8; claimed]);
     stream
-        .read_exact(&mut bytes[4..])
+        .read_exact(&mut body)
         .await
         .map_err(|error| ClientError::Transport(format!("socket read failed: {}", error.kind())))?;
-    decode_frame(&bytes)
-        .map(|(frame, _consumed)| frame)
+    decode_frame(&body)
         .map_err(|error: CodecError| ClientError::Codec(format!("decode failed: {error}")))
 }
 

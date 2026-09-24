@@ -6,7 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+rmp-serde.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 

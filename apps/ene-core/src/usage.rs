@@ -1,3 +1,4 @@
+use ene_api::codec::WireFrame;
 use ene_api::v1::management::{
     ManagementIntent, ManagementOutcome, USAGE_CAP_TARGET_PREFIX, parse_usage_cap_target,
 };
@@ -19,7 +20,6 @@ use ene_permission::{
     UsageCapScope, UsageCapStatus, UsageCapStatusQuery, UsageCapWindow, parse_usage_cap_mark,
     usage_cap_mark,
 };
-use ene_plugin_ipc::WireFrame;
 use ene_primitive::{CurrencyCode, Money, WallClockWithTz};
 
 use crate::presentation::{StoredCursor, field_reject, stale_operation};

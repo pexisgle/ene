@@ -1,10 +1,10 @@
 use super::LiveInput;
+use ene_api::codec::{UnsupportedReason, WireFrame};
 use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender, new_outgoing_envelope};
 use ene_api::v1::handshake::DisconnectNotice;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{DeviceWireId, WireMessageId, WireMessageType};
 use ene_api::v1::reject::{IncompatibleProtocol, RejectKind, RejectNotice};
-use ene_plugin_ipc::{UnsupportedReason, WireFrame};
 use uuid::Uuid;
 
 pub(crate) fn unpaired_close(frame: &WireFrame, live: &LiveInput) -> WireFrame {

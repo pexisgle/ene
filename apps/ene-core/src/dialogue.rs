@@ -1,3 +1,4 @@
+use ene_api::codec::WireFrame;
 use ene_api::v1::command::CommandReplayRejectWire;
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{CommandWireId, RoundWireId, StreamWireId};
@@ -26,7 +27,6 @@ use ene_inference::{
 };
 use ene_learning::{ExperienceCandidate, SecretScrubber as _};
 use ene_permission::{CapabilityKind, ConsentRepository as _, EvaluationTracker};
-use ene_plugin_ipc::WireFrame;
 use ene_presence::{
     ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceAttribution,
     PresenceCheckRef, PresenceGeneration, PresenceRepository as _, PresenceState, ThinMoveReason,

@@ -1,3 +1,4 @@
+use ene_api::codec::{DecodedFrame, WireFrame};
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthResult;
 use ene_api::v1::management::{
@@ -10,7 +11,6 @@ use ene_api::v1::refs::{
     ClientIncarnationId, ClientLocalId, CompanionWireRef, RoundWireId, TextLangWire,
 };
 use ene_api::v1::round::{HistoryRequest, RoundTarget, SubmitTextInput, TextBodyWire};
-use ene_plugin_ipc::{DecodedFrame, WireFrame};
 
 use super::frames::{
     PreparedRequest, capability_frame, frame_for, frame_for_session, pairing_frame, proof_frame,
@@ -896,9 +896,8 @@ fn proof_frame_names_the_paired_device() -> Result<(), String> {
         !rendered.contains("proof-hex-abc"),
         "frame Debug must not leak the proof: {rendered:?}"
     );
-    let encoded = (ene_plugin_ipc::encode_frame(&frame)).expect("encode proof frame");
-    let (decoded, _consumed) =
-        (ene_plugin_ipc::decode_frame(&encoded)).expect("decode proof frame");
+    let encoded = (ene_api::codec::encode_frame(&frame)).expect("encode proof frame");
+    let decoded = (ene_api::codec::decode_frame(&encoded)).expect("decode proof frame");
     let DecodedFrame::Known(decoded) = decoded else {
         return Err(String::from(
             "the proof frame must decode as a known message",
@@ -958,6 +957,7 @@ fn ene_client_manifest_stays_a_client_library() {
 mod unknown_wire {
     use std::time::Duration;
 
+    use ene_api::codec::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
     use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender, new_outgoing_envelope};
     use ene_api::v1::handshake::{AuthChallenge, AuthResult, NegotiatedConnection};
     use ene_api::v1::payload::WirePayload;
@@ -967,7 +967,6 @@ mod unknown_wire {
         WireMessageType,
     };
     use ene_api::v1::reject::RejectKind;
-    use ene_plugin_ipc::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
     use serde::Serialize;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -1017,19 +1016,19 @@ mod unknown_wire {
             .expect("client frame prefix must be readable");
         let claimed = u32::from_be_bytes(prefix) as usize;
         assert!(claimed <= MAX_FRAME_BYTES, "client frames stay bounded");
-        let mut bytes = zeroize::Zeroizing::new(vec![0_u8; 4 + claimed]);
-        bytes[..4].copy_from_slice(&prefix);
-        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut bytes[4..]))
+        let mut body = zeroize::Zeroizing::new(vec![0_u8; claimed]);
+        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut body))
             .await
             .expect("client frame body must arrive")
             .expect("client frame body must be readable");
-        let (decoded, consumed) = decode_frame(&bytes).expect("client frame must decode");
-        assert_eq!(consumed, bytes.len(), "one client frame per message");
-        decoded
+        decode_frame(&body).expect("client frame must decode")
     }
 
     async fn write_wire(stream: &mut tokio::net::UnixStream, frame: &WireFrame) {
-        let bytes = zeroize::Zeroizing::new(encode_frame(frame).expect("host frame encodes"));
+        let body = zeroize::Zeroizing::new(encode_frame(frame).expect("host frame encodes"));
+        let mut bytes = Vec::with_capacity(4 + body.len());
+        bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&body);
         tokio::time::timeout(Duration::from_secs(10), stream.write_all(&bytes))
             .await
             .expect("host frame write must finish")
@@ -1053,7 +1052,8 @@ mod unknown_wire {
         };
         let message_id = crafted.envelope.message_id;
         let body = rmp_serde::to_vec_named(&crafted).expect("crafted host frame encodes");
-        let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
+        let mut bytes = Vec::with_capacity(4 + body.len());
+        bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
         bytes.extend_from_slice(&body);
         tokio::time::timeout(Duration::from_secs(10), stream.write_all(&bytes))
             .await
@@ -1220,4 +1220,62 @@ fn the_session_tracks_the_open_round_until_a_stale_round_clears_it() {
         "a stale round clears the premise so the next send starts fresh"
     );
     assert_eq!(state.round_target(), RoundTarget::New);
+}
+
+#[cfg(unix)]
+mod oversize_prefix {
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use crate::error::ClientError;
+
+    #[tokio::test]
+    async fn an_oversize_length_prefix_is_refused_before_allocating_a_body() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let device = ene_api::v1::refs::DeviceWireId(uuid::Uuid::new_v4());
+        crate::device::store_device(
+            dir.path(),
+            &crate::device::StoredDevice::new(device, String::from("pairing-secret")),
+        )
+        .expect("stored device must be readable at connect");
+        let listener =
+            tokio::net::UnixListener::bind(crate::socket_path(dir.path())).expect("bind");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("client must connect");
+            let mut prefix = [0_u8; 4];
+            stream
+                .read_exact(&mut prefix)
+                .await
+                .expect("the client frames its first message");
+            let claimed = u32::from_be_bytes(prefix) as usize;
+            let mut capability = vec![0_u8; claimed];
+            stream
+                .read_exact(&mut capability)
+                .await
+                .expect("the capability frame must arrive");
+            stream
+                .write_all(&1_073_741_824_u32.to_be_bytes())
+                .await
+                .expect("oversize prefix must be writable");
+        });
+
+        let connected = tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::Client::begin_connect(dir.path(), "mini host", "test"),
+        )
+        .await
+        .expect("connect attempt must finish quickly");
+        let Err(ClientError::Codec(reason)) = connected else {
+            panic!("an oversize prefix must fail the frame cap before any handshake answer");
+        };
+        assert!(
+            reason.contains("exceeds the 256 KiB cap"),
+            "the refusal names the cap: {reason}"
+        );
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("mini host must finish")
+            .expect("mini host must not panic");
+    }
 }

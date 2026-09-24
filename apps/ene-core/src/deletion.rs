@@ -1,3 +1,4 @@
+use ene_api::codec::WireFrame;
 use ene_api::v1::deletion::{
     DELETION_STATUS_CURSOR_PREFIX, DELETION_TARGET_PREFIX, DeletionHoldWire,
     DeletionOperationStatusView, DeletionParticipantReportWire, DeletionParticipantStatusWire,
@@ -9,7 +10,6 @@ use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{DeletionOperationWireRef, DeletionStatusCursorWire, ViewMarkWire};
 use ene_api::v1::reject::RejectKind;
 use ene_permission::{IntentFingerprint, IntentOutcome};
-use ene_plugin_ipc::WireFrame;
 use ene_preservation::{
     ConfirmTargetedDeletionOutcome, DeletionLifecycleChange, DeletionLifecycleOutcome,
     DeletionOperationId, DeletionOperationPhase, DeletionOperationRecord, DeletionOperationRef,

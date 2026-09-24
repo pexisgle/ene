@@ -1566,4 +1566,4 @@ impl HostHandle {
     }
 }
 
-use ene_plugin_ipc::{DecodedFrame, WireFrame};
+use ene_api::codec::{DecodedFrame, WireFrame};
