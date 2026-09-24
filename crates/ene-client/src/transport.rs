@@ -14,6 +14,7 @@ use ene_api::v1::refs::WireMessageId;
 use ene_api::v1::reject::IncompatibleProtocol;
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::sync::mpsc;
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -34,6 +35,15 @@ const UPGRADE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Mirrors the Host's per-connection frame buffer; both directions stay
 /// bounded so a slow peer applies backpressure instead of buffering.
 const TRANSPORT_QUEUE: usize = 32;
+const CONTROL_QUEUE: usize = 8;
+/// Mirrors the Host's read-ahead: while the application queue is full the
+/// reader keeps consuming transport control frames out of this bounded
+/// window instead of stalling the socket.
+const READ_AHEAD_FRAMES: usize = 8;
+/// IPC §10.2 bounds the write wait; a Host that stops reading must not own
+/// the pump task indefinitely, and a write past the bound fails the
+/// connection because the sink may be left mid-frame.
+const WRITE_WAIT: Duration = Duration::from_secs(30);
 
 type WsClient =
     tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
@@ -67,10 +77,32 @@ struct Transport {
 
 impl Transport {
     fn spawn(socket: WsClient) -> Self {
+        Self::spawn_stream(socket)
+    }
+
+    fn spawn_stream<S>(socket: WebSocketStream<S>) -> Self
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let (inbound_tx, inbound) = mpsc::channel(TRANSPORT_QUEUE);
         let (outbound, outbound_rx) = mpsc::channel(TRANSPORT_QUEUE);
-        tokio::spawn(pump(socket, inbound_tx, outbound_rx));
+        let (control, control_rx) = mpsc::channel(CONTROL_QUEUE);
+        let (writer_gone, writer_gone_rx) = tokio::sync::watch::channel(());
+        let (sink, stream) = socket.split();
+        tokio::spawn(write_half(
+            sink,
+            outbound_rx,
+            control_rx,
+            inbound_tx.clone(),
+            writer_gone,
+        ));
+        tokio::spawn(read_half(stream, inbound_tx, control, writer_gone_rx));
         Self { inbound, outbound }
+    }
+
+    #[cfg(test)]
+    fn outbound_for_tests(&self) -> mpsc::Sender<Vec<u8>> {
+        self.outbound.clone()
     }
 
     async fn write(&self, frame: &WireFrame) -> Result<(), ClientError> {
@@ -112,89 +144,208 @@ impl Transport {
     }
 }
 
-/// Single owner of the socket: answers transport pings immediately, forwards
-/// business frames through a bounded queue, and surfaces every close,
-/// protocol violation, read/write failure, and EOF to the readers above.
-async fn pump(
-    mut socket: WsClient,
-    inbound: mpsc::Sender<Inbound>,
+/// Owns the write half: transport Pongs and application frames are written
+/// here under one bounded write wait, so neither a Host that stops reading
+/// nor a stalled application can own this task forever. `_writer_gone` is
+/// dropped when this writer ends; the reader observes the closed watch and
+/// stops with it.
+async fn write_half<S>(
+    sink: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
     mut outbound: mpsc::Receiver<Vec<u8>>,
-) {
+    mut control: mpsc::Receiver<Vec<u8>>,
+    inbound: mpsc::Sender<Inbound>,
+    _writer_gone: tokio::sync::watch::Sender<()>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
+{
+    let mut sink = sink;
     loop {
         tokio::select! {
-            next = outbound.recv() => match next {
-                Some(body) => {
-                    if let Err(error) = socket.send(Message::Binary(body.into())).await {
-                        drop(inbound
-                            .send(Inbound::TransportFailed(format!(
-                                "websocket write failed: {error}"
-                            )))
-                            .await);
-                        break;
-                    }
+            biased;
+            pong = control.recv() => {
+                let Some(payload) = pong else {
+                    // The reader ended; it surfaced why.
+                    return;
+                };
+                if !send_bounded(&mut sink, Message::Pong(payload.into())).await {
+                    surface_write_failure(&inbound).await;
+                    return;
                 }
-                None => break,
-            },
-            incoming = socket.next() => match incoming {
-                Some(Ok(Message::Binary(body))) => match decode_frame(&body) {
-                    Ok(frame) => {
-                        if inbound.send(Inbound::Frame(frame)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        drop(inbound
-                            .send(Inbound::CodecFailed(format!(
-                                "decode failed: {error}"
-                            )))
-                            .await);
-                        break;
-                    }
-                },
-                Some(Ok(Message::Ping(payload))) => {
-                    if socket.send(Message::Pong(payload)).await.is_err() {
-                        break;
-                    }
-                }
-                Some(Ok(Message::Pong(_))) => {}
-                Some(Ok(Message::Text(_))) => {
-                    drop(inbound
-                        .send(Inbound::TransportFailed(String::from(
-                            "text frames are not part of the wire protocol",
-                        )))
-                        .await);
-                    break;
-                }
-                Some(Ok(Message::Close(_))) => {
-                    drop(inbound
-                        .send(Inbound::TransportFailed(String::from(
-                            "the Host closed the connection",
-                        )))
-                        .await);
-                    break;
-                }
-                Some(Ok(Message::Frame(_))) => break,
-                Some(Err(error)) => {
-                    drop(inbound
-                        .send(Inbound::TransportFailed(format!(
-                            "websocket read failed: {error}"
-                        )))
-                        .await);
-                    break;
-                }
-                None => {
-                    drop(inbound
-                        .send(Inbound::TransportFailed(String::from(
-                            "the connection to the Host ended",
-                        )))
-                        .await);
-                    break;
+            }
+            next = outbound.recv() => {
+                let Some(body) = next else {
+                    // The application is gone; the reader closes the socket.
+                    return;
+                };
+                if !send_bounded(&mut sink, Message::Binary(body.into())).await {
+                    surface_write_failure(&inbound).await;
+                    return;
                 }
             },
         }
     }
 }
 
+async fn send_bounded<S>(
+    sink: &mut futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
+    message: Message,
+) -> bool
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    matches!(
+        tokio::time::timeout(WRITE_WAIT, sink.send(message)).await,
+        Ok(Ok(()))
+    )
+}
+
+async fn surface_write_failure(inbound: &mpsc::Sender<Inbound>) {
+    let reason = String::from("websocket write failed: the Host stopped accepting data");
+    drop(inbound.send(Inbound::TransportFailed(reason)).await);
+}
+
+/// Owns the read half: Ping → Pong, Close, EOF, and read failures are
+/// handled here immediately, and application frames are handed to the
+/// inbound queue through the bounded `READ_AHEAD_FRAMES` window, so a slow
+/// application consumer applies backpressure to the socket instead of
+/// stopping the transport control plane. Terminal conditions flush the
+/// buffered frames first and then surface the reason to the readers above.
+async fn read_half<S>(
+    stream: futures_util::stream::SplitStream<WebSocketStream<S>>,
+    inbound: mpsc::Sender<Inbound>,
+    control: mpsc::Sender<Vec<u8>>,
+    mut writer_gone: tokio::sync::watch::Receiver<()>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use std::collections::VecDeque;
+    use tokio::sync::mpsc::error::TrySendError;
+
+    let mut stream = stream;
+    let mut read_ahead: VecDeque<DecodedFrame> = VecDeque::new();
+    loop {
+        let next = if read_ahead.len() >= READ_AHEAD_FRAMES {
+            // Full backpressure: nothing further is read from the socket
+            // until the application makes room.
+            tokio::select! {
+                biased;
+                gone = writer_gone.changed() => {
+                    drop(gone);
+                    return;
+                }
+                permit = inbound.reserve() => match permit {
+                    Ok(permit) => {
+                        if let Some(frame) = read_ahead.pop_front() {
+                            permit.send(Inbound::Frame(frame));
+                        }
+                        continue;
+                    }
+                    Err(_) => return,
+                },
+            }
+        } else if read_ahead.is_empty() {
+            tokio::select! {
+                biased;
+                gone = writer_gone.changed() => {
+                    drop(gone);
+                    return;
+                }
+                next = stream.next() => next,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                permit = inbound.reserve() => match permit {
+                    Ok(permit) => {
+                        if let Some(frame) = read_ahead.pop_front() {
+                            permit.send(Inbound::Frame(frame));
+                        }
+                        continue;
+                    }
+                    Err(_) => return,
+                },
+                gone = writer_gone.changed() => {
+                    drop(gone);
+                    return;
+                }
+                next = stream.next() => next,
+            }
+        };
+        match next {
+            Some(Ok(Message::Binary(body))) => {
+                let frame = match decode_frame(&body) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        let reason = format!("decode failed: {error}");
+                        fail_after_flush(&mut read_ahead, &inbound, Inbound::CodecFailed(reason))
+                            .await;
+                        return;
+                    }
+                };
+                match inbound.try_send(Inbound::Frame(frame)) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(Inbound::Frame(frame))) => read_ahead.push_back(frame),
+                    Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => return,
+                }
+            }
+            Some(Ok(Message::Ping(payload))) => {
+                if control.send(payload.to_vec()).await.is_err() {
+                    return;
+                }
+            }
+            Some(Ok(Message::Pong(_))) => {}
+            Some(Ok(Message::Text(_))) => {
+                fail_after_flush(
+                    &mut read_ahead,
+                    &inbound,
+                    Inbound::TransportFailed(String::from(
+                        "text frames are not part of the wire protocol",
+                    )),
+                )
+                .await;
+                return;
+            }
+            Some(Ok(Message::Close(_))) => {
+                fail_after_flush(
+                    &mut read_ahead,
+                    &inbound,
+                    Inbound::TransportFailed(String::from("the Host closed the connection")),
+                )
+                .await;
+                return;
+            }
+            Some(Ok(Message::Frame(_))) | None => {
+                fail_after_flush(
+                    &mut read_ahead,
+                    &inbound,
+                    Inbound::TransportFailed(String::from("the connection to the Host ended")),
+                )
+                .await;
+                return;
+            }
+            Some(Err(error)) => {
+                let reason = format!("websocket read failed: {error}");
+                fail_after_flush(&mut read_ahead, &inbound, Inbound::TransportFailed(reason)).await;
+                return;
+            }
+        }
+    }
+}
+
+/// Delivers every buffered frame before the terminal reason, so the
+/// application observes its data first and the failure last.
+async fn fail_after_flush(
+    read_ahead: &mut std::collections::VecDeque<DecodedFrame>,
+    inbound: &mpsc::Sender<Inbound>,
+    reason: Inbound,
+) {
+    while let Some(frame) = read_ahead.pop_front() {
+        if inbound.send(Inbound::Frame(frame)).await.is_err() {
+            return;
+        }
+    }
+    drop(inbound.send(reason).await);
+}
 async fn connect_ws(runtime: &HostRuntimeInfo, pin: &str) -> Result<Transport, ClientError> {
     let port = runtime.local_port().ok_or_else(|| {
         ClientError::Transport(String::from(
@@ -668,5 +819,186 @@ fn require_reply_to(
         Err(ClientError::ServerRejected(format!(
             "uncorrelated {stage} frame"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use ene_api::v1::envelope::WireSender;
+    use ene_api::v1::handshake::PairingRequest;
+    use ene_api::v1::refs::ClientIncarnationId;
+
+    use super::*;
+
+    type PlainWs = WebSocketStream<tokio::net::TcpStream>;
+
+    /// A loopback WebSocket pair; with `small_buffers` the server side stops
+    /// absorbing data quickly so a writer stalls against it.
+    async fn ws_pair(small_buffers: bool) -> (PlainWs, PlainWs) {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("accept");
+            tokio_tungstenite::accept_async(tcp).await.expect("upgrade")
+        });
+        let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+        if small_buffers {
+            // A small fixed send window makes a writer stall quickly against
+            // a Host that stops reading.
+            socket
+                .set_send_buffer_size(4096)
+                .expect("client send buffer");
+        }
+        let tcp = socket.connect(address).await.expect("connect");
+        let (client, _) = tokio_tungstenite::client_async("ws://localhost/", tcp)
+            .await
+            .expect("client upgrade");
+        (client, server.await.expect("server task"))
+    }
+
+    fn bulky_frame(padding: usize) -> Vec<u8> {
+        let frame = frame_for(
+            WirePayload::PairingRequest(PairingRequest {
+                device_descriptor: "x".repeat(padding),
+            }),
+            WireSender {
+                device_id: None,
+                incarnation_id: ClientIncarnationId {
+                    counter: 1,
+                    random: 2,
+                },
+                connection_id: None,
+            },
+        );
+        encode_frame(&frame).expect("frame encodes")
+    }
+
+    #[tokio::test]
+    async fn an_application_backlog_still_answers_pings_and_surfaces_close() {
+        let (client, mut server) = ws_pair(false).await;
+        let mut transport = Transport::spawn_stream(client);
+        let body = bulky_frame(64);
+
+        // One frame more than the inbound queue capacity: the queue is full
+        // and one more frame sits in the reader's bounded read-ahead.
+        for _ in 0..=TRANSPORT_QUEUE {
+            server
+                .send(Message::Binary(body.clone().into()))
+                .await
+                .expect("application frame must send");
+        }
+
+        // The transport control plane keeps moving behind that backlog.
+        let expected = vec![0x7_u8; 32];
+        server
+            .send(Message::Ping(expected.clone().into()))
+            .await
+            .expect("ping must send");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match server.next().await {
+                    Some(Ok(Message::Pong(payload))) if payload.as_ref() == expected => return,
+                    Some(Ok(_)) => continue,
+                    other => panic!("expected a pong, got {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("a ping must be answered while the application queue is full");
+
+        server
+            .send(Message::Close(None))
+            .await
+            .expect("close must send");
+        let mut frames = 0;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), transport.read()).await {
+                Ok(Ok(_)) => frames += 1,
+                Ok(Err(error)) => {
+                    assert_eq!(
+                        frames,
+                        TRANSPORT_QUEUE + 1,
+                        "every buffered frame is delivered before the close"
+                    );
+                    assert!(
+                        format!("{error:?}").contains("Host closed the connection"),
+                        "the close reason must surface, got {error:?}"
+                    );
+                    break;
+                }
+                Err(_) => panic!("the close must surface behind the backlog"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn eof_surfaces_after_the_buffered_frames() {
+        let (client, mut server) = ws_pair(false).await;
+        let mut transport = Transport::spawn_stream(client);
+        server
+            .send(Message::Binary(bulky_frame(16).into()))
+            .await
+            .expect("frame must send");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(server);
+        let first = tokio::time::timeout(Duration::from_secs(10), transport.read())
+            .await
+            .expect("the buffered frame must arrive")
+            .expect("the buffered frame must decode");
+        drop(first);
+        let eof = tokio::time::timeout(Duration::from_secs(10), transport.read())
+            .await
+            .expect("eof must surface")
+            .expect_err("the connection ended");
+        let rendered = format!("{eof:?}");
+        assert!(
+            rendered.contains("the connection to the Host ended")
+                || rendered.contains("websocket read failed"),
+            "the transport end must surface as a transport failure, got {eof:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_host_read_is_bounded_and_surfaces_a_transport_failure() {
+        let (client, _server) = ws_pair(true).await;
+        let mut transport = Transport::spawn_stream(client);
+        let outbound = transport.outbound_for_tests();
+        let body = bulky_frame(8 * 1024);
+
+        // The application keeps writing while the Host never reads: the
+        // writer stalls against the closed window and the outbound queue
+        // fills behind it.
+        let writer = tokio::spawn(async move {
+            for _ in 0..64 {
+                if outbound.send(body.clone()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        // The write wait bound must release the pump instead of owning it.
+        tokio::time::pause();
+        tokio::time::advance(WRITE_WAIT + Duration::from_secs(2)).await;
+        tokio::time::resume();
+
+        let failure = tokio::time::timeout(Duration::from_secs(10), transport.read())
+            .await
+            .expect("the stalled write must surface instead of hanging")
+            .expect_err("the stalled write must fail the connection");
+        assert!(
+            format!("{failure:?}").contains("websocket write failed"),
+            "got {failure:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(10), writer)
+            .await
+            .expect("the application writer must stop once the transport is gone")
+            .expect("the writer task must not panic");
     }
 }
