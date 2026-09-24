@@ -9,6 +9,7 @@ use ene_api::v1::management::ManagementOutcome;
 use ene_config::{Config, resolve_data_dir};
 use ene_desktop::i18n::Locale;
 use ene_desktop::measure::{InteractionSample, InteractionTraceLine, monotonic_ns};
+use ene_desktop::session::{ChatIntakeRefusal, ChatSendReport, ChatStreamEnd};
 use ene_desktop::ui::presentation::{SurfaceSnapshot, parse_cap};
 use ene_desktop::ui::{DesktopError, DesktopRuntime};
 use ene_desktop_ui::{ChatWindow, Item, ManagementWindow, Message};
@@ -70,6 +71,39 @@ impl Command {
         }
     }
 }
+
+struct CommandOutput {
+    notice: String,
+    failed: bool,
+    consume_sent_draft: bool,
+}
+
+impl CommandOutput {
+    fn info(notice: impl Into<String>) -> Self {
+        Self {
+            notice: notice.into(),
+            failed: false,
+            consume_sent_draft: false,
+        }
+    }
+
+    fn error(notice: impl Into<String>) -> Self {
+        Self {
+            notice: notice.into(),
+            failed: true,
+            consume_sent_draft: false,
+        }
+    }
+
+    fn consumed_info(notice: impl Into<String>) -> Self {
+        Self {
+            notice: notice.into(),
+            failed: false,
+            consume_sent_draft: true,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct InteractionStart {
     operation: &'static str,
@@ -493,11 +527,7 @@ fn bind(s: &Surfaces, c: &ChatWindow, m: &ManagementWindow) {
     c.on_send({
         let s = s.clone();
         move |text| {
-            if s.submit(Command::Send(text.to_string()), 1)
-                && let Some(c) = s.chat.upgrade()
-            {
-                c.set_draft("".into());
-            }
+            s.submit(Command::Send(text.to_string()), 1);
         }
     });
     c.on_workspace({
@@ -725,6 +755,11 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
             s.mailbox.complete(request.lane, request.epoch);
             continue;
         }
+        let sent_text = match &request.command {
+            Command::Send(text) => Some(text.clone()),
+            _ => None,
+        };
+        let is_send = sent_text.is_some();
         let result = execute(&mut desktop, request.command).await;
         let measured = if s.interaction_paint_evidence && result.is_ok() {
             request.interaction.map(|start| PendingPaint {
@@ -751,7 +786,23 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
                 c.set_task_busy(surfaces.mailbox.pending[2].load(Ordering::SeqCst) > 0);
                 m.set_busy(surfaces.mailbox.pending[3].load(Ordering::SeqCst) > 0);
                 let ja = m.get_japanese();
-                let (notice, failed) = result_notice(ja, result);
+                let (notice, failed, consume_sent_draft) = match result {
+                    Ok(output) => (output.notice, output.failed, output.consume_sent_draft),
+                    Err(error) => {
+                        let (notice, failed) = if is_send {
+                            chat_error_notice(ja, &error)
+                        } else {
+                            result_notice(ja, Err(error))
+                        };
+                        (notice, failed, is_send)
+                    }
+                };
+                if is_send
+                    && consume_sent_draft
+                    && sent_text.as_deref() == Some(c.get_draft().as_str())
+                {
+                    c.set_draft("".into());
+                }
                 match request.lane {
                     1 => {
                         c.set_notice_error(failed);
@@ -807,7 +858,7 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
         }
     }
 }
-async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, DesktopError> {
+async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<CommandOutput, DesktopError> {
     let ja = d.surface_snapshot().japanese;
     let outcome = match command {
         Command::Startup => {
@@ -840,8 +891,8 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         }
         Command::Send(text) => {
             d.composer_mut().set_draft(text);
-            d.send_text().await?;
-            None
+            let report = d.send_text().await?;
+            return Ok(chat_output(ja, report));
         }
         Command::Workspace(path) => Some(
             d.select_workspace_folder(std::path::Path::new(&path))
@@ -850,7 +901,7 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         Command::Resume(key, text) => {
             d.check_task_key(&key)?;
             let result = d.resume_displayed_task(text).await?;
-            return Ok(resume_notice(ja, &result));
+            return Ok(CommandOutput::info(resume_notice(ja, &result)));
         }
         Command::CancelTask(key) => {
             d.check_task_key(&key)?;
@@ -923,7 +974,7 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         Command::ResumeDeletion(key) => {
             d.select_deletion_key(&key)?;
             let result = d.resume_deletion().await?;
-            return Ok(control_notice(ja, &result));
+            return Ok(CommandOutput::info(control_notice(ja, &result)));
         }
         Command::Confirm(key) => {
             let result = d.confirm_key(&key).await?;
@@ -935,7 +986,7 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
             ) {
                 d.wizard_next();
             }
-            return Ok(control_notice(ja, &result));
+            return Ok(CommandOutput::info(control_notice(ja, &result)));
         }
         Command::Dismiss => {
             d.reject_pending_challenge().await;
@@ -943,10 +994,126 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
             None
         }
     };
-    Ok(outcome.map(|v| outcome_notice(ja, &v)).unwrap_or_default())
+    Ok(CommandOutput::info(
+        outcome.map(|v| outcome_notice(ja, &v)).unwrap_or_default(),
+    ))
 }
 fn local<'a>(ja: bool, japanese: &'a str, english: &'a str) -> &'a str {
     if ja { japanese } else { english }
+}
+
+fn intake_notice(ja: bool, refusal: &ChatIntakeRefusal) -> (String, bool) {
+    let (japanese, english) = match refusal {
+        ChatIntakeRefusal::StaleRound => (
+            "前回の状態が古くなっています。最新の状態を確認して、もう一度お送りください。",
+            "The previous state is stale. Review the current state and send again.",
+        ),
+        ChatIntakeRefusal::HeldForTransition => (
+            "パートナーの状態が切り替わっています。落ち着いてからもう一度お試しください。",
+            "A presence change is in progress; try again once it settles.",
+        ),
+        ChatIntakeRefusal::NeedsRevalidation { reason } => match reason.0.as_str() {
+            "input-over-limit" => (
+                "入力が長すぎます。入力内容を短くしてから、もう一度送信してください。",
+                "The message is too long to send. Shorten it and send it again.",
+            ),
+            "stopped-companion" => (
+                "パートナーの状態を確認してから、もう一度送信してください。",
+                "Check the Companion state, then send the message again.",
+            ),
+            "unknown-companion" | "missing-generation-view" => (
+                "送信前の接続状態を確認できませんでした。接続を更新してから、もう一度送信してください。",
+                "The connection state could not be verified. Refresh the connection, then send the message again.",
+            ),
+            _ => (
+                "送信前の条件を確認できませんでした。現在の状態と設定を確認してから、もう一度送信してください。",
+                "The sending conditions could not be verified. Review the current state and settings, then send the message again.",
+            ),
+        },
+    };
+    (local(ja, japanese, english).to_string(), true)
+}
+
+fn stream_notice(ja: bool, end: ChatStreamEnd) -> (String, bool) {
+    match end {
+        ChatStreamEnd::Interrupted => (
+            local(
+                ja,
+                "返答は完了前に中断されました。メッセージは既に受け付けられている可能性があるため、会話履歴を更新して現在の状態を確認してください。このメッセージは再送しないでください。",
+                "The reply stopped before it was complete. Your message may already have been accepted, so refresh the conversation and check the current state. Do not send this message again.",
+            )
+            .to_string(),
+            true,
+        ),
+        ChatStreamEnd::Cancelled => (
+            local(
+                ja,
+                "会話が中止されたため、返答を完了できませんでした。メッセージは既に受け付けられているため、会話履歴を確認してください。このメッセージは再送しないでください。",
+                "The reply was cancelled after your message was accepted. Review the conversation history. Do not send this message again.",
+            )
+            .to_string(),
+            false,
+        ),
+        ChatStreamEnd::Stale => (
+            local(
+                ja,
+                "この返答は古い会話の状態に属しており、続行しません。履歴を更新して現在の会話を確認してください。このメッセージは再送しないでください。",
+                "This reply belongs to an older conversation state and will not continue. Refresh the history and check the current conversation. Do not send this message again.",
+            )
+            .to_string(),
+            true,
+        ),
+    }
+}
+
+fn chat_error_notice(ja: bool, _error: &DesktopError) -> (String, bool) {
+    (
+        local(
+            ja,
+            "チャットの結果が確認できませんでした。メッセージが既に受け付けられている可能性があるため、再送せず接続と履歴を確認してください。",
+            "The chat result could not be confirmed. Your message may already have been accepted, so do not resend it; check the connection and conversation history.",
+        )
+        .to_string(),
+        true,
+    )
+}
+
+fn chat_output(ja: bool, report: ChatSendReport) -> CommandOutput {
+    match report {
+        ChatSendReport::NoDraft => CommandOutput::info(""),
+        ChatSendReport::NotConnected => CommandOutput::error(local(
+            ja,
+            "Host に接続していません。メッセージは送信されていません。接続が回復したことを確認してから、もう一度試してください。",
+            "Not connected to Host. Your message was not sent. Confirm the connection is back, then try again.",
+        )),
+        ChatSendReport::Refused(refusal) => {
+            let (notice, failed) = intake_notice(ja, &refusal);
+            CommandOutput {
+                notice,
+                failed,
+                consume_sent_draft: false,
+            }
+        }
+        ChatSendReport::Completed => CommandOutput::consumed_info(""),
+        ChatSendReport::StreamEnded(end) => {
+            let (notice, failed) = stream_notice(ja, end);
+            CommandOutput {
+                notice,
+                failed,
+                consume_sent_draft: true,
+            }
+        }
+        ChatSendReport::ReplyShownHistoryRefreshFailed => CommandOutput {
+            notice: local(
+                ja,
+                "返答は表示されています。ただし、会話履歴を更新できませんでした。「履歴を更新」で確認してください。このメッセージを送信し直さないでください。",
+                "The reply is shown, but the conversation history could not be refreshed. Use \"Refresh history\" to check it. Do not send the message again.",
+            )
+            .to_string(),
+            failed: false,
+            consume_sent_draft: true,
+        },
+    }
 }
 
 fn result_notice(ja: bool, result: Result<String, DesktopError>) -> (String, bool) {
@@ -1144,6 +1311,7 @@ fn apply(c: &ChatWindow, m: &ManagementWindow, s: &SurfaceSnapshot, reset_step: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_api::v1::refs::RevalidationReasonWire;
     #[test]
     fn queued_body_copies_are_discarded_and_old_generations_invalidated() {
         let mailbox = Mailbox::default();
@@ -1211,6 +1379,78 @@ mod tests {
         let (notice, failed) = result_notice(false, Ok(String::from("accepted")));
         assert_eq!(notice, "accepted");
         assert!(!failed);
+    }
+
+    #[test]
+    fn chat_reports_are_localized_without_exposing_wire_reasons() {
+        let reports = [
+            ChatSendReport::NotConnected,
+            ChatSendReport::Refused(ChatIntakeRefusal::StaleRound),
+            ChatSendReport::Refused(ChatIntakeRefusal::HeldForTransition),
+            ChatSendReport::Refused(ChatIntakeRefusal::NeedsRevalidation {
+                reason: RevalidationReasonWire(String::from("input-over-limit")),
+            }),
+            ChatSendReport::StreamEnded(ChatStreamEnd::Interrupted),
+            ChatSendReport::StreamEnded(ChatStreamEnd::Cancelled),
+            ChatSendReport::StreamEnded(ChatStreamEnd::Stale),
+            ChatSendReport::ReplyShownHistoryRefreshFailed,
+        ];
+        for report in reports {
+            let ja = chat_output(true, report.clone());
+            let en = chat_output(false, report);
+            assert_ne!(ja.notice, en.notice);
+            assert!(!ja.notice.contains("input-over-limit"));
+            assert!(!en.notice.contains("input-over-limit"));
+            assert!(!ja.notice.contains("client is not connected"));
+            assert!(!en.notice.contains("client is not connected"));
+        }
+    }
+
+    #[test]
+    fn a_technical_chat_failure_does_not_advise_an_immediate_resend() {
+        let error = DesktopError::Transport(String::from("provider response lost"));
+        let (ja, ja_failed) = chat_error_notice(true, &error);
+        let (en, en_failed) = chat_error_notice(false, &error);
+        assert!(ja_failed && en_failed);
+        assert!(ja.contains("再送せず"));
+        assert!(en.contains("do not resend"));
+        assert!(!ja.contains("provider response lost"));
+        assert!(!en.contains("provider response lost"));
+    }
+
+    #[test]
+    fn a_history_refresh_failure_is_a_nonfatal_no_resend_notice() {
+        let output = chat_output(true, ChatSendReport::ReplyShownHistoryRefreshFailed);
+        assert!(!output.failed);
+        assert!(output.consume_sent_draft);
+        assert!(output.notice.contains("表示されています"));
+        assert!(output.notice.contains("送信し直さないでください"));
+        let english = chat_output(false, ChatSendReport::ReplyShownHistoryRefreshFailed);
+        assert!(english.notice.contains("reply is shown"));
+        assert!(english.notice.contains("Do not send the message again"));
+    }
+
+    #[test]
+    fn chat_draft_disposition_distinguishes_pre_submit_and_consumed_outcomes() {
+        assert!(!chat_output(true, ChatSendReport::NotConnected).consume_sent_draft);
+        assert!(
+            !chat_output(true, ChatSendReport::Refused(ChatIntakeRefusal::StaleRound),)
+                .consume_sent_draft
+        );
+        assert!(chat_output(true, ChatSendReport::Completed).consume_sent_draft);
+        assert!(
+            chat_output(
+                true,
+                ChatSendReport::StreamEnded(ChatStreamEnd::Interrupted),
+            )
+            .consume_sent_draft
+        );
+    }
+
+    #[test]
+    fn cancelled_stream_is_not_styled_as_a_failure() {
+        let output = chat_output(false, ChatSendReport::StreamEnded(ChatStreamEnd::Cancelled));
+        assert!(!output.failed);
     }
 
     #[test]

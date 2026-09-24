@@ -105,6 +105,13 @@ impl Composer {
         Some(taken)
     }
 
+    pub fn restore_unsent(&mut self, text: String) {
+        if self.undo.last().is_some_and(|previous| previous == &text) {
+            self.undo.pop();
+        }
+        self.draft = text;
+    }
+
     pub fn wipe(&mut self) {
         self.draft.clear();
         self.composing = false;
@@ -230,4 +237,19 @@ pub(crate) fn history_lines(items: &[HistoryItem]) -> Vec<String> {
             format!("[{role}] {}", item.text)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Composer;
+
+    #[test]
+    fn restoring_an_unsent_message_does_not_add_an_undo_step() {
+        let mut composer = Composer::default();
+        composer.set_draft(String::from("draft"));
+        let text = composer.take_sendable().expect("draft text");
+        composer.restore_unsent(text);
+        assert_eq!(composer.draft(), "draft");
+        assert_eq!(composer.undo_len(), 1);
+    }
 }

@@ -9,7 +9,7 @@ use ene_api::v1::management::{
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{
     BaseViewMark, ClientLocalId, CommandWireId, CompanionWireRef, ManagementTargetWire,
-    StreamWireId, TextLangWire,
+    RevalidationReasonWire, StreamWireId, TextLangWire,
 };
 use ene_api::v1::round::{
     ConfirmPresentationWire, HistoryItem, HistoryRequest, HistoryResponse, PresentationStatus,
@@ -35,6 +35,37 @@ pub struct ChatTurn {
     pub round: String,
     pub stream: Option<StreamWireId>,
     pub reply: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatIntakeRefusal {
+    StaleRound,
+    HeldForTransition,
+    NeedsRevalidation { reason: RevalidationReasonWire },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatStreamEnd {
+    Interrupted,
+    Cancelled,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatSessionOutcome {
+    Completed(ChatTurn),
+    Refused(ChatIntakeRefusal),
+    StreamEnded { round: String, end: ChatStreamEnd },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatSendReport {
+    NoDraft,
+    NotConnected,
+    Refused(ChatIntakeRefusal),
+    Completed,
+    StreamEnded(ChatStreamEnd),
+    ReplyShownHistoryRefreshFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,7 +209,7 @@ pub async fn submit_and_collect(
     client: &mut Client,
     text: &str,
     lang: &str,
-) -> Result<ChatTurn, DesktopError> {
+) -> Result<ChatSessionOutcome, DesktopError> {
     let companion = client.companion_ref();
     let target = client.round_target();
     let send = request_with_timeout(
@@ -200,9 +231,12 @@ pub async fn submit_and_collect(
             round
         }
         WirePayload::RoundIntakeOutcome(refusal) => {
-            return Err(DesktopError::Unavailable(describe_intake_refusal(
-                lang, &refusal,
-            )));
+            let Some(refusal) = intake_refusal(refusal) else {
+                return Err(DesktopError::Protocol(String::from(
+                    "accepted intake reached the refusal path",
+                )));
+            };
+            return Ok(ChatSessionOutcome::Refused(refusal));
         }
         other => {
             return Err(DesktopError::Protocol(format!(
@@ -218,10 +252,11 @@ pub async fn submit_and_collect(
             WirePayload::TextStreamOpen(open) => stream_id = Some(open.stream),
             WirePayload::TextStreamFrame(frame) => reply.push_str(&frame.delta),
             WirePayload::TextStreamClose(close) => {
-                if close.status != StreamClose::Completed {
-                    return Err(DesktopError::Protocol(String::from(
-                        "stream closed without completion",
-                    )));
+                if let Some(end) = stream_end(close.status) {
+                    return Ok(ChatSessionOutcome::StreamEnded {
+                        round: round.0.clone(),
+                        end,
+                    });
                 }
                 break;
             }
@@ -236,39 +271,31 @@ pub async fn submit_and_collect(
             }
         }
     }
-    Ok(ChatTurn {
+    Ok(ChatSessionOutcome::Completed(ChatTurn {
         round: round.0,
         stream: stream_id,
         reply,
-    })
+    }))
 }
 
-fn describe_intake_refusal(lang: &str, outcome: &RoundIntakeOutcomeWire) -> String {
-    let ja = lang.eq_ignore_ascii_case("ja");
-    let text = |japanese: &str, english: &str| {
-        if ja {
-            String::from(japanese)
-        } else {
-            String::from(english)
-        }
-    };
+fn intake_refusal(outcome: RoundIntakeOutcomeWire) -> Option<ChatIntakeRefusal> {
     match outcome {
-        RoundIntakeOutcomeWire::StaleRound { .. } => text(
-            "前回の状態が古くなっています。最新の状態を確認して、もう一度お送りください。",
-            "The previous state is stale. Review the current state and send again.",
-        ),
-        RoundIntakeOutcomeWire::HeldForTransition => text(
-            "パートナーの状態が切り替わっています。落ち着いてからもう一度お試しください。",
-            "A presence change is in progress; try again once it settles.",
-        ),
-        RoundIntakeOutcomeWire::NeedsRevalidation { .. } => text(
-            "送信前に最新の状態を確認してください。",
-            "Refresh the current state before sending.",
-        ),
-        RoundIntakeOutcomeWire::AcceptedForRound { .. } => text(
-            "送信は受け付けられませんでした。",
-            "The message was not accepted.",
-        ),
+        RoundIntakeOutcomeWire::StaleRound { .. } => Some(ChatIntakeRefusal::StaleRound),
+        RoundIntakeOutcomeWire::HeldForTransition => Some(ChatIntakeRefusal::HeldForTransition),
+        RoundIntakeOutcomeWire::NeedsRevalidation { reason } => {
+            Some(ChatIntakeRefusal::NeedsRevalidation { reason })
+        }
+        RoundIntakeOutcomeWire::AcceptedForRound { .. } => None,
+    }
+}
+
+#[must_use]
+fn stream_end(status: StreamClose) -> Option<ChatStreamEnd> {
+    match status {
+        StreamClose::Completed => None,
+        StreamClose::Interrupted => Some(ChatStreamEnd::Interrupted),
+        StreamClose::Cancelled => Some(ChatStreamEnd::Cancelled),
+        StreamClose::Stale => Some(ChatStreamEnd::Stale),
     }
 }
 
@@ -328,4 +355,48 @@ async fn ask_stream(client: &mut Client) -> Result<WirePayload, DesktopError> {
         .await
         .map_err(|_| DesktopError::Transport(String::from("stream timed out")))?
         .map_err(DesktopError::Client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChatIntakeRefusal, ChatStreamEnd, intake_refusal, stream_end};
+    use ene_api::v1::refs::RevalidationReasonWire;
+    use ene_api::v1::round::{RoundIntakeOutcomeWire, StreamClose};
+
+    #[test]
+    fn non_completed_stream_statuses_remain_distinct() {
+        assert_eq!(stream_end(StreamClose::Completed), None);
+        assert_eq!(
+            stream_end(StreamClose::Interrupted),
+            Some(ChatStreamEnd::Interrupted)
+        );
+        assert_eq!(
+            stream_end(StreamClose::Cancelled),
+            Some(ChatStreamEnd::Cancelled)
+        );
+        assert_eq!(stream_end(StreamClose::Stale), Some(ChatStreamEnd::Stale));
+    }
+
+    #[test]
+    fn intake_refusal_preserves_the_revalidation_reason() {
+        let reason = RevalidationReasonWire(String::from("input-over-limit"));
+        let mapped = intake_refusal(RoundIntakeOutcomeWire::NeedsRevalidation {
+            reason: reason.clone(),
+        });
+        assert_eq!(
+            mapped,
+            Some(ChatIntakeRefusal::NeedsRevalidation { reason })
+        );
+        assert_eq!(
+            intake_refusal(RoundIntakeOutcomeWire::StaleRound {
+                current_round: None,
+                current_generation: 1,
+            }),
+            Some(ChatIntakeRefusal::StaleRound)
+        );
+        assert_eq!(
+            intake_refusal(RoundIntakeOutcomeWire::HeldForTransition),
+            Some(ChatIntakeRefusal::HeldForTransition)
+        );
+    }
 }

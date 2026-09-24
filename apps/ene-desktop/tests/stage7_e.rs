@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ene_api::v1::management::ManagementOutcome;
@@ -14,9 +14,11 @@ use ene_companion::{CompanionRepository as _, UNDELIVERED_PAGE_MAX, UndeliveredR
 use ene_core::host_control;
 use ene_core::serve::HostHandle;
 use ene_desktop::body_supervise::BodySupervisor;
-use ene_desktop::session;
+use ene_desktop::session::{self, ChatSendReport, ChatSessionOutcome, ChatStreamEnd};
 use ene_desktop::ui::{DesktopRuntime, Page};
-use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
+use ene_inference::{
+    InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport,
+};
 use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
 
 mod common;
@@ -30,6 +32,7 @@ const TARGET: &str = "stage7-e-keyword-omega";
 struct GateTransport {
     replies: Mutex<VecDeque<String>>,
     sends: AtomicUsize,
+    fail_next_response: AtomicBool,
 }
 
 impl GateTransport {
@@ -37,11 +40,16 @@ impl GateTransport {
         Arc::new(Self {
             replies: Mutex::new(replies.iter().map(|text| (*text).to_string()).collect()),
             sends: AtomicUsize::new(0),
+            fail_next_response: AtomicBool::new(false),
         })
     }
 
     fn sends(&self) -> usize {
         self.sends.load(Ordering::SeqCst)
+    }
+
+    fn fail_next_response(&self) {
+        self.fail_next_response.store(true, Ordering::SeqCst);
     }
 }
 
@@ -60,6 +68,11 @@ impl ProviderTransport for GateTransport {
         let _ = req;
         Box::pin(async move {
             self.sends.fetch_add(1, Ordering::SeqCst);
+            if self.fail_next_response.swap(false, Ordering::SeqCst) {
+                return Err(InferenceTechnicalError::ProviderTransportFailed(
+                    String::from("fixture provider response was lost"),
+                ));
+            }
             let reply = self
                 .replies
                 .lock()
@@ -246,9 +259,12 @@ async fn receive_without_present_is_not_presented_ack() {
         panic!("draft must send");
     };
     let mut client = desktop.take_client().expect("paired client");
-    let turn = session::submit_and_collect(&mut client, &text, "en")
+    let outcome = session::submit_and_collect(&mut client, &text, "en")
         .await
         .expect("receive stream");
+    let ChatSessionOutcome::Completed(turn) = outcome else {
+        panic!("the fixture stream must complete: {outcome:?}");
+    };
     desktop.restore_client(client);
     assert!(
         !desktop
@@ -395,6 +411,45 @@ async fn send_text_presents_its_collected_turn() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    server.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn interrupted_provider_stream_keeps_the_typed_outcome_and_discards_partial_reply() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transport = GateTransport::with_replies(&["partial reply"]);
+    transport.fail_next_response();
+    let handle = open_host(dir.path()).await;
+    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
+    assert!(wait_for_control(dir.path()).await);
+    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    pair_and_setup(&mut desktop, &handle).await;
+
+    desktop
+        .composer_mut()
+        .set_draft(String::from("do not lose this input"));
+    let result = desktop.send_text().await;
+    assert!(
+        matches!(
+            result,
+            Ok(ChatSendReport::StreamEnded(ChatStreamEnd::Interrupted))
+        ),
+        "an interrupted provider stream must retain its close reason: {result:?}"
+    );
+    let snapshot = desktop.snapshot();
+    assert!(
+        snapshot
+            .timeline
+            .iter()
+            .any(|line| line == "[owner] do not lose this input")
+    );
+    assert!(
+        !snapshot
+            .timeline
+            .iter()
+            .any(|line| line.contains("partial reply"))
+    );
+    assert_eq!(transport.sends(), 1);
     server.shutdown_and_join().await;
 }
 
