@@ -690,11 +690,38 @@ impl StagingObject {
         Ok(())
     }
 
+    fn query_identity(&self) -> Result<WindowsStagingIdentity, String> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+
+        // SAFETY: BY_HANDLE_FILE_INFORMATION is a plain output structure and
+        // its all-zero value is valid before GetFileInformationByHandle fills it.
+        let mut information = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+        // SAFETY: the retained handle is live and information is writable.
+        if unsafe { GetFileInformationByHandle(self.handle as HANDLE, &mut information) } == 0 {
+            return Err(format!(
+                "owned staging directory identity is unavailable: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(WindowsStagingIdentity {
+            volume: information.dwVolumeSerialNumber,
+            index: (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow),
+        })
+    }
+
     fn validate_current_path(
         &self,
         workspace_root: &WorkspaceRoot,
         _original: &Path,
     ) -> Result<(), String> {
+        if self.query_identity()? != self.identity {
+            return Err(String::from(
+                "owned staging directory handle identity changed unexpectedly",
+            ));
+        }
         let current = self.current_path()?;
         workspace_root.validate_staging_directory(&current)?;
         workspace_root.validate_staging_tree(&current)?;
