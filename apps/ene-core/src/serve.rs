@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
@@ -660,15 +660,18 @@ impl HostHandle {
         self.task_executions.abort_for_host_shutdown().await;
     }
 
-    pub(crate) async fn terminate_and_join_task_effects(&self) {
+    pub(crate) async fn terminate_and_join_task_effects(&self) -> Result<(), CoreError> {
         let runtime = crate::lock_unpoison(&self.task_effect_runtime).clone();
-        runtime.terminate_and_join().await;
+        runtime
+            .terminate_and_join()
+            .await
+            .map_err(CoreError::Serving)
     }
 
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     pub fn install_uncooperative_task_effect_runtime_for_tests(
         &self,
-        executable: PathBuf,
+        executable: std::path::PathBuf,
         args: Vec<String>,
         envs: Vec<(String, String)>,
     ) {
@@ -676,7 +679,15 @@ impl HostHandle {
         *crate::lock_unpoison(&self.task_effect_runtime) = runtime;
     }
 
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
+    pub fn set_task_effect_staging_pause_for_tests(
+        &self,
+        pause: Option<ene_action::WorkspaceEffectStagingPause>,
+    ) {
+        crate::lock_unpoison(&self.task_effect_runtime).set_test_staging_pause(pause);
+    }
+
+    #[cfg(feature = "test-support")]
     pub fn live_task_effect_workers_for_tests(&self) -> usize {
         crate::lock_unpoison(&self.task_effect_runtime).live_workers_for_tests()
     }
@@ -781,45 +792,45 @@ impl HostHandle {
         *crate::lock_unpoison(&self.task_agent_quiesce_timeout)
     }
 
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_task_agent_quiesce_timeout_for_tests(&self, timeout: std::time::Duration) {
         *crate::lock_unpoison(&self.task_agent_quiesce_timeout) = timeout;
     }
 
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn arm_inference_claim_pause_for_tests(&self) {
         self.task_executions
             .arm_task_claim_pause_for_tests(crate::task_run::TaskClaimKind::Inference);
     }
 
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn arm_action_claim_pause_for_tests(&self) {
         self.task_executions
             .arm_task_claim_pause_for_tests(crate::task_run::TaskClaimKind::Action);
     }
 
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn arm_action_effect_pause_for_tests(&self) {
         self.task_executions
             .arm_task_claim_pause_for_tests(crate::task_run::TaskClaimKind::ActionEffect);
     }
 
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_task_claim_pause_for_tests(&self) {
         self.task_executions.wait_task_claim_pause_for_tests().await;
     }
 
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn release_task_claim_pause_for_tests(&self) {
         self.task_executions.release_task_claim_pause_for_tests();
     }
 
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_task_host_shutdown_for_tests(&self) {
         self.task_executions.wait_host_shutdown_for_tests().await;
     }
 
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn running_task_executions_for_tests(&self) -> usize {
         self.task_executions.running_task_executions_for_tests()
     }

@@ -4,9 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+default-run = "ene-core"
+
+[[bin]]
+name = "ene-core"
+path = "src/main.rs"
+
+[[bin]]
+name = "ene-action-worker"
+path = "src/bin/ene-action-worker.rs"
+doc = false
 
 [features]
-test-support = ["ene-store/test-support"]
+test-support = ["ene-action/test-support", "ene-store/test-support"]
 
 [dependencies]
 clap.workspace = true
@@ -41,6 +51,9 @@ uuid.workspace = true
 x509-parser.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 # Named-pipe transport only; the module using it is `cfg(windows)`-gated.
 [target.'cfg(windows)'.dependencies]

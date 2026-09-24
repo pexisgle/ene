@@ -25,15 +25,18 @@ pub(crate) const TASK_AGENT_QUIESCE_TIMEOUT: std::time::Duration =
 pub(crate) enum TaskClaimKind {
     Inference,
     Action,
+    #[cfg(any(test, feature = "test-support"))]
     ActionEffect,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct TaskClaimPause {
     kind: TaskClaimKind,
     entered: std::sync::atomic::AtomicBool,
     release: tokio::sync::Notify,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl TaskClaimPause {
     fn new(kind: TaskClaimKind) -> Self {
         Self {
@@ -51,6 +54,7 @@ pub struct TaskExecutionRegistry {
         std::sync::Mutex<std::collections::HashMap<ene_task::DelegationId, ene_task::TaskId>>,
     commit_scope: Arc<tokio::sync::Mutex<()>>,
     host_shutdown: DispatchAbort,
+    #[cfg(any(test, feature = "test-support"))]
     claim_pause: std::sync::Mutex<Option<Arc<TaskClaimPause>>>,
 }
 
@@ -93,16 +97,19 @@ impl TaskExecutionRegistry {
 
     pub(crate) async fn task_claim_scope(
         &self,
-        kind: TaskClaimKind,
+        _kind: TaskClaimKind,
     ) -> tokio::sync::OwnedMutexGuard<()> {
-        self.pause_before_task_claim(kind).await;
+        #[cfg(any(test, feature = "test-support"))]
+        self.pause_before_task_claim(_kind).await;
         self.commit_scope().await
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn arm_task_claim_pause_for_tests(&self, kind: TaskClaimKind) {
         *crate::lock_unpoison(&self.claim_pause) = Some(Arc::new(TaskClaimPause::new(kind)));
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn wait_task_claim_pause_for_tests(&self) {
         loop {
             let pause = crate::lock_unpoison(&self.claim_pause).clone();
@@ -113,17 +120,20 @@ impl TaskExecutionRegistry {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn release_task_claim_pause_for_tests(&self) {
         if let Some(pause) = crate::lock_unpoison(&self.claim_pause).as_ref() {
-            pause.release.notify_one();
+            pause.release.notify_waiters();
         }
     }
 
+    #[cfg(feature = "test-support")]
     pub(crate) async fn pause_after_task_effect_for_tests(&self) {
         self.pause_before_task_claim(TaskClaimKind::ActionEffect)
             .await;
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     async fn pause_before_task_claim(&self, kind: TaskClaimKind) {
         let pause = {
             let configured = crate::lock_unpoison(&self.claim_pause).clone();
@@ -132,19 +142,21 @@ impl TaskExecutionRegistry {
         let Some(pause) = pause else {
             return;
         };
+        let released = pause.release.notified();
         pause
             .entered
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        pause.release.notified().await;
+        released.await;
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn wait_host_shutdown_for_tests(&self) {
         while !self.host_shutdown.is_aborted() {
             tokio::task::yield_now().await;
         }
     }
 
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn running_task_executions_for_tests(&self) -> usize {
         crate::lock_unpoison(&self.running).len()
     }
@@ -814,11 +826,14 @@ impl<T> BackgroundTaskAgent<T> {
         let _shutdown = self.shutdown.lock().await;
         let tasks = crate::lock_unpoison(&self.tasks).take();
         self.signal_host_shutdown().await;
+        let handle = self.handle.upgrade();
         let Some(mut tasks) = tasks else {
+            if let Some(handle) = &handle {
+                handle.terminate_and_join_task_effects().await?;
+            }
             return Ok(());
         };
         let mut failure = crate::lock_unpoison(&self.failure).take();
-        let handle = self.handle.upgrade();
         let quiesce_timeout = handle.as_ref().map_or_else(
             || *crate::lock_unpoison(&self.quiesce_timeout),
             |handle| handle.task_agent_quiesce_timeout(),
@@ -831,20 +846,28 @@ impl<T> BackgroundTaskAgent<T> {
             }
         })
         .await;
-        if joined.is_err() {
-            if let Some(handle) = &handle {
-                handle.terminate_and_join_task_effects().await;
-            }
+        let timed_out = joined.is_err();
+        let effect_result = if let Some(handle) = &handle {
+            handle.terminate_and_join_task_effects().await
+        } else {
+            Ok(())
+        };
+        if timed_out {
             while let Some(result) = tasks.join_next().await {
                 if result.is_err() {
                     failure.get_or_insert_with(task_agent_join_failure);
                 }
             }
-            return Err(task_agent_quiesce_timeout(quiesce_timeout));
+            let mut error = task_agent_quiesce_timeout(quiesce_timeout);
+            if let Err(effect_error) = effect_result {
+                error = CoreError::Serving(format!(
+                    "{}; effect hard-stop cleanup failed: {effect_error}",
+                    error
+                ));
+            }
+            return Err(error);
         }
-        if let Some(handle) = &handle {
-            handle.terminate_and_join_task_effects().await;
-        }
+        effect_result?;
         failure.map_or(Ok(()), Err)
     }
 

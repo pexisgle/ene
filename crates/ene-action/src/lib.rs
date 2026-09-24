@@ -8,6 +8,8 @@ pub use attempt::{
     ActionStartOutcome, ActionTechnicalError, AttemptCommitPremise, CertaintyUpdateOutcome,
     EffectGrounds, OperationKind, RealTargetRef, certainty_grounds_pair_is_valid,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use filesystem::WorkspaceEffectStagingPause;
 pub use filesystem::{
     ActionOutput, ListEntry, ListEntryKind, ObservedEffect, TargetRejection, WorkspaceRoot,
     WorkspaceRootError,

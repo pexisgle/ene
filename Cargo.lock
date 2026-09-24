@@ -1537,6 +1537,7 @@ dependencies = [
  "ene-task",
  "futures-util",
  "hmac",
+ "libc",
  "rcgen",
  "rmp-serde",
  "rusqlite",
@@ -1594,7 +1595,6 @@ name = "ene-desktop"
 version = "0.1.0"
 dependencies = [
  "csv",
- "ene-action",
  "ene-api",
  "ene-body",
  "ene-client",

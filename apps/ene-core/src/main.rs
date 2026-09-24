@@ -44,6 +44,7 @@ enum CliCommand {
         cursor: Option<String>,
         limit: u32,
     },
+    WorkspaceEffectWorker,
 }
 
 fn ene_core_command() -> clap::Command {
@@ -127,6 +128,11 @@ fn ene_core_command() -> clap::Command {
                 ),
         )
         .subcommand(
+            ClapCommand::new("workspace-effect-worker")
+                .hide(true)
+                .about("Run the isolated workspace-effect worker"),
+        )
+        .subcommand(
             ClapCommand::new("deletion-status")
                 .about("Show the bounded Targeted Deletion operation status")
                 .arg(
@@ -191,6 +197,7 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<CliCommand, CliError> {
             cursor: sub.get_one::<String>("cursor").cloned(),
             limit: sub.get_one::<u32>("limit").copied().unwrap_or(50),
         }),
+        "workspace-effect-worker" => Ok(CliCommand::WorkspaceEffectWorker),
         other => Err(CliError::Usage(format!("unknown command: {other}"))),
     }
 }
@@ -270,6 +277,10 @@ fn main() -> Result<(), CliError> {
         } => {
             let data_dir = load_data_dir(config.as_deref())?;
             run_deletion_status(&data_dir, cursor.as_deref(), limit)?;
+            Ok(())
+        }
+        CliCommand::WorkspaceEffectWorker => {
+            ene_action::run_workspace_effect_worker();
             Ok(())
         }
         CliCommand::ShowConfig { config } => {

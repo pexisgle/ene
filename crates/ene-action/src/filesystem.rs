@@ -7,6 +7,20 @@ use thiserror::Error;
 
 use crate::attempt::{ActionCertainty, EffectGrounds, OperationKind, RealTargetRef};
 
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceEffectStagingPause {
+    pub entered: PathBuf,
+    pub release: PathBuf,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkspaceEffectOptions {
+    pub staging_directory: Option<PathBuf>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub pause_after_staging: Option<WorkspaceEffectStagingPause>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WorkspaceRootError {
     #[error("workspace folder is unavailable")]
@@ -160,6 +174,21 @@ impl WorkspaceRoot {
         operation: OperationKind,
         content: Option<&[u8]>,
     ) -> ObservedEffect {
+        self.execute_with_options(
+            target,
+            operation,
+            content,
+            &WorkspaceEffectOptions::default(),
+        )
+    }
+
+    pub(crate) fn execute_with_options(
+        &self,
+        target: &RealTargetRef,
+        operation: OperationKind,
+        content: Option<&[u8]>,
+        options: &WorkspaceEffectOptions,
+    ) -> ObservedEffect {
         match operation {
             OperationKind::List => self.list_directory(target),
             OperationKind::Read => {
@@ -176,13 +205,13 @@ impl WorkspaceRoot {
                 let Some(bytes) = content else {
                     return refused();
                 };
-                self.write_atomically(target, bytes, false)
+                self.write_atomically(target, bytes, false, options)
             }
             OperationKind::Edit => {
                 let Some(bytes) = content else {
                     return refused();
                 };
-                self.write_atomically(target, bytes, true)
+                self.write_atomically(target, bytes, true, options)
             }
         }
     }
@@ -244,6 +273,7 @@ impl WorkspaceRoot {
         target: &RealTargetRef,
         bytes: &[u8],
         replace: bool,
+        options: &WorkspaceEffectOptions,
     ) -> ObservedEffect {
         let destination = Path::new(target.as_path());
         if !self.reverifies_at_effect(destination, replace) {
@@ -252,7 +282,14 @@ impl WorkspaceRoot {
         let Some(parent) = destination.parent() else {
             return refused();
         };
-        let mut temporary = match NamedTempFile::new_in(parent) {
+        let temporary_directory = options.staging_directory.as_deref().unwrap_or(parent);
+        if options.staging_directory.is_some()
+            && (!temporary_directory.is_absolute()
+                || fs::create_dir_all(temporary_directory).is_err())
+        {
+            return refused();
+        }
+        let mut temporary = match NamedTempFile::new_in(temporary_directory) {
             Ok(temporary) => temporary,
             Err(_) => return refused(),
         };
@@ -261,6 +298,12 @@ impl WorkspaceRoot {
             if file.write_all(bytes).is_err() || file.sync_all().is_err() {
                 return refused();
             }
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(pause) = options.pause_after_staging.as_ref()
+            && pause.wait().is_err()
+        {
+            return refused();
         }
         let persisted = if replace {
             temporary.persist(destination)
@@ -446,6 +489,17 @@ impl core::fmt::Debug for ObservedEffect {
                 }),
             )
             .finish()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl WorkspaceEffectStagingPause {
+    fn wait(&self) -> Result<(), ()> {
+        std::fs::write(&self.entered, b"staged").map_err(|_| ())?;
+        while !self.release.exists() {
+            std::thread::yield_now();
+        }
+        Ok(())
     }
 }
 

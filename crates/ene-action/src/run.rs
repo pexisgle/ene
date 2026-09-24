@@ -109,6 +109,23 @@ impl StartedWorkspaceAction {
     pub fn content(&self) -> Option<&[u8]> {
         self.content.as_deref()
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn for_test(
+        root: WorkspaceRoot,
+        target: RealTargetRef,
+        operation: OperationKind,
+        content: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            attempt: ActionAttemptId::generate(),
+            root,
+            target,
+            operation,
+            content,
+        }
+    }
 }
 
 pub async fn orchestrate_workspace_action(

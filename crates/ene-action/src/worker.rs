@@ -1,5 +1,10 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::WorkspaceEffectStagingPause;
+use crate::filesystem::WorkspaceEffectOptions;
 use crate::{
     ActionCertainty, ActionOutput, EffectGrounds, ListEntry, ListEntryKind, ObservedEffect,
     OperationKind, RealTargetRef, WorkspaceRoot,
@@ -11,6 +16,11 @@ pub struct WorkspaceEffectRequest {
     pub target: String,
     pub operation: String,
     pub content: Option<Vec<u8>>,
+    #[serde(default)]
+    pub staging_directory: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    #[serde(default)]
+    pub test_pause_after_staging: Option<WorkspaceEffectStagingPause>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,7 +60,13 @@ pub fn execute_workspace_effect(
     let root = WorkspaceRoot::open(&request.root)
         .map_err(|_| WorkspaceEffectWorkerError::WorkspaceUnavailable)?;
     let target = RealTargetRef::from_canonical_path(request.target);
-    let effect = root.execute(&target, operation, request.content.as_deref());
+    let options = WorkspaceEffectOptions {
+        staging_directory: request.staging_directory.as_deref().map(PathBuf::from),
+        #[cfg(any(test, feature = "test-support"))]
+        pause_after_staging: request.test_pause_after_staging,
+    };
+    let effect =
+        root.execute_with_options(&target, operation, request.content.as_deref(), &options);
     Ok(WorkspaceEffectResponse {
         certainty: effect.certainty.as_str().to_owned(),
         grounds: effect.grounds.as_str().to_owned(),

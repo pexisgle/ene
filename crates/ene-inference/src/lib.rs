@@ -471,8 +471,12 @@ impl DispatchAbort {
     }
 
     pub async fn aborted(&self) {
-        while !self.is_aborted() {
-            self.inner.notify.notified().await;
+        loop {
+            let notified = self.inner.notify.notified();
+            if self.is_aborted() {
+                return;
+            }
+            notified.await;
         }
     }
 }
@@ -497,7 +501,7 @@ impl DispatchAbortInner {
         if self.aborted.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        self.notify.notify_one();
+        self.notify.notify_waiters();
         let children = {
             let mut children = self
                 .children
@@ -893,7 +897,7 @@ pub mod fake {
 
 #[cfg(test)]
 mod dispatch_tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::fake::{FakeFailure, FakeProviderTransport};
     use super::{
@@ -1923,6 +1927,44 @@ mod dispatch_tests {
         let claimed = attempts.0.lock().expect("attempt capture lock");
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].task_agent, None);
+    }
+
+    #[tokio::test]
+    async fn one_abort_wakes_every_registered_waiter() {
+        let abort = DispatchAbort::default();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let first = {
+            let abort = abort.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                let notified = abort.inner.notify.notified();
+                barrier.wait().await;
+                if abort.is_aborted() {
+                    return;
+                }
+                notified.await;
+            })
+        };
+        let second = {
+            let abort = abort.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                let notified = abort.inner.notify.notified();
+                barrier.wait().await;
+                if abort.is_aborted() {
+                    return;
+                }
+                notified.await;
+            })
+        };
+        barrier.wait().await;
+        abort.abort();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            first.await.expect("first abort waiter joins");
+            second.await.expect("second abort waiter joins");
+        })
+        .await
+        .expect("both waiters must wake");
     }
 
     #[test]

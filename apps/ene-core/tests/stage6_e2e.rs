@@ -85,7 +85,7 @@ fn uncooperative_task_effect_worker_fixture() {
     let mutation = std::env::var_os("ENE_TEST_EFFECT_MUTATION").expect("mutation path");
     std::fs::write(entered, b"entered").unwrap();
     while !std::path::Path::new(&release).exists() {
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::yield_now();
     }
     std::fs::write(mutation, b"late workspace mutation").unwrap();
 }
@@ -6780,6 +6780,135 @@ async fn serve_and_start_shutdown_task(dir: PathBuf, transport: Arc<ScriptedTran
     served
 }
 
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn supported_host_runtime_action_smoke_uses_the_packaged_worker() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"smoke.md","content":"worker smoke"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::reported(r##"{"tool":"read","path":"smoke.md"}"##, 100, 0, 10),
+            ),
+            (
+                on_task_agent_turn(2),
+                Call::reported(r#"{"final":"worker smoke complete"}"#, 100, 0, 10),
+            ),
+        ],
+        &[],
+    ));
+    transport.block_input(on_task_agent_turn(2));
+    let mut served =
+        serve_and_start_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    transport.wait_parked(1).await;
+    transport.release_blocked();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while served.handle().running_task_executions_for_tests() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the supported Host path must join the completed Task Agent");
+    assert_eq!(
+        std::fs::read(temp.path().join("shutdown-task-workspace/smoke.md"))
+            .expect("the worker must persist the create effect"),
+        b"worker smoke"
+    );
+    assert_eq!(
+        db_scalar(
+            &temp.path().join("app.db"),
+            "SELECT COUNT(*) FROM action_attempt WHERE certainty = 'confirmed_success'",
+        ),
+        2,
+        "create and read must both retain observed certainty",
+    );
+    served.stop().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn missing_worker_fails_closed_before_action_claim() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"missing-worker.md","content":"blocked"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served
+        .handle()
+        .install_uncooperative_task_effect_runtime_for_tests(
+            temp.path().join("missing-ene-action-worker"),
+            Vec::new(),
+            Vec::new(),
+        );
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while served.handle().running_task_executions_for_tests() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the missing worker must fail the Task Agent promptly");
+    assert_eq!(
+        db_scalar(
+            &temp.path().join("app.db"),
+            "SELECT COUNT(*) FROM action_attempt",
+        ),
+        0,
+        "worker preflight must fail before AU5",
+    );
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/missing-worker.md")
+            .exists()
+    );
+    served.stop().await;
+}
+
 #[tokio::test]
 async fn graceful_shutdown_aborts_a_parked_task_agent_preserves_unknown_and_does_not_replay() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -6902,6 +7031,7 @@ async fn graceful_shutdown_aborts_a_parked_task_agent_preserves_unknown_and_does
     served.stop().await;
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn host_shutdown_kills_reaps_and_joins_uncooperative_task_effect_before_returning() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -7025,6 +7155,7 @@ async fn host_shutdown_kills_reaps_and_joins_uncooperative_task_effect_before_re
     );
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn shutdown_before_task_agent_inference_claim_creates_no_attempt_or_provider_io() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -7091,6 +7222,7 @@ async fn shutdown_before_task_agent_inference_claim_creates_no_attempt_or_provid
     );
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn shutdown_before_task_agent_action_start_creates_no_attempt_or_workspace_effect() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -7157,6 +7289,7 @@ async fn shutdown_before_task_agent_action_start_creates_no_attempt_or_workspace
     );
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn action_claim_first_keeps_started_fact_and_completed_effect_across_shutdown() {
     let temp = tempfile::TempDir::new().unwrap();
