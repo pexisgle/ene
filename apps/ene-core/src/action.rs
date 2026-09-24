@@ -1275,9 +1275,10 @@ mod supervisor_tests {
             entered: entered.clone(),
             release,
         }));
+        let canonical_target = std::fs::canonicalize(&target_path).expect("canonical edit target");
         let started = ene_action::StartedWorkspaceAction::for_test(
             root.clone(),
-            RealTargetRef::from_canonical_path(target_path.to_string_lossy().into_owned()),
+            RealTargetRef::from_canonical_path(canonical_target.to_string_lossy().into_owned()),
             OperationKind::Edit,
             Some(b"after".to_vec()),
         );
