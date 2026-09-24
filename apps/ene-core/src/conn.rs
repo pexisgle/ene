@@ -24,6 +24,27 @@ use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageId};
 
 const SEEN_MESSAGE_CAP: usize = 128;
 
+/// How many decoded application frames the reader holds on its own while the
+/// business queue is full. Within this bounded window the reader keeps
+/// consuming transport control frames; past it the reader stops reading and
+/// the backpressure reaches the peer's TCP window instead of being dropped.
+const READ_AHEAD_FRAMES: usize = 8;
+
+struct BusinessJob {
+    frame: DecodedFrame,
+    live: LiveInput,
+}
+
+#[expect(
+    clippy::large_enum_variant,
+    reason = "responses are bounded by the wire cap and travel a bounded queue; boxing would add an allocation per frame"
+)]
+enum BusinessOut {
+    Response(WireFrame),
+    Done,
+    Failed(tokio::task::JoinError),
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum LiveDecision {
     Ready(LiveInput),
@@ -793,38 +814,90 @@ async fn send_transport_message(
     message: Message,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> bool {
+    // IPC §10.2 bounds the write wait: a peer that stops reading may not own
+    // the connection task forever, and a write past the bound leaves the
+    // sink mid-frame, so the connection ends with it.
     tokio::select! {
         biased;
         () = wait_for_shutdown(shutdown) => false,
-        result = sink.send(message) => result.is_ok(),
+        result = tokio::time::timeout(wss::WRITE_WAIT, sink.send(message)) => {
+            matches!(result, Ok(Ok(())))
+        }
     }
 }
 
+/// Owns the read half of the connection. Transport control (Ping / Pong),
+/// EOF, Close, and read failures are handled here immediately, no matter how
+/// far behind the application consumer is. Application frames are handed
+/// over through a bounded queue plus the bounded `READ_AHEAD_FRAMES` window,
+/// so backpressure stops at the peer's TCP window instead of stopping the
+/// control plane. `_ended` is dropped when this reader ends; the connection
+/// loop observes the closed watch and closes the connection promptly.
 async fn read_ws_frames(
     mut stream: HostStream,
     frames: tokio::sync::mpsc::Sender<DecodedFrame>,
-    peer_pings: tokio::sync::mpsc::Sender<Vec<u8>>,
+    control: tokio::sync::mpsc::Sender<Vec<u8>>,
     last_activity: Arc<StdMutex<tokio::time::Instant>>,
+    _ended: tokio::sync::watch::Sender<()>,
 ) {
-    while let Some(message) = stream.next().await {
+    use tokio::sync::mpsc::error::TrySendError;
+
+    let mut read_ahead: std::collections::VecDeque<DecodedFrame> =
+        std::collections::VecDeque::new();
+    loop {
+        let message = if read_ahead.len() >= READ_AHEAD_FRAMES {
+            // Full backpressure: nothing further is read from the socket
+            // until the business queue makes room.
+            match frames.reserve().await {
+                Ok(permit) => {
+                    if let Some(frame) = read_ahead.pop_front() {
+                        permit.send(frame);
+                    }
+                    continue;
+                }
+                Err(_) => return,
+            }
+        } else if read_ahead.is_empty() {
+            stream.next().await
+        } else {
+            tokio::select! {
+                biased;
+                permit = frames.reserve() => match permit {
+                    Ok(permit) => {
+                        if let Some(frame) = read_ahead.pop_front() {
+                            permit.send(frame);
+                        }
+                        continue;
+                    }
+                    Err(_) => return,
+                },
+                message = stream.next() => message,
+            }
+        };
         match message {
-            Ok(Message::Binary(body)) => {
+            Some(Ok(Message::Binary(body))) => {
                 touch_activity(&last_activity);
                 let Ok(frame) = decode_frame(&body) else {
-                    break;
+                    return;
                 };
-                if frames.send(frame).await.is_err() {
-                    break;
+                match frames.try_send(frame) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(frame)) => read_ahead.push_back(frame),
+                    Err(TrySendError::Closed(_)) => return,
                 }
             }
-            Ok(Message::Ping(payload)) => {
+            Some(Ok(Message::Ping(payload))) => {
                 touch_activity(&last_activity);
-                if peer_pings.send(payload.to_vec()).await.is_err() {
-                    break;
+                if control.send(payload.to_vec()).await.is_err() {
+                    return;
                 }
             }
-            Ok(Message::Pong(_)) => touch_activity(&last_activity),
-            Ok(Message::Text(_)) | Ok(Message::Close(_)) | Ok(Message::Frame(_)) | Err(_) => break,
+            Some(Ok(Message::Pong(_))) => touch_activity(&last_activity),
+            Some(Ok(Message::Text(_)))
+            | Some(Ok(Message::Close(_)))
+            | Some(Ok(Message::Frame(_)))
+            | Some(Err(_))
+            | None => return,
         }
     }
 }
@@ -954,48 +1027,99 @@ async fn serve_connection<T>(
     let (mut write_half, read_half) = socket.split();
     let (frames_tx, mut frames_rx) =
         tokio::sync::mpsc::channel::<DecodedFrame>(STREAM_BUFFER_FRAMES);
-    let (peer_ping_tx, mut peer_ping_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let (ended_tx, mut ended_rx) = tokio::sync::watch::channel(());
     let last_activity = Arc::new(StdMutex::new(tokio::time::Instant::now()));
     let reader = AbortOnDrop {
         task: Some(tokio::spawn(read_ws_frames(
             read_half,
             frames_tx,
-            peer_ping_tx,
+            control_tx,
             Arc::clone(&last_activity),
+            ended_tx,
         ))),
     };
+    let (jobs_tx, jobs_rx) = tokio::sync::mpsc::channel::<BusinessJob>(1);
+    let (business_out_tx, mut business_out_rx) =
+        tokio::sync::mpsc::channel::<BusinessOut>(STREAM_BUFFER_FRAMES);
+    let mut business = tokio::spawn(run_business(
+        Arc::clone(&handle),
+        Arc::clone(&transport),
+        jobs_rx,
+        business_out_tx,
+    ));
     let mut next_ping = tokio::time::Instant::now() + wss::PING_INTERVAL;
     let mut suspected = false;
     let mut held: std::collections::VecDeque<DecodedFrame> = std::collections::VecDeque::new();
-    let mut monitor = tokio::time::interval(wss::MONITOR_TICK);
-    monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut learning = tokio::task::JoinSet::new();
-    let mut learning_failure = None;
+    let mut monitor_at = tokio::time::Instant::now() + wss::MONITOR_TICK;
     let mut wake = handle.undelivered_wakeup();
     let mut template: Option<(WireFrame, LiveInput)> = None;
+    let mut pending_dispatch: Option<(DecodedFrame, LiveInput)> = None;
     let mut pairing_delivery_open = true;
     let mut terminal = false;
     let mut push_blocked = false;
+    let mut busy = false;
+    let mut business_failure: Option<tokio::task::JoinError> = None;
 
     let body = async {
         'connection: loop {
             let deadline = handle.receipt_deadline_for(&connection);
             let timer = async {
                 match deadline {
-                    Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                    Some(at) => tokio::time::sleep_until(at).await,
                     None => std::future::pending::<()>().await,
                 }
             };
             tokio::select! {
                 biased;
                 () = wait_for_shutdown(&mut shutdown) => break 'connection,
-                joined = learning.join_next(), if !learning.is_empty() => {
-                    if let Some(Err(error)) = joined {
-                        learning_failure = Some(error);
+                () = tokio::time::sleep_until(monitor_at) => {
+                    monitor_at = {
+                        let now = tokio::time::Instant::now();
+                        let mut next = monitor_at + wss::MONITOR_TICK;
+                        if next < now {
+                            next = now + wss::MONITOR_TICK;
+                        }
+                        next
+                    };
+                    let idle = activity_idle(&last_activity);
+                    if idle >= wss::LIVENESS_LIMIT {
                         break 'connection;
                     }
+                    // Liveness is transport-level only: it never becomes a
+                    // presentation ACK or presence, and a suspected connection
+                    // holds new inbound work in `held` instead of dispatching it.
+                    suspected = idle >= wss::SUSPECT_AFTER;
+                    if table.preauth_expired(&connection) {
+                        break 'connection;
+                    }
+                    if tokio::time::Instant::now() >= next_ping {
+                        next_ping = tokio::time::Instant::now() + wss::PING_INTERVAL;
+                        if !send_transport_message(
+                            &mut write_half,
+                            Message::Ping(Default::default()),
+                            &mut shutdown,
+                        )
+                        .await
+                        {
+                            break 'connection;
+                        }
+                    }
                 }
-                maybe = frames_rx.recv() => {
+                ended = ended_rx.changed() => {
+                    // EOF, Close, and read failures end here promptly, even
+                    // while a business handler is still running: the
+                    // connection stops being current without waiting for it.
+                    drop(ended);
+                    break 'connection;
+                }
+                joined = &mut business => {
+                    if let Some(failure) = joined.err() {
+                        business_failure = Some(failure);
+                    }
+                    break 'connection;
+                }
+                maybe = frames_rx.recv(), if !busy => {
                     let Some(frame) = maybe else {
                         break 'connection;
                     };
@@ -1004,7 +1128,45 @@ async fn serve_connection<T>(
                     }
                     held.push_back(frame);
                 }
-                () = std::future::ready(()), if !suspected && !held.is_empty() => {
+                outgoing = business_out_rx.recv() => {
+                    let Some(outgoing) = outgoing else {
+                        break 'connection;
+                    };
+                    match outgoing {
+                        BusinessOut::Response(response) => {
+                            if !write_response(&mut write_half, response, &mut terminal, &mut shutdown).await {
+                                break 'connection;
+                            }
+                        }
+                        BusinessOut::Failed(failure) => {
+                            business_failure = Some(failure);
+                            break 'connection;
+                        }
+                        BusinessOut::Done => {
+                            if terminal {
+                                break 'connection;
+                            }
+                            if let Some((DecodedFrame::Known(frame_template), live_template)) =
+                                pending_dispatch.take()
+                            {
+                                template = Some((frame_template, live_template));
+                            }
+                            busy = false;
+                            advance_output(
+                                &mut write_half,
+                                &handle,
+                                &table,
+                                &connection,
+                                &template,
+                                &mut terminal,
+                                &mut shutdown,
+                                &mut push_blocked,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                () = std::future::ready(()), if !busy && !suspected && !held.is_empty() => {
                     let Some(frame) = held.pop_front() else {
                         continue;
                     };
@@ -1013,78 +1175,14 @@ async fn serve_connection<T>(
                         LiveDecision::Duplicate => continue,
                         LiveDecision::Invalid => break 'connection,
                     };
-                    let frame_template = frame.clone();
-                    let live_template = live.clone();
-                    let (frame_tx, mut frame_rx) =
-                        tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
-                    let mut host = std::pin::pin!(handle.handle_frame_to(
-                        frame,
-                        live,
-                        transport.as_ref(),
-                        &frame_tx,
-                    ));
-                    let mut failed = false;
-                    let mut host_done = false;
-                    loop {
-                        if host_done {
-                            while let Ok(response) = frame_rx.try_recv() {
-                                if !write_response(&mut write_half, response, &mut terminal, &mut shutdown).await {
-                                    failed = true;
-                                    break;
-                                }
-                            }
-                            break;
-                        }
-                        tokio::select! {
-                            biased;
-                            () = wait_for_shutdown(&mut shutdown) => {
-                                failed = true;
-                                break;
-                            }
-                            () = &mut host => {
-                                host_done = true;
-                            }
-                            Some(response) = frame_rx.recv() => {
-                                if !write_response(&mut write_half, response, &mut terminal, &mut shutdown).await {
-                                    failed = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if !host_done {
-                        drop(frame_rx);
-                        host.await;
-                    }
-                    if handle.has_pending_learning() {
-                        let worker_handle = Arc::clone(&handle);
-                        let worker_transport = Arc::clone(&transport);
-                        learning.spawn(async move {
-                            worker_handle
-                                .run_pending_learning(worker_transport.as_ref())
-                                .await;
-                        });
-                    }
-                    if failed || terminal {
+                    pending_dispatch = Some((frame.clone(), live.clone()));
+                    busy = true;
+                    if jobs_tx.send(BusinessJob { frame, live }).await.is_err() {
                         break 'connection;
                     }
-                    if let DecodedFrame::Known(frame_template) = frame_template {
-                        template = Some((frame_template, live_template));
-                    }
-                    advance_output(
-                        &mut write_half,
-                        &handle,
-                        &table,
-                        &connection,
-                        &template,
-                        &mut terminal,
-                        &mut shutdown,
-                        &mut push_blocked,
-                    )
-                    .await;
                 }
-                peer_ping = peer_ping_rx.recv() => {
-                    let Some(payload) = peer_ping else {
+                payload = control_rx.recv() => {
+                    let Some(payload) = payload else {
                         break 'connection;
                     };
                     if !send_transport_message(&mut write_half, Message::Pong(payload.into()), &mut shutdown).await {
@@ -1115,7 +1213,7 @@ async fn serve_connection<T>(
                         break 'connection;
                     }
                 }
-                changed = wake.changed() => {
+                changed = wake.changed(), if !busy => {
                     if changed.is_err() {
                         break 'connection;
                     }
@@ -1131,7 +1229,7 @@ async fn serve_connection<T>(
                     )
                     .await;
                 }
-                () = handle.client_demand_wakeup().notified() => {
+                () = handle.client_demand_wakeup().notified(), if !busy => {
                     if !push_blocked
                         && !emit_unsolicited(
                             &mut write_half,
@@ -1148,7 +1246,7 @@ async fn serve_connection<T>(
                         push_blocked = true;
                     }
                 }
-                () = timer => {
+                () = timer, if !busy => {
                     handle.expire_due_receipts(&connection);
                     advance_output(
                         &mut write_half,
@@ -1162,31 +1260,6 @@ async fn serve_connection<T>(
                     )
                     .await;
                 }
-                _ = monitor.tick() => {
-                    let idle = activity_idle(&last_activity);
-                    if idle >= wss::LIVENESS_LIMIT {
-                        break 'connection;
-                    }
-                    // Liveness is transport-level only: it never becomes a
-                    // presentation ACK or presence, and a suspected connection
-                    // holds new inbound work in `held` instead of dispatching it.
-                    suspected = idle >= wss::SUSPECT_AFTER;
-                    if table.preauth_expired(&connection) {
-                        break 'connection;
-                    }
-                    if tokio::time::Instant::now() >= next_ping {
-                        next_ping = tokio::time::Instant::now() + wss::PING_INTERVAL;
-                        if !send_transport_message(
-                            &mut write_half,
-                            Message::Ping(Default::default()),
-                            &mut shutdown,
-                        )
-                        .await
-                        {
-                            break 'connection;
-                        }
-                    }
-                }
             }
         }
     };
@@ -1199,12 +1272,16 @@ async fn serve_connection<T>(
         .await
         .err()
         .filter(|error| !error.is_cancelled());
+    // The business task is not transport: it runs its current operation to
+    // completion and drains its learning workers on its own schedule. Only
+    // delivery ends here, together with the connection record.
+    drop(jobs_tx);
+    drop(business_out_rx);
     handle.close_connection(&table, connection).await;
-    let learning_failure = drain_learning(&mut learning, learning_failure).await;
     if let Some(payload) = panicked {
         std::panic::resume_unwind(payload);
     }
-    if let Some(error) = learning_failure.or(reader_failure) {
+    if let Some(error) = reader_failure.or(business_failure) {
         if error.is_panic() {
             std::panic::resume_unwind(error.into_panic());
         }
@@ -1212,16 +1289,105 @@ async fn serve_connection<T>(
     }
 }
 
-async fn drain_learning(
-    tasks: &mut tokio::task::JoinSet<()>,
-    mut failure: Option<tokio::task::JoinError>,
-) -> Option<tokio::task::JoinError> {
-    while let Some(result) = tasks.join_next().await {
-        if let Err(error) = result {
-            failure.get_or_insert(error);
+async fn run_business<T>(
+    handle: Arc<HostHandle>,
+    transport: Arc<T>,
+    mut jobs: tokio::sync::mpsc::Receiver<BusinessJob>,
+    business_out: tokio::sync::mpsc::Sender<BusinessOut>,
+) where
+    T: ProviderTransport + Send + Sync + 'static,
+{
+    let mut learning = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            joined = learning.join_next(), if !learning.is_empty() => {
+                if let Some(Err(failure)) = joined
+                    && business_out.send(BusinessOut::Failed(failure)).await.is_err()
+                {
+                    break;
+                }
+            }
+            job = jobs.recv() => {
+                let Some(job) = job else {
+                    break;
+                };
+                run_business_frame(&handle, transport.as_ref(), job, &business_out).await;
+                if handle.has_pending_learning() {
+                    let worker_handle = Arc::clone(&handle);
+                    let worker_transport = Arc::clone(&transport);
+                    learning.spawn(async move {
+                        worker_handle
+                            .run_pending_learning(worker_transport.as_ref())
+                            .await;
+                    });
+                }
+                if business_out.send(BusinessOut::Done).await.is_err() {
+                    break;
+                }
+            }
         }
     }
-    failure
+    while let Some(joined) = learning.join_next().await {
+        if let Err(failure) = joined {
+            drop(business_out.send(BusinessOut::Failed(failure)).await);
+        }
+    }
+}
+
+async fn run_business_frame<T: ProviderTransport>(
+    handle: &HostHandle,
+    transport: &T,
+    job: BusinessJob,
+    business_out: &tokio::sync::mpsc::Sender<BusinessOut>,
+) {
+    let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
+    let mut frame_rx = Some(frame_rx);
+    let mut host =
+        std::pin::pin!(handle.handle_frame_to(job.frame, job.live, transport, &frame_tx,));
+    let mut done = false;
+    loop {
+        if done {
+            if let Some(rx) = frame_rx.as_mut() {
+                while let Ok(response) = rx.try_recv() {
+                    if business_out
+                        .send(BusinessOut::Response(response))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+        let Some(rx) = frame_rx.as_mut() else {
+            // The connection loop is gone: the operation still runs to
+            // completion, but its responses end undelivered.
+            host.await;
+            return;
+        };
+        let mut delivery_ended = false;
+        tokio::select! {
+            biased;
+            () = &mut host => done = true,
+            response = rx.recv() => match response {
+                Some(response) => {
+                    if business_out
+                        .send(BusinessOut::Response(response))
+                        .await
+                        .is_err()
+                    {
+                        delivery_ended = true;
+                    }
+                }
+                None => delivery_ended = true,
+            },
+        }
+        if delivery_ended {
+            drop(frame_rx.take());
+        }
+    }
 }
 
 #[cfg(test)]

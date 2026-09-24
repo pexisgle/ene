@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use ene_api::codec::WireFrame;
 use ene_api::v1::command::CommandReplayRejectWire;

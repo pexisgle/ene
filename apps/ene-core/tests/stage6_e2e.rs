@@ -688,7 +688,7 @@ impl Served {
                     tokio::time::Instant::now() < deadline,
                     "the listener never bound after the restart: {failure:?}"
                 );
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
                 continue;
             }
             wait_until_deletion_drivers(&handle, 1).await;
@@ -5141,6 +5141,38 @@ impl WssClient {
         Self::handshake_on(&runtime, tcp, token, pin, origin, generation).await
     }
 
+    /// Dials with fixed kernel socket buffers, so a test can make one
+    /// direction stall at a known bound instead of depending on autotuning.
+    async fn connect_sized(
+        dir: &Path,
+        recv_buffer: Option<u32>,
+        send_buffer: Option<u32>,
+    ) -> Result<Self, String> {
+        let runtime = Self::load_runtime(dir).await?;
+        let port = runtime
+            .local_port()
+            .ok_or("runtime is not a local wss url")?;
+        let socket = tokio::net::TcpSocket::new_v4().map_err(|error| format!("socket: {error}"))?;
+        if let Some(size) = recv_buffer {
+            socket
+                .set_recv_buffer_size(size)
+                .map_err(|error| format!("receive buffer: {error}"))?;
+        }
+        if let Some(size) = send_buffer {
+            socket
+                .set_send_buffer_size(size)
+                .map_err(|error| format!("send buffer: {error}"))?;
+        }
+        let tcp = socket
+            .connect(std::net::SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                port,
+            )))
+            .await
+            .map_err(|error| format!("connect: {error}"))?;
+        Self::handshake_on(&runtime, tcp, None, None, false, None).await
+    }
+
     /// Drives TLS and the WebSocket upgrade over an already-connected stream,
     /// so a test can hold the stream between TCP connect and handshake.
     async fn handshake_on(
@@ -5258,24 +5290,24 @@ impl WssClient {
         raw.write_all(&header)
             .await
             .expect("oversize header must write");
-        let closed = tokio::time::timeout(Duration::from_secs(10), async {
-            let mut chunk = [0_u8; 1024];
-            loop {
-                match raw.read(&mut chunk).await {
-                    Ok(0) | Err(_) => return,
-                    Ok(read) => {
-                        if chunk[..read].windows(2).any(|pair| pair[0] & 0x0f == 0x8) {
-                            return;
-                        }
-                    }
-                }
-            }
-        })
-        .await;
-        assert!(
-            closed.is_ok(),
-            "an oversize frame must make the Host close the connection"
-        );
+        expect_host_close(&mut raw).await;
+    }
+
+    /// Sends one binary message split across two fragments whose reassembled
+    /// size crosses the wire cap, over the raw TLS stream underneath the
+    /// upgraded socket.
+    async fn send_fragmented_oversize_and_expect_close(self) {
+        let mut raw = self.socket.into_inner();
+        let mask = [0x11_u8, 0x22, 0x33, 0x44];
+        let first = masked_fragment(0x02, 200 * 1024, &mask);
+        raw.write_all(&first)
+            .await
+            .expect("first fragment must write");
+        let second = masked_fragment(0x80, 100 * 1024, &mask);
+        raw.write_all(&second)
+            .await
+            .expect("second fragment must write");
+        expect_host_close(&mut raw).await;
     }
 
     async fn expect_reject(&mut self, reply_to: WireMessageId, kind: RejectKind) {
@@ -5300,6 +5332,41 @@ impl WssClient {
             other => panic!("expected Reject, got {}", other.message_type()),
         }
     }
+}
+
+/// A masked, non-final (`0x02`) or continuation-final (`0x80`) fragment
+/// header plus `length` bytes of payload.
+fn masked_fragment(opcode: u8, length: usize, mask: &[u8; 4]) -> Vec<u8> {
+    let mut fragment = vec![opcode, 0x80 | 127];
+    fragment.extend_from_slice(&(length as u64).to_be_bytes());
+    fragment.extend_from_slice(mask);
+    let payload: Vec<u8> = (0..length)
+        .map(|index| (index % 251) as u8 ^ mask[index % 4])
+        .collect();
+    fragment.extend_from_slice(&payload);
+    fragment
+}
+
+/// Reads the raw TLS stream until the Host closes the connection.
+async fn expect_host_close(raw: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>) {
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut chunk = [0_u8; 1024];
+        loop {
+            match raw.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(read) => {
+                    if chunk[..read].windows(2).any(|pair| pair[0] & 0x0f == 0x8) {
+                        return;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the Host must close the connection after the crafted WebSocket message"
+    );
 }
 
 async fn raw_dial(dir: &Path) -> WssClient {
@@ -6140,6 +6207,436 @@ async fn pending_pairings_are_capped_with_a_typed_denial() {
         "the {MIRRORED_MAX_PENDING_PAIRINGS}th pending pairing must be refused"
     );
     drop(held);
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+// Mirrors `crate::serve::STREAM_BUFFER_FRAMES`; integration tests cannot
+// name pub(crate) items, so a drift breaks these tests instead of silently
+// weakening production.
+const MIRRORED_STREAM_BUFFER_FRAMES: usize = 32;
+
+/// Boots a serving Host with one completed summon round, arms the scripted
+/// barrier on the next dialogue, and returns once that dialogue's provider
+/// call is parked inside the connection's business handler.
+async fn serve_and_park_dialogue(
+    dir: PathBuf,
+    transport: Arc<ScriptedTransport>,
+    summon_text: &str,
+    park_text: &str,
+) -> Served {
+    let mut served = serve_and_setup(dir, transport.clone(), &[cmds::CAPABILITY_DIALOGUE]).await;
+    // The summon round intentionally skips the presentation confirmation: a
+    // receipt would arm the connection's receipt timer, and this helper's
+    // callers drive the liveness window through the tokio clock.
+    let (_round, _stream, _reply) = send_round(served.client(), summon_text)
+        .await
+        .expect("the summon round must complete");
+    wait_presence(&served.dir, "present").await;
+
+    transport.block_input(on_latest_owner(park_text));
+    let client = served.client();
+    let companion = client.companion_ref();
+    let target = client.round_target();
+    let intake = ask(
+        client,
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            target,
+            String::from(park_text),
+            String::from("en"),
+        )),
+        "park submit",
+    )
+    .await
+    .expect("the park submit must be answered while the intake precedes the provider call");
+    let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round: _ }) =
+        intake
+    else {
+        panic!("the park submit must be accepted, got {intake:?}");
+    };
+    transport.wait_parked(1).await;
+    served
+}
+
+/// One frame more than the mirrored queue capacity: with the business handler
+/// parked this leaves the Host's business frame queue saturated.
+async fn saturate_the_application_queue(served: &mut Served) {
+    for _ in 0..=MIRRORED_STREAM_BUFFER_FRAMES {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            served
+                .client()
+                .notify(WirePayload::HistoryRequest(cmds::history_request(
+                    "default", None, 1,
+                ))),
+        )
+        .await
+        .expect("the saturating write must be accepted by the client")
+        .expect("the saturating write must reach the transport");
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+}
+
+/// Moves only the clock across more than the liveness window while every
+/// socket operation stays on the real clock.
+async fn cross_the_liveness_window() {
+    // Let in-flight socket work settle on the real clock before the clock
+    // freezes, so the window measures liveness instead of setup races.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::pause();
+    for _ in 0..12 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+    tokio::time::resume();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+#[tokio::test]
+async fn a_business_handler_over_the_liveness_window_keeps_ping_and_the_connection_alive() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_park_dialogue(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        "summon for liveness",
+        "park beyond the liveness window",
+    )
+    .await;
+
+    // The business handler now runs past the liveness window while the client
+    // only answers the Host's pings: those pings must keep flowing, and the
+    // pongs must keep the responsive connection live.
+    cross_the_liveness_window().await;
+    assert!(
+        matches!(
+            presence_row(dir.path()),
+            Some((ref state, _)) if state == "present"
+        ),
+        "a responsive client must not be liveness-closed while its handler is parked"
+    );
+
+    // Completing the parked handler lets the Host re-check liveness against
+    // activity that stopped at the park: without transport pings inside the
+    // window this would be over the liveness window already.
+    transport.release_blocked();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        matches!(
+            presence_row(dir.path()),
+            Some((ref state, _)) if state == "present"
+        ),
+        "the liveness re-check after the parked handler must not close a client that kept answering"
+    );
+    let companion = served.client().companion_ref();
+    let answer = ask(
+        served.client(),
+        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
+        "history after the parked handler",
+    )
+    .await
+    .expect("the same connection must still answer past the liveness window");
+    assert!(
+        matches!(answer, WirePayload::HistoryResponse(_)),
+        "got {answer:?}"
+    );
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn client_close_during_a_parked_handler_closes_promptly_and_never_returns_to_current() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner("summon for close"),
+                Call::text("SUMMON-REPLY"),
+            ),
+            (
+                on_latest_owner("reconnect round"),
+                Call::text("RECONNECT-REPLY"),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = serve_and_park_dialogue(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        "summon for close",
+        "park before the client leaves",
+    )
+    .await;
+
+    // The client leaves while its business operation is still parked: the
+    // connection must close promptly, not when the operation finishes.
+    drop(served.client.take());
+    let (_, fallen_back) = wait_presence(dir.path(), "no_active").await;
+
+    // The old connection no longer passes current admission: a fresh
+    // connection authenticates and serves while the old handler is parked.
+    let mut replacement = connect(dir.path()).await;
+    assert_eq!(
+        presence_row(dir.path()),
+        Some((String::from("no_active"), fallen_back)),
+        "authentication alone must not restore attribution"
+    );
+    let (round, stream, text) = send_round(&mut replacement, "reconnect round")
+        .await
+        .expect("the replacement connection must serve");
+    assert_eq!(text, "RECONNECT-REPLY", "the new round must stream");
+    confirm_round(&mut replacement, &round, stream).await;
+    let (_, live_generation) = wait_presence(dir.path(), "present").await;
+
+    // Completing the old operation must not be adopted as current work.
+    transport.release_blocked();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let texts = history_texts(&mut replacement).await;
+    assert!(
+        !texts.iter().any(|text| text == "acknowledged"),
+        "the closed connection's provider reply must not be committed: {texts:?}"
+    );
+    assert_eq!(
+        presence_row(dir.path()),
+        Some((String::from("present"), live_generation)),
+        "the old connection's completion must not move presence"
+    );
+    drop(replacement);
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn a_saturated_application_queue_still_moves_pongs_and_close() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_park_dialogue(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        "summon for saturation",
+        "park under saturation",
+    )
+    .await;
+    saturate_the_application_queue(&mut served).await;
+
+    // Past the liveness window the Host still pings and still reads the pongs
+    // behind the saturated application queue: the connection stays present.
+    cross_the_liveness_window().await;
+    assert!(
+        matches!(
+            presence_row(dir.path()),
+            Some((ref state, _)) if state == "present"
+        ),
+        "a saturated queue must not stop the pong reads that prove liveness"
+    );
+
+    // The reader also keeps processing EOF behind the saturated queue.
+    drop(served.client.take());
+    let (_, fallen_back) = wait_presence(dir.path(), "no_active").await;
+
+    transport.release_blocked();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        presence_row(dir.path()),
+        Some((String::from("no_active"), fallen_back)),
+        "the closed connection's completion must not resurrect presence"
+    );
+    let mut replacement = connect(dir.path()).await;
+    let (round, stream, _text) =
+        send_round(&mut replacement, "after the saturated connection closed")
+            .await
+            .expect("the replacement connection must serve after saturation closed the old one");
+    confirm_round(&mut replacement, &round, stream).await;
+    drop(replacement);
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn shutdown_does_not_wait_for_a_parked_handler_behind_a_saturated_queue() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_park_dialogue(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        "summon before shutdown",
+        "park across the shutdown",
+    )
+    .await;
+    saturate_the_application_queue(&mut served).await;
+
+    served.request_graceful_stop();
+    tokio::time::timeout(Duration::from_secs(10), served.join_listener())
+        .await
+        .expect("shutdown must not wait for the parked business handler");
+    transport.release_blocked();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+}
+
+#[tokio::test]
+async fn a_stalled_peer_write_is_bounded_and_the_serving_task_exits() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+
+    // A tiny receive window on this raw client lets the Host's pong writes
+    // fill the TCP path quickly; the pending pairing keeps the connection in
+    // the owner-confirmation window so only the write wait may close it.
+    let mut client = WssClient::connect_sized(dir.path(), Some(2048), Some(1024 * 1024))
+        .await
+        .expect("a same-machine client with the current token must upgrade");
+    let mut pairing = WireFrame {
+        envelope: crafted_envelope("PairingRequest"),
+        payload: WirePayload::PairingRequest(PairingRequest {
+            device_descriptor: String::from("stalled writer"),
+        }),
+    };
+    pairing.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
+    client.send_wire(&pairing).await;
+    let reply = client.recv_wire().await;
+    assert!(
+        matches!(
+            reply.payload,
+            WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation { .. })
+        ),
+        "the pairing must pend before the stall, got {}",
+        reply.payload.message_type()
+    );
+
+    use futures_util::StreamExt as _;
+    let (mut sink, mut reader) = client.socket.split();
+    let pinger = tokio::spawn(async move {
+        use futures_util::SinkExt as _;
+        let payload = vec![0x5a_u8; 120];
+        for _ in 0..20_000 {
+            if sink
+                .send(Message::Ping(payload.clone().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // The client never reads: the Host's pong write parks on the socket, and
+    // the write wait bound must still end the connection instead of owning
+    // the serving task forever.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(32)).await;
+    tokio::time::resume();
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match reader.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the stalled write must be bounded by the write wait and close the connection"
+    );
+    pinger.abort();
+
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn the_host_answers_a_transport_ping_with_a_pong_and_closes_on_close() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let mut client = raw_dial(dir.path()).await;
+    use futures_util::{SinkExt as _, StreamExt as _};
+
+    let expected = vec![0x37_u8; 64];
+    client
+        .socket
+        .send(Message::Ping(expected.clone().into()))
+        .await
+        .expect("the ping must send");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match client.socket.next().await {
+                Some(Ok(Message::Pong(payload))) if payload.as_ref() == expected.as_slice() => {
+                    return;
+                }
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => {
+                    panic!("the ping must be answered before the connection ends")
+                }
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await
+    .expect("the Host must answer a transport ping with a matching pong");
+
+    client
+        .socket
+        .send(Message::Close(None))
+        .await
+        .expect("close");
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match client.socket.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "a Close frame must end the connection");
+
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+#[tokio::test]
+async fn a_fragmented_message_over_the_limit_closes_the_connection() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let host = raw_dial(dir.path()).await;
+    host.send_fragmented_oversize_and_expect_close().await;
     stop.send_replace(true);
     let joined = tokio::time::timeout(Duration::from_secs(30), server)
         .await

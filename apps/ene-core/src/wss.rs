@@ -25,6 +25,10 @@ pub(crate) const PING_INTERVAL: std::time::Duration = std::time::Duration::from_
 pub(crate) const SUSPECT_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 pub(crate) const LIVENESS_LIMIT: std::time::Duration = std::time::Duration::from_secs(90);
 pub(crate) const MONITOR_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+// IPC §10.2 bounds the write wait; a peer that stops reading must not own a
+// connection task indefinitely, and a write past the bound ends the
+// connection because the sink may be left mid-frame.
+pub(crate) const WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 // IPC §10.2 bounds the device-authentication wait; the design fixes the
 // limit, not the number, and IPC §9.3 keeps a pending pairing bound to its
 // originating connection's lifetime.
