@@ -33,12 +33,15 @@ use super::session::{
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Mirrors the Host's per-connection frame buffer; both directions stay
-/// bounded so a slow peer applies backpressure instead of buffering.
+/// bounded so a slow peer applies backpressure instead of buffering. The
+/// application capacity is this queue plus `READ_AHEAD_FRAMES` on top: a
+/// frame past that boundary fails the transport instead of buffering more.
 const TRANSPORT_QUEUE: usize = 32;
 const CONTROL_QUEUE: usize = 8;
-/// Mirrors the Host's read-ahead: while the application queue is full the
-/// reader keeps consuming transport control frames out of this bounded
-/// window instead of stalling the socket.
+/// Mirrors the Host's read-ahead window: while the application queue is full
+/// the reader keeps consuming transport control frames out of this bounded
+/// window instead of stalling the socket, and a frame that arrives when both
+/// the queue and this window are full exceeds the connection's capacity.
 const READ_AHEAD_FRAMES: usize = 8;
 /// IPC §10.2 bounds the write wait; a Host that stops reading must not own
 /// the pump task indefinitely, and a write past the bound fails the
@@ -208,8 +211,11 @@ async fn surface_write_failure(inbound: &mpsc::Sender<Inbound>) {
 /// handled here immediately, and application frames are handed to the
 /// inbound queue through the bounded `READ_AHEAD_FRAMES` window, so a slow
 /// application consumer applies backpressure to the socket instead of
-/// stopping the transport control plane. Terminal conditions flush the
-/// buffered frames first and then surface the reason to the readers above.
+/// stopping the transport control plane. A frame that arrives with the
+/// queue and the window both full exceeds the connection's capacity and
+/// fails the transport instead of waiting forever or being dropped in
+/// silence. Terminal conditions flush the buffered frames first and then
+/// surface the reason to the readers above.
 async fn read_half<S>(
     stream: futures_util::stream::SplitStream<WebSocketStream<S>>,
     inbound: mpsc::Sender<Inbound>,
@@ -224,52 +230,24 @@ async fn read_half<S>(
     let mut stream = stream;
     let mut read_ahead: VecDeque<DecodedFrame> = VecDeque::new();
     loop {
-        let next = if read_ahead.len() >= READ_AHEAD_FRAMES {
-            // Full backpressure: nothing further is read from the socket
-            // until the application makes room.
-            tokio::select! {
-                biased;
-                gone = writer_gone.changed() => {
-                    drop(gone);
-                    return;
-                }
-                permit = inbound.reserve() => match permit {
-                    Ok(permit) => {
-                        if let Some(frame) = read_ahead.pop_front() {
-                            permit.send(Inbound::Frame(frame));
-                        }
-                        continue;
+        // The socket is always polled together with the drain of the
+        // read-ahead window, so no backlog can hide control frames.
+        let next = tokio::select! {
+            biased;
+            gone = writer_gone.changed() => {
+                drop(gone);
+                return;
+            }
+            permit = inbound.reserve(), if !read_ahead.is_empty() => match permit {
+                Ok(permit) => {
+                    if let Some(frame) = read_ahead.pop_front() {
+                        permit.send(Inbound::Frame(frame));
                     }
-                    Err(_) => return,
-                },
-            }
-        } else if read_ahead.is_empty() {
-            tokio::select! {
-                biased;
-                gone = writer_gone.changed() => {
-                    drop(gone);
-                    return;
+                    continue;
                 }
-                next = stream.next() => next,
-            }
-        } else {
-            tokio::select! {
-                biased;
-                permit = inbound.reserve() => match permit {
-                    Ok(permit) => {
-                        if let Some(frame) = read_ahead.pop_front() {
-                            permit.send(Inbound::Frame(frame));
-                        }
-                        continue;
-                    }
-                    Err(_) => return,
-                },
-                gone = writer_gone.changed() => {
-                    drop(gone);
-                    return;
-                }
-                next = stream.next() => next,
-            }
+                Err(_) => return,
+            },
+            next = stream.next() => next,
         };
         match next {
             Some(Ok(Message::Binary(body))) => {
@@ -284,8 +262,26 @@ async fn read_half<S>(
                 };
                 match inbound.try_send(Inbound::Frame(frame)) {
                     Ok(()) => {}
-                    Err(TrySendError::Full(Inbound::Frame(frame))) => read_ahead.push_back(frame),
-                    Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => return,
+                    Err(TrySendError::Full(Inbound::Frame(frame)))
+                        if read_ahead.len() < READ_AHEAD_FRAMES =>
+                    {
+                        read_ahead.push_back(frame)
+                    }
+                    Err(TrySendError::Full(_)) => {
+                        // The application is over the bounded capacity: end
+                        // the transport with an explicit failure instead of
+                        // stalling the pump or dropping the frame in silence.
+                        fail_after_flush(
+                            &mut read_ahead,
+                            &inbound,
+                            Inbound::TransportFailed(String::from(
+                                "the application backlog exceeded the bounded inbound queue and read-ahead window",
+                            )),
+                        )
+                        .await;
+                        return;
+                    }
+                    Err(TrySendError::Closed(_)) => return,
                 }
             }
             Some(Ok(Message::Ping(payload))) => {
@@ -884,7 +880,8 @@ mod tests {
         let body = bulky_frame(64);
 
         // One frame more than the inbound queue capacity: the queue is full
-        // and one more frame sits in the reader's bounded read-ahead.
+        // and one more frame sits in the read-ahead window, which still has
+        // room — below the overload boundary of queue + read-ahead.
         for _ in 0..=TRANSPORT_QUEUE {
             server
                 .send(Message::Binary(body.clone().into()))
@@ -931,6 +928,59 @@ mod tests {
                     break;
                 }
                 Err(_) => panic!("the close must surface behind the backlog"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_application_frame_past_the_read_ahead_window_fails_the_transport() {
+        let (client, mut server) = ws_pair(false).await;
+        let mut transport = Transport::spawn_stream(client);
+        let body = bulky_frame(64);
+
+        // Saturation, not the queue alone: the full inbound queue plus the
+        // full read-ahead window. The transport is still usable at exactly
+        // this capacity.
+        for _ in 0..(TRANSPORT_QUEUE + READ_AHEAD_FRAMES) {
+            server
+                .send(Message::Binary(body.clone().into()))
+                .await
+                .expect("the saturating frame must send");
+        }
+
+        // One application frame past the boundary must not stall the pump
+        // forever and must not be dropped in silence: it ends the transport
+        // with an explicit, bounded failure after the buffered frames.
+        server
+            .send(Message::Binary(body.clone().into()))
+            .await
+            .expect("the over-capacity frame must reach the socket");
+
+        // Let the reader reach the boundary while the application is not
+        // consuming: the queue and the read-ahead window must both be full
+        // when the over-capacity frame is read.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut frames = 0;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), transport.read()).await {
+                Ok(Ok(_)) => frames += 1,
+                Ok(Err(error)) => {
+                    assert_eq!(
+                        frames,
+                        TRANSPORT_QUEUE + READ_AHEAD_FRAMES,
+                        "every buffered frame is delivered before the overload failure"
+                    );
+                    let rendered = format!("{error:?}");
+                    assert!(
+                        rendered.contains("backlog"),
+                        "the over-capacity frame must surface as an explicit backlog failure, got {rendered}"
+                    );
+                    break;
+                }
+                Err(_) => panic!(
+                    "the overload must surface instead of hanging the pump; got {frames} frames"
+                ),
             }
         }
     }
