@@ -128,6 +128,7 @@ pub(crate) struct ConnectionTable {
 struct ConnectionTableInner {
     records: HashMap<ConnectionWireId, ConnectionRecord>,
     device_current: HashMap<String, ConnectionWireId>,
+    admission_stopped: bool,
 }
 
 impl ConnectionTableInner {
@@ -137,7 +138,8 @@ impl ConnectionTableInner {
         phase: ConnectionPhase,
         device: Option<&str>,
     ) -> bool {
-        phase == ConnectionPhase::Authenticated
+        !self.admission_stopped
+            && phase == ConnectionPhase::Authenticated
             && device.is_some_and(|device| self.device_current.get(device) == Some(id))
     }
 }
@@ -145,7 +147,11 @@ impl ConnectionTableInner {
 impl ConnectionTable {
     pub(crate) fn note_accept(&self, class: TransportClass) -> ConnectionWireId {
         let id = ConnectionWireId(uuid::Uuid::new_v4());
-        crate::lock_unpoison(&self.inner).records.insert(
+        let mut table = crate::lock_unpoison(&self.inner);
+        if table.admission_stopped {
+            return id;
+        }
+        table.records.insert(
             id,
             ConnectionRecord {
                 class,
@@ -162,8 +168,19 @@ impl ConnectionTable {
         id
     }
 
+    pub(crate) fn stop_admission(&self) {
+        crate::lock_unpoison(&self.inner).admission_stopped = true;
+    }
+
+    pub(crate) fn admission_open(&self) -> bool {
+        !crate::lock_unpoison(&self.inner).admission_stopped
+    }
+
     pub(crate) fn note_paired(&self, id: &ConnectionWireId, device_wire: &str) -> bool {
         let mut table = crate::lock_unpoison(&self.inner);
+        if table.admission_stopped {
+            return false;
+        }
         let Some(record) = table.records.get_mut(id) else {
             return false;
         };
@@ -212,6 +229,9 @@ impl ConnectionTable {
         nonce: String,
     ) -> ChallengeOutcome {
         let mut table = crate::lock_unpoison(&self.inner);
+        if table.admission_stopped {
+            return ChallengeOutcome::Unknown;
+        }
         let Some(record) = table.records.get_mut(id) else {
             return ChallengeOutcome::Unknown;
         };
@@ -242,6 +262,9 @@ impl ConnectionTable {
 
     pub(crate) fn take_nonce(&self, id: &ConnectionWireId) -> NonceAdmission {
         let mut table = crate::lock_unpoison(&self.inner);
+        if table.admission_stopped {
+            return NonceAdmission::WrongPhase;
+        }
         let Some(record) = table.records.get_mut(id) else {
             return NonceAdmission::Unknown;
         };
@@ -260,6 +283,9 @@ impl ConnectionTable {
 
     pub(crate) fn install_authenticated(&self, id: &ConnectionWireId) -> InstallOutcome {
         let mut table = crate::lock_unpoison(&self.inner);
+        if table.admission_stopped {
+            return InstallOutcome::WrongPhase;
+        }
         let previous = {
             let Some(record) = table.records.get_mut(id) else {
                 return InstallOutcome::Unknown;
@@ -305,6 +331,9 @@ impl ConnectionTable {
         envelope: &WireEnvelope,
     ) -> LiveDecision {
         let mut table = crate::lock_unpoison(&self.inner);
+        if table.admission_stopped {
+            return LiveDecision::Invalid;
+        }
         let (class, device, phase, negotiated) = {
             let Some(record) = table.records.get_mut(id) else {
                 return LiveDecision::Invalid;
@@ -555,6 +584,113 @@ pub(crate) async fn wait_for_shutdown(shutdown: &mut tokio::sync::watch::Receive
     drop(shutdown.wait_for(|stop| *stop).await);
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug)]
+pub(crate) struct ShutdownTestBarrier {
+    armed: std::sync::atomic::AtomicBool,
+    signal_state: tokio::sync::watch::Sender<bool>,
+    connection_state: tokio::sync::watch::Sender<bool>,
+    release_state: tokio::sync::watch::Sender<bool>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Default for ShutdownTestBarrier {
+    fn default() -> Self {
+        Self {
+            armed: std::sync::atomic::AtomicBool::new(false),
+            signal_state: tokio::sync::watch::channel(false).0,
+            connection_state: tokio::sync::watch::channel(false).0,
+            release_state: tokio::sync::watch::channel(false).0,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ShutdownTestBarrier {
+    fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.signal_state.send_replace(false);
+        self.connection_state.send_replace(false);
+        self.release_state.send_replace(false);
+    }
+
+    fn note_signal(&self) {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            self.signal_state.send_replace(true);
+        }
+    }
+
+    async fn wait_for_signal(&self) {
+        wait_for_test_flag(&self.signal_state).await;
+    }
+
+    async fn wait_for_connection(&self) {
+        wait_for_test_flag(&self.connection_state).await;
+    }
+
+    fn note_connection(&self) {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            self.connection_state.send_replace(true);
+        }
+    }
+
+    async fn wait_for_release(&self) {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            wait_for_test_flag(&self.release_state).await;
+        }
+    }
+
+    fn release(&self) {
+        self.release_state.send_replace(true);
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn wait_for_test_flag(state: &tokio::sync::watch::Sender<bool>) {
+    let mut state = state.subscribe();
+    while !*state.borrow_and_update() {
+        if state.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl HostHandle {
+    #[doc(hidden)]
+    pub fn arm_shutdown_boundary_for_tests(&self) {
+        self.shutdown_test_barrier.arm();
+    }
+
+    #[doc(hidden)]
+    pub async fn wait_shutdown_boundary_signal_for_tests(&self) {
+        self.shutdown_test_barrier.wait_for_signal().await;
+    }
+
+    #[doc(hidden)]
+    pub async fn wait_shutdown_boundary_connection_for_tests(&self) {
+        self.shutdown_test_barrier.wait_for_connection().await;
+    }
+
+    #[doc(hidden)]
+    pub fn release_shutdown_boundary_for_tests(&self) {
+        self.shutdown_test_barrier.release();
+    }
+
+    pub(crate) fn note_shutdown_admission_signal(&self) {
+        self.shutdown_test_barrier.note_signal();
+    }
+
+    pub(crate) async fn pause_shutdown_before_abort_for_tests(&self) {
+        self.shutdown_test_barrier.wait_for_release().await;
+    }
+
+    pub(crate) async fn pause_connection_at_shutdown_for_tests(&self) {
+        self.shutdown_test_barrier.note_connection();
+        self.shutdown_test_barrier.wait_for_release().await;
+    }
+}
+
 struct ServingHandlers {
     stop: tokio::sync::watch::Sender<bool>,
     tasks: tokio::task::JoinSet<()>,
@@ -587,8 +723,15 @@ impl ServingHandlers {
         }
     }
 
-    async fn stop_and_join(&mut self) -> Result<(), CoreError> {
+    fn stop_admission(&mut self, table: &ConnectionTable) {
+        // The table gate is the synchronous admission linearization. The
+        // watch signal then wakes serving connections and requesters so they
+        // leave their receive loops before any Host dispatch is aborted.
+        table.stop_admission();
         self.stop.send_replace(true);
+    }
+
+    async fn join(&mut self) -> Result<(), CoreError> {
         while let Some(result) = self.tasks.join_next().await {
             self.record(Some(result));
         }
@@ -694,12 +837,17 @@ where
         handle: &HostHandle,
         result: Result<(), CoreError>,
     ) -> Result<(), CoreError> {
-        // New admission stops with the handlers below; the cooperative stop
-        // reaches the running dispatches first so their joins below are
-        // bounded by the inference abort contract, not by a provider that
-        // never returns.
+        // The top-level accept loop has already stopped accepting new work.
+        // First close the synchronous admission boundary for existing
+        // connections and requesters, then cooperatively abort dispatches,
+        // and only then join handlers and their owned business work.
+        self.handlers.stop_admission(&self.table);
+        #[cfg(any(test, feature = "test-support"))]
+        handle.note_shutdown_admission_signal();
+        #[cfg(any(test, feature = "test-support"))]
+        handle.pause_shutdown_before_abort_for_tests().await;
         self.abort.abort();
-        let handler_result = self.handlers.stop_and_join().await;
+        let handler_result = self.handlers.join().await;
         handle.join_confirmation_tasks().await;
         let task_result = self.launcher.shutdown_and_join().await;
         let driver_result = self.driver.stop_and_join().await;
@@ -783,12 +931,14 @@ where
                                 tokio::sync::mpsc::channel::<BusinessJob>(1);
                             let (business_out_tx, business_out_rx) =
                                 tokio::sync::mpsc::channel::<BusinessOut>(STREAM_BUFFER_FRAMES);
+                            let business_stop = stop.clone();
                             let business = tokio::spawn(run_business(
                                 Arc::clone(&handle),
                                 transport,
                                 jobs_rx,
                                 business_out_tx,
                                 abort,
+                                business_stop,
                             ));
                             let served = CatchUnwind(serve_connection(
                                 socket,
@@ -836,8 +986,10 @@ where
             }
         }
     };
-    let runtime_cleanup = wss::remove_runtime(&data_dir);
+    drop(control);
+    drop(wss);
     let quiesced = composition.quiesce(&handle, result).await;
+    let runtime_cleanup = wss::remove_runtime(&data_dir);
     runtime_cleanup.and(quiesced)
 }
 
@@ -1115,7 +1267,11 @@ async fn serve_connection(
             // pending — neither direction starves.
             tokio::select! {
                 biased;
-                () = wait_for_shutdown(&mut shutdown) => break 'connection,
+                () = wait_for_shutdown(&mut shutdown) => {
+                    #[cfg(any(test, feature = "test-support"))]
+                    handle.pause_connection_at_shutdown_for_tests().await;
+                    break 'connection;
+                }
                 () = tokio::time::sleep_until(monitor_at) => {
                     monitor_at = {
                         let now = tokio::time::Instant::now();
@@ -1166,6 +1322,9 @@ async fn serve_connection(
                     held.push_back(frame);
                 }
                 () = std::future::ready(()), if !busy && !suspected && !held.is_empty() => {
+                    if *shutdown.borrow() {
+                        break 'connection;
+                    }
                     let Some(frame) = held.pop_front() else {
                         continue;
                     };
@@ -1352,6 +1511,7 @@ async fn run_business<T>(
     mut jobs: tokio::sync::mpsc::Receiver<BusinessJob>,
     business_out: tokio::sync::mpsc::Sender<BusinessOut>,
     abort: DispatchAbort,
+    mut admission_stop: tokio::sync::watch::Receiver<bool>,
 ) where
     T: ProviderTransport + Send + Sync + 'static,
 {
@@ -1359,6 +1519,7 @@ async fn run_business<T>(
     loop {
         tokio::select! {
             biased;
+            () = wait_for_shutdown(&mut admission_stop) => break,
             joined = learning.join_next(), if !learning.is_empty() => {
                 if let Some(Err(failure)) = joined
                     && business_out.send(BusinessOut::Failed(failure)).await.is_err()
@@ -1370,14 +1531,22 @@ async fn run_business<T>(
                 let Some(job) = job else {
                     break;
                 };
+                if *admission_stop.borrow() {
+                    break;
+                }
                 run_business_frame(&handle, transport.as_ref(), job, &business_out, &abort).await;
                 if handle.has_pending_learning() {
                     let worker_handle = Arc::clone(&handle);
                     let worker_transport = Arc::clone(&transport);
                     let worker_abort = abort.clone();
+                    let mut worker_admission_stop = admission_stop.clone();
                     learning.spawn(async move {
                         worker_handle
-                            .run_pending_learning(worker_transport.as_ref(), &worker_abort)
+                            .run_pending_learning(
+                                worker_transport.as_ref(),
+                                &worker_abort,
+                                &mut worker_admission_stop,
+                            )
                             .await;
                     });
                 }

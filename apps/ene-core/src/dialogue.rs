@@ -893,10 +893,11 @@ impl HostHandle {
         &self,
         transport: &T,
         abort: &ene_inference::DispatchAbort,
+        admission_stop: &mut tokio::sync::watch::Receiver<bool>,
     ) {
         let _serialized = self.learning_worker.lock().await;
         loop {
-            if abort.is_aborted() {
+            if abort.is_aborted() || *admission_stop.borrow() {
                 // Host shutdown stops new learning admission; the queued work
                 // stays unclaimed instead of racing the stop.
                 break;
@@ -908,8 +909,16 @@ impl HostHandle {
             let Some(experience) = next else {
                 break;
             };
+            if abort.is_aborted() || *admission_stop.borrow() {
+                crate::lock_unpoison(&self.learning_queue).clear_taken();
+                break;
+            }
             #[cfg(any(test, feature = "test-support"))]
             self.store.pause_learning_take_if_armed_for_tests().await;
+            if abort.is_aborted() || *admission_stop.borrow() {
+                crate::lock_unpoison(&self.learning_queue).clear_taken();
+                break;
+            }
             let formation = match self
                 .store
                 .begin_learning_formation(experience.companion, experience.sources.clone())

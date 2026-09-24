@@ -6712,6 +6712,164 @@ async fn graceful_shutdown_aborts_a_parked_dialogue_dispatch_and_keeps_the_unkno
     );
 }
 
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn graceful_shutdown_stops_admission_before_abort_and_joins_without_new_ingress() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner("summon before the shutdown boundary"),
+            Call::reported("SUMMON-BOUNDARY-REPLY", 10, 0, 1),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let (_round, _stream, _reply) =
+        send_round(served.client(), "summon before the shutdown boundary")
+            .await
+            .expect("the setup round must complete");
+    wait_presence(&served.dir, "present").await;
+    let summary = fetch_summary(served.client(), "the boundary receipt")
+        .await
+        .expect("the setup round must produce a receipt");
+    assert_eq!(served.handle().receipts_held_for_tests(), 1);
+
+    let db = dir.path().join("app.db");
+    let owner_rows_before = db_scalar(
+        &db,
+        "SELECT COUNT(*) FROM history_message WHERE role = 'owner'",
+    );
+    let attempts_before = db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt");
+    let task_rows_before = db_scalar(&db, "SELECT COUNT(*) FROM task");
+    let sends_before = transport.sends();
+    let inputs_before = transport.input_texts().len();
+
+    served.handle().arm_shutdown_boundary_for_tests();
+    served.request_graceful_stop();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        served.handle().wait_shutdown_boundary_signal_for_tests(),
+    )
+    .await
+    .expect("shutdown must publish the admission-stop signal");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        served
+            .handle()
+            .wait_shutdown_boundary_connection_for_tests(),
+    )
+    .await
+    .expect("the existing connection must observe the admission-stop signal");
+
+    let companion = served.client().companion_ref();
+    let target = served.client().round_target();
+    let submit = tokio::time::timeout(
+        Duration::from_secs(5),
+        served
+            .client()
+            .notify(WirePayload::SubmitTextInput(cmds::submit_input(
+                &companion,
+                target,
+                String::from("input after the shutdown boundary"),
+                String::from("en"),
+            ))),
+    )
+    .await;
+    assert!(
+        submit.is_ok(),
+        "the post-boundary input attempt must be bounded, got {submit:?}"
+    );
+    let control = tokio::time::timeout(
+        Duration::from_secs(5),
+        served.client().notify(WirePayload::ConfirmPresentation(
+            ene_api::v1::round::ConfirmPresentationWire {
+                round: summary.round,
+                stream: None,
+                status: PresentationStatus::Presented,
+                detail: None,
+            },
+        )),
+    )
+    .await;
+    assert!(
+        control.is_ok(),
+        "the post-boundary control attempt must be bounded, got {control:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM history_message WHERE role = 'owner'"
+        ),
+        owner_rows_before,
+        "input after the admission boundary must not commit an owner row"
+    );
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
+        attempts_before,
+        "input after the admission boundary must not create an inference attempt"
+    );
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM task"),
+        task_rows_before,
+        "control input after the admission boundary must not mutate task state"
+    );
+    assert_eq!(
+        transport.sends(),
+        sends_before,
+        "input after the admission boundary must not reach the provider"
+    );
+    assert_eq!(
+        transport.input_texts().len(),
+        inputs_before,
+        "input after the admission boundary must not add provider input"
+    );
+    assert_eq!(
+        served.handle().receipts_held_for_tests(),
+        1,
+        "control input after the admission boundary must not settle the receipt"
+    );
+
+    served.handle().release_shutdown_boundary_for_tests();
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "admission stop must precede abort and the handler join"
+    );
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+    let settled = (
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM history_message WHERE role = 'owner'",
+        ),
+        db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
+        db_scalar(&db, "SELECT COUNT(*) FROM task"),
+        transport.sends(),
+        transport.input_texts().len(),
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        settled,
+        (
+            db_scalar(
+                &db,
+                "SELECT COUNT(*) FROM history_message WHERE role = 'owner'"
+            ),
+            db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
+            db_scalar(&db, "SELECT COUNT(*) FROM task"),
+            transport.sends(),
+            transport.input_texts().len(),
+        ),
+        "no store or provider mutation may appear after conn::run() returns"
+    );
+}
+
 #[tokio::test]
 async fn graceful_shutdown_aborts_a_parked_learning_dispatch_and_keeps_the_unknown_fact() {
     let temp = tempfile::tempdir().expect("temp dir");

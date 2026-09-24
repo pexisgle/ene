@@ -1,7 +1,10 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::Mutex as StdMutex;
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use ene_api::codec::{
@@ -89,11 +92,13 @@ impl Failure {
 /// recorded as they pass through, and a test can request a transport ping
 /// through the writer. The application never drains through this to make a
 /// failure surface.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 pub struct TransportProbe {
     inner: Arc<TransportProbeInner>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct TransportProbeInner {
     host_pings: AtomicU64,
     pongs_sent: AtomicU64,
@@ -102,6 +107,7 @@ struct TransportProbeInner {
     wake: tokio::sync::Notify,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl TransportProbe {
     fn new() -> Self {
         Self {
@@ -164,6 +170,7 @@ impl TransportProbe {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn lock_probe<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -206,6 +213,7 @@ impl Transport {
         // bounds that hand-over.
         let (terminal, terminal_rx) = mpsc::channel(1);
         let (writer_gone, writer_gone_rx) = tokio::sync::watch::channel(());
+        #[cfg(any(test, feature = "test-support"))]
         let probe = TransportProbe::new();
         let (sink, stream) = socket.split();
         // The task handles only exist for test observation; in production the
@@ -215,6 +223,7 @@ impl Transport {
             outbound_rx,
             control_rx,
             terminal.clone(),
+            #[cfg(any(test, feature = "test-support"))]
             probe.clone(),
             writer_gone,
         ));
@@ -223,6 +232,7 @@ impl Transport {
             inbound_tx,
             control,
             terminal,
+            #[cfg(any(test, feature = "test-support"))]
             probe.clone(),
             writer_gone_rx,
         ));
@@ -307,6 +317,7 @@ impl Transport {
 /// task forever. A write failure is stored in the terminal slot without
 /// waiting for the application, and `_writer_gone` is dropped when this
 /// writer ends; the reader observes the closed watch and stops with it.
+#[cfg(any(test, feature = "test-support"))]
 async fn write_half<S>(
     sink: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
     mut outbound: mpsc::Receiver<Vec<u8>>,
@@ -338,6 +349,44 @@ async fn write_half<S>(
                         surface_write_failure(&terminal);
                         return;
                     }
+                }
+            }
+            next = outbound.recv() => {
+                let Some(body) = next else {
+                    // The application is gone; the reader closes the socket.
+                    return;
+                };
+                if !send_bounded(&mut sink, Message::Binary(body.into())).await {
+                    surface_write_failure(&terminal);
+                    return;
+                }
+            },
+        }
+    }
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+async fn write_half<S>(
+    sink: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
+    mut outbound: mpsc::Receiver<Vec<u8>>,
+    mut control: mpsc::Receiver<Vec<u8>>,
+    terminal: mpsc::Sender<Terminal>,
+    _writer_gone: tokio::sync::watch::Sender<()>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
+{
+    let mut sink = sink;
+    loop {
+        tokio::select! {
+            biased;
+            pong = control.recv() => {
+                let Some(payload) = pong else {
+                    // The reader ended; it surfaced why.
+                    return;
+                };
+                if !send_bounded(&mut sink, Message::Pong(payload.into())).await {
+                    surface_write_failure(&terminal);
+                    return;
                 }
             }
             next = outbound.recv() => {
@@ -389,7 +438,7 @@ async fn read_half<S>(
     inbound: mpsc::Sender<DecodedFrame>,
     control: mpsc::Sender<Vec<u8>>,
     terminal: mpsc::Sender<Terminal>,
-    probe: TransportProbe,
+    #[cfg(any(test, feature = "test-support"))] probe: TransportProbe,
     mut writer_gone: tokio::sync::watch::Receiver<()>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -450,12 +499,16 @@ async fn read_half<S>(
                 }
             }
             Some(Ok(Message::Ping(payload))) => {
+                #[cfg(any(test, feature = "test-support"))]
                 probe.note_host_ping();
                 if control.send(payload.to_vec()).await.is_err() {
                     return;
                 }
             }
-            Some(Ok(Message::Pong(payload))) => probe.note_pong(&payload),
+            Some(Ok(Message::Pong(_payload))) => {
+                #[cfg(any(test, feature = "test-support"))]
+                probe.note_pong(&_payload);
+            }
             Some(Ok(Message::Text(_))) => {
                 fail_with(
                     read_ahead,

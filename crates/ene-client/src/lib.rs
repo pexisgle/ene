@@ -16,7 +16,9 @@ mod win_acl;
 pub use error::ClientError;
 pub use frames::PreparedRequest;
 pub use host_pin::trust_host_pin;
-pub use transport::{Client, ConnectProgress, PendingPairingClient, TransportProbe};
+#[cfg(any(test, feature = "test-support"))]
+pub use transport::TransportProbe;
+pub use transport::{Client, ConnectProgress, PendingPairingClient};
 
 pub const DEFAULT_COMPANION_REF: &str = "default";
 
