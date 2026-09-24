@@ -444,11 +444,21 @@ pub struct DispatchAbort {
     inner: std::sync::Arc<DispatchAbortInner>,
 }
 
-#[derive(Default)]
 struct DispatchAbortInner {
     aborted: std::sync::atomic::AtomicBool,
-    notify: tokio::sync::Notify,
+    notify: tokio::sync::watch::Sender<bool>,
     children: std::sync::Mutex<Vec<std::sync::Weak<DispatchAbortInner>>>,
+}
+
+impl Default for DispatchAbortInner {
+    fn default() -> Self {
+        let (notify, _) = tokio::sync::watch::channel(false);
+        Self {
+            aborted: std::sync::atomic::AtomicBool::new(false),
+            notify,
+            children: std::sync::Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl DispatchAbort {
@@ -471,12 +481,15 @@ impl DispatchAbort {
     }
 
     pub async fn aborted(&self) {
+        let mut notify = self.inner.notify.subscribe();
         loop {
-            let notified = self.inner.notify.notified();
-            if self.is_aborted() {
+            let observed = *notify.borrow_and_update();
+            if observed || self.is_aborted() {
                 return;
             }
-            notified.await;
+            if notify.changed().await.is_err() {
+                return;
+            }
         }
     }
 }
@@ -501,7 +514,7 @@ impl DispatchAbortInner {
         if self.aborted.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        self.notify.notify_waiters();
+        let _previous = self.notify.send_replace(true);
         let children = {
             let mut children = self
                 .children
@@ -1937,24 +1950,16 @@ mod dispatch_tests {
             let abort = abort.clone();
             let barrier = Arc::clone(&barrier);
             tokio::spawn(async move {
-                let notified = abort.inner.notify.notified();
                 barrier.wait().await;
-                if abort.is_aborted() {
-                    return;
-                }
-                notified.await;
+                abort.aborted().await;
             })
         };
         let second = {
             let abort = abort.clone();
             let barrier = Arc::clone(&barrier);
             tokio::spawn(async move {
-                let notified = abort.inner.notify.notified();
                 barrier.wait().await;
-                if abort.is_aborted() {
-                    return;
-                }
-                notified.await;
+                abort.aborted().await;
             })
         };
         barrier.wait().await;
