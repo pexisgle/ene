@@ -325,6 +325,7 @@ mod tests {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}",
             "event: response.output_text.delta",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}",
+            "data: {\"type\":\"response.future_event\",\"x\":1}",
             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":1}}}}",
         ] {
             deltas.extend(assembler.feed_line(line).expect("a known event parses"));
@@ -398,23 +399,6 @@ mod tests {
                 Err(InferenceTechnicalError::ProviderTransportFailed(_))
             ));
         }
-    }
-
-    #[test]
-    fn stream_assembler_ignores_non_data_lines_and_future_events() {
-        let mut assembler = super::StreamAssembler::default();
-        let mut deltas = Vec::new();
-        deltas.extend(
-            assembler
-                .feed_line("event: response.output_text.delta")
-                .expect("a non-data line is ignored"),
-        );
-        deltas.extend(
-            assembler
-                .feed_line("data: {\"type\":\"response.future_event\",\"x\":1}")
-                .expect("an unknown event is ignored"),
-        );
-        assert!(deltas.is_empty());
     }
 
     struct FixtureRefs {
