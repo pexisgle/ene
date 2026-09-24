@@ -14,6 +14,11 @@ default-run = "ene-desktop"
 name = "ene-desktop"
 path = "src/main.rs"
 
+[[bin]]
+name = "ene-action-worker"
+path = "src/bin/ene-action-worker.rs"
+doc = false
+
 [lib]
 name = "ene_desktop"
 path = "src/lib.rs"
