@@ -24,10 +24,10 @@ use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageId};
 
 const SEEN_MESSAGE_CAP: usize = 128;
 
-/// How many decoded application frames the reader holds on its own while the
-/// business queue is full. Within this bounded window the reader keeps
-/// consuming transport control frames; past it the reader stops reading and
-/// the backpressure reaches the peer's TCP window instead of being dropped.
+/// The application capacity is the bounded business queue plus this bounded
+/// read-ahead window on top of it: an application frame that arrives when
+/// both are full exceeds the connection's capacity and ends it (IPC §22), and
+/// raising this number only moves that boundary.
 const READ_AHEAD_FRAMES: usize = 8;
 
 struct BusinessJob {
@@ -761,8 +761,47 @@ where
                                 return;
                             };
                             let connection = table.note_accept(TransportClass::SameMachine);
-                            serve_connection(socket, connection, handle, transport, table, stop, permit)
-                                .await;
+                            // The business task is owned by this serving task
+                            // from its spawn: once the connection ends no new
+                            // job can arrive, and the join below keeps the
+                            // Host lifecycle in charge of the started
+                            // operation, so graceful shutdown quiesces it
+                            // instead of detaching it.
+                            let (jobs_tx, jobs_rx) =
+                                tokio::sync::mpsc::channel::<BusinessJob>(1);
+                            let (business_out_tx, business_out_rx) =
+                                tokio::sync::mpsc::channel::<BusinessOut>(STREAM_BUFFER_FRAMES);
+                            let business = tokio::spawn(run_business(
+                                Arc::clone(&handle),
+                                transport,
+                                jobs_rx,
+                                business_out_tx,
+                            ));
+                            let served = CatchUnwind(serve_connection(
+                                socket,
+                                connection,
+                                handle,
+                                table,
+                                stop,
+                                permit,
+                                jobs_tx,
+                                business_out_rx,
+                            ))
+                            .await;
+                            // Join before any unwind so a business task is
+                            // never detached from the Host lifecycle.
+                            let joined = business.await;
+                            if let Err(payload) = served {
+                                std::panic::resume_unwind(payload);
+                            }
+                            if let Err(error) = joined {
+                                if error.is_panic() {
+                                    std::panic::resume_unwind(error.into_panic());
+                                }
+                                std::panic::resume_unwind(Box::new(
+                                    "the business task was cancelled",
+                                ));
+                            }
                         });
                     }
                 }
@@ -828,11 +867,15 @@ async fn send_transport_message(
 
 /// Owns the read half of the connection. Transport control (Ping / Pong),
 /// EOF, Close, and read failures are handled here immediately, no matter how
-/// far behind the application consumer is. Application frames are handed
-/// over through a bounded queue plus the bounded `READ_AHEAD_FRAMES` window,
-/// so backpressure stops at the peer's TCP window instead of stopping the
-/// control plane. `_ended` is dropped when this reader ends; the connection
-/// loop observes the closed watch and closes the connection promptly.
+/// far behind the application consumer is: the socket is always polled
+/// together with the drain of the bounded `READ_AHEAD_FRAMES` window, so an
+/// application backlog can never hide them (IPC §10.2 / §22). Application
+/// frames fill the bounded business queue first and this bounded window on
+/// top; a frame that arrives when both are full exceeds the connection's
+/// capacity and ends the connection as an explicit failure instead of
+/// waiting forever or being dropped in silence. `_ended` is dropped when
+/// this reader ends; the connection loop observes the closed watch and
+/// closes the connection promptly.
 async fn read_ws_frames(
     mut stream: HostStream,
     frames: tokio::sync::mpsc::Sender<DecodedFrame>,
@@ -845,10 +888,9 @@ async fn read_ws_frames(
     let mut read_ahead: std::collections::VecDeque<DecodedFrame> =
         std::collections::VecDeque::new();
     loop {
-        let message = if read_ahead.len() >= READ_AHEAD_FRAMES {
-            // Full backpressure: nothing further is read from the socket
-            // until the business queue makes room.
-            match frames.reserve().await {
+        let message = tokio::select! {
+            biased;
+            permit = frames.reserve(), if !read_ahead.is_empty() => match permit {
                 Ok(permit) => {
                     if let Some(frame) = read_ahead.pop_front() {
                         permit.send(frame);
@@ -856,23 +898,8 @@ async fn read_ws_frames(
                     continue;
                 }
                 Err(_) => return,
-            }
-        } else if read_ahead.is_empty() {
-            stream.next().await
-        } else {
-            tokio::select! {
-                biased;
-                permit = frames.reserve() => match permit {
-                    Ok(permit) => {
-                        if let Some(frame) = read_ahead.pop_front() {
-                            permit.send(frame);
-                        }
-                        continue;
-                    }
-                    Err(_) => return,
-                },
-                message = stream.next() => message,
-            }
+            },
+            message = stream.next() => message,
         };
         match message {
             Some(Ok(Message::Binary(body))) => {
@@ -882,8 +909,10 @@ async fn read_ws_frames(
                 };
                 match frames.try_send(frame) {
                     Ok(()) => {}
-                    Err(TrySendError::Full(frame)) => read_ahead.push_back(frame),
-                    Err(TrySendError::Closed(_)) => return,
+                    Err(TrySendError::Full(frame)) if read_ahead.len() < READ_AHEAD_FRAMES => {
+                        read_ahead.push_back(frame)
+                    }
+                    Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => return,
                 }
             }
             Some(Ok(Message::Ping(payload))) => {
@@ -1009,17 +1038,20 @@ async fn advance_output(
     }
 }
 
-async fn serve_connection<T>(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "connection output state is intentionally explicit"
+)]
+async fn serve_connection(
     socket: HostWebSocket,
     connection: ConnectionWireId,
     handle: Arc<HostHandle>,
-    transport: Arc<T>,
     table: Arc<ConnectionTable>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     _permit: tokio::sync::OwnedSemaphorePermit,
-) where
-    T: ProviderTransport + Send + Sync + 'static,
-{
+    jobs_tx: tokio::sync::mpsc::Sender<BusinessJob>,
+    mut business_out_rx: tokio::sync::mpsc::Receiver<BusinessOut>,
+) {
     let Some(mut pairing_provisions) = handle.pairing_deliveries.register(&connection) else {
         handle.close_connection(&table, connection).await;
         return;
@@ -1039,15 +1071,6 @@ async fn serve_connection<T>(
             ended_tx,
         ))),
     };
-    let (jobs_tx, jobs_rx) = tokio::sync::mpsc::channel::<BusinessJob>(1);
-    let (business_out_tx, mut business_out_rx) =
-        tokio::sync::mpsc::channel::<BusinessOut>(STREAM_BUFFER_FRAMES);
-    let mut business = tokio::spawn(run_business(
-        Arc::clone(&handle),
-        Arc::clone(&transport),
-        jobs_rx,
-        business_out_tx,
-    ));
     let mut next_ping = tokio::time::Instant::now() + wss::PING_INTERVAL;
     let mut suspected = false;
     let mut held: std::collections::VecDeque<DecodedFrame> = std::collections::VecDeque::new();
@@ -1059,7 +1082,7 @@ async fn serve_connection<T>(
     let mut terminal = false;
     let mut push_blocked = false;
     let mut busy = false;
-    let mut business_failure: Option<tokio::task::JoinError> = None;
+    let mut learning_failure: Option<tokio::task::JoinError> = None;
 
     let body = async {
         'connection: loop {
@@ -1113,12 +1136,6 @@ async fn serve_connection<T>(
                     drop(ended);
                     break 'connection;
                 }
-                joined = &mut business => {
-                    if let Some(failure) = joined.err() {
-                        business_failure = Some(failure);
-                    }
-                    break 'connection;
-                }
                 maybe = frames_rx.recv(), if !busy => {
                     let Some(frame) = maybe else {
                         break 'connection;
@@ -1129,6 +1146,8 @@ async fn serve_connection<T>(
                     held.push_back(frame);
                 }
                 outgoing = business_out_rx.recv() => {
+                    // The channel closes when the business task ends, so a
+                    // failed task still ends this connection promptly.
                     let Some(outgoing) = outgoing else {
                         break 'connection;
                     };
@@ -1139,7 +1158,7 @@ async fn serve_connection<T>(
                             }
                         }
                         BusinessOut::Failed(failure) => {
-                            business_failure = Some(failure);
+                            learning_failure = Some(failure);
                             break 'connection;
                         }
                         BusinessOut::Done => {
@@ -1246,19 +1265,26 @@ async fn serve_connection<T>(
                         push_blocked = true;
                     }
                 }
-                () = timer, if !busy => {
+                () = timer => {
+                    // The receipt deadline is a state transition on the
+                    // monotonic clock (IPC §13.3): expiry runs whether or not
+                    // a business handler is running. Only publishing what
+                    // comes next waits for the handler, so unsolicited output
+                    // keeps its send order.
                     handle.expire_due_receipts(&connection);
-                    advance_output(
-                        &mut write_half,
-                        &handle,
-                        &table,
-                        &connection,
-                        &template,
-                        &mut terminal,
-                        &mut shutdown,
-                        &mut push_blocked,
-                    )
-                    .await;
+                    if !busy {
+                        advance_output(
+                            &mut write_half,
+                            &handle,
+                            &table,
+                            &connection,
+                            &template,
+                            &mut terminal,
+                            &mut shutdown,
+                            &mut push_blocked,
+                        )
+                        .await;
+                    }
                 }
             }
         }
@@ -1272,8 +1298,9 @@ async fn serve_connection<T>(
         .await
         .err()
         .filter(|error| !error.is_cancelled());
-    // The business task is not transport: it runs its current operation to
-    // completion and drains its learning workers on its own schedule. Only
+    // Ending the connection closes both business channels: the business task
+    // runs its current operation to completion, drains its learning workers,
+    // and exits; this serving task joins it before it reports back. Only
     // delivery ends here, together with the connection record.
     drop(jobs_tx);
     drop(business_out_rx);
@@ -1281,7 +1308,13 @@ async fn serve_connection<T>(
     if let Some(payload) = panicked {
         std::panic::resume_unwind(payload);
     }
-    if let Some(error) = reader_failure.or(business_failure) {
+    if let Some(error) = reader_failure {
+        if error.is_panic() {
+            std::panic::resume_unwind(error.into_panic());
+        }
+        std::panic::resume_unwind(Box::new("the connection reader was cancelled"));
+    }
+    if let Some(error) = learning_failure {
         if error.is_panic() {
             std::panic::resume_unwind(error.into_panic());
         }

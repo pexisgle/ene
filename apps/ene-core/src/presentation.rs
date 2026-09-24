@@ -2097,6 +2097,11 @@ impl HostHandle {
         }
     }
 
+    #[doc(hidden)]
+    pub fn receipts_held_for_tests(&self) -> usize {
+        crate::lock_unpoison(&self.presentations).receipts.len()
+    }
+
     pub(crate) fn expire_due_receipts(&self, connection: &ConnectionWireId) {
         #[cfg(all(test, unix))]
         self.receipt_expiry_runs

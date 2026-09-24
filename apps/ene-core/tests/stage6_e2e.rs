@@ -214,6 +214,10 @@ impl ScriptedTransport {
         }
     }
 
+    fn parked_count(&self) -> usize {
+        self.parked.load(Ordering::SeqCst)
+    }
+
     fn input_texts(&self) -> Vec<String> {
         self.inputs
             .lock()
@@ -652,6 +656,25 @@ impl Served {
             Err(error) => panic!("the listener panicked: {error}"),
             Ok(Err(error)) => panic!("the listener failed: {error}"),
         }
+    }
+
+    /// Awaits the listener for at most `limit` and reports whether it
+    /// finished. On timeout the handle stays owned, so the same shutdown can
+    /// be joined again later.
+    #[expect(clippy::panic, reason = "test fixture helper")]
+    async fn join_listener_within(&mut self, limit: Duration) -> bool {
+        let finished = tokio::time::timeout(limit, &mut self.server).await;
+        let Ok(finished) = finished else {
+            return false;
+        };
+        self.server = tokio::spawn(async { Ok::<(), CoreError>(()) });
+        match finished {
+            Ok(Ok(())) => {}
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => panic!("the listener panicked: {error}"),
+            Ok(Err(error)) => panic!("the listener failed: {error}"),
+        }
+        true
     }
 
     async fn abort_listener(&mut self) {
@@ -6222,6 +6245,10 @@ async fn pending_pairings_are_capped_with_a_typed_denial() {
 // name pub(crate) items, so a drift breaks these tests instead of silently
 // weakening production.
 const MIRRORED_STREAM_BUFFER_FRAMES: usize = 32;
+// Mirrors `crate::conn::READ_AHEAD_FRAMES`: the reader's bounded window on
+// top of the business queue. Queue + read-ahead together are the application
+// capacity; one frame past that boundary must fail the connection.
+const MIRRORED_READ_AHEAD_FRAMES: usize = 8;
 
 /// Boots a serving Host with one completed summon round, arms the scripted
 /// barrier on the next dialogue, and returns once that dialogue's provider
@@ -6267,9 +6294,25 @@ async fn serve_and_park_dialogue(
 }
 
 /// One frame more than the mirrored queue capacity: with the business handler
-/// parked this leaves the Host's business frame queue saturated.
+/// parked this leaves the business frame queue full and one frame in the
+/// read-ahead window — below the queue + read-ahead overload boundary.
 async fn saturate_the_application_queue(served: &mut Served) {
-    for _ in 0..=MIRRORED_STREAM_BUFFER_FRAMES {
+    notify_some(served, MIRRORED_STREAM_BUFFER_FRAMES + 1).await;
+}
+
+/// Exactly the mirrored application capacity — business queue plus the full
+/// read-ahead window — with the business handler parked. The connection is
+/// saturated but still at capacity, not over it.
+async fn saturate_queue_and_read_ahead(served: &mut Served) {
+    notify_some(
+        served,
+        MIRRORED_STREAM_BUFFER_FRAMES + MIRRORED_READ_AHEAD_FRAMES,
+    )
+    .await;
+}
+
+async fn notify_some(served: &mut Served, count: usize) {
+    for _ in 0..count {
         tokio::time::timeout(
             Duration::from_secs(5),
             served
@@ -6460,7 +6503,69 @@ async fn a_saturated_application_queue_still_moves_pongs_and_close() {
 }
 
 #[tokio::test]
-async fn shutdown_does_not_wait_for_a_parked_handler_behind_a_saturated_queue() {
+async fn an_application_frame_past_the_read_ahead_window_fails_the_connection() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let mut served = serve_and_park_dialogue(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        "summon for the overload",
+        "park under the overload",
+    )
+    .await;
+
+    // Saturation, not queue-full alone: the business queue and the whole
+    // read-ahead window are both full. At exactly this capacity the control
+    // plane still moves — the Host's pings reach the client and the pongs
+    // come back past the liveness window.
+    saturate_queue_and_read_ahead(&mut served).await;
+    cross_the_liveness_window().await;
+    assert!(
+        matches!(
+            presence_row(dir.path()),
+            Some((ref state, _)) if state == "present"
+        ),
+        "a fully saturated application backlog must not stop the pong reads that prove liveness"
+    );
+
+    // One application frame past that boundary is the explicit bounded
+    // failure: the connection ends instead of waiting for the parked handler
+    // or dropping the frame in silence. The write itself may already be
+    // refused by the closing Host; either outcome is the bounded failure.
+    let over_capacity = tokio::time::timeout(
+        Duration::from_secs(5),
+        served
+            .client()
+            .notify(WirePayload::HistoryRequest(cmds::history_request(
+                "default", None, 1,
+            ))),
+    )
+    .await;
+    drop(over_capacity);
+    let (_, fallen_back) = wait_presence(dir.path(), "no_active").await;
+    assert_eq!(
+        presence_row(dir.path()),
+        Some((String::from("no_active"), fallen_back)),
+        "the over-capacity frame must close the connection's currentness"
+    );
+
+    // The serving composition does not hang: while the old handler is still
+    // parked, a replacement connection is accepted and serves normally.
+    let mut replacement = connect(dir.path()).await;
+    let (round, stream, _text) =
+        send_round(&mut replacement, "after the overloaded connection closed")
+            .await
+            .expect("the replacement must serve after the overload closed the old connection");
+    confirm_round(&mut replacement, &round, stream).await;
+    drop(replacement);
+
+    transport.release_blocked();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn graceful_shutdown_quiesces_a_parked_business_handler() {
     let dir = tempfile::tempdir().expect("temp dir");
     let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
     let mut served = serve_and_park_dialogue(
@@ -6470,16 +6575,191 @@ async fn shutdown_does_not_wait_for_a_parked_handler_behind_a_saturated_queue() 
         "park across the shutdown",
     )
     .await;
-    saturate_the_application_queue(&mut served).await;
 
     served.request_graceful_stop();
-    tokio::time::timeout(Duration::from_secs(10), served.join_listener())
-        .await
-        .expect("shutdown must not wait for the parked business handler");
+    // Concurrency Control shutdown owns the running business work: it must
+    // not report success by detaching the parked handler.
+    assert!(
+        !served.join_listener_within(Duration::from_secs(2)).await,
+        "graceful shutdown must not detach a parked business handler"
+    );
+    // The barrier confirms the shutdown is waiting on this very handler.
+    transport.wait_parked(1).await;
+    assert_eq!(
+        transport.parked_count(),
+        1,
+        "the parked handler must still be under the Host lifecycle"
+    );
+
     transport.release_blocked();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "releasing the parked handler must let the shutdown finish"
+    );
     wait_until_deletion_drivers(served.handle(), 0).await;
     wait_until_deletion_blocking(served.handle(), 0).await;
+    assert_eq!(
+        transport.parked_count(),
+        0,
+        "no business task may outlive the shutdown"
+    );
+
+    // With the task joined, nothing derived from it may still mutate the
+    // store after the shutdown completed.
+    let settled = served.canonical_remainder("park across the shutdown").await;
+    assert!(settled > 0, "the completed operation must be persisted");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        served.canonical_remainder("park across the shutdown").await,
+        settled,
+        "no store mutation may appear from the quiesced business task after shutdown"
+    );
+}
+
+/// Moves only the clock forward in small steps so timers fire at their
+/// boundaries while every socket operation stays on the real clock.
+async fn advance_clock_in_steps(span: Duration) {
+    let mut left = span;
+    while left > Duration::ZERO {
+        let take = Duration::from_secs(5).min(left);
+        tokio::time::advance(take).await;
+        left -= take;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_receipt_expires_while_the_business_handler_is_parked() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let park_text = "park past the receipt deadline";
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner(park_text),
+            Call::text(format!("REPLY-DONE {park_text}")),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let (round, stream, _reply) = send_round(served.client(), "summon for the receipt")
+        .await
+        .expect("the summon round must complete");
+    wait_presence(&served.dir, "present").await;
+    confirm_round(served.client(), &round, stream).await;
+
+    // A receipt is issued on this connection and never acknowledged.
+    let stale = fetch_summary(served.client(), "the unacked receipt")
+        .await
+        .expect("the subscription must answer");
+    assert!(
+        !stale.receipt.0.is_empty(),
+        "the fixture must issue a receipt"
+    );
+    assert_eq!(served.handle().receipts_held_for_tests(), 1);
+
+    transport.block_input(on_latest_owner(park_text));
+    let companion = served.client().companion_ref();
+    let target = served.client().round_target();
+    let intake = ask(
+        served.client(),
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            target,
+            String::from(park_text),
+            String::from("en"),
+        )),
+        "park submit",
+    )
+    .await
+    .expect("the park submit must be answered while the intake precedes the provider call");
+    assert!(
+        matches!(
+            intake,
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+        ),
+        "the park submit must be accepted, got {intake:?}"
+    );
+    transport.wait_parked(1).await;
+    assert_eq!(
+        served.handle().receipts_held_for_tests(),
+        1,
+        "the receipt is still held when the park begins"
+    );
+
+    // The deadline is 30 seconds from the receipt's commit on the monotonic
+    // clock. Only the clock moves here; the handler stays parked throughout,
+    // and the receipt's state transition never waits for it.
+    tokio::time::pause();
+    advance_clock_in_steps(Duration::from_secs(25)).await;
+    assert_eq!(
+        transport.parked_count(),
+        1,
+        "the handler must still be parked before the deadline"
+    );
+    assert_eq!(
+        served.handle().receipts_held_for_tests(),
+        1,
+        "the receipt is still held before its 30-second deadline"
+    );
+    advance_clock_in_steps(Duration::from_secs(10)).await;
+    tokio::time::resume();
+    assert_eq!(
+        transport.parked_count(),
+        1,
+        "the handler must still be parked at the deadline"
+    );
+    assert_eq!(
+        served.handle().receipts_held_for_tests(),
+        0,
+        "the receipt must expire at its deadline while the business handler is parked"
+    );
+
+    transport.release_blocked();
+    // The late acknowledgement of the expired receipt is stale — it is never
+    // adopted as the presentation of anything current.
+    let acked = ack_summary(served.client(), &stale)
+        .await
+        .expect("the late ack must answer");
+    assert_eq!(
+        acked,
+        UndeliveredAckOutcome::StalePresentation,
+        "an ack after the receipt deadline must be stale"
+    );
+
+    // After the business work completes, the subsequent undelivered page
+    // becomes deliverable in order: the reply row exists only once the
+    // parked round has committed, and the page acknowledges without
+    // replaying the parked provider call.
+    let inputs_before = transport
+        .input_texts()
+        .iter()
+        .filter(|input| input.contains(park_text))
+        .count();
+    assert_eq!(inputs_before, 1, "the parked call ran exactly once");
+    let next = wait_for_summary_with(served.client(), "REPLY-DONE").await;
+    assert!(
+        next.items
+            .iter()
+            .any(|item| item.excerpt.contains("REPLY-DONE")),
+        "the page after the expired receipt must carry the completed round: {next:?}"
+    );
+    assert_eq!(
+        transport
+            .input_texts()
+            .iter()
+            .filter(|input| input.contains(park_text))
+            .count(),
+        1,
+        "delivering the subsequent page must not replay the parked work"
+    );
+    assert_eq!(transport.parked_count(), 0, "the handler is done");
+    served.stop().await;
 }
 
 #[tokio::test]
