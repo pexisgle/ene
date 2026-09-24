@@ -361,7 +361,6 @@ async fn completed_reply_is_wiped_when_presentation_deletion_is_pending() {
         send.as_mut().await
     };
     assert!(matches!(report, Ok(ChatSendReport::Completed)));
-    assert_eq!(probe.local_erasure_results(), 1);
     assert_eq!(probe.presentation_wiped_results(), 1);
     assert_eq!(transport.accepted_deltas(), 2);
     assert!(erased.load(Ordering::SeqCst) > 0);

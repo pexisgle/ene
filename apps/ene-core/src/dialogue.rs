@@ -544,10 +544,6 @@ impl HostHandle {
             let (id, rev) = authorized.consent_premise();
             (id.to_owned(), rev)
         };
-        #[cfg(test)]
-        if let Some(gate) = self.submit_accept_gate() {
-            gate.pause().await;
-        }
         let store = self.store.clone();
         let committed = self
             .with_current_connection_blocking(live, move || {
@@ -571,13 +567,6 @@ impl HostHandle {
         };
         match begin {
             DialogueBegin::Ready(turn) => {
-                #[cfg(test)]
-                {
-                    let gate = crate::lock_unpoison(&self.submit_open_gate).clone();
-                    if let Some(gate) = gate {
-                        gate.pause().await;
-                    }
-                }
                 let installed = self.record_open_round(
                     live,
                     &companion_key,
@@ -590,8 +579,8 @@ impl HostHandle {
                 );
                 #[cfg(any(test, feature = "test-support"))]
                 {
-                    let gate = crate::lock_unpoison(&self.submit_publish_gate).clone();
-                    if let Some(gate) = gate {
+                    let publish_gate = crate::lock_unpoison(&self.submit_publish_gate).clone();
+                    if let Some(gate) = publish_gate {
                         gate.pause().await;
                     }
                 }
@@ -676,10 +665,6 @@ impl HostHandle {
                         {
                             let _pin = self.host_transient_arrival.acquire_pin().await;
                             if let Some(experience) = pin_experience(&input, &self.store).await {
-                                #[cfg(any(test, feature = "test-support"))]
-                                self.store
-                                    .pause_learning_pin_queue_if_armed_for_tests()
-                                    .await;
                                 self.queue_learning_formation(experience).await;
                             }
                         }
@@ -751,10 +736,6 @@ impl HostHandle {
         else {
             return Vec::new();
         };
-        #[cfg(test)]
-        if let Some(gate) = self.confirm_commit_gate() {
-            gate.pause().await;
-        }
         let _gate = self.presentation_gate().await;
         let store = self.store.clone();
         let _applied = self
@@ -873,10 +854,6 @@ impl HostHandle {
         let _gate = self.host_transient_arrival.lock().await;
         crate::lock_unpoison(&self.learning_queue).push_back(experience);
         self.host_transient_arrival.note_queued_arrival();
-        #[cfg(any(test, feature = "test-support"))]
-        self.store
-            .pause_host_transient_arrival_publish_if_armed_for_tests()
-            .await;
         crate::transient_erasure::publish_owed_learning_arrivals(
             &self.store,
             &self.host_transient_arrival,
@@ -913,8 +890,6 @@ impl HostHandle {
                 crate::lock_unpoison(&self.learning_queue).clear_taken();
                 break;
             }
-            #[cfg(any(test, feature = "test-support"))]
-            self.store.pause_learning_take_if_armed_for_tests().await;
             if abort.is_aborted() || *admission_stop.borrow() {
                 crate::lock_unpoison(&self.learning_queue).clear_taken();
                 break;
@@ -931,10 +906,6 @@ impl HostHandle {
                 }
             };
             crate::lock_unpoison(&self.learning_queue).clear_taken();
-            #[cfg(any(test, feature = "test-support"))]
-            self.store
-                .pause_learning_formation_if_armed_for_tests()
-                .await;
             let refuse = self
                 .store
                 .learning_formation_must_refuse(formation)
