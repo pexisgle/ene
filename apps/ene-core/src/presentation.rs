@@ -90,6 +90,8 @@ struct Receipt {
     round_wire: String,
     generation: u64,
     selected: Vec<UndeliveredId>,
+    // Receipts expire on the tokio clock: the connection loop sleeps this
+    // deadline on that clock, so expiry and the wakeup can never disagree.
     expires_at: Instant,
 }
 
