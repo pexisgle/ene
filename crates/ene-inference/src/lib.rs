@@ -514,6 +514,10 @@ impl DispatchAbortInner {
     }
 }
 
+pub type InferenceClaimFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = tokio::sync::OwnedMutexGuard<()>> + Send + 'static>,
+>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InferenceDispatchOutcome {
     Completed {
@@ -551,6 +555,15 @@ pub trait InferenceExecutor: Send + Sync {
         sink: &mut (dyn DeltaSink + Send),
         abort: Option<&DispatchAbort>,
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
+
+    async fn dispatch_with_claim_scope(
+        &self,
+        authorized: AuthorizedInference,
+        prompt: ScrubbedText,
+        sink: &mut (dyn DeltaSink + Send),
+        abort: Option<&DispatchAbort>,
+        acquire_claim_scope: Box<dyn FnOnce() -> InferenceClaimFuture + Send>,
+    ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
 }
 
 #[expect(
@@ -562,6 +575,56 @@ pub async fn dispatch_authorized(
     prompt: ScrubbedText,
     sink: &mut (dyn DeltaSink + Send),
     abort: Option<&DispatchAbort>,
+    consent: &impl ConsentRepository,
+    attempts: &impl InferenceAttemptRepository,
+    usage: &impl UsageRepository,
+    transport: &impl ProviderTransport,
+) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
+    dispatch_authorized_inner(
+        authorized, prompt, sink, abort, None, consent, attempts, usage, transport,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the owner boundary takes each repository it must sequence in order; a parameter struct would only restate the same wiring"
+)]
+pub async fn dispatch_authorized_with_claim_scope(
+    authorized: AuthorizedInference,
+    prompt: ScrubbedText,
+    sink: &mut (dyn DeltaSink + Send),
+    abort: Option<&DispatchAbort>,
+    acquire_claim_scope: Box<dyn FnOnce() -> InferenceClaimFuture + Send>,
+    consent: &impl ConsentRepository,
+    attempts: &impl InferenceAttemptRepository,
+    usage: &impl UsageRepository,
+    transport: &impl ProviderTransport,
+) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
+    dispatch_authorized_inner(
+        authorized,
+        prompt,
+        sink,
+        abort,
+        Some(acquire_claim_scope),
+        consent,
+        attempts,
+        usage,
+        transport,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the owner boundary takes each repository it must sequence in order; a parameter struct would only restate the same wiring"
+)]
+async fn dispatch_authorized_inner(
+    authorized: AuthorizedInference,
+    prompt: ScrubbedText,
+    sink: &mut (dyn DeltaSink + Send),
+    abort: Option<&DispatchAbort>,
+    acquire_claim_scope: Option<Box<dyn FnOnce() -> InferenceClaimFuture + Send>>,
     consent: &impl ConsentRepository,
     attempts: &impl InferenceAttemptRepository,
     usage: &impl UsageRepository,
@@ -599,6 +662,15 @@ pub async fn dispatch_authorized(
         input: prompt.into_text(),
     };
     let usage_estimate = transport.usage_estimate(&request);
+    let claim_scope = if let Some(acquire) = acquire_claim_scope {
+        let scope = acquire().await;
+        if abort.is_some_and(DispatchAbort::is_aborted) {
+            return Ok(InferenceDispatchOutcome::Aborted);
+        }
+        Some(scope)
+    } else {
+        None
+    };
     match attempts
         .begin_inference_attempt(InferenceAttempt {
             ticket,
@@ -644,6 +716,7 @@ pub async fn dispatch_authorized(
         }
         Err(error) => return Err(error),
     }
+    drop(claim_scope);
     let response = if let Some(abort) = abort {
         tokio::select! {
             biased;

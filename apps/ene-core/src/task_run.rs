@@ -12,19 +12,46 @@ use ene_task::{
 };
 use std::sync::Arc;
 
-use crate::action::{WorkspaceActionHostError, WorkspaceActionHostOutcome, run_workspace_action};
+use crate::action::{
+    TaskEffectRuntime, WorkspaceActionHostError, WorkspaceActionHostOutcome, run_workspace_action,
+};
 use crate::serve::{CoreError, HostHandle};
 
 pub const DEFAULT_MAX_TURNS: u32 = 16;
-const TASK_AGENT_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const TASK_AGENT_QUIESCE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskClaimKind {
+    Inference,
+    Action,
+    ActionEffect,
+}
+
+struct TaskClaimPause {
+    kind: TaskClaimKind,
+    entered: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
+}
+
+impl TaskClaimPause {
+    fn new(kind: TaskClaimKind) -> Self {
+        Self {
+            kind,
+            entered: std::sync::atomic::AtomicBool::new(false),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct TaskExecutionRegistry {
     running: std::sync::Mutex<std::collections::HashMap<ene_task::DelegationId, RunningExecution>>,
     reservations:
         std::sync::Mutex<std::collections::HashMap<ene_task::DelegationId, ene_task::TaskId>>,
-    commit_scope: tokio::sync::Mutex<()>,
+    commit_scope: Arc<tokio::sync::Mutex<()>>,
     host_shutdown: DispatchAbort,
+    claim_pause: std::sync::Mutex<Option<Arc<TaskClaimPause>>>,
 }
 
 pub enum TakeReservation<'a> {
@@ -51,12 +78,75 @@ impl TaskExecutionRegistry {
         signalled
     }
 
-    fn abort_for_host_shutdown(&self) {
+    pub(crate) async fn abort_for_host_shutdown(&self) {
+        let _commit = self.commit_scope().await;
         self.host_shutdown.abort();
     }
 
-    pub async fn commit_scope(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.commit_scope.lock().await
+    pub(crate) fn abort_for_host_shutdown_without_commit_scope(&self) {
+        self.host_shutdown.abort();
+    }
+
+    pub async fn commit_scope(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.commit_scope).lock_owned().await
+    }
+
+    pub(crate) async fn task_claim_scope(
+        &self,
+        kind: TaskClaimKind,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.pause_before_task_claim(kind).await;
+        self.commit_scope().await
+    }
+
+    pub(crate) fn arm_task_claim_pause_for_tests(&self, kind: TaskClaimKind) {
+        *crate::lock_unpoison(&self.claim_pause) = Some(Arc::new(TaskClaimPause::new(kind)));
+    }
+
+    pub(crate) async fn wait_task_claim_pause_for_tests(&self) {
+        loop {
+            let pause = crate::lock_unpoison(&self.claim_pause).clone();
+            if pause.is_some_and(|pause| pause.entered.load(std::sync::atomic::Ordering::SeqCst)) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub(crate) fn release_task_claim_pause_for_tests(&self) {
+        if let Some(pause) = crate::lock_unpoison(&self.claim_pause).as_ref() {
+            pause.release.notify_one();
+        }
+    }
+
+    pub(crate) async fn pause_after_task_effect_for_tests(&self) {
+        self.pause_before_task_claim(TaskClaimKind::ActionEffect)
+            .await;
+    }
+
+    async fn pause_before_task_claim(&self, kind: TaskClaimKind) {
+        let pause = {
+            let configured = crate::lock_unpoison(&self.claim_pause).clone();
+            configured.filter(|pause| pause.kind == kind)
+        };
+        let Some(pause) = pause else {
+            return;
+        };
+        pause
+            .entered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        pause.release.notified().await;
+    }
+
+    pub(crate) async fn wait_host_shutdown_for_tests(&self) {
+        while !self.host_shutdown.is_aborted() {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn running_task_executions_for_tests(&self) -> usize {
+        crate::lock_unpoison(&self.running).len()
     }
 
     pub fn reserve(&self, delegation: ene_task::DelegationId, task: ene_task::TaskId) -> bool {
@@ -134,6 +224,10 @@ pub struct TaskExecutionRegistration<'a> {
 impl TaskExecutionRegistration<'_> {
     pub(crate) fn dispatch_abort(&self) -> &DispatchAbort {
         &self.dispatch_abort
+    }
+
+    pub(crate) fn task_executions(&self) -> &TaskExecutionRegistry {
+        self.registry
     }
 
     fn stop_outcome(&self) -> Option<TaskAgentRunOutcome> {
@@ -264,11 +358,12 @@ impl From<ene_task::TaskTechnicalError> for TaskAgentRunError {
     }
 }
 
-pub async fn run_task_agent_execution(
+pub(crate) async fn run_task_agent_execution(
     store: &Store,
     instructions: &impl TaskInstructionSource,
     inference: &impl TaskAgentInference,
     scrubber: &impl SecretScrubber,
+    effect_runtime: &TaskEffectRuntime,
     max_turns: u32,
     registration: &TaskExecutionRegistration<'_>,
 ) -> Result<TaskAgentRunOutcome, TaskAgentRunError> {
@@ -375,6 +470,9 @@ pub async fn run_task_agent_execution(
                 }
                 let action = run_workspace_action(
                     store,
+                    registration.task_executions(),
+                    effect_runtime,
+                    registration.dispatch_abort(),
                     delegation,
                     request.operation,
                     request.path.clone(),
@@ -382,6 +480,13 @@ pub async fn run_task_agent_execution(
                 )
                 .await?;
                 match action {
+                    WorkspaceActionHostOutcome::Stopped => {
+                        return Ok(if registration.cancellation.is_aborted() {
+                            TaskAgentRunOutcome::Cancelled
+                        } else {
+                            TaskAgentRunOutcome::HostShutdown
+                        });
+                    }
                     WorkspaceActionHostOutcome::Completed {
                         attempt,
                         effect,
@@ -679,6 +784,7 @@ pub struct BackgroundTaskAgent<T> {
     tasks: std::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
     shutdown: tokio::sync::Mutex<()>,
     failure: std::sync::Mutex<Option<CoreError>>,
+    quiesce_timeout: std::sync::Mutex<std::time::Duration>,
 }
 
 impl<T> BackgroundTaskAgent<T> {
@@ -690,11 +796,16 @@ impl<T> BackgroundTaskAgent<T> {
             tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
             shutdown: tokio::sync::Mutex::new(()),
             failure: std::sync::Mutex::new(None),
+            quiesce_timeout: std::sync::Mutex::new(TASK_AGENT_QUIESCE_TIMEOUT),
         }
     }
 
     pub(crate) fn abort(&self) {
-        self.signal_host_shutdown();
+        if let Some(handle) = self.handle.upgrade() {
+            handle
+                .task_executions
+                .abort_for_host_shutdown_without_commit_scope();
+        }
         let tasks = crate::lock_unpoison(&self.tasks).take();
         drop(tasks);
     }
@@ -702,12 +813,17 @@ impl<T> BackgroundTaskAgent<T> {
     pub(crate) async fn shutdown_and_join(&self) -> Result<(), CoreError> {
         let _shutdown = self.shutdown.lock().await;
         let tasks = crate::lock_unpoison(&self.tasks).take();
-        self.signal_host_shutdown();
+        self.signal_host_shutdown().await;
         let Some(mut tasks) = tasks else {
             return Ok(());
         };
         let mut failure = crate::lock_unpoison(&self.failure).take();
-        let joined = tokio::time::timeout(TASK_AGENT_QUIESCE_TIMEOUT, async {
+        let handle = self.handle.upgrade();
+        let quiesce_timeout = handle.as_ref().map_or_else(
+            || *crate::lock_unpoison(&self.quiesce_timeout),
+            |handle| handle.task_agent_quiesce_timeout(),
+        );
+        let joined = tokio::time::timeout(quiesce_timeout, async {
             while let Some(result) = tasks.join_next().await {
                 if result.is_err() {
                     failure.get_or_insert_with(task_agent_join_failure);
@@ -716,15 +832,25 @@ impl<T> BackgroundTaskAgent<T> {
         })
         .await;
         if joined.is_err() {
-            tasks.abort_all();
-            return Err(task_agent_quiesce_timeout());
+            if let Some(handle) = &handle {
+                handle.terminate_and_join_task_effects().await;
+            }
+            while let Some(result) = tasks.join_next().await {
+                if result.is_err() {
+                    failure.get_or_insert_with(task_agent_join_failure);
+                }
+            }
+            return Err(task_agent_quiesce_timeout(quiesce_timeout));
+        }
+        if let Some(handle) = &handle {
+            handle.terminate_and_join_task_effects().await;
         }
         failure.map_or(Ok(()), Err)
     }
 
-    fn signal_host_shutdown(&self) {
+    async fn signal_host_shutdown(&self) {
         if let Some(handle) = self.handle.upgrade() {
-            handle.task_executions.abort_for_host_shutdown();
+            handle.abort_task_agents_for_host_shutdown().await;
         }
     }
 }
@@ -733,10 +859,10 @@ fn task_agent_join_failure() -> CoreError {
     CoreError::Serving(String::from("Task Agent runner panicked or was cancelled"))
 }
 
-fn task_agent_quiesce_timeout() -> CoreError {
+fn task_agent_quiesce_timeout(timeout: std::time::Duration) -> CoreError {
     CoreError::Serving(format!(
-        "Task Agent shutdown quiesce exceeded {} seconds",
-        TASK_AGENT_QUIESCE_TIMEOUT.as_secs()
+        "Task Agent shutdown quiesce exceeded {} ms",
+        timeout.as_millis()
     ))
 }
 
@@ -802,8 +928,8 @@ mod launcher_tests {
         }
     }
 
-    #[test]
-    fn host_shutdown_abort_is_distinct_from_task_cancellation() {
+    #[tokio::test]
+    async fn host_shutdown_abort_is_distinct_from_task_cancellation() {
         let registry = TaskExecutionRegistry::default();
         let task = ene_task::TaskId::generate();
         let delegation = ene_task::DelegationId::generate();
@@ -813,7 +939,7 @@ mod launcher_tests {
             panic!("the reservation must enter the running registry");
         };
 
-        registry.abort_for_host_shutdown();
+        registry.abort_for_host_shutdown().await;
 
         assert!(registration.dispatch_abort.is_aborted());
         assert!(!registration.cancellation.is_aborted());
@@ -915,45 +1041,6 @@ mod launcher_tests {
         assert!(weak.upgrade().is_none());
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn uncooperative_task_agent_work_has_a_bounded_shutdown() {
-        let directory = tempfile::tempdir().unwrap();
-        let handle = Arc::new(
-            HostHandle::open_with_cred_store(
-                directory.path(),
-                crate::serve::CredStore::Memory(ene_credential::MemoryCredentialStore::new()),
-            )
-            .await
-            .unwrap(),
-        );
-        let launcher = Arc::new(BackgroundTaskAgent::new(
-            Arc::clone(&handle),
-            Arc::new(NoProvider),
-        ));
-        let (held, released) = tokio::sync::oneshot::channel::<()>();
-        let worker = Arc::clone(&handle);
-        crate::lock_unpoison(&launcher.tasks)
-            .as_mut()
-            .unwrap()
-            .spawn(async move {
-                let _held = held;
-                std::future::pending::<()>().await;
-                drop(worker);
-            });
-
-        let result = launcher.shutdown_and_join().await;
-
-        assert!(matches!(
-            result,
-            Err(CoreError::Serving(reason)) if reason.contains("quiesce exceeded")
-        ));
-        tokio::time::timeout(std::time::Duration::from_secs(1), released)
-            .await
-            .expect("the aborted runner must be released")
-            .expect_err("the pending runner must be cancelled");
-        drop(handle);
-    }
-
     #[tokio::test]
     async fn admitted_launch_is_owned_until_shutdown() {
         let directory = tempfile::tempdir().unwrap();
@@ -995,6 +1082,7 @@ mod launcher_tests {
             tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
             shutdown: tokio::sync::Mutex::new(()),
             failure: std::sync::Mutex::new(None),
+            quiesce_timeout: std::sync::Mutex::new(TASK_AGENT_QUIESCE_TIMEOUT),
         };
         let (held, released) = tokio::sync::oneshot::channel::<()>();
         crate::lock_unpoison(&launcher.tasks)
@@ -1051,6 +1139,7 @@ mod launcher_tests {
             tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
             shutdown: tokio::sync::Mutex::new(()),
             failure: std::sync::Mutex::new(None),
+            quiesce_timeout: std::sync::Mutex::new(TASK_AGENT_QUIESCE_TIMEOUT),
         };
         let (release, wait) = tokio::sync::oneshot::channel::<()>();
         let (panicking, panicked) = tokio::sync::oneshot::channel::<()>();

@@ -1,6 +1,7 @@
 mod attempt;
 mod filesystem;
 mod run;
+mod worker;
 
 pub use attempt::{
     ActionAttemptId, ActionAttemptRecord, ActionAttemptRepository, ActionCertainty,
@@ -12,5 +13,11 @@ pub use filesystem::{
     WorkspaceRootError,
 };
 pub use run::{
-    ActionNotStarted, ActionRunOutcome, WorkspaceActionCommand, orchestrate_workspace_action,
+    ActionClaimOutcome, ActionNotStarted, ActionRunOutcome, StartedWorkspaceAction,
+    WorkspaceActionCommand, orchestrate_workspace_action, settle_workspace_effect,
+    start_workspace_action,
+};
+pub use worker::{
+    WorkspaceEffectRequest, WorkspaceEffectResponse, WorkspaceEffectWorkerError,
+    execute_workspace_effect, run_workspace_effect_worker,
 };

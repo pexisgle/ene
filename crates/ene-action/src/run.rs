@@ -71,13 +71,73 @@ pub enum ActionRunOutcome {
     NotStarted(ActionNotStarted),
 }
 
+pub enum ActionClaimOutcome {
+    Started(StartedWorkspaceAction),
+    NotStarted(ActionNotStarted),
+}
+
+pub struct StartedWorkspaceAction {
+    attempt: ActionAttemptId,
+    root: WorkspaceRoot,
+    target: RealTargetRef,
+    operation: OperationKind,
+    content: Option<Vec<u8>>,
+}
+
+impl StartedWorkspaceAction {
+    #[must_use]
+    pub fn attempt(&self) -> ActionAttemptId {
+        self.attempt
+    }
+
+    #[must_use]
+    pub fn root(&self) -> &WorkspaceRoot {
+        &self.root
+    }
+
+    #[must_use]
+    pub fn target(&self) -> &RealTargetRef {
+        &self.target
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> OperationKind {
+        self.operation
+    }
+
+    #[must_use]
+    pub fn content(&self) -> Option<&[u8]> {
+        self.content.as_deref()
+    }
+}
+
 pub async fn orchestrate_workspace_action(
     repository: &impl ActionAttemptRepository,
     tracker: &mut ActionEvaluationTracker,
     command: WorkspaceActionCommand,
 ) -> Result<ActionRunOutcome, ActionTechnicalError> {
+    let started = match start_workspace_action(repository, tracker, command).await? {
+        ActionClaimOutcome::Started(started) => started,
+        ActionClaimOutcome::NotStarted(reason) => {
+            return Ok(ActionRunOutcome::NotStarted(reason));
+        }
+    };
+    let attempt = started.attempt;
+    let effect = started.root.execute(
+        &started.target,
+        started.operation,
+        started.content.as_deref(),
+    );
+    settle_workspace_effect(repository, attempt, effect).await
+}
+
+pub async fn start_workspace_action(
+    repository: &impl ActionAttemptRepository,
+    tracker: &mut ActionEvaluationTracker,
+    command: WorkspaceActionCommand,
+) -> Result<ActionClaimOutcome, ActionTechnicalError> {
     if let Some(not_started) = input_check(&command) {
-        return Ok(ActionRunOutcome::NotStarted(not_started));
+        return Ok(ActionClaimOutcome::NotStarted(not_started));
     }
     let target = match command
         .root
@@ -85,7 +145,7 @@ pub async fn orchestrate_workspace_action(
     {
         Ok(target) => target,
         Err(rejection) => {
-            return Ok(ActionRunOutcome::NotStarted(ActionNotStarted::Rejected(
+            return Ok(ActionClaimOutcome::NotStarted(ActionNotStarted::Rejected(
                 rejection,
             )));
         }
@@ -107,39 +167,47 @@ pub async fn orchestrate_workspace_action(
     let evaluation = match authorize_action_use(&candidate, &current, tracker) {
         ActionAuthorizationDecision::AllowForThisUse(evaluation) => evaluation,
         ActionAuthorizationDecision::Deny(code) => {
-            return Ok(ActionRunOutcome::NotStarted(ActionNotStarted::Denied(code)));
+            return Ok(ActionClaimOutcome::NotStarted(ActionNotStarted::Denied(
+                code,
+            )));
         }
         ActionAuthorizationDecision::NeedsRevalidation => {
-            return Ok(ActionRunOutcome::NotStarted(
+            return Ok(ActionClaimOutcome::NotStarted(
                 ActionNotStarted::NeedsRevalidation,
             ));
         }
     };
     tracker.consume(&evaluation, &candidate);
-    let evaluation_id = evaluation.as_raw();
-    let premise = attempt_premise(&command, &target, evaluation_id);
+    let premise = attempt_premise(&command, &target, evaluation.as_raw());
     let attempt = premise.attempt;
-    let outcome = repository.insert_attempt_if_current(premise).await?;
-    match outcome {
-        ActionStartOutcome::Started => {}
-        ActionStartOutcome::StalePremise => {
-            return Ok(ActionRunOutcome::NotStarted(ActionNotStarted::StalePremise));
-        }
-        ActionStartOutcome::TaskTerminal => {
-            return Ok(ActionRunOutcome::NotStarted(ActionNotStarted::TaskTerminal));
-        }
-        ActionStartOutcome::ExecutionSealed => {
-            return Ok(ActionRunOutcome::NotStarted(
-                ActionNotStarted::ExecutionSealed,
-            ));
-        }
-        ActionStartOutcome::HeldForErasure => {
-            return Ok(ActionRunOutcome::NotStarted(ActionNotStarted::DataUseHeld));
-        }
+    match repository.insert_attempt_if_current(premise).await? {
+        ActionStartOutcome::Started => Ok(ActionClaimOutcome::Started(StartedWorkspaceAction {
+            attempt,
+            root: command.root,
+            target,
+            operation: command.operation,
+            content: command.content,
+        })),
+        ActionStartOutcome::StalePremise => Ok(ActionClaimOutcome::NotStarted(
+            ActionNotStarted::StalePremise,
+        )),
+        ActionStartOutcome::TaskTerminal => Ok(ActionClaimOutcome::NotStarted(
+            ActionNotStarted::TaskTerminal,
+        )),
+        ActionStartOutcome::ExecutionSealed => Ok(ActionClaimOutcome::NotStarted(
+            ActionNotStarted::ExecutionSealed,
+        )),
+        ActionStartOutcome::HeldForErasure => Ok(ActionClaimOutcome::NotStarted(
+            ActionNotStarted::DataUseHeld,
+        )),
     }
-    let effect = command
-        .root
-        .execute(&target, command.operation, command.content.as_deref());
+}
+
+pub async fn settle_workspace_effect(
+    repository: &impl ActionAttemptRepository,
+    attempt: ActionAttemptId,
+    effect: ObservedEffect,
+) -> Result<ActionRunOutcome, ActionTechnicalError> {
     let fact_recorded = repository
         .compare_and_set_certainty(
             attempt,

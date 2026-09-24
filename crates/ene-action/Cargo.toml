@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 ene-permission = { path = "../ene-permission" }
 ene-primitive = { path = "../ene-primitive" }
+serde.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 

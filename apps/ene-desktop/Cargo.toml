@@ -19,6 +19,7 @@ name = "ene_desktop"
 path = "src/lib.rs"
 
 [dependencies]
+ene-action = { path = "../../crates/ene-action" }
 ene-api = { path = "../../crates/ene-api" }
 ene-client = { path = "../../crates/ene-client" }
 ene-config = { path = "../../crates/ene-config" }
