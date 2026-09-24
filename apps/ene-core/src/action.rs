@@ -1708,7 +1708,10 @@ mod supervisor_tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let workspace_root =
             WorkspaceRoot::open(&workspace.path().to_string_lossy()).expect("workspace root");
-        let staging_path = workspace.path().join(".ene-action-staging").join("attempt");
+        let staging_path = workspace_root
+            .as_path()
+            .join(".ene-action-staging")
+            .join("attempt");
         let staging = super::prepare_staging_directory(&staging_path, &workspace_root)
             .await
             .expect("owned staging");
