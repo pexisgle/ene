@@ -158,25 +158,31 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn one_pending_has_one_claim_on_one_registered_connection() {
-        let registry = PairingDeliveryRegistry::default();
-        let connection = ConnectionWireId(Uuid::new_v4());
-        let receiver = registry.register(&connection);
-        assert!(receiver.is_some());
-        assert!(registry.bind_pending(&connection, "pending-1", None, "laptop"));
-        let claim = registry.claim("pending-1");
-        assert!(claim.is_some());
-        assert!(registry.claim("pending-1").is_none());
-    }
-
-    #[test]
-    fn ended_connection_cannot_be_claimed() {
-        let registry = PairingDeliveryRegistry::default();
-        let connection = ConnectionWireId(Uuid::new_v4());
-        let receiver = registry.register(&connection);
-        assert!(receiver.is_some());
-        assert!(registry.bind_pending(&connection, "pending-1", None, "laptop"));
-        registry.remove(&connection);
-        assert!(registry.claim("pending-1").is_none());
+    fn a_bound_pending_is_claimed_once_only_while_its_connection_is_registered() {
+        for (case, remove_connection, expected_first_claim) in [
+            ("registered", false, true),
+            ("connection removed", true, false),
+        ] {
+            let registry = PairingDeliveryRegistry::default();
+            let connection = ConnectionWireId(Uuid::new_v4());
+            let receiver = registry.register(&connection);
+            assert!(receiver.is_some(), "{case}: registration must succeed");
+            assert!(
+                registry.bind_pending(&connection, "pending-1", None, "laptop"),
+                "{case}: the registered connection must bind its pending"
+            );
+            if remove_connection {
+                registry.remove(&connection);
+            }
+            assert_eq!(
+                registry.claim("pending-1").is_some(),
+                expected_first_claim,
+                "{case}: connection removal controls claim authority"
+            );
+            assert!(
+                registry.claim("pending-1").is_none(),
+                "{case}: a pending is claimed at most once"
+            );
+        }
     }
 }

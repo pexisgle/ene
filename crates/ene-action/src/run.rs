@@ -283,29 +283,32 @@ fn input_check(command: &WorkspaceActionCommand) -> Option<ActionNotStarted> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{fs, sync::Mutex};
 
     use tempfile::tempdir;
 
     use super::{
-        ActionNotStarted, ActionRunOutcome, WorkspaceActionCommand, attempt_premise,
-        orchestrate_workspace_action,
+        ActionNotStarted, ActionRunOutcome, WorkspaceActionCommand, orchestrate_workspace_action,
     };
     use crate::attempt::{
         ActionAttemptId, ActionAttemptRecord, ActionCertainty, ActionStartOutcome,
         ActionTechnicalError, AttemptCommitPremise, CertaintyUpdateOutcome, EffectGrounds,
-        OperationKind, RealTargetRef,
+        OperationKind, certainty_grounds_pair_is_valid,
     };
-    use crate::filesystem::{TargetRejection, WorkspaceRoot};
-    use ene_permission::{
-        ActionAuthorizationDecision, ActionEvaluationTracker, ActionKind, ActionUseCandidate,
-        CurrentActionPremise, authorize_action_use,
-    };
+    use crate::filesystem::{ActionOutput, ObservedEffect, TargetRejection, WorkspaceRoot};
+    use ene_permission::ActionEvaluationTracker;
 
     #[derive(Default)]
     struct FakeAttempts {
         starts: Mutex<Vec<AttemptCommitPremise>>,
-        updates: Mutex<Vec<(ActionAttemptId, ActionCertainty, EffectGrounds)>>,
+        updates: Mutex<
+            Vec<(
+                ActionAttemptId,
+                ActionCertainty,
+                ActionCertainty,
+                EffectGrounds,
+            )>,
+        >,
         start_outcome: Mutex<Option<ActionStartOutcome>>,
         update_outcome: Mutex<Option<CertaintyUpdateOutcome>>,
     }
@@ -315,7 +318,14 @@ mod tests {
             self.starts.lock().expect("start capture lock").clone()
         }
 
-        fn updates(&self) -> Vec<(ActionAttemptId, ActionCertainty, EffectGrounds)> {
+        fn updates(
+            &self,
+        ) -> Vec<(
+            ActionAttemptId,
+            ActionCertainty,
+            ActionCertainty,
+            EffectGrounds,
+        )> {
             self.updates.lock().expect("update capture lock").clone()
         }
 
@@ -355,14 +365,14 @@ mod tests {
         async fn compare_and_set_certainty(
             &self,
             attempt: ActionAttemptId,
-            _expected: ActionCertainty,
+            expected: ActionCertainty,
             new: ActionCertainty,
             grounds: EffectGrounds,
         ) -> Result<CertaintyUpdateOutcome, ActionTechnicalError> {
             self.updates
                 .lock()
                 .expect("update capture lock")
-                .push((attempt, new, grounds));
+                .push((attempt, expected, new, grounds));
             Ok(self
                 .update_outcome
                 .lock()
@@ -418,246 +428,204 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_starts_then_writes_and_records_the_observation() {
+    async fn successful_create_returns_the_effect_and_claims_its_exact_premise() {
         let (directory, root) = workspace();
         let attempts = FakeAttempts::default();
-        let mut command = command(root, OperationKind::Create, "report.md");
+        let mut command = command(root.clone(), OperationKind::Create, "report.md");
         command.content = Some(b"# report".to_vec());
+        let expected_target = root
+            .resolve("report.md", OperationKind::Create)
+            .expect("create target");
+        let expected = command.clone();
+
         let outcome = run(&attempts, command)
             .await
             .expect("domain outcomes are not technical errors");
         let ActionRunOutcome::Completed {
+            attempt,
             effect,
             fact_recorded,
-            ..
         } = outcome
         else {
             panic!("the configured claim started");
         };
         assert_eq!(effect.certainty, ActionCertainty::ConfirmedSuccess);
         assert_eq!(effect.grounds, EffectGrounds::ObservedAtTarget);
+        assert!(certainty_grounds_pair_is_valid(
+            effect.certainty,
+            effect.grounds
+        ));
+        assert_eq!(
+            effect.output,
+            Some(ActionOutput::Created {
+                target: expected_target.clone()
+            })
+        );
         assert!(fact_recorded);
         assert_eq!(
-            std::fs::read(directory.path().join("report.md")).expect("created file"),
+            fs::read(directory.path().join("report.md")).expect("created file"),
             b"# report"
         );
+
         let starts = attempts.starts();
         assert_eq!(starts.len(), 1);
-        assert_eq!(starts[0].operation, OperationKind::Create);
-        assert!(starts[0].real_target.as_path().ends_with("report.md"));
-        let updates = attempts.updates();
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].1, ActionCertainty::ConfirmedSuccess);
-        assert_eq!(updates[0].2, EffectGrounds::ObservedAtTarget);
-    }
+        let premise = &starts[0];
+        assert_eq!(premise.attempt, attempt);
+        assert_eq!(premise.delegation, expected.delegation);
+        assert_eq!(premise.task, expected.task);
+        assert_eq!(premise.task_revision, expected.task_revision);
+        assert_eq!(premise.workspace, expected.workspace);
+        assert_eq!(premise.real_target, expected_target);
+        assert_eq!(premise.operation, OperationKind::Create);
+        assert!(!premise.relied_evaluation.as_uuid().is_nil());
 
-    #[test]
-    fn the_issued_evaluation_raw_identity_is_the_premise_correlation() {
-        let (_directory, root) = workspace();
-        let command = command(root, OperationKind::Create, "report.md");
-        let target = RealTargetRef::from_canonical_path(String::from("/srv/workspace/report.md"));
-        let candidate = ActionUseCandidate {
-            delegation: command.delegation,
-            task: command.task,
-            task_revision: command.task_revision,
-            workspace: command.workspace,
-            operation: ActionKind::Create,
-            resolved_target: target.as_path().to_owned(),
-        };
-        let current = CurrentActionPremise {
-            delegation: command.delegation,
-            task: command.task,
-            task_revision: command.task_revision,
-            workspace: command.workspace,
-        };
-        let mut tracker = ActionEvaluationTracker::new();
-        let ActionAuthorizationDecision::AllowForThisUse(evaluation) =
-            authorize_action_use(&candidate, &current, &mut tracker)
-        else {
-            panic!("the matching candidate is allowed");
-        };
-        let premise = attempt_premise(&command, &target, evaluation.as_raw());
         assert_eq!(
-            premise.relied_evaluation,
-            evaluation.as_raw(),
-            "the durable premise carries exactly the issued raw evaluation identity"
-        );
-        assert_eq!(premise.real_target, target);
-        assert!(
-            tracker.consume(&evaluation, &candidate),
-            "the boundary still consumes exactly the issued evaluation"
-        );
-        assert!(
-            !tracker.consume(&evaluation, &candidate),
-            "the evaluation stays single-use"
+            attempts.updates(),
+            vec![(
+                attempt,
+                ActionCertainty::Unknown,
+                ActionCertainty::ConfirmedSuccess,
+                EffectGrounds::ObservedAtTarget,
+            )]
         );
     }
 
     #[tokio::test]
-    async fn list_starts_then_observes_the_directory() {
-        let (directory, root) = workspace();
-        std::fs::write(directory.path().join("a.txt"), b"a").expect("fixture write");
-        let attempts = FakeAttempts::default();
-        let outcome = run(&attempts, command(root, OperationKind::List, ""))
-            .await
-            .expect("a listing answers a domain outcome");
-        let ActionRunOutcome::Completed {
-            effect,
-            fact_recorded,
-            ..
-        } = outcome
-        else {
-            panic!("the listing must complete on the started attempt");
-        };
-        assert!(fact_recorded);
-        assert_eq!(effect.certainty, ActionCertainty::ConfirmedSuccess);
-        assert!(matches!(
-            effect.output,
-            Some(crate::filesystem::ActionOutput::Listing(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn stale_premise_writes_nothing_and_executes_nothing() {
+    async fn stale_premise_has_no_effect_and_no_certainty_update() {
         let (directory, root) = workspace();
         let attempts = FakeAttempts::default();
         attempts.set_start(ActionStartOutcome::StalePremise);
         let mut command = command(root, OperationKind::Create, "report.md");
         command.content = Some(b"# report".to_vec());
-        let outcome = run(&attempts, command)
-            .await
-            .expect("stale is a domain outcome");
+
         assert_eq!(
-            outcome,
+            run(&attempts, command)
+                .await
+                .expect("stale is a domain outcome"),
             ActionRunOutcome::NotStarted(ActionNotStarted::StalePremise)
         );
         assert!(!directory.path().join("report.md").exists());
+        assert_eq!(attempts.starts().len(), 1);
         assert!(attempts.updates().is_empty());
     }
 
     #[tokio::test]
-    async fn escaped_paths_never_claim_and_never_execute() {
-        let (_directory, root) = workspace();
-        let attempts = FakeAttempts::default();
-        let mut command = command(root, OperationKind::Read, "../escape.txt");
-        command.content = None;
-        let outcome = run(&attempts, command)
-            .await
-            .expect("a rejection is a domain outcome");
-        assert_eq!(
-            outcome,
-            ActionRunOutcome::NotStarted(ActionNotStarted::Rejected(
-                TargetRejection::MalformedPath
-            ))
-        );
-        assert!(attempts.starts().is_empty(), "a rejection never claims");
-        assert!(attempts.updates().is_empty());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn create_through_a_reentry_symlink_never_claims_and_never_executes() {
+    async fn rejected_target_never_claims_or_produces_an_effect() {
         let (directory, root) = workspace();
-        let outside = tempdir().expect("outside directory");
-        let sub = directory.path().join("sub");
-        std::fs::create_dir(&sub).expect("inside subdirectory");
-        std::os::unix::fs::symlink(outside.path(), directory.path().join("out"))
-            .expect("out symlink");
-        std::os::unix::fs::symlink(&sub, outside.path().join("back")).expect("back symlink");
         let attempts = FakeAttempts::default();
-        let mut command = command(root, OperationKind::Create, "out/back/new.txt");
-        command.content = Some(b"# new".to_vec());
-        let outcome = run(&attempts, command)
-            .await
-            .expect("a rejection is a domain outcome");
-        assert_eq!(
-            outcome,
-            ActionRunOutcome::NotStarted(ActionNotStarted::Rejected(
-                TargetRejection::OutsideWorkspace
-            ))
-        );
-        assert!(
-            attempts.starts().is_empty(),
-            "a path that leaves and re-enters the workspace never claims an attempt"
-        );
-        assert!(attempts.updates().is_empty());
-        assert!(
-            !sub.join("new.txt").exists(),
-            "no create effect may bypass the ancestor boundary"
-        );
-    }
+        for (path, expected) in [
+            ("../escape.txt", TargetRejection::MalformedPath),
+            ("missing.txt", TargetRejection::MissingTarget),
+        ] {
+            assert_eq!(
+                run(&attempts, command(root.clone(), OperationKind::Read, path))
+                    .await
+                    .expect("a rejection is a domain outcome"),
+                ActionRunOutcome::NotStarted(ActionNotStarted::Rejected(expected))
+            );
+        }
 
-    #[tokio::test]
-    async fn input_shape_is_refused_before_any_claim() {
-        let (_directory, root) = workspace();
-        let attempts = FakeAttempts::default();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
 
-        let read_with_content = WorkspaceActionCommand {
-            content: Some(b"unexpected".to_vec()),
-            ..command(root.clone(), OperationKind::Read, "input.txt")
-        };
-        assert_eq!(
-            run(&attempts, read_with_content)
-                .await
-                .expect("domain outcome"),
-            ActionRunOutcome::NotStarted(ActionNotStarted::ContentNotAllowed)
-        );
+            let outside = tempdir().expect("outside directory");
+            let sub = directory.path().join("sub");
+            fs::create_dir(&sub).expect("inside subdirectory");
+            symlink(outside.path(), directory.path().join("out")).expect("outside symlink");
+            symlink(&sub, outside.path().join("back")).expect("back symlink");
+            let mut create = command(root.clone(), OperationKind::Create, "out/back/new.txt");
+            create.content = Some(b"# new".to_vec());
+            assert_eq!(
+                run(&attempts, create)
+                    .await
+                    .expect("a rejection is a domain outcome"),
+                ActionRunOutcome::NotStarted(ActionNotStarted::Rejected(
+                    TargetRejection::OutsideWorkspace
+                ))
+            );
+            assert!(!sub.join("new.txt").exists());
+        }
 
-        let mut write_without_content = command(root, OperationKind::Edit, "input.txt");
-        write_without_content.content = None;
-        assert_eq!(
-            run(&attempts, write_without_content)
-                .await
-                .expect("domain outcome"),
-            ActionRunOutcome::NotStarted(ActionNotStarted::MissingContent)
-        );
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::symlink_dir;
+
+            let outside = tempdir().expect("outside directory");
+            let sub = directory.path().join("sub");
+            fs::create_dir(&sub).expect("inside subdirectory");
+            if symlink_dir(outside.path(), directory.path().join("out")).is_ok()
+                && symlink_dir(&sub, outside.path().join("back")).is_ok()
+            {
+                let mut create = command(root.clone(), OperationKind::Create, "out/back/new.txt");
+                create.content = Some(b"# new".to_vec());
+                assert_eq!(
+                    run(&attempts, create)
+                        .await
+                        .expect("a rejection is a domain outcome"),
+                    ActionRunOutcome::NotStarted(ActionNotStarted::Rejected(
+                        TargetRejection::OutsideWorkspace
+                    ))
+                );
+                assert!(!sub.join("new.txt").exists());
+            }
+        }
 
         assert!(attempts.starts().is_empty());
+        assert!(attempts.updates().is_empty());
     }
 
     #[tokio::test]
-    async fn the_effect_is_returned_even_when_recording_it_fails() {
+    async fn observed_effect_is_returned_when_fact_recording_does_not_update() {
         let (directory, root) = workspace();
         let attempts = FakeAttempts::default();
         attempts.set_update(CertaintyUpdateOutcome::MissingAttempt);
         let mut command = command(root, OperationKind::Create, "report.md");
         command.content = Some(b"# report".to_vec());
+
         let outcome = run(&attempts, command)
             .await
             .expect("a missing attempt row is a domain outcome");
         let ActionRunOutcome::Completed {
+            attempt,
             effect,
             fact_recorded,
-            ..
         } = outcome
         else {
             panic!("the configured claim started");
         };
         assert_eq!(effect.certainty, ActionCertainty::ConfirmedSuccess);
-        assert!(!fact_recorded, "the missing attempt row stays absent");
+        assert!(!fact_recorded);
         assert_eq!(
-            std::fs::read(directory.path().join("report.md")).expect("created file"),
+            attempts.updates(),
+            vec![(
+                attempt,
+                ActionCertainty::Unknown,
+                ActionCertainty::ConfirmedSuccess,
+                EffectGrounds::ObservedAtTarget,
+            )]
+        );
+        assert_eq!(
+            fs::read(directory.path().join("report.md")).expect("created file"),
             b"# report",
-            "the external effect is never hidden by the recording failure"
+            "a failed fact write never hides the already observed effect"
         );
     }
 
     #[tokio::test]
-    async fn command_debug_redacts_content() {
+    async fn command_and_effect_debug_bodies_are_absent() {
         let (_directory, root) = workspace();
         let mut command = command(root, OperationKind::Create, "report.md");
-        command.content = Some(b"secret file body".to_vec());
-        let rendered = format!("{command:?}");
-        assert!(!rendered.contains("secret file body"));
-        assert!(rendered.contains("bytes redacted"));
-    }
+        command.content = Some(b"secret command body".to_vec());
+        let command_debug = format!("{command:?}");
+        assert!(!command_debug.contains("secret command body"));
 
-    #[test]
-    fn real_target_debug_never_loses_the_path() {
-        let target = RealTargetRef::from_canonical_path(String::from("/tmp/workspace/report.md"));
-        assert_eq!(
-            format!("{target:?}"),
-            "RealTargetRef(\"/tmp/workspace/report.md\")"
-        );
+        let effect = ObservedEffect {
+            certainty: ActionCertainty::ConfirmedSuccess,
+            grounds: EffectGrounds::ObservedAtTarget,
+            output: Some(ActionOutput::Bytes(b"secret effect body".to_vec())),
+        };
+        let effect_debug = format!("{effect:?}");
+        assert!(!effect_debug.contains("secret effect body"));
     }
 }

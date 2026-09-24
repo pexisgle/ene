@@ -154,33 +154,28 @@ mod tests {
     }
 
     #[test]
-    fn a_matching_candidate_is_allowed_for_one_use() {
-        let mut tracker = ActionEvaluationTracker::new();
-        let candidate = candidate();
-        let decision = authorize_action_use(&candidate, &premise(&candidate), &mut tracker);
-        let ActionAuthorizationDecision::AllowForThisUse(evaluation) = decision else {
-            panic!("a matching candidate is allowed: {decision:?}");
-        };
-        assert!(tracker.consume(&evaluation, &candidate));
-        assert!(
-            !tracker.consume(&evaluation, &candidate),
-            "an evaluation id is single-use"
-        );
-    }
+    fn action_authorization_binds_premise_target_and_operation() {
+        for operation in [
+            ActionKind::List,
+            ActionKind::Read,
+            ActionKind::Create,
+            ActionKind::Edit,
+        ] {
+            let candidate = ActionUseCandidate {
+                operation,
+                ..candidate()
+            };
+            let mut tracker = ActionEvaluationTracker::new();
+            let ActionAuthorizationDecision::AllowForThisUse(evaluation) =
+                authorize_action_use(&candidate, &premise(&candidate), &mut tracker)
+            else {
+                panic!("an exact allowlisted operation must be authorized");
+            };
+            assert!(tracker.consume(&evaluation, &candidate));
+        }
 
-    #[test]
-    fn a_candidate_that_disagrees_with_the_current_premise_is_denied() {
-        let mut tracker = ActionEvaluationTracker::new();
         let candidate = candidate();
         for current in [
-            CurrentActionPremise {
-                task_revision: RevisionInner::from_u64(3),
-                ..premise(&candidate)
-            },
-            CurrentActionPremise {
-                workspace: RawId::new(),
-                ..premise(&candidate)
-            },
             CurrentActionPremise {
                 delegation: RawId::new(),
                 ..premise(&candidate)
@@ -189,39 +184,40 @@ mod tests {
                 task: RawId::new(),
                 ..premise(&candidate)
             },
+            CurrentActionPremise {
+                task_revision: RevisionInner::from_u64(3),
+                ..premise(&candidate)
+            },
+            CurrentActionPremise {
+                workspace: RawId::new(),
+                ..premise(&candidate)
+            },
         ] {
+            let mut tracker = ActionEvaluationTracker::new();
             assert_eq!(
                 authorize_action_use(&candidate, &current, &mut tracker),
-                ActionAuthorizationDecision::Deny(ActionDenyCode::PremiseMismatch),
-                "a moved premise never mints an evaluation"
+                ActionAuthorizationDecision::Deny(ActionDenyCode::PremiseMismatch)
             );
         }
-    }
 
-    #[test]
-    fn a_minted_evaluation_cannot_be_consumed_for_another_target_or_operation() {
         let mut tracker = ActionEvaluationTracker::new();
-        let candidate = candidate();
         let ActionAuthorizationDecision::AllowForThisUse(evaluation) =
             authorize_action_use(&candidate, &premise(&candidate), &mut tracker)
         else {
-            panic!("the matching candidate is allowed");
+            panic!("the exact premise must mint an evaluation");
         };
-        let mut other_target = candidate.clone();
-        other_target.resolved_target = String::from("/srv/workspace/other.md");
-        assert!(
-            !tracker.consume(&evaluation, &other_target),
-            "the evaluation is bound to the resolved target"
-        );
-        let mut other_operation = candidate.clone();
-        other_operation.operation = ActionKind::Edit;
-        assert!(
-            !tracker.consume(&evaluation, &other_operation),
-            "the evaluation is bound to the operation"
-        );
-        assert!(
-            tracker.consume(&evaluation, &candidate),
-            "the original binding still consumes"
-        );
+        for altered in [
+            ActionUseCandidate {
+                resolved_target: String::from("/srv/workspace/other.md"),
+                ..candidate.clone()
+            },
+            ActionUseCandidate {
+                operation: ActionKind::Edit,
+                ..candidate.clone()
+            },
+        ] {
+            assert!(!tracker.consume(&evaluation, &altered));
+        }
+        assert!(tracker.consume(&evaluation, &candidate));
     }
 }

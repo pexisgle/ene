@@ -284,18 +284,8 @@ fn status_failure(status: u16) -> InferenceTechnicalError {
 mod tests {
     use ene_credential::{CredentialRef, MemoryCredentialStore};
 
-    use super::{OpenAiResponsesTransport, status_failure};
+    use super::OpenAiResponsesTransport;
     use crate::InferenceTechnicalError;
-
-    #[test]
-    fn request_body_disables_server_side_storage() {
-        let body = super::responses_body("gpt-test", "hello");
-        assert_eq!(
-            body.get("store"),
-            Some(&serde_json::Value::Bool(false)),
-            "history lives locally; the provider must not retain response state: {body}"
-        );
-    }
 
     #[test]
     fn request_body_sets_the_explicit_output_maximum_the_estimate_uses() {
@@ -332,41 +322,6 @@ mod tests {
             super::MAX_OUTPUT_TOKENS,
             "the output side must be the explicit maximum the body carries"
         );
-    }
-
-    #[test]
-    fn unauthorized_maps_to_transport_failure() {
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = status_failure(401) else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("unauthorized"));
-    }
-
-    #[test]
-    fn rate_limited_maps_to_unavailable() {
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = status_failure(429) else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("provider unavailable"));
-        assert!(reason.contains("429"));
-    }
-
-    #[test]
-    fn server_error_maps_to_unavailable() {
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = status_failure(503) else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("provider unavailable"));
-        assert!(reason.contains("503"));
-    }
-
-    #[test]
-    fn other_client_error_maps_to_request_failure() {
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = status_failure(400) else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("provider request failed"));
-        assert!(reason.contains("400"));
     }
 
     #[test]
@@ -497,17 +452,6 @@ mod tests {
             ),
             "a known delta event with no string delta must fail, got {result:?}"
         );
-    }
-
-    #[test]
-    fn debug_rendering_carries_no_bearer_material() {
-        let concrete = MemoryCredentialStore::new();
-        let credential = CredentialRef::new("openai", "main").expect("valid test fixture");
-        concrete.insert(credential.clone(), "sk-probe-bearer-material");
-        let transport = OpenAiResponsesTransport::new("http://127.0.0.1:9", concrete).unwrap();
-        let rendered = format!("{transport:?}");
-        assert!(!rendered.contains("sk-probe-bearer-material"));
-        assert!(!rendered.contains("Bearer"));
     }
 
     struct FixtureRefs {

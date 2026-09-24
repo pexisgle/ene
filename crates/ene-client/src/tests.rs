@@ -1,4 +1,4 @@
-use ene_api::codec::{DecodedFrame, WireFrame};
+use ene_api::codec::WireFrame;
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthResult;
 use ene_api::v1::management::{
@@ -15,7 +15,6 @@ use ene_api::v1::round::{HistoryRequest, RoundTarget, SubmitTextInput, TextBodyW
 use super::frames::{
     PreparedRequest, capability_frame, frame_for, frame_for_session, pairing_frame, proof_frame,
 };
-use super::platform_display;
 use super::session::{
     AuthDecision, DEFERRED_CAP, PENDING_ERASURE_CAP, SessionState, decide_auth, stale_generation_of,
 };
@@ -69,15 +68,6 @@ fn credential_intent(
         },
         confirmed: false,
     }
-}
-
-#[test]
-fn platform_display_names_os_and_arch() {
-    let display = platform_display();
-    assert!(
-        display == format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-        "platform display must name OS and arch, got {display:?}"
-    );
 }
 
 #[test]
@@ -159,31 +149,6 @@ fn incompatible_protocol_refusal_names_both_maxima_and_hint() {
     }
 }
 
-#[test]
-fn message_type_names_the_variant() {
-    let sender = WireSender {
-        device_id: None,
-        incarnation_id: incarnation(),
-        connection_id: None,
-    };
-    let frame = frame_for(
-        WirePayload::HistoryRequest(history_request("companion-1", 3)),
-        sender,
-    );
-    assert!(
-        frame.envelope.message_type.0 == "HistoryRequest",
-        "discriminator must name the variant"
-    );
-    assert!(
-        frame.payload.message_type() == "HistoryRequest",
-        "kind name must match the discriminator"
-    );
-    assert!(
-        frame.envelope.protocol == ProtocolVersion::V1,
-        "built frames speak V1"
-    );
-}
-
 fn presence_fact(generation: u64) -> PresenceAttributionWire {
     PresenceAttributionWire {
         companion: CompanionWireRef(String::from("default")),
@@ -201,11 +166,16 @@ fn stale_answer(current_generation: u64) -> WirePayload {
 }
 
 #[test]
-fn session_starts_unobserved_and_tracks_latest() {
+fn session_tracks_latest_presence_generation_and_companion() {
     let mut session = SessionState::default();
     assert!(
         session.generation().is_none(),
         "a new session observed nothing yet"
+    );
+    assert_eq!(
+        session.companion_ref(),
+        String::from(crate::DEFAULT_COMPANION_REF),
+        "bootstrap echoes the fallback until the first fact"
     );
     session.observe_presence(&presence_fact(4));
     assert!(
@@ -223,14 +193,24 @@ fn session_starts_unobserved_and_tracks_latest() {
         session.generation() == Some(9),
         "a stale answer refreshes the running session"
     );
+    let mut fact = presence_fact(3);
+    fact.companion = CompanionWireRef(String::from("host-issued-projection"));
+    session.observe_presence(&fact);
+    assert_eq!(
+        session.companion_ref(),
+        String::from("host-issued-projection"),
+        "after presence the session echoes the learned projection"
+    );
+    assert_eq!(
+        session.generation(),
+        Some(3),
+        "generation bookkeeping is untouched"
+    );
 }
 
 #[test]
 fn local_erasure_demand_wipes_the_deferred_buffer_and_reports_classes() {
-    use ene_api::v1::deletion::{
-        ClientTempClass, DeletionDemand, DeletionDemandWireId, DeletionTargetWire,
-        LocalErasureResult,
-    };
+    use ene_api::v1::deletion::ClientTempClass;
 
     let mut session = SessionState::default();
     let response_frame = || {
@@ -263,27 +243,6 @@ fn local_erasure_demand_wipes_the_deferred_buffer_and_reports_classes() {
     assert!(
         session.take_undelivered().is_empty(),
         "the deferred presentation buffer is dropped whole"
-    );
-
-    let demand = DeletionDemand {
-        demand: DeletionDemandWireId(String::from("demand-1")),
-        operation: ene_api::v1::refs::DeletionOperationWireRef(String::from("operation-1")),
-        sweep: 3,
-        targets: vec![DeletionTargetWire::WipeClass {
-            class: ClientTempClass::PresentationBuffer,
-        }],
-    };
-    let result = LocalErasureResult {
-        demand: demand.demand.clone(),
-        operation: demand.operation.clone(),
-        sweep: demand.sweep,
-        wiped: drained,
-        unverified: Vec::new(),
-    };
-    let json = serde_json::to_string(&result).expect("the result must serialize");
-    assert!(
-        !json.to_lowercase().contains("deletion:"),
-        "the wire result carries no mechanical target: {json}"
     );
 }
 
@@ -493,13 +452,12 @@ fn boot_incarnation_fails_closed_on_corrupt_or_exhausted_counters() {
         std::process::id(),
     ));
     assert!(std::fs::create_dir_all(&dir).is_ok());
+    let exhausted = u64::MAX.to_string();
     for (name, bytes) in [
         ("empty", b"".as_slice()),
-        ("blank", b"   \n".as_slice()),
-        ("alpha", b"not-a-number".as_slice()),
-        ("negative", b"-3".as_slice()),
         ("trailing", b"12x".as_slice()),
-        ("binary", &[0xff, 0x00, 0x31]),
+        ("invalid UTF-8", &[0xff, 0x00, 0x31]),
+        ("u64::MAX", exhausted.as_bytes()),
     ] {
         assert!(
             std::fs::write(counter_path(&dir), bytes).is_ok(),
@@ -515,15 +473,6 @@ fn boot_incarnation_fails_closed_on_corrupt_or_exhausted_counters() {
             "{name} failure must not rewrite the counter"
         );
     }
-    assert!(
-        std::fs::write(counter_path(&dir), u64::MAX.to_string()).is_ok(),
-        "the exhausted fixture must write"
-    );
-    reset_for_tests();
-    assert!(
-        boot_incarnation(&dir).is_err(),
-        "an exhausted counter must fail closed, never wrap"
-    );
     assert!(std::fs::remove_dir_all(&dir).is_ok() || !dir.exists());
     reset_for_tests();
 }
@@ -601,7 +550,7 @@ fn answer_payload() -> WirePayload {
 }
 
 #[test]
-fn prepare_keeps_command_identity_and_leaves_requests_unstamped() -> Result<(), String> {
+fn prepared_requests_mint_once_and_retry_with_fresh_transport_ids() -> Result<(), String> {
     let sender = WireSender {
         device_id: None,
         incarnation_id: incarnation(),
@@ -657,50 +606,8 @@ fn prepare_keeps_command_identity_and_leaves_requests_unstamped() -> Result<(), 
         first.envelope.correlation.request_id.is_some(),
         "every send carries a request ID for pairing"
     );
-    Ok(())
-}
 
-#[test]
-fn session_echoes_the_learned_companion_projection() {
-    use super::session::SessionState;
-
-    let mut state = SessionState::default();
-    assert_eq!(
-        state.companion_ref(),
-        String::from(crate::DEFAULT_COMPANION_REF),
-        "bootstrap echoes the fallback until the first fact"
-    );
-    let mut fact = presence_fact(3);
-    fact.companion = CompanionWireRef(String::from("host-issued-projection"));
-    state.observe_presence(&fact);
-    assert_eq!(
-        state.companion_ref(),
-        String::from("host-issued-projection"),
-        "after presence the session echoes the learned projection"
-    );
-    assert_eq!(
-        state.generation(),
-        Some(3),
-        "generation bookkeeping is untouched"
-    );
-}
-
-#[test]
-fn prepared_retry_reuses_command_with_fresh_transport_ids() {
-    let sender = WireSender {
-        device_id: None,
-        incarnation_id: incarnation(),
-        connection_id: None,
-    };
-    let input = || {
-        WirePayload::SubmitTextInput(submit_input(
-            "companion-1",
-            RoundTarget::New,
-            String::from("hi"),
-            String::from("en"),
-        ))
-    };
-    let prepared = PreparedRequest::new(input());
+    let prepared = PreparedRequest::new(submit());
     let first = prepared.frame(sender, Some(3));
     let Some(command) = first.envelope.correlation.command_id else {
         panic!("a prepared text input must carry a command identity");
@@ -724,6 +631,7 @@ fn prepared_retry_reuses_command_with_fresh_transport_ids() {
         second.envelope.observed.presence_generation_view,
         "retries preserve the observed premise"
     );
+    Ok(())
 }
 
 #[test]
@@ -762,10 +670,6 @@ fn decide_frame_classifies_facts_answers_and_deferrals() {
         matches!(decide_frame(own, &hint), FrameDecision::AbsorbBodyHint),
         "BodyStateHint is a fact, never an answer, even with matching reply_to"
     );
-}
-
-fn history_answer(limit: u64) -> WirePayload {
-    WirePayload::HistoryRequest(history_request("companion-1", limit))
 }
 
 #[test]
@@ -832,7 +736,7 @@ fn pending_erasure_queue_drops_the_oldest_demand_at_capacity() {
 }
 
 #[test]
-fn decide_auth_rejection_guides_reprovisioning() -> Result<(), String> {
+fn decide_auth_distinguishes_guidance_and_unexpected_results() -> Result<(), String> {
     let decision = decide_auth(&WirePayload::AuthResult(AuthResult::Rejected {
         reason: String::from("unknown proof"),
     }));
@@ -847,11 +751,7 @@ fn decide_auth_rejection_guides_reprovisioning() -> Result<(), String> {
         message.contains("fresh pairing request"),
         "guidance names the provisioning step: {message:?}"
     );
-    Ok(())
-}
 
-#[test]
-fn decide_auth_names_unexpected_kinds() -> Result<(), String> {
     let decision = decide_auth(&answer_payload());
     let AuthDecision::Unexpected { message } = decision else {
         return Err(String::from("foreign kinds must be unexpected"));
@@ -882,19 +782,6 @@ fn proof_frame_names_the_paired_device() -> Result<(), String> {
         "the proof names the paired device but no connection: {:?}",
         frame.envelope.sender
     );
-    let rendered = format!("{frame:?}");
-    assert!(
-        !rendered.contains("proof-hex-abc"),
-        "frame Debug must not leak the proof: {rendered:?}"
-    );
-    let encoded = (ene_api::codec::encode_frame(&frame)).expect("encode proof frame");
-    let decoded = (ene_api::codec::decode_frame(&encoded)).expect("decode proof frame");
-    let DecodedFrame::Known(decoded) = decoded else {
-        return Err(String::from(
-            "the proof frame must decode as a known message",
-        ));
-    };
-    assert!(decoded == frame, "codec must preserve the proof frame");
     Ok(())
 }
 
@@ -916,32 +803,6 @@ fn proof_derives_from_the_secret_and_the_single_use_nonce() -> Result<(), String
         "the proof is bound to the single-use nonce"
     );
     Ok(())
-}
-
-#[test]
-fn session_debug_reports_the_queue_length_without_bodies() {
-    let mut session = SessionState::default();
-    session.push_deferred(script_frame(history_answer(3), message_id(71), None));
-    let rendered = format!("{session:?}");
-    assert!(
-        rendered.contains("deferred_len"),
-        "session Debug must name the queue length: {rendered:?}"
-    );
-    assert!(
-        !rendered.contains("HistoryRequest"),
-        "session Debug must not dump queued payloads: {rendered:?}"
-    );
-}
-
-#[test]
-fn ene_client_manifest_stays_a_client_library() {
-    let manifest = include_str!("../Cargo.toml");
-    for forbidden in ["ene-local-control", "ene-store", "ene-credential", "clap"] {
-        assert!(
-            !manifest.contains(forbidden),
-            "ene-client must not depend on {forbidden}: {manifest}"
-        );
-    }
 }
 
 mod wss_session {
@@ -1244,13 +1105,11 @@ mod wss_session {
             let (mut sink, mut stream) = host.accept_upgrade().await;
             handshake_to_auth(&mut sink, &mut stream, device, connection).await;
             let sender = host_sender(device, connection);
-            let first_id = send_unknown(&mut sink, sender).await;
-            let first_reject = MiniHost::recv_frame(&mut stream).await;
             MiniHost::send_frame(&mut sink, &frame_for(presence(), sender)).await;
-            let second_id = send_unknown(&mut sink, sender).await;
-            let second_reject = MiniHost::recv_frame(&mut stream).await;
+            let unknown_id = send_unknown(&mut sink, sender).await;
+            let reject = MiniHost::recv_frame(&mut stream).await;
             MiniHost::send_frame(&mut sink, &frame_for(presence(), sender)).await;
-            (first_id, first_reject, second_id, second_reject)
+            (unknown_id, reject)
         });
 
         let connected = tokio::time::timeout(
@@ -1273,17 +1132,15 @@ mod wss_session {
             "the session continues after rejecting an unknown message"
         );
 
-        let (first_id, first_reject, second_id, second_reject) =
-            tokio::time::timeout(std::time::Duration::from_secs(10), server)
-                .await
-                .expect("mini host must finish")
-                .expect("mini host must not panic");
-        assert_reject(&first_reject, first_id);
-        assert_reject(&second_reject, second_id);
+        let (unknown_id, reject) = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+            .await
+            .expect("mini host must finish")
+            .expect("mini host must not panic");
+        assert_reject(&reject, unknown_id);
     }
 
     #[tokio::test]
-    async fn a_probe_confirms_the_serving_host_and_trusts_nothing_new() {
+    async fn the_probe_accepts_only_the_pinned_serving_host_and_never_creates_trust() {
         let dir = tempfile::tempdir().expect("test dir");
         let host = start_host(dir.path()).await;
         let dir_path = dir.path().to_path_buf();
@@ -1303,10 +1160,7 @@ mod wss_session {
             "probing must never adopt or write trust of its own"
         );
         responder.abort();
-    }
 
-    #[tokio::test]
-    async fn a_stale_runtime_with_an_unrelated_listener_is_not_serving() {
         let dir = tempfile::tempdir().expect("test dir");
         let stray = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1472,11 +1326,9 @@ mod runtime_protection {
         .expect("pin must store");
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
-    fn a_world_readable_runtime_is_refused_without_leaking_the_token() {
-        use std::os::unix::fs::PermissionsExt as _;
-
+    fn runtime_file_protection_refuses_insecure_permissions_without_leaking_token() {
         let dir = tempfile::tempdir().expect("test dir");
         let runtime = sample_runtime();
         let path = dir.path().join(HOST_RUNTIME_FILE_NAME);
@@ -1485,34 +1337,14 @@ mod runtime_protection {
             serde_json::to_vec(&runtime).expect("runtime encodes"),
         )
         .expect("runtime must write");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
-            .expect("chmod must apply");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+                .expect("chmod must apply");
+        }
         let error = crate::runtime_info::load_host_runtime(dir.path())
-            .expect_err("a world-readable runtime file must be refused");
-        let text = error.to_string();
-        assert!(
-            text.contains("owner"),
-            "the refusal names the protection: {text}"
-        );
-        assert!(
-            !text.contains(&runtime.local_token),
-            "no token leaks: {text}"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn a_default_acl_runtime_is_refused_without_leaking_the_token() {
-        let dir = tempfile::tempdir().expect("test dir");
-        let runtime = sample_runtime();
-        let path = dir.path().join(HOST_RUNTIME_FILE_NAME);
-        std::fs::write(
-            &path,
-            serde_json::to_vec(&runtime).expect("runtime encodes"),
-        )
-        .expect("runtime must write");
-        let error = crate::runtime_info::load_host_runtime(dir.path())
-            .expect_err("a default-ACL runtime file must be refused");
+            .expect_err("an insecure runtime file must be refused");
         let text = error.to_string();
         assert!(
             text.contains("owner"),

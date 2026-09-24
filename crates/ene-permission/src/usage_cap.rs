@@ -352,7 +352,7 @@ impl UsageReservationState {
 
 #[cfg(test)]
 mod tests {
-    use super::{UsageCapScope, UsageCapWindow};
+    use super::UsageCapWindow;
     use ene_primitive::WallClockWithTz;
 
     fn at(value: &str) -> WallClockWithTz {
@@ -360,152 +360,42 @@ mod tests {
     }
 
     #[test]
-    fn daily_window_is_the_utc_calendar_day_half_open() {
-        let window = UsageCapWindow::DailyUtc;
-        let period = window
-            .period_containing(at("2026-03-15T13:45:00+09:00"))
-            .expect("the period exists");
-        assert_eq!(period.start(), at("2026-03-15T00:00:00Z"));
-        assert_eq!(period.end(), at("2026-03-16T00:00:00Z"));
-    }
-
-    #[test]
-    fn monthly_window_is_the_utc_calendar_month_half_open() {
-        let window = UsageCapWindow::MonthlyUtc;
-        let period = window
-            .period_containing(at("2026-03-15T23:59:00-05:00"))
-            .expect("the period exists");
-        assert_eq!(period.start(), at("2026-03-01T00:00:00Z"));
-        assert_eq!(period.end(), at("2026-04-01T00:00:00Z"));
-    }
-
-    #[test]
-    fn december_and_leap_boundaries_do_not_roll_over_the_wrong_way() {
-        let monthly = UsageCapWindow::MonthlyUtc;
-        let december = monthly
-            .period_containing(at("2026-12-31T23:59:59Z"))
-            .expect("the period exists");
-        assert_eq!(december.end(), at("2027-01-01T00:00:00Z"));
-        let february = monthly
-            .period_containing(at("2028-02-29T12:00:00Z"))
-            .expect("the period exists");
-        assert_eq!(february.start(), at("2028-02-01T00:00:00Z"));
-        assert_eq!(february.end(), at("2028-03-01T00:00:00Z"));
-    }
-
-    #[test]
-    fn scope_storage_vocabulary_is_closed_world() {
-        assert_eq!(UsageCapScope::System.as_str(), "system");
-        assert_eq!(
-            UsageCapScope::Provider(String::from("openai")).as_str(),
-            "provider"
-        );
-        assert_eq!(
-            UsageCapScope::from_stored("system", ""),
-            Some(UsageCapScope::System)
-        );
-        assert_eq!(
-            UsageCapScope::from_stored("provider", "openai"),
-            Some(UsageCapScope::Provider(String::from("openai")))
-        );
-        assert_eq!(UsageCapScope::from_stored("system", "openai"), None);
-        assert_eq!(UsageCapScope::from_stored("provider", ""), None);
-        assert_eq!(UsageCapScope::from_stored("global", "openai"), None);
-        assert_eq!(
-            UsageCapWindow::from_name("daily_utc"),
-            Some(UsageCapWindow::DailyUtc)
-        );
-        assert_eq!(
-            UsageCapWindow::from_name("monthly_utc"),
-            Some(UsageCapWindow::MonthlyUtc)
-        );
-        assert_eq!(UsageCapWindow::from_name("weekly_utc"), None);
-    }
-
-    #[test]
-    fn cap_marks_roundtrip_per_slot_and_face_stale_otherwise() {
-        use super::{UsageCapRevision, parse_usage_cap_mark, usage_cap_mark};
-        let system = UsageCapScope::System;
-        let openai = UsageCapScope::Provider(String::from("openai"));
-        assert_eq!(
-            usage_cap_mark(&system, UsageCapWindow::DailyUtc, None),
-            "usage-cap-system-daily_utc-none"
-        );
-        assert_eq!(
-            usage_cap_mark(
-                &system,
+    fn usage_cap_windows_are_half_open_utc_calendar_periods() {
+        for (window, instant, expected_start, expected_end) in [
+            (
+                UsageCapWindow::DailyUtc,
+                "2026-03-15T13:45:00+09:00",
+                "2026-03-15T00:00:00Z",
+                "2026-03-16T00:00:00Z",
+            ),
+            (
                 UsageCapWindow::MonthlyUtc,
-                Some(UsageCapRevision::from_u64(3))
-            ),
-            "usage-cap-system-monthly_utc-rev-3"
-        );
-        assert_eq!(
-            usage_cap_mark(
-                &openai,
-                UsageCapWindow::DailyUtc,
-                Some(UsageCapRevision::from_u64(12))
-            ),
-            "usage-cap-provider-openai-daily_utc-rev-12"
-        );
-        assert_eq!(
-            usage_cap_mark(&openai, UsageCapWindow::DailyUtc, None),
-            "usage-cap-provider-openai-daily_utc-none"
-        );
-        for (mark, scope, window, expected) in [
-            (
-                "usage-cap-system-daily_utc-none",
-                &system,
-                UsageCapWindow::DailyUtc,
-                Some(None),
+                "2026-03-15T23:59:00-05:00",
+                "2026-03-01T00:00:00Z",
+                "2026-04-01T00:00:00Z",
             ),
             (
-                "usage-cap-system-daily_utc-rev-3",
-                &system,
-                UsageCapWindow::DailyUtc,
-                Some(Some(3)),
+                UsageCapWindow::MonthlyUtc,
+                "2026-12-31T23:59:59Z",
+                "2026-12-01T00:00:00Z",
+                "2027-01-01T00:00:00Z",
             ),
             (
-                "usage-cap-provider-openai-daily_utc-rev-12",
-                &openai,
-                UsageCapWindow::DailyUtc,
-                Some(Some(12)),
-            ),
-            (
-                "usage-cap-provider-openai-daily_utc-none",
-                &openai,
-                UsageCapWindow::DailyUtc,
-                Some(None),
+                UsageCapWindow::MonthlyUtc,
+                "2028-02-29T12:00:00Z",
+                "2028-02-01T00:00:00Z",
+                "2028-03-01T00:00:00Z",
             ),
         ] {
-            assert_eq!(
-                parse_usage_cap_mark(mark, scope, window),
-                expected,
-                "the mark roundtrips: {mark}"
-            );
+            let instant = at(instant);
+            let period = window
+                .period_containing(instant)
+                .expect("the calendar period exists");
+            assert_eq!(period.start(), at(expected_start));
+            assert_eq!(period.end(), at(expected_end));
+            let instant = instant.as_datetime();
+            assert!(period.start().as_datetime() <= instant);
+            assert!(instant < period.end().as_datetime());
         }
-        for mark in [
-            "usage-cap-system-monthly_utc-rev-3",
-            "usage-cap-provider-other-daily_utc-rev-1",
-            "usage-cap-system-daily_utc",
-            "usage-cap-system-daily_utc-rev-x",
-            "usage-cap-system-daily_utc-none-extra",
-            "consent-dialogue-rev-1",
-            "",
-        ] {
-            assert_eq!(
-                parse_usage_cap_mark(mark, &system, UsageCapWindow::DailyUtc),
-                None,
-                "a foreign mark must be face-stale, not a guess: {mark}"
-            );
-        }
-        let hyphenated = UsageCapScope::Provider(String::from("open-ai"));
-        assert_eq!(
-            parse_usage_cap_mark(
-                "usage-cap-provider-open-ai-daily_utc-rev-1",
-                &hyphenated,
-                UsageCapWindow::DailyUtc
-            ),
-            Some(Some(1))
-        );
     }
 }

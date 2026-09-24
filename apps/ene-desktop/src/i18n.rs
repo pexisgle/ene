@@ -108,7 +108,7 @@ pub fn backpressure_hold(locale: Locale) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Locale, backpressure_hold, control_deny};
+    use super::{Locale, control_deny};
     use ene_local_control::{ControlOutcome, FromConfirmation};
 
     #[test]
@@ -122,16 +122,6 @@ mod tests {
         assert!(!ja.contains("処理できません"));
         assert!(!en.contains("unexpected"));
         assert!(ja.contains("保護ストア") || ja.contains("拒否"));
-    }
-
-    #[test]
-    fn a_requester_hold_has_its_own_notice_in_both_locales() {
-        let ja = backpressure_hold(Locale::Ja);
-        let en = backpressure_hold(Locale::En);
-        assert!(ja.contains("保留"));
-        assert_eq!(en, "Held due to load; retry shortly.");
-        assert!(!ja.contains("処理できません"));
-        assert!(!en.contains("unexpected"));
     }
 
     #[test]

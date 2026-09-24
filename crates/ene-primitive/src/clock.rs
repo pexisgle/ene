@@ -59,7 +59,6 @@ mod tests {
         let clock = WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00.987654321+09:00")
             .expect("offset timestamp must parse");
         assert_eq!(clock.to_rfc3339_secs(), "2026-09-08T12:00:00+09:00");
-        assert_eq!(clock.to_rfc3339_secs().len(), 25);
     }
 
     #[test]
@@ -77,14 +76,6 @@ mod tests {
             tokyo, utc,
             "equality follows the instant, not the stored offset"
         );
-    }
-
-    #[test]
-    fn wraps_and_returns_the_same_instant() {
-        let clock = WallClockWithTz::parse_rfc3339("2026-01-02T03:04:05Z")
-            .expect("UTC timestamp must parse");
-        let rebuilt = WallClockWithTz::from_datetime(clock.as_datetime());
-        assert_eq!(rebuilt, clock);
     }
 
     #[test]

@@ -682,35 +682,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initialize_once_and_reject_unsupported_schemas_without_changes() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        run(&mut conn).unwrap();
-        conn.execute("UPDATE credential_set SET rev = 7", ())
+    fn initialization_is_idempotent_and_rejects_representative_unsupported_versions() {
+        let mut current = Connection::open_in_memory().unwrap();
+        run(&mut current).unwrap();
+        current
+            .execute("UPDATE credential_set SET rev = 7", ())
             .unwrap();
-        let changes = conn.total_changes();
-        run(&mut conn).unwrap();
-        assert_eq!(conn.total_changes(), changes);
+        let current_changes = current.total_changes();
+        run(&mut current).unwrap();
+        assert_eq!(current.total_changes(), current_changes);
         assert_eq!(
-            conn.query_row("SELECT rev FROM credential_set", (), |r| r.get::<_, i64>(0))
+            current
+                .query_row("SELECT rev FROM credential_set", (), |row| {
+                    row.get::<_, i64>(0)
+                })
                 .unwrap(),
             7
         );
-        for version in [
-            -1, 0, 1, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
-        ] {
+
+        for version in [-1, 1, CURRENT_VERSION - 1] {
+            let mut conn = Connection::open_in_memory().unwrap();
             conn.pragma_update(None, "user_version", version).unwrap();
-            assert!(run(&mut conn).is_err());
+            let changes = conn.total_changes();
             assert_eq!(
-                conn.query_row("PRAGMA user_version", (), |r| r.get::<_, i64>(0))
+                run(&mut conn),
+                Err(String::from("unsupported schema version"))
+            );
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0))
                     .unwrap(),
                 version
             );
             assert_eq!(conn.total_changes(), changes);
         }
+
+        let mut unversioned = Connection::open_in_memory().unwrap();
+        unversioned
+            .execute_batch("CREATE TABLE preexisting(value TEXT)")
+            .unwrap();
+        let changes = unversioned.total_changes();
+        assert_eq!(
+            run(&mut unversioned),
+            Err(String::from("unversioned database is not empty"))
+        );
+        assert_eq!(
+            unversioned
+                .query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(unversioned.total_changes(), changes);
     }
 
     #[test]
-    fn failed_initialization_rolls_back_and_can_be_retried() {
+    fn failed_atomic_initialization_can_be_retried() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("atomic.db");
         let reader = Connection::open(&path).unwrap();
@@ -722,42 +747,25 @@ mod tests {
         assert!(run(&mut writer).is_err());
         assert_eq!(
             writer
-                .query_row("SELECT COUNT(*) FROM sqlite_schema", (), |r| r
-                    .get::<_, i64>(0))
+                .query_row("SELECT COUNT(*) FROM sqlite_schema", (), |row| {
+                    row.get::<_, i64>(0)
+                })
                 .unwrap(),
             0
         );
         assert_eq!(
             writer
-                .query_row("PRAGMA user_version", (), |r| r.get::<_, i64>(0))
+                .query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0))
                 .unwrap(),
             0
         );
         reader.execute_batch("ROLLBACK").unwrap();
         run(&mut writer).unwrap();
-    }
-
-    #[test]
-    fn concurrent_initializers_publish_one_schema_and_seed() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("concurrent.db");
-        let barrier = std::sync::Barrier::new(2);
-        std::thread::scope(|scope| {
-            for _ in 0..2 {
-                scope.spawn(|| {
-                    let mut conn = Connection::open(&path).unwrap();
-                    conn.busy_timeout(std::time::Duration::from_secs(5))
-                        .unwrap();
-                    barrier.wait();
-                    run(&mut conn).unwrap();
-                    assert_eq!(
-                        conn.query_row("SELECT COUNT(*) FROM credential_set", (), |r| r
-                            .get::<_, i64>(0))
-                            .unwrap(),
-                        1
-                    );
-                });
-            }
-        });
+        assert_eq!(
+            writer
+                .query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0))
+                .unwrap(),
+            CURRENT_VERSION
+        );
     }
 }

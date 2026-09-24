@@ -1297,34 +1297,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deletion_outcomes_round_trip_through_control() {
+    fn deletion_outcomes_round_trip_and_malformed_identities_are_refused() {
         let current = DeletionOperationRef {
             operation: ene_preservation::DeletionOperationId::from_raw(RawId::new()),
             sweep: ene_preservation::DeletionSweepGeneration::from_u64(4),
         };
-        for outcome in [
-            ConfirmTargetedDeletionOutcome::Started(current),
-            ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(current),
-            ConfirmTargetedDeletionOutcome::HeldByOperation(current),
-            ConfirmTargetedDeletionOutcome::NeedsClarification,
-            ConfirmTargetedDeletionOutcome::Missing,
+        for (case, outcome) in [
+            ("started", ConfirmTargetedDeletionOutcome::Started(current)),
+            (
+                "already covered",
+                ConfirmTargetedDeletionOutcome::AlreadyCoveredBy(current),
+            ),
+            (
+                "held by another operation",
+                ConfirmTargetedDeletionOutcome::HeldByOperation(current),
+            ),
+            (
+                "needs clarification",
+                ConfirmTargetedDeletionOutcome::NeedsClarification,
+            ),
+            ("missing", ConfirmTargetedDeletionOutcome::Missing),
         ] {
             let rendered = deletion_outcome(&outcome);
+            assert_eq!(deletion_from_control(&rendered), Some(outcome), "{case}");
+        }
+
+        for malformed in [
+            DeletionOutcome::Started {
+                operation: String::from("not-a-uuid"),
+                sweep: 1,
+            },
+            DeletionOutcome::AlreadyCoveredBy {
+                operation: String::from("not-a-uuid"),
+                sweep: 1,
+            },
+            DeletionOutcome::HeldByOperation {
+                operation: String::from("not-a-uuid"),
+                sweep: 1,
+            },
+        ] {
             assert_eq!(
-                deletion_from_control(&rendered),
-                Some(outcome),
-                "every canonical outcome must round-trip"
+                deletion_from_control(&malformed),
+                None,
+                "a malformed operation identity is never authority"
             );
         }
-    }
-
-    #[test]
-    fn a_malformed_operation_identity_is_refused() {
-        let malformed = DeletionOutcome::Started {
-            operation: String::from("not-a-uuid"),
-            sweep: 1,
-        };
-        assert_eq!(deletion_from_control(&malformed), None);
     }
 
     #[cfg(any(unix, windows))]
@@ -1341,45 +1358,39 @@ mod tests {
     }
 
     #[test]
-    fn an_unspawned_gui_leaves_no_confirmable_seat() {
+    fn gui_seat_generations_bind_confirmation_to_the_current_child() {
         let seat = FirstPartyControlSeat::default();
-        assert!(
-            !seat.has_seat(),
-            "a Host that never spawned a GUI has no seat to hand out"
-        );
+        assert!(!seat.has_seat());
+        assert_eq!(seat.holder_generation(), None);
         let (request_id, state) = seat
             .accept_request()
             .expect("an empty queue admits a request");
         assert!(
             matches!(state, RequestState::ConfirmationUnavailable),
-            "a request with no confirmation surface must say so, got {state:?}"
+            "an unspawned GUI has no confirmation authority"
         );
-        let refused = seat.mint(
-            &request_id,
-            ControlOp::DeviceApprove,
-            String::from("p"),
-            PendingOp::DeviceApprove {
-                pending_id: String::from("p"),
-            },
-        );
-        assert!(
-            matches!(refused, FromConfirmation::DeniedByBoundary),
-            "no challenge may be minted without a Host-spawned GUI"
-        );
-    }
+        assert!(matches!(
+            seat.mint(
+                &request_id,
+                ControlOp::DeviceApprove,
+                String::from("p"),
+                PendingOp::DeviceApprove {
+                    pending_id: String::from("p"),
+                },
+            ),
+            FromConfirmation::DeniedByBoundary
+        ));
 
-    #[test]
-    fn a_new_spawned_gui_invalidates_the_previous_seat_and_its_sessions() {
-        let seat = FirstPartyControlSeat::default();
         let (first_outbound, _first_inbound) = std::sync::mpsc::channel();
         let first = seat.seat_spawned_gui(first_outbound);
-        let (request_id, _) = seat
+        assert_eq!(seat.holder_generation(), Some(first));
+        let (old_request, _) = seat
             .accept_request()
-            .expect("an empty queue admits a request");
+            .expect("the live seat admits a request");
         let FromConfirmation::ConfirmationChallenge {
             session_id, nonce, ..
         } = seat.mint(
-            &request_id,
+            &old_request,
             ControlOp::DeletionConfirm,
             String::from("r"),
             PendingOp::DeletionConfirm {
@@ -1389,30 +1400,38 @@ mod tests {
         else {
             panic!("a live seat must mint a challenge");
         };
+
         let (second_outbound, _second_inbound) = std::sync::mpsc::channel();
         let second = seat.seat_spawned_gui(second_outbound);
-        assert_ne!(first, second, "a new child is a new seat generation");
+        assert_ne!(first, second, "each GUI child receives a new generation");
+        assert_eq!(seat.holder_generation(), Some(second));
         assert!(
             seat.take(session_id, nonce.expose()).is_none(),
-            "the previous GUI's session must not complete under the new seat"
+            "a new seat must invalidate the previous GUI's confirmation session"
         );
-    }
+        assert_eq!(
+            seat.request_state(&old_request),
+            Some(RequestState::ConfirmationUnavailable),
+            "the superseded request loses its confirmation authority"
+        );
 
-    #[test]
-    fn the_gui_channel_ending_clears_the_seat() {
-        let seat = FirstPartyControlSeat::default();
-        let generation = seat.seat_spawned_gui(std::sync::mpsc::channel().0);
-        seat.seat_closed(generation);
-        assert!(!seat.has_seat(), "a closed GUI leaves no seat behind");
+        for (case, closing, expected) in [
+            ("stale close", first, Some(second)),
+            ("current close", second, None),
+        ] {
+            seat.seat_closed(closing);
+            assert_eq!(seat.holder_generation(), expected, "{case}");
+            assert_eq!(seat.has_seat(), expected.is_some(), "{case}");
+        }
         let (request_id, state) = seat
             .accept_request()
-            .expect("an empty queue admits a request");
+            .expect("a closed GUI still admits requests without confirmation");
         assert!(matches!(state, RequestState::ConfirmationUnavailable));
         assert!(matches!(
             seat.mint(
                 &request_id,
                 ControlOp::CredentialPut,
-                String::from("p"),
+                String::from("openai:main"),
                 PendingOp::CredentialPut {
                     provider: String::from("openai"),
                     label: String::from("main"),
@@ -1424,26 +1443,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_closing_older_channel_does_not_clear_the_newer_seat() {
-        let seat = FirstPartyControlSeat::default();
-        let (first_outbound, _first_inbound) = std::sync::mpsc::channel();
-        let first = seat.seat_spawned_gui(first_outbound);
-        let (second_outbound, _second_inbound) = std::sync::mpsc::channel();
-        let second = seat.seat_spawned_gui(second_outbound);
-        seat.seat_closed(first);
-        assert!(
-            seat.has_seat(),
-            "an older channel closing must not clear the newer live seat"
-        );
-        assert_eq!(seat.holder_generation(), Some(second));
-    }
-
-    #[test]
-    fn an_expired_session_cannot_complete_and_settles_rejected() {
-        let seat = FirstPartyControlSeat::default();
-        let (outbound, _inbound) = std::sync::mpsc::channel();
-        seat.seat_spawned_gui(outbound);
+    fn mint_deletion_session(seat: &FirstPartyControlSeat) -> (String, Uuid, String) {
         let (request_id, _) = seat
             .accept_request()
             .expect("an empty queue admits a request");
@@ -1460,47 +1460,110 @@ mod tests {
         else {
             panic!("a live seat must mint a challenge");
         };
-        {
-            let mut inner = lock_unpoison(&seat.inner);
-            let session = inner
-                .sessions
-                .get_mut(&session_id)
-                .expect("the minted session must exist");
-            session.deadline = std::time::Instant::now() - CONTROL_SESSION_TTL;
-        }
-        assert!(
-            seat.take(session_id, nonce.expose()).is_none(),
-            "an expired session must not complete"
-        );
-        assert_eq!(
-            seat.request_state(&request_id),
-            Some(RequestState::Rejected),
-            "an expired session must settle its request as rejected"
-        );
+        (request_id, session_id, nonce.expose().to_owned())
     }
 
     #[test]
-    fn a_foreign_nonce_cannot_complete_a_session() {
-        let seat = FirstPartyControlSeat::default();
-        let (outbound, _inbound) = std::sync::mpsc::channel();
-        seat.seat_spawned_gui(outbound);
-        let (request_id, _) = seat
-            .accept_request()
-            .expect("an empty queue admits a request");
-        let FromConfirmation::ConfirmationChallenge { session_id, .. } = seat.mint(
-            &request_id,
-            ControlOp::DeviceApprove,
-            String::from("p"),
-            PendingOp::DeviceApprove {
-                pending_id: String::from("p"),
-            },
-        ) else {
-            panic!("a live seat must mint a challenge");
-        };
-        assert!(
-            seat.take(session_id, "not-the-minted-nonce").is_none(),
-            "a guessed nonce is not authority"
-        );
+    fn nonce_expiry_rejection_and_reclamation_enforce_session_authority() {
+        #[derive(Clone, Copy)]
+        enum SessionAction {
+            ForeignNonce,
+            ExpireOnCompletion,
+            Reject,
+            ExpireBeforeAdmission,
+        }
+
+        for (case, action) in [
+            ("foreign nonce", SessionAction::ForeignNonce),
+            ("expired completion", SessionAction::ExpireOnCompletion),
+            ("explicit rejection", SessionAction::Reject),
+            (
+                "expired-session reclamation",
+                SessionAction::ExpireBeforeAdmission,
+            ),
+        ] {
+            let seat = FirstPartyControlSeat::default();
+            let (outbound, _inbound) = std::sync::mpsc::channel();
+            seat.seat_spawned_gui(outbound);
+            let (request_id, session_id, nonce) = mint_deletion_session(&seat);
+            if matches!(
+                action,
+                SessionAction::ExpireOnCompletion | SessionAction::ExpireBeforeAdmission
+            ) {
+                let mut inner = lock_unpoison(&seat.inner);
+                let session = inner
+                    .sessions
+                    .get_mut(&session_id)
+                    .expect("the minted session must exist");
+                session.deadline = std::time::Instant::now() - CONTROL_SESSION_TTL;
+            }
+
+            match action {
+                SessionAction::ForeignNonce => {
+                    assert!(
+                        seat.take(session_id, "not-the-minted-nonce").is_none(),
+                        "{case}: a guessed nonce is not authority"
+                    );
+                    assert!(
+                        seat.take(session_id, &nonce).is_some(),
+                        "{case}: rejecting a guessed nonce must not consume the real session"
+                    );
+                }
+                SessionAction::ExpireOnCompletion => {
+                    assert!(
+                        seat.take(session_id, &nonce).is_none(),
+                        "{case}: an expired session cannot complete"
+                    );
+                    assert_eq!(
+                        seat.request_state(&request_id),
+                        Some(RequestState::Rejected),
+                        "{case}: expiry settles the request as rejected"
+                    );
+                    assert!(
+                        lock_unpoison(&seat.inner).sessions.is_empty(),
+                        "{case}: expiry reclaims the session"
+                    );
+                }
+                SessionAction::Reject => {
+                    assert_eq!(
+                        seat.reject(session_id, &nonce),
+                        Some(request_id.clone()),
+                        "{case}: only the minted nonce may reject its session"
+                    );
+                    seat.reject_request(&request_id);
+                    assert_eq!(
+                        seat.request_state(&request_id),
+                        Some(RequestState::Rejected),
+                        "{case}: rejection settles the request"
+                    );
+                    assert!(
+                        lock_unpoison(&seat.inner).sessions.is_empty(),
+                        "{case}: rejection reclaims the session"
+                    );
+                }
+                SessionAction::ExpireBeforeAdmission => {
+                    let (replacement, state) = seat
+                        .accept_request()
+                        .expect("reclaiming an expired session frees pending capacity");
+                    assert_ne!(replacement, request_id);
+                    assert!(
+                        matches!(state, RequestState::AwaitingOwnerConfirmation),
+                        "{case}: the replacement remains under the live seat"
+                    );
+                    assert_eq!(
+                        seat.request_state(&request_id),
+                        Some(RequestState::Rejected),
+                        "{case}: the expired request is settled before replacement"
+                    );
+                    let inner = lock_unpoison(&seat.inner);
+                    assert!(
+                        inner.sessions.is_empty(),
+                        "{case}: the expired session is not retained: {} remain",
+                        inner.sessions.len()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1524,50 +1587,6 @@ mod tests {
         assert!(
             seat.accept_request().is_some(),
             "a settled request must free one pending slot"
-        );
-    }
-
-    #[test]
-    fn expired_sessions_are_retired_before_a_new_admission() {
-        let seat = FirstPartyControlSeat::default();
-        let (outbound, _inbound) = std::sync::mpsc::channel();
-        seat.seat_spawned_gui(outbound);
-        let (request_id, _) = seat
-            .accept_request()
-            .expect("an empty queue admits a request");
-        let FromConfirmation::ConfirmationChallenge { session_id, .. } = seat.mint(
-            &request_id,
-            ControlOp::DeletionConfirm,
-            String::from("r"),
-            PendingOp::DeletionConfirm {
-                request_id: String::from("r"),
-            },
-        ) else {
-            panic!("a live seat must mint a challenge");
-        };
-        {
-            let mut inner = lock_unpoison(&seat.inner);
-            let session = inner
-                .sessions
-                .get_mut(&session_id)
-                .expect("the minted session must exist");
-            session.deadline = std::time::Instant::now() - CONTROL_SESSION_TTL;
-        }
-        let admitted = seat.accept_request();
-        assert!(
-            admitted.is_some(),
-            "the reclaimed slot admits a new request"
-        );
-        assert_eq!(
-            seat.request_state(&request_id),
-            Some(RequestState::Rejected),
-            "the retired request reads back rejected"
-        );
-        let inner = lock_unpoison(&seat.inner);
-        assert!(
-            inner.sessions.is_empty(),
-            "the expired session is reclaimed, not retained: {} remain",
-            inner.sessions.len()
         );
     }
 }

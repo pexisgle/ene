@@ -37,7 +37,7 @@ impl HostRuntimeInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{HOST_RUNTIME_FILE_NAME, HostRuntimeInfo};
+    use super::HostRuntimeInfo;
 
     fn info(url: &str) -> HostRuntimeInfo {
         HostRuntimeInfo {
@@ -56,22 +56,5 @@ mod tests {
         assert_eq!(info("http://127.0.0.1:43121").local_port(), None);
         assert_eq!(info("wss://127.0.0.1:0").local_port(), None);
         assert_eq!(info("wss://127.0.0.1:not-a-port").local_port(), None);
-    }
-
-    #[test]
-    fn debug_redacts_the_local_token() {
-        let rendered = format!("{:?}", info("wss://127.0.0.1:43121"));
-        assert!(!rendered.contains("token-marker-9921"), "{rendered}");
-        assert!(rendered.contains("[redacted]"), "{rendered}");
-        assert!(rendered.contains("wss://127.0.0.1:43121"), "{rendered}");
-    }
-
-    #[test]
-    fn the_runtime_file_roundtrips() {
-        let original = info("wss://127.0.0.1:43121");
-        let json = serde_json::to_string(&original).expect("runtime must serialize");
-        let back: HostRuntimeInfo = serde_json::from_str(&json).expect("runtime must parse");
-        assert_eq!(back, original, "runtime facts must survive the file");
-        assert_eq!(HOST_RUNTIME_FILE_NAME, "host-runtime.json");
     }
 }

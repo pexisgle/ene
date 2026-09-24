@@ -289,7 +289,6 @@ mod tests {
     #[derive(Serialize)]
     enum CraftedPayload {
         FutureThing(FutureBody),
-        FuturePing,
         SubmitTextInput(PartialSubmit),
         TextStreamClose(CraftedClose),
     }
@@ -437,21 +436,6 @@ mod tests {
                 message_type: String::from("FuturePing")
             },
             "an unknown message type is rejected without inferring its body"
-        );
-    }
-
-    #[test]
-    fn a_unit_variant_payload_without_an_envelope_match_is_unsupported() {
-        let crafted = CraftedFrame {
-            envelope: envelope_of("FuturePing"),
-            payload: CraftedPayload::FuturePing,
-        };
-        let reason = unsupported_reason(&crafted);
-        assert_eq!(
-            reason,
-            super::UnsupportedReason::UnknownMessageType {
-                message_type: String::from("FuturePing")
-            }
         );
     }
 

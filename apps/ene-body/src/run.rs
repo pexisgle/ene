@@ -404,14 +404,10 @@ mod tests {
 
     #[test]
     fn default_endpoint_is_stdio() {
-        let endpoint = parse_endpoint(["ene-body"]).expect("parse");
-        assert_eq!(endpoint, IpcEndpoint::Stdio);
-    }
-
-    #[test]
-    fn stdio_flag_is_accepted() {
-        let endpoint = parse_endpoint(["ene-body", "--ipc-stdio"]).expect("parse");
-        assert_eq!(endpoint, IpcEndpoint::Stdio);
+        let default = parse_endpoint(["ene-body"]).expect("default parse");
+        let explicit = parse_endpoint(["ene-body", "--ipc-stdio"]).expect("explicit stdio parse");
+        assert_eq!(default, IpcEndpoint::Stdio);
+        assert_eq!(explicit, IpcEndpoint::Stdio);
     }
 
     #[cfg(unix)]

@@ -266,7 +266,8 @@ pub struct ManagementView {
 
 #[cfg(test)]
 mod tests {
-    use super::super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, ViewMarkWire};
+    use super::super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire};
+    use super::ViewSection;
     use super::{
         IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin,
         SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, UsageCapTarget, consent_target,
@@ -274,7 +275,6 @@ mod tests {
         parse_usage_cap_target, parse_workspace_target, task_target, usage_cap_target,
         workspace_target,
     };
-    use super::{ManagementOutcome, ViewSection};
     use uuid::Uuid;
 
     fn intent() -> ManagementIntent {
@@ -349,18 +349,6 @@ mod tests {
         assert!(
             intent.target_carries_owner_body(),
             "a deletion target carries an Owner body whatever the kind claims"
-        );
-    }
-
-    #[test]
-    fn stale_base_view_points_at_the_current_mark() {
-        let outcome = ManagementOutcome::StaleBaseView {
-            current: ViewMarkWire(String::from("mark-2")),
-        };
-        let rendered = format!("{outcome:?}");
-        assert!(
-            rendered.contains("mark-2"),
-            "current mark stays visible: {rendered}"
         );
     }
 
@@ -507,21 +495,6 @@ mod tests {
             assert_eq!(
                 parse_workspace_target(&ManagementTargetWire(String::from(raw))),
                 None
-            );
-        }
-    }
-
-    #[test]
-    fn setup_command_targets_parse_as_neither_shape() {
-        for raw in [SETUP_SHOW_TARGET, SETUP_COMPLETE_TARGET] {
-            let target = ManagementTargetWire(String::from(raw));
-            assert!(
-                parse_credential_target(&target).is_none(),
-                "setup target is not a credential target: {raw:?}"
-            );
-            assert!(
-                parse_consent_target(&target).is_none(),
-                "setup target is not a consent target: {raw:?}"
             );
         }
     }

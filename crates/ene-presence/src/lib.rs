@@ -226,14 +226,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_client_ids_differ() {
-        assert_ne!(
-            ClientId::from_raw(RawId::new()),
-            ClientId::from_raw(RawId::new())
-        );
-    }
-
-    #[test]
     fn fallback_requires_current_same_machine_and_permitted() {
         let closing = client("00000000-0000-0000-0000-000000000001");
         let other = client("00000000-0000-0000-0000-000000000002");

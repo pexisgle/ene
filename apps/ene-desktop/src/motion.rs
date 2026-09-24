@@ -69,7 +69,7 @@ fn env_dir(name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUNDLED_MOTION_DIR, MotionEnvironment, resolve};
+    use super::{BUNDLED_MOTION_DIR, MotionEnvironment, resolve, search_dirs};
     use ene_body::ipc::PoseHint;
     use ene_body::testing::{MotionFixture, write_generated_vrma};
     use std::path::{Path, PathBuf};
@@ -98,69 +98,118 @@ mod tests {
     }
 
     #[test]
-    fn explicit_override_is_used_without_searching() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut environment = environment(dir.path());
-        let override_dir = dir.path().join("override");
-        write_clip(&override_dir, "VRMA_06.vrma");
-        write_clip(
-            &environment.data_dir.join(BUNDLED_MOTION_DIR),
-            "VRMA_01.vrma",
-        );
-        environment.motion_dir = Some(override_dir.clone());
+    fn override_and_search_root_precedence_are_table_driven() {
+        let cases = [
+            (
+                Some(("VRMA_06.vrma", PoseHint::Idle)),
+                Some(("VRMA_01.vrma", PoseHint::Speaking)),
+                Some(("VRMA_02.vrma", PoseHint::Listening)),
+                Some(("VRMA_07.vrma", PoseHint::Working)),
+                Some(PoseHint::Idle),
+            ),
+            (
+                None,
+                Some(("VRMA_01.vrma", PoseHint::Speaking)),
+                Some(("VRMA_02.vrma", PoseHint::Listening)),
+                Some(("VRMA_07.vrma", PoseHint::Working)),
+                Some(PoseHint::Speaking),
+            ),
+            (
+                None,
+                None,
+                Some(("VRMA_02.vrma", PoseHint::Listening)),
+                Some(("VRMA_07.vrma", PoseHint::Working)),
+                Some(PoseHint::Listening),
+            ),
+            (
+                None,
+                None,
+                None,
+                Some(("VRMA_06.vrma", PoseHint::Idle)),
+                Some(PoseHint::Idle),
+            ),
+            (None, None, None, None, None),
+        ];
 
-        let clips = resolve(&environment);
-        assert_eq!(clips.len(), 1);
-        assert_eq!(clips[0].pose, PoseHint::Idle);
+        for (override_clip, data_clip, exe_clip, workspace_clip, expected) in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut environment = environment(dir.path());
+            if let Some((name, _)) = override_clip {
+                write_clip(&dir.path().join("override"), name);
+                environment.motion_dir = Some(dir.path().join("override"));
+            }
+            if let Some((name, _)) = data_clip {
+                write_clip(&environment.data_dir.join(BUNDLED_MOTION_DIR), name);
+            }
+            if let Some((name, _)) = exe_clip {
+                write_clip(
+                    &environment
+                        .exe_dir
+                        .as_ref()
+                        .expect("exe dir")
+                        .join(BUNDLED_MOTION_DIR),
+                    name,
+                );
+            }
+            if let Some((name, _)) = workspace_clip {
+                write_clip(
+                    &environment
+                        .workspace_dir
+                        .as_ref()
+                        .expect("workspace dir")
+                        .join(BUNDLED_MOTION_DIR),
+                    name,
+                );
+            }
+
+            let poses = resolve(&environment)
+                .into_iter()
+                .map(|clip| clip.pose)
+                .collect::<Vec<_>>();
+            assert_eq!(poses, expected.into_iter().collect::<Vec<_>>());
+            if expected.is_none() {
+                for root in search_dirs(&environment) {
+                    assert!(!root.exists(), "resolution created {}", root.display());
+                }
+            }
+        }
     }
 
     #[test]
-    fn the_data_directory_is_searched_before_the_installation() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let environment = environment(dir.path());
-        let data_motions = environment.data_dir.join(BUNDLED_MOTION_DIR);
-        write_clip(&data_motions, "VRMA_01.vrma");
-        let exe_dir = environment.exe_dir.clone().expect("exe dir");
-        write_clip(&exe_dir.join(BUNDLED_MOTION_DIR), "VRMA_06.vrma");
+    fn partial_packs_keep_their_mapped_clips_in_canonical_order() {
+        type ClipEntry = (&'static str, PoseHint);
+        type PackCase = (&'static [ClipEntry], &'static [PoseHint]);
+        let cases: &[PackCase] = &[
+            (
+                &[
+                    ("VRMA_03.vrma", PoseHint::Attention),
+                    ("VRMA_01.vrma", PoseHint::Speaking),
+                ],
+                &[PoseHint::Speaking, PoseHint::Attention],
+            ),
+            (
+                &[
+                    ("VRMA_07.vrma", PoseHint::Working),
+                    ("VRMA_06.vrma", PoseHint::Idle),
+                    ("VRMA_02.vrma", PoseHint::Listening),
+                ],
+                &[PoseHint::Idle, PoseHint::Listening, PoseHint::Working],
+            ),
+        ];
 
-        let clips = resolve(&environment);
-        assert_eq!(clips.len(), 1);
-        assert_eq!(clips[0].pose, PoseHint::Speaking);
-    }
+        for (files, expected) in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let environment = environment(dir.path());
+            let motions = environment.data_dir.join(BUNDLED_MOTION_DIR);
+            for (name, _) in *files {
+                write_clip(&motions, name);
+            }
 
-    #[test]
-    fn the_workspace_assets_are_used_for_development_runs() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let environment = environment(dir.path());
-        let workspace = environment.workspace_dir.clone().expect("workspace");
-        write_clip(&workspace.join(BUNDLED_MOTION_DIR), "VRMA_06.vrma");
-
-        let clips = resolve(&environment);
-        assert_eq!(clips.len(), 1);
-        assert_eq!(clips[0].pose, PoseHint::Idle);
-    }
-
-    #[test]
-    fn a_partial_pack_assigns_only_the_clips_it_has() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let environment = environment(dir.path());
-        write_clip(
-            &environment.data_dir.join(BUNDLED_MOTION_DIR),
-            "VRMA_02.vrma",
-        );
-
-        let clips = resolve(&environment);
-        assert_eq!(clips.len(), 1);
-        assert_eq!(clips[0].pose, PoseHint::Listening);
-    }
-
-    #[test]
-    fn nothing_placed_yields_no_assignment() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let environment = environment(dir.path());
-
-        let clips = resolve(&environment);
-        assert!(clips.is_empty());
-        assert!(!environment.data_dir.join(BUNDLED_MOTION_DIR).exists());
+            let poses = resolve(&environment)
+                .into_iter()
+                .map(|clip| clip.pose)
+                .collect::<Vec<_>>();
+            assert_eq!(poses, *expected);
+        }
     }
 }

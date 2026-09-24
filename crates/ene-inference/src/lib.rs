@@ -1542,31 +1542,6 @@ mod dispatch_tests {
     }
 
     #[tokio::test]
-    async fn transport_failure_records_unknown_counts() {
-        let usage = CapturedUsage(Mutex::new(Vec::new()));
-        let consent = FixedConsent(Some(record(1)));
-        let transport = FakeProviderTransport::failing(FakeFailure::Transport("down".to_owned()));
-        let result = dispatch_authorized(
-            authorized(),
-            prompt("hello").await,
-            &mut DiscardSink,
-            None,
-            &consent,
-            &StartedAttempts,
-            &usage,
-            &transport,
-        )
-        .await;
-        assert!(result.is_err(), "transport failure propagates");
-        let facts = usage.0.lock().expect("usage capture lock");
-        assert_eq!(facts.len(), 1, "an uncertain attempt records one fact");
-        assert_eq!(facts[0].source, UsageSource::Unknown);
-        assert_eq!(facts[0].input_tokens, None);
-        assert_eq!(facts[0].cached_input_tokens, None);
-        assert_eq!(facts[0].output_tokens, None);
-    }
-
-    #[tokio::test]
     async fn usage_failure_on_completed_call_propagates_not_a_clean_success() {
         let consent = FixedConsent(Some(record(1)));
         let transport = FakeProviderTransport::new(

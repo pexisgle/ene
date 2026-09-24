@@ -1323,41 +1323,46 @@ mod tests {
     }
 
     #[test]
-    fn round_targets_resolve_only_with_a_matching_observed_view() {
-        assert_eq!(
-            canonical_round_intent(&submit(RoundTarget::New), None),
-            Some(RoundIntentMark::New),
-            "New without an observed round starts one"
-        );
-        assert_eq!(
-            canonical_round_intent(
-                &submit(RoundTarget::Existing(round("r1"))),
-                Some(&round("r1"))
+    fn round_intake_resolves_only_target_and_observed_views_that_agree() {
+        let cases = [
+            (
+                "New without an observed round",
+                RoundTarget::New,
+                None,
+                Some(RoundIntentMark::New),
             ),
-            Some(RoundIntentMark::Existing(String::from("r1"))),
-            "Existing joins the observed round"
-        );
-    }
+            (
+                "Existing with its observed round",
+                RoundTarget::Existing(round("r1")),
+                Some(round("r1")),
+                Some(RoundIntentMark::Existing(String::from("r1"))),
+            ),
+            (
+                "New with a contradicted observed round",
+                RoundTarget::New,
+                Some(round("r1")),
+                None,
+            ),
+            (
+                "Existing without an observed round",
+                RoundTarget::Existing(round("r1")),
+                None,
+                None,
+            ),
+            (
+                "Existing with a different observed round",
+                RoundTarget::Existing(round("r1")),
+                Some(round("r2")),
+                None,
+            ),
+        ];
 
-    #[test]
-    fn a_contradicted_observed_round_is_stale_instead_of_resolved() {
-        assert_eq!(
-            canonical_round_intent(&submit(RoundTarget::New), Some(&round("r1"))),
-            None,
-            "New cannot carry an observed round"
-        );
-        assert_eq!(
-            canonical_round_intent(&submit(RoundTarget::Existing(round("r1"))), None),
-            None,
-            "Existing must carry its own observed round"
-        );
-        assert_eq!(
-            canonical_round_intent(
-                &submit(RoundTarget::Existing(round("r1"))),
-                Some(&round("r2"))
-            ),
-            None,
-            "Existing cannot borrow a different observed round"
-        );
+        for (case, target, observed, expected) in cases {
+            assert_eq!(
+                canonical_round_intent(&submit(target), observed.as_ref()),
+                expected,
+                "{case}"
+            );
+        }
     }
 }

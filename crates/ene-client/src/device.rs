@@ -174,8 +174,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_loads_as_missing() {
-        let dir = scratch_dir("missing");
+    fn device_file_states_distinguish_missing_from_invalid() {
+        let dir = scratch_dir("states");
         assert!(
             !device_file_path(&dir).exists(),
             "the scratch file must start absent"
@@ -184,12 +184,30 @@ mod tests {
             load_stored_device(&dir) == DeviceFileState::Missing,
             "a missing file is the first-run state"
         );
+
+        let written = std::fs::write(device_file_path(&dir), b"{not json");
+        assert!(written.is_ok(), "the corrupt fixture must write");
+        assert!(
+            load_stored_device(&dir) == DeviceFileState::Malformed,
+            "a corrupt file is a degraded state, never a first run"
+        );
+
+        let blank = StoredDevice::new(DeviceWireId(uuid::Uuid::from_u128(1)), String::new());
+        let stored_result = store_device(&dir, &blank);
+        assert!(
+            stored_result.is_ok(),
+            "storing must succeed: {stored_result:?}"
+        );
+        assert!(
+            load_stored_device(&dir) == DeviceFileState::Malformed,
+            "a blank secret cannot prove anything and is degraded state"
+        );
         remove_dir(&dir);
     }
 
     #[test]
-    fn stored_device_roundtrips_through_the_file() {
-        let dir = scratch_dir("roundtrip");
+    fn stored_device_roundtrips_privately_and_redacts_its_secret() {
+        let dir = scratch_dir("roundtrip-private");
         let stored_result = store_device(&dir, &stored());
         assert!(
             stored_result.is_ok(),
@@ -200,58 +218,33 @@ mod tests {
             loaded == DeviceFileState::Loaded(stored()),
             "the stored identity must load back, got {loaded:?}"
         );
-        remove_dir(&dir);
-    }
 
-    #[cfg(unix)]
-    #[test]
-    fn stored_device_file_is_owner_only() {
-        use std::os::unix::fs::PermissionsExt as _;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = scratch_dir("perms");
-        let stored_result = store_device(&dir, &stored());
-        assert!(
-            stored_result.is_ok(),
-            "storing must succeed: {stored_result:?}"
-        );
-        let metadata = std::fs::metadata(device_file_path(&dir));
-        assert!(metadata.is_ok(), "the device file must exist");
-        let Ok(metadata) = metadata else {
-            remove_dir(&dir);
-            return;
-        };
-        assert!(
-            metadata.permissions().mode() & 0o777 == 0o600,
-            "the device file must be owner-only, got {:o}",
-            metadata.permissions().mode() & 0o777
-        );
-        remove_dir(&dir);
-    }
+            let metadata = std::fs::metadata(device_file_path(&dir));
+            assert!(metadata.is_ok(), "the device file must exist");
+            let metadata = metadata.expect("the device file must exist");
+            assert!(
+                metadata.permissions().mode() & 0o777 == 0o600,
+                "the device file must be owner-only, got {:o}",
+                metadata.permissions().mode() & 0o777
+            );
+        }
 
-    #[test]
-    fn corrupt_file_is_malformed_not_missing() {
-        let dir = scratch_dir("corrupt");
-        let written = std::fs::write(device_file_path(&dir), b"{not json");
-        assert!(written.is_ok(), "the corrupt fixture must write");
+        let rendered = format!("{:?}", stored());
         assert!(
-            load_stored_device(&dir) == DeviceFileState::Malformed,
-            "a corrupt file is a degraded state, never a first run"
-        );
-        remove_dir(&dir);
-    }
-
-    #[test]
-    fn blank_secret_file_is_malformed() {
-        let dir = scratch_dir("blank");
-        let blank = StoredDevice::new(DeviceWireId(uuid::Uuid::from_u128(1)), String::new());
-        let stored_result = store_device(&dir, &blank);
-        assert!(
-            stored_result.is_ok(),
-            "storing must succeed: {stored_result:?}"
+            !rendered.contains("abcdef0123456789"),
+            "stored Debug must not leak the secret: {rendered:?}"
         );
         assert!(
-            load_stored_device(&dir) == DeviceFileState::Malformed,
-            "a blank secret cannot prove anything and is degraded state"
+            rendered.contains("[redacted]"),
+            "stored Debug must mark the redaction: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("StoredDevice"),
+            "stored Debug must name the type: {rendered:?}"
         );
         remove_dir(&dir);
     }
@@ -339,22 +332,5 @@ mod tests {
             "the final document must be loadable"
         );
         remove_dir(&dir);
-    }
-
-    #[test]
-    fn stored_device_debug_redacts_the_secret() {
-        let rendered = format!("{:?}", stored());
-        assert!(
-            !rendered.contains("abcdef0123456789"),
-            "stored Debug must not leak the secret: {rendered:?}"
-        );
-        assert!(
-            rendered.contains("[redacted]"),
-            "stored Debug must mark the redaction: {rendered:?}"
-        );
-        assert!(
-            rendered.contains("StoredDevice"),
-            "stored Debug must name the type: {rendered:?}"
-        );
     }
 }

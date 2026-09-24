@@ -465,9 +465,15 @@ pub trait ErasureParticipant: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Waker};
+
     use super::*;
-    use crate::{DeletionSearchMaterial, MechanicalDeletionTarget};
+    use crate::{DeletionSearchMaterial, TargetedDeletionTarget};
     use ene_primitive::RawId;
+
+    const OWNER: ParticipantOwnerRef = ParticipantOwnerRef::Learning;
 
     fn condition() -> ErasureConditionRef {
         ErasureConditionRef {
@@ -476,106 +482,150 @@ mod tests {
         }
     }
 
-    #[test]
-    fn owner_storage_names_round_trip_including_incarnations() {
-        let owners = [
-            ParticipantOwnerRef::Companion,
-            ParticipantOwnerRef::Learning,
-            ParticipantOwnerRef::Task,
-            ParticipantOwnerRef::Action,
-            ParticipantOwnerRef::Inference,
-            ParticipantOwnerRef::Permission,
-            ParticipantOwnerRef::Credential,
-            ParticipantOwnerRef::Presence,
-            ParticipantOwnerRef::HostTransient,
-            ParticipantOwnerRef::ClientIncarnation(RawId::new()),
-        ];
-        for owner in owners {
-            let stored = owner.storage_name();
-            assert_eq!(
-                ParticipantOwnerRef::from_storage_name(&stored),
-                Some(owner),
-                "{stored} must round-trip"
-            );
-        }
-        let client = ParticipantOwnerRef::ClientIncarnation(RawId::new());
-        assert!(client.is_incarnation());
-        assert_eq!(client.class_name(), "client_incarnation");
-        assert!(!ParticipantOwnerRef::Companion.is_incarnation());
-        assert_eq!(
-            ParticipantOwnerRef::from_storage_name("client_incarnation:not-a-uuid"),
-            None,
-            "a malformed incarnation identity is unreadable stored state"
-        );
-        assert_eq!(
-            ParticipantOwnerRef::from_storage_name("unknown_owner"),
-            None
-        );
-    }
-
-    #[test]
-    fn a_verified_fact_always_reports_zero_remainder() {
-        let condition = condition();
-        let participant = ParticipantOwnerRef::Companion;
-        let at = WallClockWithTz::now();
-        let verified = ParticipantCompletionFact::verified(condition, participant, 7, at);
-        assert_eq!(verified.status(), ParticipantCompletionStatus::Verified);
-        assert_eq!(verified.erased_count(), 7);
-        assert_eq!(verified.remainder_count(), 0);
-        assert_eq!(verified.condition(), condition);
-        assert_eq!(verified.participant(), participant);
-        assert_eq!(verified.observed_at(), at);
-        let partial = ParticipantCompletionFact::local_complete(condition, participant, 3, 4, at);
-        assert_eq!(partial.status(), ParticipantCompletionStatus::LocalComplete);
-        assert_eq!(partial.erased_count(), 3);
-        assert_eq!(partial.remainder_count(), 4);
-        let held = ParticipantCompletionFact::held(
-            condition,
-            participant,
-            ParticipantHoldClass::Unavailable,
-            at,
-        );
-        assert_eq!(
-            held.status(),
-            ParticipantCompletionStatus::Held(ParticipantHoldClass::Unavailable)
-        );
-    }
-
-    #[test]
-    fn hold_classes_and_progress_keep_their_sweep() {
-        assert_eq!(
-            ParticipantHoldClass::from_name("unsupported"),
-            Some(ParticipantHoldClass::Unsupported)
-        );
-        assert_eq!(ParticipantHoldClass::from_name("other"), None);
-        assert_eq!(ParticipantProgress::Pending.sweep(), None);
-        let sweep = DeletionSweepGeneration::from_u64(3);
-        let held = ParticipantProgress::Held {
-            sweep,
-            reason: ParticipantHoldClass::Failed,
-        };
-        assert_eq!(held.sweep(), Some(sweep));
-        assert!(!held.is_verified());
-        assert!(ParticipantProgress::Verified { sweep }.is_verified());
-    }
-
-    #[test]
-    fn scope_debug_never_renders_the_target_body() {
-        let material = TargetedDeletionTarget {
+    fn local_scope(text: &str) -> ParticipantErasureScope {
+        ParticipantErasureScope::local(TargetedDeletionTarget {
             mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
-                "private-target".into(),
+                text.to_owned(),
             )),
-            semantic_hints: vec![DeletionSearchMaterial::new("private-hint".into())],
-        };
+            semantic_hints: Vec::new(),
+        })
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+        loop {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+                return output;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    fn drive(
+        condition: ErasureConditionRef,
+        scope: ParticipantErasureScope,
+        outcome: Result<LocalErasurePass, ()>,
+    ) -> (
+        ParticipantCompletionFact,
+        Option<(ErasureConditionRef, String)>,
+    ) {
+        let observed = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&observed);
+        let fact = block_on(drive_local_erasure(
+            OWNER,
+            DemandLocalErasureCommand::new(condition, OWNER, scope),
+            move |actual, text| {
+                let sink = Arc::clone(&sink);
+                let observed_value = (actual, text.to_owned());
+                Box::pin(async move {
+                    *sink.lock().expect("observation lock") = Some(observed_value);
+                    outcome
+                })
+            },
+        ));
+        let observed = observed.lock().expect("observation lock").clone();
+        (fact, observed)
+    }
+
+    fn assert_identity(fact: &ParticipantCompletionFact, condition: ErasureConditionRef) {
+        assert_eq!(fact.condition(), condition);
+        assert_eq!(fact.participant(), OWNER);
+    }
+
+    #[test]
+    fn generic_local_erasure_driver_preserves_holds_progress_and_verification() {
+        let condition = condition();
+        let target = "private target";
         let command = DemandLocalErasureCommand::new(
-            condition(),
-            ParticipantOwnerRef::Learning,
-            ParticipantErasureScope::local(material),
+            condition,
+            OWNER,
+            ParticipantErasureScope::local(TargetedDeletionTarget {
+                mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
+                    String::from(target),
+                )),
+                semantic_hints: vec![DeletionSearchMaterial::new(String::from(
+                    "private semantic hint",
+                ))],
+            }),
         );
-        let rendered = format!("{command:?}");
-        assert!(!rendered.contains("private-target"));
-        assert!(!rendered.contains("private-hint"));
-        let correlation_only = ParticipantErasureScope::correlation_only();
-        assert!(correlation_only.target().is_none());
+        let command_debug = format!("{command:?}");
+        assert!(!command_debug.contains(target));
+        assert!(!command_debug.contains("private semantic hint"));
+
+        for scope in [
+            ParticipantErasureScope::correlation_only(),
+            local_scope(" "),
+        ] {
+            let (fact, observed) = drive(
+                condition,
+                scope,
+                Ok(LocalErasurePass::Applied {
+                    erased: 0,
+                    remainder: 0,
+                }),
+            );
+            assert_eq!(
+                fact.status(),
+                ParticipantCompletionStatus::Held(ParticipantHoldClass::Failed)
+            );
+            assert_eq!((fact.erased_count(), fact.remainder_count()), (0, 0));
+            assert_identity(&fact, condition);
+            assert_eq!(observed, None);
+        }
+
+        let (fact, observed) = drive(condition, local_scope(target), Err(()));
+        assert_eq!(
+            fact.status(),
+            ParticipantCompletionStatus::Held(ParticipantHoldClass::Failed)
+        );
+        assert_eq!(
+            observed,
+            Some((condition, String::from(target))),
+            "a storage failure still preserves its exact condition and target"
+        );
+        assert_identity(&fact, condition);
+
+        let (fact, observed) = drive(
+            condition,
+            local_scope(target),
+            Ok(LocalErasurePass::NotCurrent),
+        );
+        assert_eq!(fact.status(), ParticipantCompletionStatus::LocalComplete);
+        assert_eq!((fact.erased_count(), fact.remainder_count()), (0, 0));
+        assert_eq!(observed, Some((condition, String::from(target))));
+        assert_identity(&fact, condition);
+        assert!(!matches!(
+            fact.status(),
+            ParticipantCompletionStatus::Verified
+        ));
+
+        let (fact, observed) = drive(
+            condition,
+            local_scope(target),
+            Ok(LocalErasurePass::Applied {
+                erased: 0,
+                remainder: 0,
+            }),
+        );
+        assert_eq!(fact.status(), ParticipantCompletionStatus::Verified);
+        assert_eq!((fact.erased_count(), fact.remainder_count()), (0, 0));
+        assert_eq!(observed, Some((condition, String::from(target))));
+        assert_identity(&fact, condition);
+
+        let (fact, observed) = drive(
+            condition,
+            local_scope(target),
+            Ok(LocalErasurePass::Applied {
+                erased: 1,
+                remainder: 2,
+            }),
+        );
+        assert_eq!(fact.status(), ParticipantCompletionStatus::MoreWork);
+        assert_eq!((fact.erased_count(), fact.remainder_count()), (1, 2));
+        assert_eq!(observed, Some((condition, String::from(target))));
+        assert_identity(&fact, condition);
+        assert!(!format!("{fact:?}").contains(target));
     }
 }

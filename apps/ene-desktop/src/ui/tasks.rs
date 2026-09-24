@@ -736,8 +736,7 @@ async fn load_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        DisplayedTask, PresentedReceipt, TaskPanel, is_interrupted, resume_from_displayed,
-        same_listed_task, task_id_from_purpose,
+        DisplayedTask, PresentedReceipt, TaskPanel, resume_from_displayed, same_listed_task,
     };
     use ene_api::v1::undelivered::{TaskListItem, TaskWireRef};
 
@@ -749,21 +748,6 @@ mod tests {
             progress: String::from("in_progress"),
             running: false,
         }
-    }
-
-    #[test]
-    fn interrupted_is_in_progress_without_execution_registration() {
-        let mut item = shown(1);
-        assert!(is_interrupted(&item));
-        item.running = true;
-        assert!(!is_interrupted(&item));
-        item.running = false;
-        item.progress = String::from("cancelled");
-        assert!(!is_interrupted(&item));
-        item.progress = String::from("failed");
-        assert!(!is_interrupted(&item));
-        item.progress = String::from("completed");
-        assert!(!is_interrupted(&item));
     }
 
     #[test]
@@ -780,13 +764,6 @@ mod tests {
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1"
         );
         assert_ne!(command.expected_revision, latest.revision);
-    }
-
-    #[test]
-    fn purpose_identity_yields_the_management_task_target() {
-        let id = task_id_from_purpose("01234567-89ab-cdef-0123-456789abcdef:3")
-            .expect("purpose identity parses");
-        assert_eq!(id.to_string(), "01234567-89ab-cdef-0123-456789abcdef");
     }
 
     #[test]
@@ -821,15 +798,5 @@ mod tests {
         assert!(same_listed_task(&rotated, &shown));
         rotated.purpose = String::from("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:4");
         assert!(!same_listed_task(&rotated, &shown));
-    }
-
-    #[test]
-    fn resume_debug_does_not_carry_the_instruction() {
-        let command = resume_from_displayed(&shown(1), String::from("sk-should-not-leak"));
-        let rendered = format!("{command:?}");
-        assert!(
-            !rendered.contains("sk-should-not-leak"),
-            "instruction redacted: {rendered}"
-        );
     }
 }

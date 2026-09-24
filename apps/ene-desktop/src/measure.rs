@@ -1231,38 +1231,34 @@ mod tests {
     }
 
     #[test]
-    fn pass_is_only_produced_after_all_evidence_is_evaluated() {
+    fn presentation_gate_distinguishes_presented_discarded_missing_fps_and_rejection() {
         let mut record = passing_record();
         assert!(!record.claims_pass());
         record.evaluate();
         assert!(record.claims_pass(), "{:?}", record.failures);
-    }
 
-    #[test]
-    fn discarded_frames_do_not_fail_a_passing_presented_fps() {
-        let mut record = passing_record();
         let source = record.fps.as_ref().expect("fps").source.clone();
         let mut events = presented_events(300);
         events.push(PresentationEvent::Discarded {
             correlation_id: 300,
         });
-        record.fps =
-            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.fps = Some(
+            PresentationRecord::from_events(source.clone(), 5.0, 10.0, events)
+                .expect("presentation"),
+        );
         record.evaluate();
         assert!(record.claims_pass(), "{:?}", record.failures);
-    }
+        assert_eq!(record.fps.as_ref().expect("fps").discarded, 1);
 
-    #[test]
-    fn missing_frames_still_fail_a_passing_presented_fps() {
-        let mut record = passing_record();
-        let source = record.fps.as_ref().expect("fps").source.clone();
         let mut events = presented_events(300);
         events.push(PresentationEvent::Missing {
             correlation_id: 300,
             reason: String::from("feedback never resolved"),
         });
-        record.fps =
-            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.fps = Some(
+            PresentationRecord::from_events(source.clone(), 5.0, 10.0, events)
+                .expect("presentation"),
+        );
         record.evaluate();
         assert_eq!(record.verdict.label(), "Fail");
         assert!(
@@ -1274,11 +1270,28 @@ mod tests {
             "{:?}",
             record.failures
         );
-    }
 
-    #[test]
-    fn missing_evidence_does_not_hide_independent_gate_failures() {
-        let mut record = passing_record();
+        let events = (0..300)
+            .map(|id| PresentationEvent::Presented {
+                correlation_id: id,
+                timestamp_ns: id * 33_000_000,
+                clock_id: 1,
+                output: String::new(),
+            })
+            .collect();
+        record.fps =
+            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.evaluate();
+        let failure = record
+            .failures
+            .iter()
+            .find(|failure| failure.starts_with("presented FPS"))
+            .expect("the rejected presentation is reported");
+        assert!(
+            failure.contains("presented output is empty"),
+            "the operator line must name the rejection reason: {failure}"
+        );
+
         let events = (0..29)
             .map(|id| PresentationEvent::Presented {
                 correlation_id: id,
@@ -1313,32 +1326,6 @@ mod tests {
                 .failures
                 .iter()
                 .any(|failure| failure.starts_with("presented FPS 29.000"))
-        );
-    }
-
-    #[test]
-    fn rejected_presentation_names_the_reason_on_the_failure_line() {
-        let mut record = passing_record();
-        let source = record.fps.as_ref().expect("fps").source.clone();
-        let events = (0..300)
-            .map(|id| PresentationEvent::Presented {
-                correlation_id: id,
-                timestamp_ns: id * 33_000_000,
-                clock_id: 1,
-                output: String::new(),
-            })
-            .collect();
-        record.fps =
-            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
-        record.evaluate();
-        let failure = record
-            .failures
-            .iter()
-            .find(|failure| failure.starts_with("presented FPS"))
-            .expect("the rejected presentation is reported");
-        assert!(
-            failure.contains("presented output is empty"),
-            "the operator line must name the rejection reason: {failure}"
         );
     }
 

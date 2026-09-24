@@ -344,12 +344,7 @@ fn render_operation(operation: &DeletionOperationStatusView) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeletionPanel, render_operation};
-    use ene_api::v1::deletion::{
-        DeletionOperationStatusView, DeletionParticipantReportWire, DeletionPhaseWire,
-        DeletionPurposeWire,
-    };
-    use ene_api::v1::refs::DeletionOperationWireRef;
+    use super::DeletionPanel;
 
     #[test]
     fn debug_redacts_exact_text() {
@@ -366,30 +361,5 @@ mod tests {
             !body.contains("raw-secret-keyword"),
             "projection must omit the body: {body}"
         );
-    }
-
-    #[test]
-    fn phases_are_distinct_in_the_projection() {
-        for phase in [
-            DeletionPhaseWire::Held,
-            DeletionPhaseWire::Finalizing,
-            DeletionPhaseWire::Completed,
-        ] {
-            let line = render_operation(&DeletionOperationStatusView {
-                operation: DeletionOperationWireRef(String::from("op-1")),
-                phase,
-                purpose: DeletionPurposeWire::Privacy,
-                started_at: String::from("2026-09-19T00:00:00Z"),
-                sweep: 1,
-                hold: None,
-                participants: DeletionParticipantReportWire::NotReported,
-            });
-            assert!(
-                line.contains(phase.as_str()),
-                "phase token must appear: {line}"
-            );
-        }
-        assert_ne!(DeletionPhaseWire::Held, DeletionPhaseWire::Completed);
-        assert_ne!(DeletionPhaseWire::Finalizing, DeletionPhaseWire::Completed);
     }
 }

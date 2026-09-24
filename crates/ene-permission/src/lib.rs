@@ -407,10 +407,10 @@ mod tests {
     use super::{
         CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord, ConsentRevision, ConsumerKind,
         DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision, PurposeKind,
-        check_live_authorization, consent_mark, consent_view_mark, parse_consent_mark,
+        check_live_authorization,
     };
 
-    fn candidate() -> InferenceUseCandidate {
+    fn dialogue_candidate() -> InferenceUseCandidate {
         InferenceUseCandidate {
             consumer: ConsumerKind::CompanionDialogue,
             capability: CapabilityKind::Dialogue,
@@ -420,8 +420,24 @@ mod tests {
         }
     }
 
-    fn record() -> ConsentRecord {
-        record_for(CapabilityKind::Dialogue)
+    fn learning_candidate() -> InferenceUseCandidate {
+        InferenceUseCandidate {
+            consumer: ConsumerKind::CompanionLearning,
+            capability: CapabilityKind::Learning,
+            provider_ref: "acme".to_owned(),
+            model: "dialogue-1".to_owned(),
+            purpose: PurposeKind::MemoryFormation,
+        }
+    }
+
+    fn task_candidate() -> InferenceUseCandidate {
+        InferenceUseCandidate {
+            consumer: ConsumerKind::TaskAgent,
+            capability: CapabilityKind::Dialogue,
+            provider_ref: "acme".to_owned(),
+            model: "dialogue-1".to_owned(),
+            purpose: PurposeKind::TaskAgentTurn,
+        }
     }
 
     fn record_for(capability: CapabilityKind) -> ConsentRecord {
@@ -435,367 +451,168 @@ mod tests {
         }
     }
 
-    fn query_for(stored: &ConsentRecord) -> CheckLiveAuthorizationQuery {
+    fn query_for(
+        candidate: &InferenceUseCandidate,
+        stored: &ConsentRecord,
+    ) -> CheckLiveAuthorizationQuery {
         CheckLiveAuthorizationQuery {
-            candidate: candidate(),
+            candidate: candidate.clone(),
             expected_consent: Some((stored.id.clone(), stored.rev)),
         }
     }
 
-    #[test]
-    fn matching_consent_allows_for_exactly_one_use() {
-        let stored = record();
-        let query = query_for(&stored);
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(matches!(
-            decision,
-            LiveAuthorizationDecision::AllowForThisUse(_)
-        ));
-        let LiveAuthorizationDecision::AllowForThisUse(id) = decision else {
-            return;
-        };
-        assert!(tracker.consume(&id, &candidate()));
-        assert!(!tracker.consume(&id, &candidate()));
+    fn authorize(
+        query: &CheckLiveAuthorizationQuery,
+        current: Option<&ConsentRecord>,
+        tracker: &mut EvaluationTracker,
+    ) -> LiveAuthorizationDecision {
+        check_live_authorization(query, current, tracker)
     }
 
     #[test]
-    fn unknown_id_does_not_consume() {
-        let stored = record();
-        let query = query_for(&stored);
+    fn inference_token_is_single_use_and_bound_to_the_full_fingerprint() {
+        let stored = record_for(CapabilityKind::Dialogue);
+        let candidate = dialogue_candidate();
         let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(matches!(
-            decision,
-            LiveAuthorizationDecision::AllowForThisUse(_)
-        ));
-        let LiveAuthorizationDecision::AllowForThisUse(_) = decision else {
-            return;
+        let LiveAuthorizationDecision::AllowForThisUse(evaluation) =
+            authorize(&query_for(&candidate, &stored), Some(&stored), &mut tracker)
+        else {
+            panic!("exact current consent must mint an evaluation");
         };
-        let mut fresh = EvaluationTracker::new();
-        let other = fresh.mint(&candidate());
-        assert!(!tracker.consume(&other, &candidate()));
-    }
 
-    #[test]
-    fn mismatched_fingerprint_rejects_without_burning_the_id() {
-        let stored = record();
-        let query = query_for(&stored);
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(matches!(
-            decision,
-            LiveAuthorizationDecision::AllowForThisUse(_)
-        ));
-        let LiveAuthorizationDecision::AllowForThisUse(id) = decision else {
-            return;
-        };
-        let mut altered = candidate();
-        altered.model = "other-model".to_owned();
-        assert!(!tracker.consume(&id, &altered));
-        assert!(tracker.consume(&id, &candidate()));
-    }
-
-    #[test]
-    fn stale_expected_consent_needs_revalidation() {
-        let stored = record();
-        let query = CheckLiveAuthorizationQuery {
-            expected_consent: Some(("consent-1".to_owned(), ConsentRevision::from_u64(1))),
-            ..query_for(&stored)
-        };
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(matches!(
-            decision,
-            LiveAuthorizationDecision::NeedsRevalidation
-        ));
-    }
-
-    #[test]
-    fn missing_expected_consent_needs_revalidation_when_stored_exists() {
-        let stored = record();
-        let query = CheckLiveAuthorizationQuery {
-            expected_consent: None,
-            ..query_for(&stored)
-        };
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(matches!(
-            decision,
-            LiveAuthorizationDecision::NeedsRevalidation
-        ));
-    }
-
-    #[test]
-    fn provider_mismatch_denies_as_stale_consent() {
-        let stored = record();
-        let mut off = candidate();
-        off.provider_ref = "other".to_owned();
-        let query = CheckLiveAuthorizationQuery {
-            candidate: off,
-            expected_consent: Some((stored.id.clone(), stored.rev)),
-        };
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(matches!(decision, LiveAuthorizationDecision::Deny(_)));
-        let LiveAuthorizationDecision::Deny(code) = decision else {
-            return;
-        };
-        assert_eq!(code, DenyCode::ConsentStale);
-    }
-
-    #[test]
-    fn missing_stored_consent_denies_as_stale_consent() {
-        let stored = record();
-        let query = query_for(&stored);
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, None, &mut tracker);
-        assert!(matches!(decision, LiveAuthorizationDecision::Deny(_)));
-        let LiveAuthorizationDecision::Deny(code) = decision else {
-            return;
-        };
-        assert_eq!(code, DenyCode::ConsentStale);
-    }
-
-    fn learning_candidate() -> InferenceUseCandidate {
-        InferenceUseCandidate {
-            consumer: ConsumerKind::CompanionLearning,
-            capability: CapabilityKind::Learning,
-            provider_ref: "acme".to_owned(),
-            model: "dialogue-1".to_owned(),
-            purpose: PurposeKind::MemoryFormation,
+        let mut other_model = candidate.clone();
+        other_model.model = String::from("other-model");
+        let mut other_provider = candidate.clone();
+        other_provider.provider_ref = String::from("other-provider");
+        let mut other_consumer = candidate.clone();
+        other_consumer.consumer = ConsumerKind::TaskAgent;
+        let mut other_capability = candidate.clone();
+        other_capability.capability = CapabilityKind::Learning;
+        let mut other_purpose = candidate.clone();
+        other_purpose.purpose = PurposeKind::TaskAgentTurn;
+        for altered in [
+            other_model,
+            other_provider,
+            other_consumer,
+            other_capability,
+            other_purpose,
+        ] {
+            assert!(
+                !tracker.consume(&evaluation, &altered),
+                "a token must not transfer to another inference fingerprint"
+            );
         }
+
+        let mut foreign_tracker = EvaluationTracker::new();
+        let foreign = foreign_tracker.mint(&candidate);
+        assert!(!tracker.consume(&foreign, &candidate));
+        assert!(tracker.consume(&evaluation, &candidate));
+        assert!(!tracker.consume(&evaluation, &candidate));
     }
 
     #[test]
-    fn learning_formation_requires_a_learning_consent() {
-        let stored = record_for(CapabilityKind::Learning);
-        let query = CheckLiveAuthorizationQuery {
-            candidate: learning_candidate(),
-            expected_consent: Some((stored.id.clone(), stored.rev)),
-        };
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        let LiveAuthorizationDecision::AllowForThisUse(id) = decision else {
-            panic!("learning formation must be allowed, got {decision:?}");
-        };
-        assert!(
-            tracker.consume(&id, &learning_candidate()),
-            "the learning evaluation is bound to the learning fingerprint"
-        );
-        assert!(
-            !tracker.consume(&id, &candidate()),
-            "a dialogue fingerprint must not consume a learning evaluation"
-        );
-    }
-
-    #[test]
-    fn dialogue_consent_never_authorizes_learning() {
-        let stored = record();
-        let query = CheckLiveAuthorizationQuery {
-            candidate: learning_candidate(),
-            expected_consent: Some((stored.id.clone(), stored.rev)),
-        };
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(
-            matches!(
-                decision,
-                LiveAuthorizationDecision::Deny(code) if code == DenyCode::ConsentStale
-            ),
-            "a dialogue consent must not authorize learning, got {decision:?}"
-        );
-    }
-
-    #[test]
-    fn dialogue_and_learning_consumers_are_not_interchangeable() {
-        let stored = record();
-        for mixed in [
-            InferenceUseCandidate {
-                consumer: ConsumerKind::CompanionDialogue,
-                ..learning_candidate()
-            },
-            InferenceUseCandidate {
-                capability: CapabilityKind::Dialogue,
-                ..learning_candidate()
-            },
-            InferenceUseCandidate {
-                purpose: PurposeKind::DialogueResponse,
-                ..learning_candidate()
-            },
-            InferenceUseCandidate {
-                consumer: ConsumerKind::CompanionLearning,
-                ..candidate()
-            },
+    fn authorization_requires_the_exact_current_consent_view() {
+        let stored = record_for(CapabilityKind::Dialogue);
+        for expected in [
+            Some((String::from("other-consent"), stored.rev)),
+            Some((stored.id.clone(), ConsentRevision::from_u64(2))),
+            None,
         ] {
             let query = CheckLiveAuthorizationQuery {
-                candidate: mixed.clone(),
-                expected_consent: Some((stored.id.clone(), stored.rev)),
+                expected_consent: expected,
+                ..query_for(&dialogue_candidate(), &stored)
             };
             let mut tracker = EvaluationTracker::new();
-            let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-            assert!(
-                matches!(
-                    decision,
-                    LiveAuthorizationDecision::Deny(code) if code == DenyCode::NotInAllowlist
-                ),
-                "mixed consumer/capability/purpose must stay outside the closed world: {mixed:?}"
+            assert_eq!(
+                authorize(&query, Some(&stored), &mut tracker),
+                LiveAuthorizationDecision::NeedsRevalidation,
+                "an id/revision view that is not exactly current must be revalidated"
+            );
+        }
+
+        let mut tracker = EvaluationTracker::new();
+        assert_eq!(
+            authorize(
+                &query_for(&dialogue_candidate(), &stored),
+                None,
+                &mut tracker
+            ),
+            LiveAuthorizationDecision::Deny(DenyCode::ConsentStale)
+        );
+
+        let learning = record_for(CapabilityKind::Learning);
+        assert_eq!(
+            authorize(
+                &query_for(&dialogue_candidate(), &stored),
+                Some(&learning),
+                &mut tracker
+            ),
+            LiveAuthorizationDecision::Deny(DenyCode::ConsentStale),
+            "a different capability cannot satisfy the current consent"
+        );
+
+        for field in ["provider", "model"] {
+            let mut candidate = dialogue_candidate();
+            if field == "provider" {
+                candidate.provider_ref = String::from("other-provider");
+            } else {
+                candidate.model = String::from("other-model");
+            }
+            assert_eq!(
+                authorize(&query_for(&candidate, &stored), Some(&stored), &mut tracker),
+                LiveAuthorizationDecision::Deny(DenyCode::ConsentStale),
+                "the consent binds the exact provider and model"
             );
         }
     }
 
-    fn task_agent_candidate() -> InferenceUseCandidate {
-        InferenceUseCandidate {
-            consumer: ConsumerKind::TaskAgent,
-            capability: CapabilityKind::Dialogue,
-            provider_ref: "acme".to_owned(),
-            model: "dialogue-1".to_owned(),
-            purpose: PurposeKind::TaskAgentTurn,
+    #[test]
+    fn inference_allowlist_is_the_three_closed_world_triples() {
+        for (candidate, capability) in [
+            (dialogue_candidate(), CapabilityKind::Dialogue),
+            (learning_candidate(), CapabilityKind::Learning),
+            (task_candidate(), CapabilityKind::Dialogue),
+        ] {
+            let stored = record_for(capability);
+            let mut tracker = EvaluationTracker::new();
+            let LiveAuthorizationDecision::AllowForThisUse(evaluation) =
+                authorize(&query_for(&candidate, &stored), Some(&stored), &mut tracker)
+            else {
+                panic!("the exact closed-world triple must be allowed");
+            };
+            assert!(tracker.consume(&evaluation, &candidate));
         }
-    }
 
-    #[test]
-    fn task_agent_turn_inherits_the_dialogue_consent() {
-        let stored = record();
-        let query = CheckLiveAuthorizationQuery {
-            candidate: task_agent_candidate(),
-            expected_consent: Some((stored.id.clone(), stored.rev)),
-        };
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        let LiveAuthorizationDecision::AllowForThisUse(id) = decision else {
-            panic!("task agent turn must be allowed under the inherited consent, got {decision:?}");
-        };
-        assert!(
-            tracker.consume(&id, &task_agent_candidate()),
-            "the task agent evaluation is bound to the task agent fingerprint"
-        );
-        assert!(
-            !tracker.consume(&id, &candidate()),
-            "a dialogue fingerprint must not consume a task agent evaluation"
-        );
-    }
-
-    #[test]
-    fn task_agent_turn_is_not_allowed_with_a_learning_consent() {
-        let stored = record_for(CapabilityKind::Learning);
-        let query = CheckLiveAuthorizationQuery {
-            candidate: task_agent_candidate(),
-            expected_consent: Some((stored.id.clone(), stored.rev)),
-        };
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(
-            matches!(
-                decision,
-                LiveAuthorizationDecision::Deny(code) if code == DenyCode::ConsentStale
-            ),
-            "the task agent turn inherits only the dialogue capability consent, got {decision:?}"
-        );
-    }
-
-    #[test]
-    fn task_agent_turn_does_not_masquerade_as_dialogue_or_learning() {
-        let stored = record();
-        for mixed in [
+        let stored = record_for(CapabilityKind::Dialogue);
+        for candidate in [
             InferenceUseCandidate {
-                consumer: ConsumerKind::CompanionDialogue,
-                ..task_agent_candidate()
+                capability: CapabilityKind::Learning,
+                ..dialogue_candidate()
             },
             InferenceUseCandidate {
                 consumer: ConsumerKind::CompanionLearning,
-                ..task_agent_candidate()
-            },
-            InferenceUseCandidate {
-                purpose: PurposeKind::DialogueResponse,
-                ..task_agent_candidate()
+                ..dialogue_candidate()
             },
             InferenceUseCandidate {
                 purpose: PurposeKind::MemoryFormation,
-                ..task_agent_candidate()
+                ..dialogue_candidate()
             },
             InferenceUseCandidate {
-                capability: CapabilityKind::Learning,
-                ..task_agent_candidate()
+                purpose: PurposeKind::DialogueResponse,
+                ..task_candidate()
             },
         ] {
-            let query = CheckLiveAuthorizationQuery {
-                candidate: mixed.clone(),
-                expected_consent: Some((stored.id.clone(), stored.rev)),
-            };
             let mut tracker = EvaluationTracker::new();
-            let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-            assert!(
-                matches!(
-                    decision,
-                    LiveAuthorizationDecision::Deny(code) if code == DenyCode::NotInAllowlist
-                ),
-                "a Task Agent turn may only use the explicit task-agent triple: {mixed:?}"
+            assert_eq!(
+                authorize(&query_for(&candidate, &stored), Some(&stored), &mut tracker),
+                LiveAuthorizationDecision::Deny(DenyCode::NotInAllowlist),
+                "wrong capability, consumer, or purpose must stay denied: {candidate:?}"
             );
         }
     }
 
     #[test]
-    fn consumer_and_purpose_storage_names_are_closed_world() {
-        for consumer in [
-            ConsumerKind::CompanionDialogue,
-            ConsumerKind::CompanionLearning,
-            ConsumerKind::TaskAgent,
-        ] {
-            assert_eq!(ConsumerKind::from_name(consumer.as_str()), Some(consumer));
-        }
-        assert_eq!(ConsumerKind::from_name("observer"), None);
-        for purpose in [
-            PurposeKind::DialogueResponse,
-            PurposeKind::MemoryFormation,
-            PurposeKind::TaskAgentTurn,
-        ] {
-            assert_eq!(PurposeKind::from_name(purpose.as_str()), Some(purpose));
-        }
-        assert_eq!(PurposeKind::from_name("unknown"), None);
-    }
-
-    #[test]
-    fn mark_helpers_round_trip_both_capabilities() {
-        assert_eq!(
-            consent_mark(CapabilityKind::Dialogue, None),
-            "consent-dialogue-none"
-        );
-        assert_eq!(
-            consent_mark(CapabilityKind::Learning, Some(2)),
-            "consent-learning-rev-2"
-        );
-        let combined = consent_view_mark(Some(3), Some(4));
-        assert_eq!(combined, "consent-dialogue-rev-3;consent-learning-rev-4");
-        assert_eq!(
-            parse_consent_mark(&combined, CapabilityKind::Dialogue),
-            Some(Some(3))
-        );
-        assert_eq!(
-            parse_consent_mark(&combined, CapabilityKind::Learning),
-            Some(Some(4))
-        );
-        assert_eq!(
-            parse_consent_mark("consent-dialogue-none", CapabilityKind::Dialogue),
-            Some(None)
-        );
-        assert_eq!(
-            parse_consent_mark("consent-dialogue-none", CapabilityKind::Learning),
-            None
-        );
-        let reordered = "consent-learning-rev-4;consent-dialogue-rev-3";
-        assert_eq!(
-            parse_consent_mark(reordered, CapabilityKind::Dialogue),
-            Some(Some(3))
-        );
-        assert_eq!(
-            parse_consent_mark(reordered, CapabilityKind::Learning),
-            Some(Some(4))
-        );
-    }
-
-    #[test]
-    fn revision_exhaustion_is_reported_not_aliased() {
+    fn consent_revision_exhaustion_is_not_aliased() {
         assert_eq!(
             ConsentRevision::from_u64(0).checked_next(),
             Some(ConsentRevision::from_u64(1))

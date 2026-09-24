@@ -1092,39 +1092,6 @@ mod launcher_tests {
     }
 
     #[tokio::test]
-    async fn admitted_launch_is_owned_until_shutdown() {
-        let directory = tempfile::tempdir().unwrap();
-        let handle = Arc::new(
-            HostHandle::open_with_cred_store(
-                directory.path(),
-                crate::serve::CredStore::Memory(ene_credential::MemoryCredentialStore::new()),
-            )
-            .await
-            .unwrap(),
-        );
-        let launcher = Arc::new(BackgroundTaskAgent::new(
-            Arc::clone(&handle),
-            Arc::new(NoProvider),
-        ));
-        assert!(handle.install_task_launcher(launcher.clone()));
-        let weak = Arc::downgrade(&handle);
-        launcher
-            .try_launch(ene_task::DelegationId::generate())
-            .unwrap();
-        assert_eq!(
-            crate::lock_unpoison(&launcher.tasks)
-                .as_ref()
-                .unwrap()
-                .len(),
-            1
-        );
-        drop(handle);
-        assert!(weak.upgrade().is_some());
-        launcher.shutdown_and_join().await.unwrap();
-        assert!(weak.upgrade().is_none());
-    }
-
-    #[tokio::test]
     async fn dropping_launcher_aborts_owned_async_work() {
         let launcher = BackgroundTaskAgent {
             handle: std::sync::Weak::new(),

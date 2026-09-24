@@ -167,44 +167,35 @@ mod tests {
         DeletionRequestId, OwnerConfirmationFact, ParticipantOwnerRef,
         StageTargetedDeletionRequestCommand, TargetedDeletionRequest,
     };
-    use crate::{DeletionPurpose, MechanicalDeletionTarget, TargetedDeletionTarget};
+    use crate::{
+        DeletionPurpose, DeletionSearchMaterial, MechanicalDeletionTarget, TargetedDeletionTarget,
+    };
 
-    fn target(text: &str) -> TargetedDeletionTarget {
+    fn target(text: &str, hint: &str) -> TargetedDeletionTarget {
         TargetedDeletionTarget {
-            mechanical: MechanicalDeletionTarget::ExactText(crate::DeletionSearchMaterial::new(
+            mechanical: MechanicalDeletionTarget::ExactText(DeletionSearchMaterial::new(
                 text.to_owned(),
             )),
-            semantic_hints: Vec::new(),
+            semantic_hints: vec![DeletionSearchMaterial::new(hint.to_owned())],
         }
     }
 
     fn staged() -> TargetedDeletionRequest {
         TargetedDeletionRequest::from_durable(
             DeletionRequestId::from_raw(RawId::new()),
-            target("private target"),
+            target("private target", "private hint"),
             DeletionPurpose::Privacy,
         )
     }
 
     #[test]
-    fn staged_request_debug_never_renders_the_target_body() {
-        let request = staged();
-        let rendered = format!("{request:?}");
-        assert!(
-            !rendered.contains("private target"),
-            "the staged target never renders through Debug: {rendered}"
-        );
-    }
-
-    #[test]
-    fn confirmation_binds_to_its_own_request_identity() {
+    fn confirmation_is_bound_to_its_own_request_identity() {
         let request = staged();
         let identity = request.request();
-        let fact = OwnerConfirmationFact::from_durable(identity);
         let command = request
             .clone()
             .into_command(
-                fact,
+                OwnerConfirmationFact::from_durable(identity),
                 WallClockWithTz::now(),
                 vec![
                     ParticipantOwnerRef::Companion,
@@ -225,16 +216,20 @@ mod tests {
     }
 
     #[test]
-    fn staging_command_exposes_no_confirmation() {
+    fn staged_scope_and_command_material_are_absent_from_debug() {
+        let request = staged();
+        let request_debug = format!("{request:?}");
+        assert!(!request_debug.contains("private target"));
+        assert!(!request_debug.contains("private hint"));
+
         let command = StageTargetedDeletionRequestCommand::new(
-            target("secret"),
+            target("secret staging body", "secret staging hint"),
             DeletionPurpose::Security,
             WallClockWithTz::now(),
         );
         assert_eq!(command.purpose(), DeletionPurpose::Security);
-        assert!(
-            !format!("{command:?}").contains("secret"),
-            "the staging input is as protected as the request"
-        );
+        let command_debug = format!("{command:?}");
+        assert!(!command_debug.contains("secret staging body"));
+        assert!(!command_debug.contains("secret staging hint"));
     }
 }

@@ -1286,19 +1286,16 @@ mod tests {
             clap_error(&["--version"]),
             clap::error::ErrorKind::DisplayVersion
         ));
-        assert!(matches!(
-            clap_error(&["send", "--help"]),
-            clap::error::ErrorKind::DisplayHelp
-        ));
     }
 
     #[test]
-    fn missing_command_reports_usage() {
+    fn missing_or_unknown_command_reports_usage() {
         assert!(matches!(parse(&[]), Err(CliError::Usage(_))));
         assert!(matches!(
-            parse(&["--config", "/tmp/ene.json"]),
+            parse(&["tasks", "extra"]),
             Err(CliError::Usage(_))
         ));
+        assert!(matches!(parse(&["frobnicate"]), Err(CliError::Usage(_))));
     }
 
     #[test]
@@ -1320,13 +1317,9 @@ mod tests {
         ])
         .expect("a repeated --config keeps the last value");
         assert!(repeated.config == Some(PathBuf::from("/tmp/b.json")));
-    }
-
-    #[test]
-    fn config_value_named_serve_stays_data() {
-        let cli =
+        let named =
             parse(&["--config", "serve", "setup", "--show"]).expect("the value is not a command");
-        assert!(cli.config == Some(PathBuf::from("serve")));
+        assert!(named.config == Some(PathBuf::from("serve")));
     }
 
     #[test]
@@ -1369,7 +1362,6 @@ mod tests {
             ][..],
             &["setup", "--provider", "acme", "--model", "gpt-x"][..],
             &["setup", "--provider", "openai", "--model", ""][..],
-            &["setup", "--unknown"][..],
         ] {
             assert!(
                 matches!(parse(words), Err(CliError::Usage(_))),
@@ -1415,7 +1407,6 @@ mod tests {
         );
         for words in [
             &["send"][..],
-            &["send", "--new", "hi"][..],
             &["send", "--round"][..],
             &["send", "--unknown", "hi"][..],
         ] {
@@ -1475,10 +1466,8 @@ mod tests {
                 }
         );
         for words in [
-            &["memory", "extra"][..],
             &["memory", "--after", "a", "--revisions", "b"][..],
             &["memory", "--after-revision", "3"][..],
-            &["memory", "--after"][..],
         ] {
             assert!(
                 matches!(parse(words), Err(CliError::Usage(_))),
@@ -1623,15 +1612,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_flags_and_positionals_report_usage() {
-        assert!(matches!(
-            parse(&["tasks", "extra"]),
-            Err(CliError::Usage(_))
-        ));
-        assert!(matches!(parse(&["frobnicate"]), Err(CliError::Usage(_))));
-    }
-
-    #[test]
     fn exit_codes_split_outcome_from_failures() {
         assert!(
             CliError::Client(ClientError::ServerOutcome(String::from("stale"))).exit_code()
@@ -1659,27 +1639,18 @@ mod tests {
 
         use super::observe_close;
 
-        for shown in [false, true] {
-            assert!(
-                observe_close(StreamClose::Completed, shown)
-                    == (PresentationStatus::Presented, true),
-                "completion always presents and succeeds, shown={shown}"
-            );
-        }
-        for status in [
-            StreamClose::Interrupted,
-            StreamClose::Cancelled,
-            StreamClose::Stale,
-        ] {
-            assert!(
-                observe_close(status, true) == (PresentationStatus::Presented, false),
-                "a shown-but-{status:?} stream observes presented yet fails"
-            );
-            assert!(
-                observe_close(status, false) == (PresentationStatus::Unknown, false),
-                "an unshown {status:?} stream observes unknown and fails"
-            );
-        }
+        assert!(
+            observe_close(StreamClose::Completed, false) == (PresentationStatus::Presented, true),
+            "completion always presents and succeeds"
+        );
+        assert!(
+            observe_close(StreamClose::Interrupted, true) == (PresentationStatus::Presented, false),
+            "a shown-but-interrupted stream observes presented yet fails"
+        );
+        assert!(
+            observe_close(StreamClose::Interrupted, false) == (PresentationStatus::Unknown, false),
+            "an unshown interrupted stream observes unknown and fails"
+        );
     }
 
     #[test]

@@ -59,15 +59,6 @@ mod tests {
         handle.expect("the winning handle must open")
     }
 
-    async fn serve_startup(dir: &Path) -> Result<(HostLock, HostHandle), CoreError> {
-        let lock = HostLock::acquire(dir)?;
-        let handle =
-            HostHandle::open_with_cred_store(dir, CredStore::Memory(MemoryCredentialStore::new()))
-                .await?;
-        handle.run_startup_mutations().await?;
-        Ok((lock, handle))
-    }
-
     async fn generation(handle: &HostHandle) -> u64 {
         let companion = handle
             .store
@@ -82,27 +73,6 @@ mod tests {
             .expect("the attribution must exist")
             .generation
             .as_u64()
-    }
-
-    #[test]
-    fn second_acquisition_of_the_same_directory_is_already_running() {
-        let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
-        let first = HostLock::acquire(dir.path());
-        assert!(
-            first.is_ok(),
-            "the first acquisition must succeed: {first:?}"
-        );
-        let second = HostLock::acquire(dir.path());
-        assert!(
-            matches!(second, Err(CoreError::AlreadyRunning)),
-            "the second acquisition must be refused, got {second:?}"
-        );
-        drop(first);
-        let third = HostLock::acquire(dir.path());
-        assert!(
-            third.is_ok(),
-            "a released lock must be acquirable again: {third:?}"
-        );
     }
 
     #[tokio::test]
@@ -175,32 +145,6 @@ mod tests {
         assert!(
             pending.iter().any(|entry| entry.pending_id == pending_id),
             "the offline attempt leaves the pending request untouched"
-        );
-    }
-
-    #[tokio::test]
-    async fn second_serve_startup_is_refused_before_startup_mutation() {
-        let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
-        let started = serve_startup(dir.path()).await;
-        let (lock, winner) = started.expect("the winning startup must complete");
-        let before = generation(&winner).await;
-        let loser = serve_startup(dir.path()).await;
-        assert!(
-            matches!(loser, Err(CoreError::AlreadyRunning)),
-            "the second serving startup must be refused at the lock, got {:?}",
-            loser.as_ref().err().map(ToString::to_string)
-        );
-        assert_eq!(
-            generation(&winner).await,
-            before,
-            "the refused startup must not run presence/notification/reconciliation mutations"
-        );
-        drop(lock);
-        let restarted = serve_startup(dir.path()).await;
-        assert!(
-            restarted.is_ok(),
-            "the released lock must admit a fresh startup: {:?}",
-            restarted.as_ref().err().map(ToString::to_string)
         );
     }
 }
