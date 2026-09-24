@@ -96,6 +96,7 @@ struct WorkerHandle {
     process: Arc<ProcessHandle>,
     staging_directory: Option<PathBuf>,
     hard_stopped: AtomicBool,
+    hard_stop_signal: tokio::sync::watch::Sender<bool>,
 }
 
 #[derive(Debug)]
@@ -255,7 +256,7 @@ impl TaskEffectRuntime {
                 });
             }
         };
-        let output = tokio::spawn(async move {
+        let mut output = tokio::spawn(async move {
             let mut bytes = Vec::new();
             stdout.read_to_end(&mut bytes).await.map(|_| bytes)
         });
@@ -310,11 +311,19 @@ impl TaskEffectRuntime {
                 status = child.wait() => status,
             }
         };
+        let mut hard_stop_signal = handle.hard_stop_signal.subscribe();
         let output = if stop_requested || handle.hard_stopped.load(Ordering::SeqCst) {
             output.abort();
             output.await
         } else {
-            output.await
+            tokio::select! {
+                biased;
+                _ = hard_stop_signal.changed() => {
+                    output.abort();
+                    output.await
+                }
+                result = &mut output => result,
+            }
         };
         let cleanup = cleanup_staging(staging_directory).await;
         if cleanup.is_ok() {
@@ -419,12 +428,14 @@ impl TaskEffectRuntime {
             } else {
                 let id = registry.next_id;
                 registry.next_id = registry.next_id.wrapping_add(1);
+                let (hard_stop_signal, _) = tokio::sync::watch::channel(false);
                 let handle = Arc::new(WorkerHandle {
                     id,
                     pid,
                     process: Arc::clone(&process),
                     staging_directory,
                     hard_stopped: AtomicBool::new(false),
+                    hard_stop_signal,
                 });
                 registry.workers.insert(id, Arc::clone(&handle));
                 Some(handle)
@@ -892,6 +903,7 @@ impl ProcessHandle {
 
 fn hard_kill_worker(worker: &WorkerHandle) -> Result<(), String> {
     worker.hard_stopped.store(true, Ordering::SeqCst);
+    let _previous = worker.hard_stop_signal.send_replace(true);
     worker.process.hard_kill(worker.pid)
 }
 
