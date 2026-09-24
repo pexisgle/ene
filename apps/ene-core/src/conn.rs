@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio_tungstenite::tungstenite::Message;
 
-use ene_inference::ProviderTransport;
+use ene_inference::{DispatchAbort, ProviderTransport};
 
 use crate::serve::{CoreError, HostHandle, outgoing_fact, outgoing_frame_pre_auth};
 use crate::wss::{self, HostSink, HostStream, HostWebSocket};
@@ -656,6 +656,11 @@ struct ServingComposition<T> {
     table: Arc<ConnectionTable>,
     driver: DeletionDriver,
     handlers: ServingHandlers,
+    /// The Host-lifecycle cooperative stop for running dialogue and learning
+    /// dispatches: fired once the Host stops admitting work, before the
+    /// connection tasks are joined, so a parked provider wait ends through
+    /// the inference boundary's abort contract instead of outliving the Host.
+    abort: DispatchAbort,
     _task_owner: TaskAgentOwner<T>,
 }
 
@@ -679,6 +684,7 @@ where
             table,
             driver,
             handlers,
+            abort: DispatchAbort::default(),
             _task_owner: task_owner,
         }
     }
@@ -688,6 +694,11 @@ where
         handle: &HostHandle,
         result: Result<(), CoreError>,
     ) -> Result<(), CoreError> {
+        // New admission stops with the handlers below; the cooperative stop
+        // reaches the running dispatches first so their joins below are
+        // bounded by the inference abort contract, not by a provider that
+        // never returns.
+        self.abort.abort();
         let handler_result = self.handlers.stop_and_join().await;
         handle.join_confirmation_tasks().await;
         let task_result = self.launcher.shutdown_and_join().await;
@@ -748,6 +759,7 @@ where
                     Ok(None) => {}
                     Ok(Some(pending)) => {
                         let mut stop = composition.handlers.stop.subscribe();
+                        let abort = composition.abort.clone();
                         let handle = Arc::clone(&handle);
                         let transport = Arc::clone(&transport);
                         let table = Arc::clone(&table);
@@ -776,6 +788,7 @@ where
                                 transport,
                                 jobs_rx,
                                 business_out_tx,
+                                abort,
                             ));
                             let served = CatchUnwind(serve_connection(
                                 socket,
@@ -1093,6 +1106,13 @@ async fn serve_connection(
                     None => std::future::pending::<()>().await,
                 }
             };
+            // Biased order is the connection's progress guarantee: shutdown,
+            // liveness/Ping, EOF/Close, transport control, pairing, and the
+            // monotonic receipt deadline are all polled ahead of business
+            // delivery, so continuous business output can never starve them.
+            // Every branch above the last one consumes its event when it
+            // fires, and business delivery still runs whenever they are
+            // pending — neither direction starves.
             tokio::select! {
                 biased;
                 () = wait_for_shutdown(&mut shutdown) => break 'connection,
@@ -1144,46 +1164,6 @@ async fn serve_connection(
                         break 'connection;
                     }
                     held.push_back(frame);
-                }
-                outgoing = business_out_rx.recv() => {
-                    // The channel closes when the business task ends, so a
-                    // failed task still ends this connection promptly.
-                    let Some(outgoing) = outgoing else {
-                        break 'connection;
-                    };
-                    match outgoing {
-                        BusinessOut::Response(response) => {
-                            if !write_response(&mut write_half, response, &mut terminal, &mut shutdown).await {
-                                break 'connection;
-                            }
-                        }
-                        BusinessOut::Failed(failure) => {
-                            learning_failure = Some(failure);
-                            break 'connection;
-                        }
-                        BusinessOut::Done => {
-                            if terminal {
-                                break 'connection;
-                            }
-                            if let Some((DecodedFrame::Known(frame_template), live_template)) =
-                                pending_dispatch.take()
-                            {
-                                template = Some((frame_template, live_template));
-                            }
-                            busy = false;
-                            advance_output(
-                                &mut write_half,
-                                &handle,
-                                &table,
-                                &connection,
-                                &template,
-                                &mut terminal,
-                                &mut shutdown,
-                                &mut push_blocked,
-                            )
-                            .await;
-                        }
-                    }
                 }
                 () = std::future::ready(()), if !busy && !suspected && !held.is_empty() => {
                     let Some(frame) = held.pop_front() else {
@@ -1286,6 +1266,46 @@ async fn serve_connection(
                         .await;
                     }
                 }
+                outgoing = business_out_rx.recv() => {
+                    // The channel closes when the business task ends, so a
+                    // failed task still ends this connection promptly.
+                    let Some(outgoing) = outgoing else {
+                        break 'connection;
+                    };
+                    match outgoing {
+                        BusinessOut::Response(response) => {
+                            if !write_response(&mut write_half, response, &mut terminal, &mut shutdown).await {
+                                break 'connection;
+                            }
+                        }
+                        BusinessOut::Failed(failure) => {
+                            learning_failure = Some(failure);
+                            break 'connection;
+                        }
+                        BusinessOut::Done => {
+                            if terminal {
+                                break 'connection;
+                            }
+                            if let Some((DecodedFrame::Known(frame_template), live_template)) =
+                                pending_dispatch.take()
+                            {
+                                template = Some((frame_template, live_template));
+                            }
+                            busy = false;
+                            advance_output(
+                                &mut write_half,
+                                &handle,
+                                &table,
+                                &connection,
+                                &template,
+                                &mut terminal,
+                                &mut shutdown,
+                                &mut push_blocked,
+                            )
+                            .await;
+                        }
+                    }
+                }
             }
         }
     };
@@ -1299,8 +1319,12 @@ async fn serve_connection(
         .err()
         .filter(|error| !error.is_cancelled());
     // Ending the connection closes both business channels: the business task
-    // runs its current operation to completion, drains its learning workers,
-    // and exits; this serving task joins it before it reports back. Only
+    // runs its current operation to completion — a client disconnect alone
+    // never infers "not executed" or "failed" for work that already started —
+    // drains its learning workers, and exits; this serving task joins it
+    // before it reports back. Host shutdown fires the cooperative dispatch
+    // abort first, so that same completion (post-claim accounting included)
+    // is bounded instead of waiting for a provider that never returns. Only
     // delivery ends here, together with the connection record.
     drop(jobs_tx);
     drop(business_out_rx);
@@ -1327,6 +1351,7 @@ async fn run_business<T>(
     transport: Arc<T>,
     mut jobs: tokio::sync::mpsc::Receiver<BusinessJob>,
     business_out: tokio::sync::mpsc::Sender<BusinessOut>,
+    abort: DispatchAbort,
 ) where
     T: ProviderTransport + Send + Sync + 'static,
 {
@@ -1345,13 +1370,14 @@ async fn run_business<T>(
                 let Some(job) = job else {
                     break;
                 };
-                run_business_frame(&handle, transport.as_ref(), job, &business_out).await;
+                run_business_frame(&handle, transport.as_ref(), job, &business_out, &abort).await;
                 if handle.has_pending_learning() {
                     let worker_handle = Arc::clone(&handle);
                     let worker_transport = Arc::clone(&transport);
+                    let worker_abort = abort.clone();
                     learning.spawn(async move {
                         worker_handle
-                            .run_pending_learning(worker_transport.as_ref())
+                            .run_pending_learning(worker_transport.as_ref(), &worker_abort)
                             .await;
                     });
                 }
@@ -1373,11 +1399,12 @@ async fn run_business_frame<T: ProviderTransport>(
     transport: &T,
     job: BusinessJob,
     business_out: &tokio::sync::mpsc::Sender<BusinessOut>,
+    abort: &DispatchAbort,
 ) {
     let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<WireFrame>(STREAM_BUFFER_FRAMES);
     let mut frame_rx = Some(frame_rx);
     let mut host =
-        std::pin::pin!(handle.handle_frame_to(job.frame, job.live, transport, &frame_tx,));
+        std::pin::pin!(handle.handle_frame_to(job.frame, job.live, transport, &frame_tx, abort));
     let mut done = false;
     loop {
         if done {

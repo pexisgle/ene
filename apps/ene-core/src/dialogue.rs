@@ -248,6 +248,7 @@ impl HostHandle {
         live: &LiveInput,
         transport: &impl ProviderTransport,
         sink: &tokio::sync::mpsc::Sender<WireFrame>,
+        abort: &ene_inference::DispatchAbort,
     ) {
         let Some(device_wire) = live.paired_device.clone() else {
             return emit_end(sink, unpaired_close(frame, live));
@@ -666,6 +667,7 @@ impl HostHandle {
                         &task_control,
                         &mut gate,
                         &is_current,
+                        Some(abort),
                     )
                     .await
                 };
@@ -887,9 +889,18 @@ impl HostHandle {
         !crate::lock_unpoison(&self.learning_queue).is_empty()
     }
 
-    pub(crate) async fn run_pending_learning<T: ProviderTransport>(&self, transport: &T) {
+    pub(crate) async fn run_pending_learning<T: ProviderTransport>(
+        &self,
+        transport: &T,
+        abort: &ene_inference::DispatchAbort,
+    ) {
         let _serialized = self.learning_worker.lock().await;
         loop {
+            if abort.is_aborted() {
+                // Host shutdown stops new learning admission; the queued work
+                // stays unclaimed instead of racing the stop.
+                break;
+            }
             let next = {
                 let mut queue = crate::lock_unpoison(&self.learning_queue);
                 queue.take_pending()
@@ -948,6 +959,7 @@ impl HostHandle {
                     &self.store,
                     &executor,
                     &scrubber,
+                    Some(abort),
                 )
                 .await,
             );

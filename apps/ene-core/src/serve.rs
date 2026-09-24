@@ -806,6 +806,7 @@ impl HostHandle {
         live: LiveInput,
         transport: &impl ProviderTransport,
         sink: &tokio::sync::mpsc::Sender<WireFrame>,
+        abort: &ene_inference::DispatchAbort,
     ) {
         let negotiated_version = live.negotiated.as_ref().map(|terms| terms.version);
         match (negotiated_version, frame.envelope().protocol) {
@@ -901,7 +902,7 @@ impl HostHandle {
                 {
                     return emit_end(sink, refusal);
                 }
-                self.submit_text(&frame, submit, &live, transport, sink)
+                self.submit_text(&frame, submit, &live, transport, sink, abort)
                     .await;
             }
             WirePayload::ConfirmPresentation(confirm) => {
