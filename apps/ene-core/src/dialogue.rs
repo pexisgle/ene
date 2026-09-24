@@ -588,7 +588,7 @@ impl HostHandle {
                         generation: attribution.generation,
                     },
                 );
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 {
                     let gate = crate::lock_unpoison(&self.submit_publish_gate).clone();
                     if let Some(gate) = gate {

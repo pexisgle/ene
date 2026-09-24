@@ -6,7 +6,7 @@ pub(crate) mod tasks;
 pub(crate) mod usage;
 
 use ene_api::v1::round::HistoryItem;
-use ene_client::error::ClientError;
+use ene_client::error::{ClientError, RequestFailure, ResponseWaitFailure};
 
 pub use memory::{MemoryPage, MemoryRevisionRow, MemoryRow};
 pub use runtime::DesktopRuntime;
@@ -105,6 +105,17 @@ impl Composer {
         Some(taken)
     }
 
+    pub fn discard_sendable(&mut self) {
+        self.draft.clear();
+    }
+
+    pub fn restore_unsent(&mut self, text: String) {
+        if self.undo.last().is_some_and(|previous| previous == &text) {
+            self.undo.pop();
+        }
+        self.draft = text;
+    }
+
     pub fn wipe(&mut self) {
         self.draft.clear();
         self.composing = false;
@@ -189,6 +200,43 @@ pub enum DesktopError {
     Client(#[from] ClientError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopErrorKind {
+    Transport,
+    Codec,
+    Server,
+    Protocol,
+    Control,
+    HostLaunch,
+    Boundary,
+    Backpressure,
+    Domain,
+    Unknown,
+}
+
+impl DesktopError {
+    #[must_use]
+    pub fn kind(&self) -> DesktopErrorKind {
+        match self {
+            Self::Transport(_) => DesktopErrorKind::Transport,
+            Self::Control(_) => DesktopErrorKind::Control,
+            Self::HostLaunch(_) => DesktopErrorKind::HostLaunch,
+            Self::DeniedByBoundary => DesktopErrorKind::Boundary,
+            Self::Protocol(_) => DesktopErrorKind::Protocol,
+            Self::Unavailable(_) | Self::Stale(_) => DesktopErrorKind::Domain,
+            Self::BackpressureHold => DesktopErrorKind::Backpressure,
+            Self::Client(error) => match error {
+                ClientError::Transport(_) => DesktopErrorKind::Transport,
+                ClientError::Codec(_) => DesktopErrorKind::Codec,
+                ClientError::ServerRejected(_)
+                | ClientError::ServerOutcome(_)
+                | ClientError::HostPinMismatch { .. }
+                | ClientError::UnsupportedPlatform(_) => DesktopErrorKind::Server,
+            },
+        }
+    }
+}
+
 pub(crate) const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub(crate) async fn request_with_timeout(
@@ -207,6 +255,24 @@ pub(crate) async fn request_observed_with_timeout(
     timeout: std::time::Duration,
 ) -> Result<ene_api::v1::payload::WirePayload, DesktopError> {
     timed_request(client.request_observed(payload, round, generation), timeout).await
+}
+
+pub(crate) async fn request_classified_with_timeout(
+    client: &mut ene_client::Client,
+    payload: ene_api::v1::payload::WirePayload,
+    timeout: std::time::Duration,
+) -> Result<ene_api::v1::payload::WirePayload, RequestFailure> {
+    let prepared = client.prepare(payload);
+    let pending = client
+        .enqueue_request(&prepared)
+        .await
+        .map_err(RequestFailure::NotSent)?;
+    match tokio::time::timeout(timeout, client.resolve_request(pending)).await {
+        Ok(result) => result.map_err(RequestFailure::OutcomeUnknown),
+        Err(_) => Err(RequestFailure::OutcomeUnknown(
+            ResponseWaitFailure::TimedOut,
+        )),
+    }
 }
 
 async fn timed_request(
@@ -230,4 +296,19 @@ pub(crate) fn history_lines(items: &[HistoryItem]) -> Vec<String> {
             format!("[{role}] {}", item.text)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Composer;
+
+    #[test]
+    fn restoring_an_unsent_message_does_not_add_an_undo_step() {
+        let mut composer = Composer::default();
+        composer.set_draft(String::from("draft"));
+        let text = composer.take_sendable().expect("draft text");
+        composer.restore_unsent(text);
+        assert_eq!(composer.draft(), "draft");
+        assert_eq!(composer.undo_len(), 1);
+    }
 }

@@ -21,7 +21,10 @@ use crate::i18n::Locale;
 use crate::measure::WaylandFeedbackTraceLine;
 use crate::motion::{self, MotionEnvironment};
 use crate::secret::SecretIntake;
-use crate::session::{self, SETUP_PROVIDER_OPENAI, SetupFacts};
+use crate::session::{
+    self, ChatDeliveryPhase, ChatOperation, ChatSendReport, ChatSessionOutcome,
+    ChatTechnicalFailure, ChatTurn, SETUP_PROVIDER_OPENAI, SetupFacts,
+};
 use crate::ui::deletion::DeletionPanel;
 use crate::ui::tasks::TaskPanel;
 use crate::ui::usage::UsagePanel;
@@ -651,41 +654,53 @@ impl DesktopRuntime {
         self.adopt_client(client);
     }
 
-    pub async fn send_text(&mut self) -> Result<(), DesktopError> {
-        let Some(text) = self.composer.take_sendable() else {
-            return Ok(());
-        };
+    pub async fn send_text(&mut self) -> Result<ChatSendReport, DesktopError> {
+        if self.client.is_none() {
+            return Ok(ChatSendReport::NotSent { failure: None });
+        }
+        if self.composer.draft().trim().is_empty() {
+            return Ok(ChatSendReport::NoDraft);
+        }
         self.project_body_pose(PoseHint::Listening);
         let lang = self.locale.as_tag().to_string();
-        let collected = match self.client.as_mut() {
-            Some(client) => session::submit_and_collect(client, &text, &lang).await,
-            None => Err(DesktopError::Transport(String::from(
-                "client is not connected",
-            ))),
+        let collected = {
+            let text = self.composer.draft();
+            match self.client.as_mut() {
+                Some(client) => session::submit_and_collect(client, text, &lang).await,
+                None => {
+                    return Ok(ChatSendReport::NotSent { failure: None });
+                }
+            }
         };
         match collected {
-            Ok(turn) => {
+            ChatSessionOutcome::Completed(turn) => {
                 self.project_body_pose(PoseHint::Speaking);
+                let ChatTurn {
+                    round,
+                    stream,
+                    reply,
+                } = turn;
+                let Some(text) = self.composer.take_sendable() else {
+                    return Ok(ChatSendReport::NotSent { failure: None });
+                };
                 self.timeline.push(super::presentation::Message {
-                    round: turn.round.clone(),
+                    round: round.clone(),
                     owner: true,
                     text,
                     caption: String::new(),
                 });
                 self.timeline.push(super::presentation::Message {
-                    round: turn.round.clone(),
+                    round: round.clone(),
                     owner: false,
-                    text: turn.reply.clone(),
+                    text: reply,
                     caption: String::new(),
                 });
-                self.chat_receipt = Some((turn.round.clone(), turn.stream));
-                {
-                    let client = self.client.as_mut().ok_or_else(|| {
-                        DesktopError::Transport(String::from("client is not connected"))
-                    })?;
+                self.chat_receipt = Some((round.clone(), stream));
+                if let Some(client) = self.client.as_mut() {
                     match session::confirm_chat_presentation(
                         client,
-                        &turn,
+                        &round,
+                        stream,
                         PresentationStatus::Presented,
                     )
                     .await
@@ -693,19 +708,68 @@ impl DesktopRuntime {
                         Ok(()) | Err(_) => {}
                     }
                 }
+                let history_result = self.refresh_history().await;
                 self.flush_pending_erasure().await;
-                let _result = self.refresh_history().await;
-                Ok(())
+                match history_result {
+                    Ok(()) => Ok(ChatSendReport::Completed),
+                    Err(error) => Ok(ChatSendReport::ReplyShownHistoryRefreshFailed {
+                        failure: ChatTechnicalFailure {
+                            operation: ChatOperation::HistoryRefresh,
+                            phase: ChatDeliveryPhase::Accepted,
+                            error,
+                        },
+                    }),
+                }
             }
-            Err(error) => {
+            ChatSessionOutcome::Refused(refusal) => {
                 self.project_body_pose(PoseHint::Attention);
-                self.timeline.push(super::presentation::Message {
-                    owner: true,
-                    text,
-                    ..Default::default()
-                });
                 self.flush_pending_erasure().await;
-                Err(error)
+                Ok(ChatSendReport::Refused(refusal))
+            }
+            ChatSessionOutcome::NotSent(failure) => {
+                self.project_body_pose(PoseHint::Attention);
+                self.flush_pending_erasure().await;
+                Ok(ChatSendReport::NotSent {
+                    failure: Some(failure),
+                })
+            }
+            ChatSessionOutcome::OutcomeUnknown(failure) => {
+                self.project_body_pose(PoseHint::Attention);
+                self.composer.discard_sendable();
+                self.flush_pending_erasure().await;
+                Ok(ChatSendReport::OutcomeUnknown(failure))
+            }
+            ChatSessionOutcome::AcceptedFailure { round, failure } => {
+                self.project_body_pose(PoseHint::Attention);
+                if let Some(text) = self.composer.take_sendable() {
+                    self.timeline.push(super::presentation::Message {
+                        round: round.clone(),
+                        owner: true,
+                        text,
+                        caption: String::new(),
+                    });
+                }
+                match self.refresh_history().await {
+                    Ok(()) | Err(_) => {}
+                }
+                self.flush_pending_erasure().await;
+                Ok(ChatSendReport::AcceptedFailure { round, failure })
+            }
+            ChatSessionOutcome::StreamEnded { round, end } => {
+                self.project_body_pose(PoseHint::Attention);
+                if let Some(text) = self.composer.take_sendable() {
+                    self.timeline.push(super::presentation::Message {
+                        round: round.clone(),
+                        owner: true,
+                        text,
+                        caption: String::new(),
+                    });
+                }
+                match self.refresh_history().await {
+                    Ok(()) | Err(_) => {}
+                }
+                self.flush_pending_erasure().await;
+                Ok(ChatSendReport::StreamEnded { round, end })
             }
         }
     }
@@ -1277,22 +1341,20 @@ impl DesktopRuntime {
 #[cfg(test)]
 mod tests {
     use super::DesktopRuntime;
+    use crate::session::ChatSendReport;
 
     #[tokio::test]
-    async fn disconnected_send_keeps_the_typed_text_in_the_timeline() {
+    async fn disconnected_send_keeps_the_typed_text_in_the_draft() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut runtime = DesktopRuntime::new(dir.path().to_path_buf());
         runtime.composer_mut().set_draft(String::from("keep me"));
         let result = runtime.send_text().await;
-        assert!(result.is_err(), "a disconnected send must not fake success");
-        let snapshot = runtime.snapshot();
         assert!(
-            snapshot
-                .timeline
-                .iter()
-                .any(|line| line == "[owner] keep me"),
-            "the Owner's text must stay in the timeline: {:?}",
-            snapshot.timeline
+            matches!(result, Ok(ChatSendReport::NotSent { failure: None })),
+            "a disconnected send must report the no-client outcome: {result:?}"
         );
+        let snapshot = runtime.snapshot();
+        assert_eq!(snapshot.draft, "keep me");
+        assert!(snapshot.timeline.is_empty());
     }
 }
