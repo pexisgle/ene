@@ -1,5 +1,7 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use ene_api::codec::{
@@ -60,22 +62,131 @@ fn ws_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_FRAME_BYTES))
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "frames are bounded by the wire cap and travel a bounded queue; boxing would add an allocation per frame"
-)]
-enum Inbound {
-    Frame(DecodedFrame),
-    CodecFailed(String),
-    TransportFailed(String),
+/// A terminal failure the pump stored for the application: `read_ahead`
+/// holds the bounded frames that were buffered before the failure, so
+/// `Transport::read()` surfaces that data first and the reason last without
+/// the reader ever waiting for an application drain.
+struct Terminal {
+    read_ahead: VecDeque<DecodedFrame>,
+    reason: Failure,
+}
+
+enum Failure {
+    Codec(String),
+    Transport(String),
+}
+
+impl Failure {
+    fn into_client_error(self) -> ClientError {
+        match self {
+            Self::Codec(reason) => ClientError::Codec(reason),
+            Self::Transport(reason) => ClientError::Transport(reason),
+        }
+    }
+}
+
+/// Transport-control observations of the pump: host pings and pongs are
+/// recorded as they pass through, and a test can request a transport ping
+/// through the writer. The application never drains through this to make a
+/// failure surface.
+#[derive(Clone)]
+pub struct TransportProbe {
+    inner: Arc<TransportProbeInner>,
+}
+
+struct TransportProbeInner {
+    host_pings: AtomicU64,
+    pongs_sent: AtomicU64,
+    pongs: StdMutex<VecDeque<Vec<u8>>>,
+    pings: StdMutex<VecDeque<Vec<u8>>>,
+    wake: tokio::sync::Notify,
+}
+
+impl TransportProbe {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(TransportProbeInner {
+                host_pings: AtomicU64::new(0),
+                pongs_sent: AtomicU64::new(0),
+                pongs: StdMutex::new(VecDeque::new()),
+                pings: StdMutex::new(VecDeque::new()),
+                wake: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    fn note_host_ping(&self) {
+        self.inner.host_pings.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn note_pong_sent(&self) {
+        self.inner.pongs_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn note_pong(&self, payload: &[u8]) {
+        let mut pongs = lock_probe(&self.inner.pongs);
+        while pongs.len() >= 32 {
+            pongs.pop_front();
+        }
+        pongs.push_back(payload.to_vec());
+    }
+
+    async fn ping_ready(&self) {
+        self.inner.wake.notified().await;
+    }
+
+    fn take_ping(&self) -> Option<Vec<u8>> {
+        lock_probe(&self.inner.pings).pop_front()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn host_pings(&self) -> u64 {
+        self.inner.host_pings.load(Ordering::Relaxed)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn pongs_sent(&self) -> u64 {
+        self.inner.pongs_sent.load(Ordering::Relaxed)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn take_pongs(&self) -> Vec<Vec<u8>> {
+        lock_probe(&self.inner.pongs).drain(..).collect()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn send_ping(&self, payload: &[u8]) {
+        lock_probe(&self.inner.pings).push_back(payload.to_vec());
+        self.inner.wake.notify_one();
+    }
+}
+
+fn lock_probe<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Owns the WebSocket through a background pump, so Ping/Pong and inbound
 /// frames are processed whenever the socket has them — independent of
 /// whether an upper layer is inside a request or `next_frame()`.
 struct Transport {
-    inbound: mpsc::Receiver<Inbound>,
+    inbound: mpsc::Receiver<DecodedFrame>,
+    terminal: mpsc::Receiver<Terminal>,
     outbound: mpsc::Sender<Vec<u8>>,
+    /// Frames the ended reader handed over before its terminal reason; they
+    /// surface once the bounded inbound queue is drained.
+    staged: VecDeque<DecodedFrame>,
+    pending_failure: Option<Failure>,
+    #[cfg(any(test, feature = "test-support"))]
+    probe: TransportProbe,
+    #[cfg(test)]
+    reader_task: tokio::task::JoinHandle<()>,
+    #[cfg(test)]
+    writer_task: tokio::task::JoinHandle<()>,
 }
 
 impl Transport {
@@ -90,17 +201,44 @@ impl Transport {
         let (inbound_tx, inbound) = mpsc::channel(TRANSPORT_QUEUE);
         let (outbound, outbound_rx) = mpsc::channel(TRANSPORT_QUEUE);
         let (control, control_rx) = mpsc::channel(CONTROL_QUEUE);
+        // One terminal per connection: the reader and the writer store their
+        // failure here without awaiting the application, and this capacity
+        // bounds that hand-over.
+        let (terminal, terminal_rx) = mpsc::channel(1);
         let (writer_gone, writer_gone_rx) = tokio::sync::watch::channel(());
+        let probe = TransportProbe::new();
         let (sink, stream) = socket.split();
-        tokio::spawn(write_half(
+        // The task handles only exist for test observation; in production the
+        // pump is detached as soon as it is spawned.
+        let _writer_task = tokio::spawn(write_half(
             sink,
             outbound_rx,
             control_rx,
-            inbound_tx.clone(),
+            terminal.clone(),
+            probe.clone(),
             writer_gone,
         ));
-        tokio::spawn(read_half(stream, inbound_tx, control, writer_gone_rx));
-        Self { inbound, outbound }
+        let _reader_task = tokio::spawn(read_half(
+            stream,
+            inbound_tx,
+            control,
+            terminal,
+            probe.clone(),
+            writer_gone_rx,
+        ));
+        Self {
+            inbound,
+            terminal: terminal_rx,
+            outbound,
+            staged: VecDeque::new(),
+            pending_failure: None,
+            #[cfg(any(test, feature = "test-support"))]
+            probe,
+            #[cfg(test)]
+            reader_task: _reader_task,
+            #[cfg(test)]
+            writer_task: _writer_task,
+        }
     }
 
     #[cfg(test)]
@@ -118,13 +256,29 @@ impl Transport {
     }
 
     async fn read(&mut self) -> Result<DecodedFrame, ClientError> {
-        match self.inbound.recv().await {
-            Some(Inbound::Frame(frame)) => Ok(frame),
-            Some(Inbound::CodecFailed(reason)) => Err(ClientError::Codec(reason)),
-            Some(Inbound::TransportFailed(reason)) => Err(ClientError::Transport(reason)),
-            None => Err(ClientError::Transport(String::from(
-                "the connection to the Host ended",
-            ))),
+        loop {
+            if let Some(frame) = self.staged.pop_front() {
+                return Ok(frame);
+            }
+            if let Some(failure) = self.pending_failure.take() {
+                return Err(failure.into_client_error());
+            }
+            if let Some(frame) = self.inbound.recv().await {
+                return Ok(frame);
+            }
+            // The reader has already ended without waiting for this consumer;
+            // serve what it buffered first and its terminal reason last.
+            match self.terminal.recv().await {
+                Some(terminal) => {
+                    self.staged = terminal.read_ahead;
+                    self.pending_failure = Some(terminal.reason);
+                }
+                None => {
+                    return Err(ClientError::Transport(String::from(
+                        "the connection to the Host ended",
+                    )));
+                }
+            }
         }
     }
 
@@ -147,16 +301,18 @@ impl Transport {
     }
 }
 
-/// Owns the write half: transport Pongs and application frames are written
-/// here under one bounded write wait, so neither a Host that stops reading
-/// nor a stalled application can own this task forever. `_writer_gone` is
-/// dropped when this writer ends; the reader observes the closed watch and
-/// stops with it.
+/// Owns the write half: transport Pongs, requested transport Pings, and
+/// application frames are written here under one bounded write wait, so
+/// neither a Host that stops reading nor a stalled application can own this
+/// task forever. A write failure is stored in the terminal slot without
+/// waiting for the application, and `_writer_gone` is dropped when this
+/// writer ends; the reader observes the closed watch and stops with it.
 async fn write_half<S>(
     sink: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
     mut outbound: mpsc::Receiver<Vec<u8>>,
     mut control: mpsc::Receiver<Vec<u8>>,
-    inbound: mpsc::Sender<Inbound>,
+    terminal: mpsc::Sender<Terminal>,
+    probe: TransportProbe,
     _writer_gone: tokio::sync::watch::Sender<()>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
@@ -170,9 +326,18 @@ async fn write_half<S>(
                     // The reader ended; it surfaced why.
                     return;
                 };
+                probe.note_pong_sent();
                 if !send_bounded(&mut sink, Message::Pong(payload.into())).await {
-                    surface_write_failure(&inbound).await;
+                    surface_write_failure(&terminal);
                     return;
+                }
+            }
+            () = probe.ping_ready() => {
+                while let Some(payload) = probe.take_ping() {
+                    if !send_bounded(&mut sink, Message::Ping(payload.into())).await {
+                        surface_write_failure(&terminal);
+                        return;
+                    }
                 }
             }
             next = outbound.recv() => {
@@ -181,7 +346,7 @@ async fn write_half<S>(
                     return;
                 };
                 if !send_bounded(&mut sink, Message::Binary(body.into())).await {
-                    surface_write_failure(&inbound).await;
+                    surface_write_failure(&terminal);
                     return;
                 }
             },
@@ -202,9 +367,11 @@ where
     )
 }
 
-async fn surface_write_failure(inbound: &mpsc::Sender<Inbound>) {
-    let reason = String::from("websocket write failed: the Host stopped accepting data");
-    drop(inbound.send(Inbound::TransportFailed(reason)).await);
+fn surface_write_failure(terminal: &mpsc::Sender<Terminal>) {
+    let reason = Failure::Transport(String::from(
+        "websocket write failed: the Host stopped accepting data",
+    ));
+    fail_with(VecDeque::new(), terminal, reason);
 }
 
 /// Owns the read half: Ping → Pong, Close, EOF, and read failures are
@@ -213,18 +380,20 @@ async fn surface_write_failure(inbound: &mpsc::Sender<Inbound>) {
 /// application consumer applies backpressure to the socket instead of
 /// stopping the transport control plane. A frame that arrives with the
 /// queue and the window both full exceeds the connection's capacity and
-/// fails the transport instead of waiting forever or being dropped in
-/// silence. Terminal conditions flush the buffered frames first and then
-/// surface the reason to the readers above.
+/// ends the transport instead of waiting forever or being dropped in
+/// silence. Terminal conditions hand their buffered frames and the reason to
+/// the terminal slot in one non-blocking step and end this task, so reaching
+/// the terminal state never depends on the application draining anything.
 async fn read_half<S>(
     stream: futures_util::stream::SplitStream<WebSocketStream<S>>,
-    inbound: mpsc::Sender<Inbound>,
+    inbound: mpsc::Sender<DecodedFrame>,
     control: mpsc::Sender<Vec<u8>>,
+    terminal: mpsc::Sender<Terminal>,
+    probe: TransportProbe,
     mut writer_gone: tokio::sync::watch::Receiver<()>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    use std::collections::VecDeque;
     use tokio::sync::mpsc::error::TrySendError;
 
     let mut stream = stream;
@@ -241,7 +410,7 @@ async fn read_half<S>(
             permit = inbound.reserve(), if !read_ahead.is_empty() => match permit {
                 Ok(permit) => {
                     if let Some(frame) = read_ahead.pop_front() {
-                        permit.send(Inbound::Frame(frame));
+                        permit.send(frame);
                     }
                     continue;
                 }
@@ -255,93 +424,86 @@ async fn read_half<S>(
                     Ok(frame) => frame,
                     Err(error) => {
                         let reason = format!("decode failed: {error}");
-                        fail_after_flush(&mut read_ahead, &inbound, Inbound::CodecFailed(reason))
-                            .await;
+                        fail_with(read_ahead, &terminal, Failure::Codec(reason));
                         return;
                     }
                 };
-                match inbound.try_send(Inbound::Frame(frame)) {
+                match inbound.try_send(frame) {
                     Ok(()) => {}
-                    Err(TrySendError::Full(Inbound::Frame(frame)))
-                        if read_ahead.len() < READ_AHEAD_FRAMES =>
-                    {
+                    Err(TrySendError::Full(frame)) if read_ahead.len() < READ_AHEAD_FRAMES => {
                         read_ahead.push_back(frame)
                     }
                     Err(TrySendError::Full(_)) => {
                         // The application is over the bounded capacity: end
                         // the transport with an explicit failure instead of
                         // stalling the pump or dropping the frame in silence.
-                        fail_after_flush(
-                            &mut read_ahead,
-                            &inbound,
-                            Inbound::TransportFailed(String::from(
+                        fail_with(
+                            read_ahead,
+                            &terminal,
+                            Failure::Transport(String::from(
                                 "the application backlog exceeded the bounded inbound queue and read-ahead window",
                             )),
-                        )
-                        .await;
+                        );
                         return;
                     }
                     Err(TrySendError::Closed(_)) => return,
                 }
             }
             Some(Ok(Message::Ping(payload))) => {
+                probe.note_host_ping();
                 if control.send(payload.to_vec()).await.is_err() {
                     return;
                 }
             }
-            Some(Ok(Message::Pong(_))) => {}
+            Some(Ok(Message::Pong(payload))) => probe.note_pong(&payload),
             Some(Ok(Message::Text(_))) => {
-                fail_after_flush(
-                    &mut read_ahead,
-                    &inbound,
-                    Inbound::TransportFailed(String::from(
+                fail_with(
+                    read_ahead,
+                    &terminal,
+                    Failure::Transport(String::from(
                         "text frames are not part of the wire protocol",
                     )),
-                )
-                .await;
+                );
                 return;
             }
             Some(Ok(Message::Close(_))) => {
-                fail_after_flush(
-                    &mut read_ahead,
-                    &inbound,
-                    Inbound::TransportFailed(String::from("the Host closed the connection")),
-                )
-                .await;
+                fail_with(
+                    read_ahead,
+                    &terminal,
+                    Failure::Transport(String::from("the Host closed the connection")),
+                );
                 return;
             }
             Some(Ok(Message::Frame(_))) | None => {
-                fail_after_flush(
-                    &mut read_ahead,
-                    &inbound,
-                    Inbound::TransportFailed(String::from("the connection to the Host ended")),
-                )
-                .await;
+                fail_with(
+                    read_ahead,
+                    &terminal,
+                    Failure::Transport(String::from("the connection to the Host ended")),
+                );
                 return;
             }
             Some(Err(error)) => {
                 let reason = format!("websocket read failed: {error}");
-                fail_after_flush(&mut read_ahead, &inbound, Inbound::TransportFailed(reason)).await;
+                fail_with(read_ahead, &terminal, Failure::Transport(reason));
                 return;
             }
         }
     }
 }
 
-/// Delivers every buffered frame before the terminal reason, so the
-/// application observes its data first and the failure last.
-async fn fail_after_flush(
-    read_ahead: &mut std::collections::VecDeque<DecodedFrame>,
-    inbound: &mpsc::Sender<Inbound>,
-    reason: Inbound,
+/// Stores the buffered frames together with the terminal reason so
+/// `Transport::read()` can surface the data first and the failure last.
+/// Nothing here awaits the application. Only one terminal fits the slot; a
+/// losing race keeps the already-stored terminal, so a failure is never
+/// dropped in silence.
+fn fail_with(
+    read_ahead: VecDeque<DecodedFrame>,
+    terminal: &mpsc::Sender<Terminal>,
+    reason: Failure,
 ) {
-    while let Some(frame) = read_ahead.pop_front() {
-        if inbound.send(Inbound::Frame(frame)).await.is_err() {
-            return;
-        }
-    }
-    drop(inbound.send(reason).await);
+    drop(terminal.try_send(Terminal { read_ahead, reason }));
 }
+
 async fn connect_ws(runtime: &HostRuntimeInfo, pin: &str) -> Result<Transport, ClientError> {
     let port = runtime.local_port().ok_or_else(|| {
         ClientError::Transport(String::from(
@@ -697,6 +859,19 @@ impl Client {
         self.state.take_undelivered()
     }
 
+    /// Hands the pump a transport-level Ping to send. Test-only: the
+    /// application's own traffic never needs to inject transport control.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn send_transport_ping_for_tests(&self, payload: &[u8]) {
+        self.transport.probe.send_ping(payload);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn transport_probe_for_tests(&self) -> TransportProbe {
+        self.transport.probe.clone()
+    }
+
     async fn authenticate(
         &mut self,
         challenge: &AuthChallenge,
@@ -983,6 +1158,76 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// The over-capacity overload with no application consumer at all: the
+    /// reader and writer must reach their terminal state on their own, and a
+    /// later reader still gets the buffered data in order followed by the
+    /// explicit backlog failure — the reader is not kept alive to surface it.
+    #[tokio::test]
+    async fn an_overload_ends_the_pump_without_an_application_drain() {
+        let (client, mut server) = ws_pair(false).await;
+        let mut transport = Transport::spawn_stream(client);
+        let total = TRANSPORT_QUEUE + READ_AHEAD_FRAMES;
+
+        // Distinct frames, so their order is observable when they surface.
+        for padding in 0..total {
+            server
+                .send(Message::Binary(bulky_frame(padding).into()))
+                .await
+                .expect("the saturating frame must send");
+        }
+        server
+            .send(Message::Binary(bulky_frame(total).into()))
+            .await
+            .expect("the over-capacity frame must reach the socket");
+
+        // The application never calls read(): the pump still ends in bounded
+        // time instead of waiting for a drain that can never come.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !transport.reader_task.is_finished() || !transport.writer_task.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the pump must reach its terminal state without an application drain");
+
+        let mut paddings = Vec::with_capacity(total);
+        for _ in 0..total {
+            let frame = tokio::time::timeout(Duration::from_secs(10), transport.read())
+                .await
+                .expect("the buffered frames must surface")
+                .expect("the buffered frames must decode");
+            let DecodedFrame::Known(frame) = frame else {
+                panic!("the buffered frame must be known, got {frame:?}");
+            };
+            let WirePayload::PairingRequest(request) = frame.payload else {
+                panic!(
+                    "expected buffered application frames, got {}",
+                    frame.payload.message_type()
+                );
+            };
+            paddings.push(request.device_descriptor.len());
+        }
+        assert_eq!(
+            paddings,
+            (0..total).collect::<Vec<_>>(),
+            "the buffered frames must surface in their arrival order"
+        );
+
+        let failure = tokio::time::timeout(Duration::from_secs(10), transport.read())
+            .await
+            .expect("the overload failure must surface behind the buffered frames")
+            .expect_err("the over-capacity frame must fail the transport");
+        let rendered = format!("{failure:?}");
+        assert!(
+            rendered.contains("backlog"),
+            "the overload must stay an explicit backlog failure, got {rendered}"
+        );
+        assert!(
+            transport.reader_task.is_finished(),
+            "the reader must not stay alive to surface the failure"
+        );
     }
 
     #[tokio::test]
