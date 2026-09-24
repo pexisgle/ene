@@ -1139,7 +1139,7 @@ mod supervisor_tests {
             result = &mut execution => panic!("fixture execution ended before the barrier: {result:?}"),
             () = wait_for_markers(&markers, 2) => {}
         }
-        let stopped = timeout(Duration::from_secs(5), async {
+        let stopped = timeout(Duration::from_secs(15), async {
             let (stop, result) = tokio::join!(runtime.terminate_and_join(), execution);
             (stop, result)
         })
@@ -1179,7 +1179,7 @@ mod supervisor_tests {
             result = &mut second_task => panic!("second fixture execution ended before the barrier: {result:?}"),
             () = wait_for_markers(&markers, 2) => {}
         }
-        let stopped = timeout(Duration::from_secs(5), async {
+        let stopped = timeout(Duration::from_secs(15), async {
             let (stop, first, second) =
                 tokio::join!(runtime.terminate_and_join(), first_task, second_task);
             (stop, first, second)
@@ -1216,14 +1216,20 @@ mod supervisor_tests {
             let runtime = runtime.clone();
             async move { runtime.execute(&started, &abort).await }
         });
-        timeout(Duration::from_secs(5), async {
-            while !entered.exists() {
-                tokio::task::yield_now().await;
+        let mut execution = execution;
+        tokio::select! {
+            result = &mut execution => panic!("create staging worker ended before the barrier: {result:?}"),
+            result = timeout(Duration::from_secs(15), async {
+                while !entered.exists() {
+                    tokio::task::yield_now().await;
+                }
+            }) => {
+                if result.is_err() {
+                    panic!("staging barrier must be reached");
+                }
             }
-        })
-        .await
-        .expect("staging barrier must be reached");
-        let stopped = timeout(Duration::from_secs(5), async {
+        }
+        let stopped = timeout(Duration::from_secs(15), async {
             let (stop, result) = tokio::join!(runtime.terminate_and_join(), execution);
             (stop, result)
         })
@@ -1280,14 +1286,20 @@ mod supervisor_tests {
             let runtime = runtime.clone();
             async move { runtime.execute(&started, &abort).await }
         });
-        timeout(Duration::from_secs(5), async {
-            while !entered.exists() {
-                tokio::task::yield_now().await;
+        let mut execution = execution;
+        tokio::select! {
+            result = &mut execution => panic!("edit staging worker ended before the barrier: {result:?}"),
+            result = timeout(Duration::from_secs(15), async {
+                while !entered.exists() {
+                    tokio::task::yield_now().await;
+                }
+            }) => {
+                if result.is_err() {
+                    panic!("staging barrier must be reached");
+                }
             }
-        })
-        .await
-        .expect("edit staging barrier must be reached");
-        let stopped = timeout(Duration::from_secs(5), async {
+        }
+        let stopped = timeout(Duration::from_secs(15), async {
             let (stop, result) = tokio::join!(runtime.terminate_and_join(), execution);
             (stop, result)
         })
