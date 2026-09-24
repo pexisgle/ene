@@ -16,6 +16,7 @@ use crate::action::{WorkspaceActionHostError, WorkspaceActionHostOutcome, run_wo
 use crate::serve::{CoreError, HostHandle};
 
 pub const DEFAULT_MAX_TURNS: u32 = 16;
+const TASK_AGENT_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Default)]
 pub struct TaskExecutionRegistry {
@@ -23,6 +24,7 @@ pub struct TaskExecutionRegistry {
     reservations:
         std::sync::Mutex<std::collections::HashMap<ene_task::DelegationId, ene_task::TaskId>>,
     commit_scope: tokio::sync::Mutex<()>,
+    host_shutdown: DispatchAbort,
 }
 
 pub enum TakeReservation<'a> {
@@ -47,6 +49,10 @@ impl TaskExecutionRegistry {
             }
         }
         signalled
+    }
+
+    fn abort_for_host_shutdown(&self) {
+        self.host_shutdown.abort();
     }
 
     pub async fn commit_scope(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -95,6 +101,7 @@ impl TaskExecutionRegistry {
             None => return TakeReservation::Unreserved,
         }
         let cancellation = DispatchAbort::default();
+        let dispatch_abort = cancellation.linked_to(&self.host_shutdown);
         running.insert(
             delegation,
             RunningExecution {
@@ -106,6 +113,8 @@ impl TaskExecutionRegistry {
             registry: self,
             delegation,
             cancellation,
+            host_shutdown: self.host_shutdown.clone(),
+            dispatch_abort,
         })
     }
 
@@ -117,7 +126,25 @@ impl TaskExecutionRegistry {
 pub struct TaskExecutionRegistration<'a> {
     registry: &'a TaskExecutionRegistry,
     delegation: ene_task::DelegationId,
-    pub cancellation: DispatchAbort,
+    cancellation: DispatchAbort,
+    host_shutdown: DispatchAbort,
+    dispatch_abort: DispatchAbort,
+}
+
+impl TaskExecutionRegistration<'_> {
+    pub(crate) fn dispatch_abort(&self) -> &DispatchAbort {
+        &self.dispatch_abort
+    }
+
+    fn stop_outcome(&self) -> Option<TaskAgentRunOutcome> {
+        if self.cancellation.is_aborted() {
+            Some(TaskAgentRunOutcome::Cancelled)
+        } else if self.host_shutdown.is_aborted() {
+            Some(TaskAgentRunOutcome::HostShutdown)
+        } else {
+            None
+        }
+    }
 }
 
 impl Drop for TaskExecutionRegistration<'_> {
@@ -212,6 +239,7 @@ pub enum TaskAgentRunOutcome {
         attempt: ene_action::ActionAttemptId,
     },
     Cancelled,
+    HostShutdown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -245,7 +273,9 @@ pub async fn run_task_agent_execution(
     registration: &TaskExecutionRegistration<'_>,
 ) -> Result<TaskAgentRunOutcome, TaskAgentRunError> {
     let delegation = registration.delegation;
-    let cancellation = &registration.cancellation;
+    if let Some(outcome) = registration.stop_outcome() {
+        return Ok(outcome);
+    }
     if execution_already_started(store, delegation).await? {
         return Ok(TaskAgentRunOutcome::Refused(
             TaskAgentRunRefusal::ExecutionAlreadyStarted { delegation },
@@ -255,8 +285,8 @@ pub async fn run_task_agent_execution(
     let mut attempt_refs: Vec<RawId> = Vec::new();
     let mut turn = 0_u32;
     loop {
-        if cancellation.is_aborted() {
-            return Ok(TaskAgentRunOutcome::Cancelled);
+        if let Some(outcome) = registration.stop_outcome() {
+            return Ok(outcome);
         }
         if turn >= max_turns {
             return Ok(TaskAgentRunOutcome::TurnLimitReached { turns: turn });
@@ -309,7 +339,11 @@ pub async fn run_task_agent_execution(
                 return Ok(TaskAgentRunOutcome::NotSent(reason));
             }
             TaskAgentTurnOutcome::Aborted => {
-                return Ok(TaskAgentRunOutcome::Cancelled);
+                return Ok(if registration.cancellation.is_aborted() {
+                    TaskAgentRunOutcome::Cancelled
+                } else {
+                    TaskAgentRunOutcome::HostShutdown
+                });
             }
         };
         if !produced.adoption_consent_current {
@@ -336,8 +370,8 @@ pub async fn run_task_agent_execution(
                 return Ok(TaskAgentRunOutcome::Finalized { result, acceptance });
             }
             Ok(TaskAgentDirective::Act(request)) => {
-                if cancellation.is_aborted() {
-                    return Ok(TaskAgentRunOutcome::Cancelled);
+                if let Some(outcome) = registration.stop_outcome() {
+                    return Ok(outcome);
                 }
                 let action = run_workspace_action(
                     store,
@@ -660,6 +694,7 @@ impl<T> BackgroundTaskAgent<T> {
     }
 
     pub(crate) fn abort(&self) {
+        self.signal_host_shutdown();
         let tasks = crate::lock_unpoison(&self.tasks).take();
         drop(tasks);
     }
@@ -667,21 +702,42 @@ impl<T> BackgroundTaskAgent<T> {
     pub(crate) async fn shutdown_and_join(&self) -> Result<(), CoreError> {
         let _shutdown = self.shutdown.lock().await;
         let tasks = crate::lock_unpoison(&self.tasks).take();
+        self.signal_host_shutdown();
         let Some(mut tasks) = tasks else {
             return Ok(());
         };
         let mut failure = crate::lock_unpoison(&self.failure).take();
-        while let Some(result) = tasks.join_next().await {
-            if result.is_err() {
-                failure.get_or_insert_with(task_agent_join_failure);
+        let joined = tokio::time::timeout(TASK_AGENT_QUIESCE_TIMEOUT, async {
+            while let Some(result) = tasks.join_next().await {
+                if result.is_err() {
+                    failure.get_or_insert_with(task_agent_join_failure);
+                }
             }
+        })
+        .await;
+        if joined.is_err() {
+            tasks.abort_all();
+            return Err(task_agent_quiesce_timeout());
         }
         failure.map_or(Ok(()), Err)
+    }
+
+    fn signal_host_shutdown(&self) {
+        if let Some(handle) = self.handle.upgrade() {
+            handle.task_executions.abort_for_host_shutdown();
+        }
     }
 }
 
 fn task_agent_join_failure() -> CoreError {
     CoreError::Serving(String::from("Task Agent runner panicked or was cancelled"))
+}
+
+fn task_agent_quiesce_timeout() -> CoreError {
+    CoreError::Serving(format!(
+        "Task Agent shutdown quiesce exceeded {} seconds",
+        TASK_AGENT_QUIESCE_TIMEOUT.as_secs()
+    ))
 }
 
 impl<T> BackgroundTaskAgent<T>
@@ -744,6 +800,50 @@ mod launcher_tests {
         > {
             Box::pin(std::future::pending())
         }
+    }
+
+    #[test]
+    fn host_shutdown_abort_is_distinct_from_task_cancellation() {
+        let registry = TaskExecutionRegistry::default();
+        let task = ene_task::TaskId::generate();
+        let delegation = ene_task::DelegationId::generate();
+        assert!(registry.reserve(delegation, task));
+        let TakeReservation::Admitted(registration) = registry.take_reservation(delegation, task)
+        else {
+            panic!("the reservation must enter the running registry");
+        };
+
+        registry.abort_for_host_shutdown();
+
+        assert!(registration.dispatch_abort.is_aborted());
+        assert!(!registration.cancellation.is_aborted());
+        assert!(registration.host_shutdown.is_aborted());
+        assert_eq!(
+            registration.stop_outcome(),
+            Some(TaskAgentRunOutcome::HostShutdown)
+        );
+    }
+
+    #[test]
+    fn task_cancellation_aborts_dispatch_without_relabelling_host_shutdown() {
+        let registry = TaskExecutionRegistry::default();
+        let task = ene_task::TaskId::generate();
+        let delegation = ene_task::DelegationId::generate();
+        assert!(registry.reserve(delegation, task));
+        let TakeReservation::Admitted(registration) = registry.take_reservation(delegation, task)
+        else {
+            panic!("the reservation must enter the running registry");
+        };
+
+        assert!(registry.cancel(task));
+
+        assert!(registration.dispatch_abort.is_aborted());
+        assert!(registration.cancellation.is_aborted());
+        assert!(!registration.host_shutdown.is_aborted());
+        assert_eq!(
+            registration.stop_outcome(),
+            Some(TaskAgentRunOutcome::Cancelled)
+        );
     }
 
     #[tokio::test]
@@ -813,6 +913,45 @@ mod launcher_tests {
         second_join.await.unwrap();
         assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
         assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn uncooperative_task_agent_work_has_a_bounded_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = Arc::new(
+            HostHandle::open_with_cred_store(
+                directory.path(),
+                crate::serve::CredStore::Memory(ene_credential::MemoryCredentialStore::new()),
+            )
+            .await
+            .unwrap(),
+        );
+        let launcher = Arc::new(BackgroundTaskAgent::new(
+            Arc::clone(&handle),
+            Arc::new(NoProvider),
+        ));
+        let (held, released) = tokio::sync::oneshot::channel::<()>();
+        let worker = Arc::clone(&handle);
+        crate::lock_unpoison(&launcher.tasks)
+            .as_mut()
+            .unwrap()
+            .spawn(async move {
+                let _held = held;
+                std::future::pending::<()>().await;
+                drop(worker);
+            });
+
+        let result = launcher.shutdown_and_join().await;
+
+        assert!(matches!(
+            result,
+            Err(CoreError::Serving(reason)) if reason.contains("quiesce exceeded")
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), released)
+            .await
+            .expect("the aborted runner must be released")
+            .expect_err("the pending runner must be cancelled");
+        drop(handle);
     }
 
     #[tokio::test]

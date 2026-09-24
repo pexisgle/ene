@@ -50,6 +50,7 @@ use ene_inference::cost::UsageEstimate;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport, RawUsage};
 use ene_preservation::{ConfirmTargetedDeletionOutcome, DeletionOperationRef};
 use ene_primitive::{RawId, WallClockWithTz};
+use ene_task::{CancelTaskCommand, TaskCancelOutcome, TaskId};
 use rusqlite::OptionalExtension as _;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -70,6 +71,8 @@ const MIRRORED_MAX_PENDING_PAIRINGS: usize = 8;
 
 const DESCRIPTOR: &str = "stage6 e2e";
 const MODEL: &str = "gpt-4o-mini";
+const SHUTDOWN_TASK_OWNER: &str = "create the shutdown task before stopping the Host";
+const SHUTDOWN_TASK_PURPOSE: &str = "write the shutdown report";
 const TARGET: &str = "TS6-DELETION-CANARY-9137";
 const SECRET: &str = "sk-stage6-secret-marker-8821";
 const ROTATED_SECRET: &str = "sk-stage6-rotated-marker-4477";
@@ -6738,6 +6741,225 @@ fn db_scalar(db: &Path, sql: &str) -> u64 {
         .query_row(sql, [], |row| row.get(0))
         .expect("the store query must answer");
     u64::try_from(counted).expect("a row count never goes negative")
+}
+
+async fn serve_and_start_shutdown_task(dir: PathBuf, transport: Arc<ScriptedTransport>) -> Served {
+    let mut served = serve_and_setup(dir.clone(), transport, &[cmds::CAPABILITY_DIALOGUE]).await;
+    let workspace = dir.join("shutdown-task-workspace");
+    std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
+    select_workspace(served.client(), &workspace)
+        .await
+        .expect("workspace must select");
+    let (round, stream, reply) = send_round(served.client(), SHUTDOWN_TASK_OWNER)
+        .await
+        .expect("the proposal round must complete");
+    assert!(reply.contains("Task accepted"), "{reply}");
+    confirm_round(served.client(), &round, stream).await;
+    served
+}
+
+#[tokio::test]
+async fn graceful_shutdown_aborts_a_parked_task_agent_preserves_unknown_and_does_not_replay() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"report.md","content":"shutdown report"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
+            ),
+        ],
+        &[],
+    ));
+    transport.block_input(on_task_agent_turn(1));
+    let mut served =
+        serve_and_start_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    transport.wait_parked(1).await;
+    let tasks = list_tasks(served.client())
+        .await
+        .expect("the active task must list");
+    assert_eq!(tasks.tasks.len(), 1);
+    assert_eq!(tasks.tasks[0].progress, "in_progress");
+    assert!(tasks.tasks[0].running);
+
+    served.request_graceful_stop();
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "the Task Agent cooperative abort must bound its parked provider call"
+    );
+    assert_eq!(
+        transport.parked_count(),
+        1,
+        "the provider fixture was never released"
+    );
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+
+    let db = temp.path().join("app.db");
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM inference_attempt WHERE consumer = 'task_agent'",
+        ),
+        2,
+        "the completed action turn and the parked final turn each claimed once"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM usage_fact f JOIN inference_attempt a ON f.ticket = a.ticket \
+             WHERE a.consumer = 'task_agent' AND f.source = 'unknown'",
+        ),
+        1,
+        "the post-claim Host abort records Unknown usage"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM action_attempt WHERE certainty = 'confirmed_success'",
+        ),
+        1,
+        "an effect completed before Host shutdown keeps its confirmed fact"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM task WHERE progress = 'in_progress'",
+        ),
+        1,
+        "Host shutdown is not a durable Task cancellation"
+    );
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM task_result"),
+        0,
+        "the interrupted execution cannot finalize from shutdown"
+    );
+
+    let sends_after_shutdown = transport.sends();
+    let mut client = served.restart().await;
+    let restarted = list_tasks(&mut client)
+        .await
+        .expect("the interrupted task must remain listed after restart");
+    assert_eq!(restarted.tasks.len(), 1);
+    assert_eq!(restarted.tasks[0].progress, "in_progress");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        transport.sends(),
+        sends_after_shutdown,
+        "restart must not replay an already-started Task Agent execution"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM inference_attempt WHERE consumer = 'task_agent'",
+        ),
+        2,
+        "restart must not claim another inference attempt"
+    );
+    drop(client);
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn task_cancel_racing_host_shutdown_keeps_the_durable_cancel_distinct() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
+            ),
+        ],
+        &[],
+    ));
+    transport.block_input(on_task_agent_turn(0));
+    let mut served =
+        serve_and_start_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    transport.wait_parked(1).await;
+    let tasks = list_tasks(served.client())
+        .await
+        .expect("the active task must list");
+    assert_eq!(tasks.tasks.len(), 1);
+    let db = temp.path().join("app.db");
+    let conn = rusqlite::Connection::open(&db).expect("the state database opens");
+    let stored_task_id: String = conn
+        .query_row("SELECT task_id FROM task", [], |row| row.get(0))
+        .expect("the active task id must exist");
+    drop(conn);
+    let task_id =
+        uuid::Uuid::parse_str(&stored_task_id).expect("the stored task id must be a UUID");
+    let task = TaskId::from_raw(RawId::from_uuid(task_id));
+    let handle = served.handle_arc();
+    let cancel = tokio::spawn(async move { handle.cancel_task(CancelTaskCommand { task }).await });
+
+    served.request_graceful_stop();
+    let cancel_outcome = cancel.await.expect("the cancel task must join");
+    assert_eq!(
+        cancel_outcome,
+        Ok(TaskCancelOutcome::CancelAccepted),
+        "the durable cancel outcome must be reported"
+    );
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "cancel and Host shutdown must both quiesce the parked task"
+    );
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM task WHERE progress = 'cancelled'",
+        ),
+        1,
+        "the durable cancel remains the Task lifecycle outcome"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM usage_fact f JOIN inference_attempt a ON f.ticket = a.ticket \
+             WHERE a.consumer = 'task_agent' AND f.source = 'unknown'",
+        ),
+        1,
+        "the claimed cancelled attempt keeps Unknown usage"
+    );
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM task_result"),
+        0,
+        "neither race path fabricates a final result"
+    );
 }
 
 #[tokio::test]

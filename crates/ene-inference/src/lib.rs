@@ -448,14 +448,21 @@ pub struct DispatchAbort {
 struct DispatchAbortInner {
     aborted: std::sync::atomic::AtomicBool,
     notify: tokio::sync::Notify,
+    children: std::sync::Mutex<Vec<std::sync::Weak<DispatchAbortInner>>>,
 }
 
 impl DispatchAbort {
+    /// Returns a child signal that aborts when either source aborts.
+    #[must_use]
+    pub fn linked_to(&self, other: &Self) -> Self {
+        let linked = Self::default();
+        self.inner.link(&linked.inner);
+        other.inner.link(&linked.inner);
+        linked
+    }
+
     pub fn abort(&self) {
-        self.inner
-            .aborted
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.inner.notify.notify_one();
+        DispatchAbortInner::abort(std::sync::Arc::clone(&self.inner));
     }
 
     #[must_use]
@@ -466,6 +473,43 @@ impl DispatchAbort {
     pub async fn aborted(&self) {
         while !self.is_aborted() {
             self.inner.notify.notified().await;
+        }
+    }
+}
+
+impl DispatchAbortInner {
+    fn link(self: &std::sync::Arc<Self>, child: &std::sync::Arc<Self>) {
+        let abort_child = {
+            let mut children = self
+                .children
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            children.retain(|entry| entry.strong_count() != 0);
+            children.push(std::sync::Arc::downgrade(child));
+            self.aborted.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        if abort_child {
+            Self::abort(std::sync::Arc::clone(child));
+        }
+    }
+
+    fn abort(self: std::sync::Arc<Self>) {
+        if self.aborted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.notify.notify_one();
+        let children = {
+            let mut children = self
+                .children
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *children)
+        };
+        for child in children
+            .into_iter()
+            .filter_map(|entry| std::sync::Weak::upgrade(&entry))
+        {
+            Self::abort(child);
         }
     }
 }
@@ -1808,6 +1852,22 @@ mod dispatch_tests {
         assert_eq!(claimed[0].task_agent, None);
     }
 
+    #[test]
+    fn linked_abort_propagates_without_relabelling_its_source() {
+        let task_cancel = DispatchAbort::default();
+        let host_shutdown = DispatchAbort::default();
+        let dispatch_abort = task_cancel.linked_to(&host_shutdown);
+
+        host_shutdown.abort();
+        assert!(dispatch_abort.is_aborted());
+        assert!(!task_cancel.is_aborted());
+
+        let other_cancel = DispatchAbort::default();
+        let other_dispatch_abort = other_cancel.linked_to(&DispatchAbort::default());
+        other_cancel.abort();
+        assert!(other_dispatch_abort.is_aborted());
+    }
+
     #[tokio::test]
     async fn abort_before_the_claim_claims_nothing_and_records_nothing() {
         let usage = CapturedUsage(Mutex::new(Vec::new()));
@@ -1815,8 +1875,10 @@ mod dispatch_tests {
         let attempts = RecordingAttempts(Mutex::new(0));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let transport = CountingTransport(std::sync::Arc::clone(&calls));
-        let abort = DispatchAbort::default();
-        abort.abort();
+        let task_cancel = DispatchAbort::default();
+        let host_shutdown = DispatchAbort::default();
+        let abort = task_cancel.linked_to(&host_shutdown);
+        host_shutdown.abort();
 
         let outcome = dispatch_authorized(
             authorized(),

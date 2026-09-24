@@ -787,7 +787,7 @@ impl HostHandle {
             }
         };
         let executor = HostInference::new(&self.store, &self.cred_store, &self.tracker, transport);
-        let inference = TaskAgentInferenceAdapter::new(&executor, &registration.cancellation);
+        let inference = TaskAgentInferenceAdapter::new(&executor, registration.dispatch_abort());
         let instructions = OwnerInstructionSource::new(&self.store);
         let scrubber = CredentialScrubber {
             refs: &self.store,
