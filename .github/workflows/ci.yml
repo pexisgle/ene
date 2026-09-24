@@ -74,5 +74,6 @@ jobs:
           cargo test --locked -p ene-core --features test-support --test stage6_e2e supported_host_runtime_action_smoke_uses_the_packaged_worker -- --exact
           cargo test --locked -p ene-core --features test-support --test stage6_e2e stale_worker_protocol_is_rejected_before_au5_and_staging -- --exact
           cargo test --locked -p ene-core --features test-support --test stage6_e2e host_shutdown_kills_reaps_and_joins_uncooperative_task_effect_before_returning -- --exact
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e host_shutdown_reports_staging_cleanup_failure_and_keeps_the_obligation -- --exact
           cargo test --locked -p ene-core --features test-support --test stage6_e2e shutdown_before_task_agent_action_start_creates_no_attempt_or_workspace_effect -- --exact
           cargo test --locked -p ene-core --features test-support --test stage6_e2e action_claim_first_keeps_started_fact_and_completed_effect_across_shutdown -- --exact

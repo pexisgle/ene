@@ -790,10 +790,12 @@ pub trait TaskAgentLauncher: Send + Sync {
     fn launch(&self, delegation: ene_task::DelegationId);
 }
 
+type TaskAgentJoinResult = Result<TaskAgentRunOutcome, TaskAgentRunError>;
+
 pub struct BackgroundTaskAgent<T> {
     handle: std::sync::Weak<HostHandle>,
     transport: Arc<T>,
-    tasks: std::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
+    tasks: std::sync::Mutex<Option<tokio::task::JoinSet<TaskAgentJoinResult>>>,
     shutdown: tokio::sync::Mutex<()>,
     failure: std::sync::Mutex<Option<CoreError>>,
     quiesce_timeout: std::sync::Mutex<std::time::Duration>,
@@ -827,11 +829,16 @@ impl<T> BackgroundTaskAgent<T> {
         let tasks = crate::lock_unpoison(&self.tasks).take();
         self.signal_host_shutdown().await;
         let handle = self.handle.upgrade();
+        let effect_result = if let Some(handle) = &handle {
+            handle.terminate_and_join_task_effects().await
+        } else {
+            Ok(())
+        };
         let Some(mut tasks) = tasks else {
-            if let Some(handle) = &handle {
-                handle.terminate_and_join_task_effects().await?;
-            }
-            return Ok(());
+            effect_result?;
+            return crate::lock_unpoison(&self.failure)
+                .take()
+                .map_or(Ok(()), Err);
         };
         let mut failure = crate::lock_unpoison(&self.failure).take();
         let quiesce_timeout = handle.as_ref().map_or_else(
@@ -840,25 +847,19 @@ impl<T> BackgroundTaskAgent<T> {
         );
         let joined = tokio::time::timeout(quiesce_timeout, async {
             while let Some(result) = tasks.join_next().await {
-                if result.is_err() {
-                    failure.get_or_insert_with(task_agent_join_failure);
-                }
+                record_task_agent_result(&mut failure, result);
             }
         })
         .await;
         let timed_out = joined.is_err();
-        let effect_result = if let Some(handle) = &handle {
-            handle.terminate_and_join_task_effects().await
-        } else {
-            Ok(())
-        };
         if timed_out {
             while let Some(result) = tasks.join_next().await {
-                if result.is_err() {
-                    failure.get_or_insert_with(task_agent_join_failure);
-                }
+                record_task_agent_result(&mut failure, result);
             }
             let mut error = task_agent_quiesce_timeout(quiesce_timeout);
+            if let Some(task_failure) = failure {
+                error = CoreError::Serving(format!("{error}; {task_failure}"));
+            }
             if let Err(effect_error) = effect_result {
                 error = CoreError::Serving(format!(
                     "{}; effect hard-stop cleanup failed: {effect_error}",
@@ -867,13 +868,29 @@ impl<T> BackgroundTaskAgent<T> {
             }
             return Err(error);
         }
-        effect_result?;
-        failure.map_or(Ok(()), Err)
+        effect_result.and(failure.map_or(Ok(()), Err))
     }
 
     async fn signal_host_shutdown(&self) {
         if let Some(handle) = self.handle.upgrade() {
             handle.abort_task_agents_for_host_shutdown().await;
+        }
+    }
+}
+
+fn record_task_agent_result(
+    failure: &mut Option<CoreError>,
+    result: Result<TaskAgentJoinResult, tokio::task::JoinError>,
+) {
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            failure.get_or_insert_with(|| {
+                CoreError::Serving(format!("Task Agent technical failure: {error}"))
+            });
+        }
+        Err(_) => {
+            failure.get_or_insert_with(task_agent_join_failure);
         }
     }
 }
@@ -903,14 +920,14 @@ where
             return Err(TaskAgentRunRefusal::ExecutionUnavailable { delegation });
         };
         while let Some(result) = tasks.try_join_next() {
-            if result.is_err() {
-                crate::lock_unpoison(&self.failure).get_or_insert_with(task_agent_join_failure);
-            }
+            let mut failure = crate::lock_unpoison(&self.failure);
+            record_task_agent_result(&mut failure, result);
         }
         let transport = Arc::clone(&self.transport);
         tasks.spawn(async move {
-            drop(handle.run_task_agent(transport.as_ref(), delegation).await);
+            let result = handle.run_task_agent(transport.as_ref(), delegation).await;
             handle.task_executions.release(delegation);
+            result
         });
         Ok(())
     }
@@ -1035,6 +1052,7 @@ mod launcher_tests {
                 .await
                 .unwrap();
                 drop(worker);
+                Ok(TaskAgentRunOutcome::Cancelled)
             });
         entered_rx.await.unwrap();
         let mut joining = std::pin::pin!(launcher.shutdown_and_join());
@@ -1114,6 +1132,7 @@ mod launcher_tests {
             .spawn(async move {
                 std::future::pending::<()>().await;
                 drop(held);
+                std::future::pending::<TaskAgentJoinResult>().await
             });
         drop(launcher);
         assert!(released.await.is_err());
@@ -1144,11 +1163,61 @@ mod launcher_tests {
                 std::future::pending::<()>().await;
                 drop(handle);
                 drop(held);
+                std::future::pending::<TaskAgentJoinResult>().await
             });
         assert!(weak.upgrade().is_some());
         launcher.abort();
         assert!(released.await.is_err());
         assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn domain_stop_outcomes_are_not_task_agent_technical_failures() {
+        let launcher = BackgroundTaskAgent {
+            handle: std::sync::Weak::new(),
+            transport: Arc::new(NoProvider),
+            tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+            shutdown: tokio::sync::Mutex::new(()),
+            failure: std::sync::Mutex::new(None),
+            quiesce_timeout: std::sync::Mutex::new(TASK_AGENT_QUIESCE_TIMEOUT),
+        };
+        {
+            let mut registry = crate::lock_unpoison(&launcher.tasks);
+            let tasks = registry.as_mut().unwrap();
+            tasks.spawn(async { Ok(TaskAgentRunOutcome::Cancelled) });
+            tasks.spawn(async { Ok(TaskAgentRunOutcome::HostShutdown) });
+        }
+
+        launcher.shutdown_and_join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_agent_technical_failure_reaches_shutdown_accounting() {
+        let launcher = BackgroundTaskAgent {
+            handle: std::sync::Weak::new(),
+            transport: Arc::new(NoProvider),
+            tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+            shutdown: tokio::sync::Mutex::new(()),
+            failure: std::sync::Mutex::new(None),
+            quiesce_timeout: std::sync::Mutex::new(TASK_AGENT_QUIESCE_TIMEOUT),
+        };
+        {
+            let mut registry = crate::lock_unpoison(&launcher.tasks);
+            registry.as_mut().unwrap().spawn(async {
+                Err(TaskAgentRunError::Action(
+                    WorkspaceActionHostError::EffectUnavailable {
+                        reason: String::from("staging cleanup failed"),
+                    },
+                ))
+            });
+        }
+
+        let error = launcher
+            .shutdown_and_join()
+            .await
+            .expect_err("technical task failure must reach shutdown");
+        assert!(error.to_string().contains("Task Agent technical failure"));
+        assert!(error.to_string().contains("staging cleanup failed"));
     }
 
     #[tokio::test]
@@ -1173,7 +1242,10 @@ mod launcher_tests {
                 let _panicking = panicking;
                 panic!("test runner panic");
             });
-            tasks.spawn(async move { wait.await.unwrap() });
+            tasks.spawn(async move {
+                wait.await.unwrap();
+                Ok(TaskAgentRunOutcome::Cancelled)
+            });
         }
         assert!(panicked.await.is_err());
         let mut joining = std::pin::pin!(launcher.shutdown_and_join());

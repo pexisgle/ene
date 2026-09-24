@@ -10,6 +10,7 @@ mod pairing_delivery;
 pub mod presentation;
 pub mod serve;
 pub mod setup;
+mod staging_cleanup;
 pub mod targeted_deletion;
 pub mod task_agent;
 pub mod task_control;

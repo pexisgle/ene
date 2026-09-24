@@ -18,6 +18,10 @@ use ene_store::Store;
 use ene_task::{DelegationId, TaskId, TaskProgress, TaskRef, TaskRepository, TaskTechnicalError};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
+use crate::staging_cleanup::{
+    StagingCleanupFailure, StagingLease, StagingLeaseOptions, cleanup_staging_lease,
+    prepare_staging_lease,
+};
 use crate::task_run::{TaskClaimKind, TaskExecutionRegistry};
 
 const WORKER_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -80,6 +84,10 @@ pub(crate) struct TaskEffectRuntime {
     #[cfg(feature = "test-support")]
     test_staging_pause: Arc<StdMutex<Option<ene_action::WorkspaceEffectStagingPause>>>,
     #[cfg(feature = "test-support")]
+    test_cleanup_pause: Arc<StdMutex<Option<crate::staging_cleanup::StagingCleanupPause>>>,
+    #[cfg(feature = "test-support")]
+    test_cleanup_failure: Arc<AtomicBool>,
+    #[cfg(feature = "test-support")]
     cooperative_abort: bool,
 }
 
@@ -104,6 +112,8 @@ struct WorkerHandle {
     id: u64,
     pid: u32,
     process: Arc<ProcessHandle>,
+    staging_obligation: StdMutex<Option<Arc<StagingLease>>>,
+    reaped: AtomicBool,
     hard_stopped: AtomicBool,
     hard_stop_signal: tokio::sync::watch::Sender<bool>,
 }
@@ -128,30 +138,6 @@ struct PreparedWorker {
     stdout: BufReader<tokio::process::ChildStdout>,
 }
 
-struct StagingLease {
-    path: PathBuf,
-    workspace_root: WorkspaceRoot,
-    identity: StagingDirectoryIdentity,
-}
-
-#[cfg(unix)]
-#[derive(PartialEq, Eq)]
-struct StagingDirectoryIdentity {
-    device: u64,
-    inode: u64,
-}
-
-#[cfg(windows)]
-#[derive(PartialEq, Eq)]
-struct StagingDirectoryIdentity {
-    volume: u32,
-    index: u64,
-}
-
-#[cfg(not(any(unix, windows)))]
-#[derive(PartialEq, Eq)]
-struct StagingDirectoryIdentity;
-
 impl TaskEffectRuntime {
     pub(crate) fn new() -> Self {
         Self::with_command(effect_worker_command())
@@ -164,6 +150,10 @@ impl TaskEffectRuntime {
             workers: Arc::new(StdMutex::new(WorkerRegistry::default())),
             #[cfg(feature = "test-support")]
             test_staging_pause: Arc::new(StdMutex::new(None)),
+            #[cfg(feature = "test-support")]
+            test_cleanup_pause: Arc::new(StdMutex::new(None)),
+            #[cfg(feature = "test-support")]
+            test_cleanup_failure: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "test-support")]
             cooperative_abort: true,
         }
@@ -197,15 +187,21 @@ impl TaskEffectRuntime {
         let stdout = tokio::select! {
             biased;
             () = abort.aborted() => {
-                stop_child(&mut child).await;
-                self.finish_worker(&handle);
-                return Ok(None);
+                self.stop_registered_child(&mut child, &handle).await;
+                return self
+                    .finish_worker(&handle)
+                    .map(|()| None)
+                    .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason });
             }
             result = negotiate_worker(&mut child) => match result {
                 Ok(stdout) => stdout,
                 Err(error) => {
-                    stop_child(&mut child).await;
-                    self.finish_worker(&handle);
+                    self.stop_registered_child(&mut child, &handle).await;
+                    if let Err(reason) = self.finish_worker(&handle) {
+                        return Err(WorkspaceActionHostError::EffectUnavailable {
+                            reason: format!("{}; {reason}", error),
+                        });
+                    }
                     return Err(error);
                 }
             }
@@ -217,9 +213,19 @@ impl TaskEffectRuntime {
         }))
     }
 
-    async fn stop_prepared(&self, mut prepared: PreparedWorker) {
-        stop_child(&mut prepared.child).await;
-        self.finish_worker(&prepared.handle);
+    async fn stop_registered_child(
+        &self,
+        child: &mut tokio::process::Child,
+        handle: &Arc<WorkerHandle>,
+    ) {
+        stop_child(child).await;
+        handle.reaped.store(true, Ordering::SeqCst);
+    }
+
+    async fn stop_prepared(&self, mut prepared: PreparedWorker) -> Result<(), String> {
+        self.stop_registered_child(&mut prepared.child, &prepared.handle)
+            .await;
+        self.finish_worker(&prepared.handle)
     }
 
     #[cfg(all(test, feature = "test-support"))]
@@ -247,8 +253,9 @@ impl TaskEffectRuntime {
         } = prepared;
         let _active = self.active.read().await;
         if abort.is_aborted() || self.is_closing() {
-            stop_child(&mut child).await;
-            self.finish_worker(&handle);
+            self.stop_registered_child(&mut child, &handle).await;
+            self.finish_worker(&handle)
+                .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
             return Ok(TaskEffectExecution::Aborted);
         }
 
@@ -301,28 +308,65 @@ impl TaskEffectRuntime {
                 }
             })?;
         }
-        let staging_directory = if let Some(path) = staging_path {
-            match prepare_staging_directory(&path, started.root()).await {
-                Ok(staging_directory) => Some(staging_directory),
-                Err(reason) => {
-                    stop_child(&mut child).await;
-                    self.finish_worker(&handle);
-                    return Err(WorkspaceActionHostError::EffectUnavailable { reason });
+        if let Some(path) = staging_path {
+            match prepare_staging_lease(&path, started.root(), self.staging_lease_options()).await {
+                Ok(lease) => {
+                    if let Err(failure) = self.attach_staging_obligation(&handle, lease) {
+                        self.stop_registered_child(&mut child, &handle).await;
+                        let cleanup = cleanup_staging_lease(failure.lease).await;
+                        return Err(WorkspaceActionHostError::EffectUnavailable {
+                            reason: match cleanup {
+                                Ok(()) => failure.reason,
+                                Err(cleanup) => format!("{}; {}", failure.reason, cleanup.reason),
+                            },
+                        });
+                    }
+                }
+                Err(failure) => {
+                    if let Some(lease) = failure.lease
+                        && let Err(attach) = self.attach_staging_obligation(&handle, lease)
+                    {
+                        return Err(WorkspaceActionHostError::EffectUnavailable {
+                            reason: format!("{}; {}", failure.reason, attach.reason),
+                        });
+                    }
+                    self.stop_registered_child(&mut child, &handle).await;
+                    let cleanup = self.cleanup_worker_staging(&handle).await;
+                    let finish = if cleanup.is_ok() {
+                        self.finish_worker(&handle)
+                    } else {
+                        Err(String::from("staging cleanup failed"))
+                    };
+                    return Err(WorkspaceActionHostError::EffectUnavailable {
+                        reason: [Some(failure.reason), cleanup.err(), finish.err()]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    });
                 }
             }
-        } else {
-            None
-        };
+        }
         let mut stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => {
-                stop_child(&mut child).await;
-                self.finish_worker(&handle);
-                cleanup_staging(staging_directory)
-                    .await
-                    .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
+                self.stop_registered_child(&mut child, &handle).await;
+                let cleanup = self.cleanup_worker_staging(&handle).await;
+                let finish = if cleanup.is_ok() {
+                    self.finish_worker(&handle)
+                } else {
+                    Err(String::from("staging cleanup failed"))
+                };
                 return Err(WorkspaceActionHostError::EffectUnavailable {
-                    reason: String::from("worker stdin unavailable"),
+                    reason: [
+                        Some(String::from("worker stdin unavailable")),
+                        cleanup.err(),
+                        finish.err(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("; "),
                 });
             }
         };
@@ -336,19 +380,21 @@ impl TaskEffectRuntime {
             && let Err(error) = std::fs::write(marker, b"write-started")
         {
             drop(stdin);
-            stop_child(&mut child).await;
+            self.stop_registered_child(&mut child, &handle).await;
             output.abort();
             drop(output.await);
-            self.finish_worker(&handle);
-            cleanup_staging(staging_directory)
-                .await
-                .map_err(
-                    |cleanup_reason| WorkspaceActionHostError::EffectUnavailable {
-                        reason: format!("{error}; {cleanup_reason}"),
-                    },
-                )?;
+            let cleanup = self.cleanup_worker_staging(&handle).await;
+            let finish = if cleanup.is_ok() {
+                self.finish_worker(&handle)
+            } else {
+                Err(String::from("staging cleanup failed"))
+            };
             return Err(WorkspaceActionHostError::EffectUnavailable {
-                reason: error.to_string(),
+                reason: [Some(error.to_string()), cleanup.err(), finish.err()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("; "),
             });
         }
 
@@ -365,7 +411,7 @@ impl TaskEffectRuntime {
         };
         drop(stdin);
         if stop_requested || write_error.is_some() {
-            stop_child(&mut child).await;
+            self.stop_registered_child(&mut child, &handle).await;
         }
 
         let status = if stop_requested || write_error.is_some() {
@@ -375,12 +421,15 @@ impl TaskEffectRuntime {
                 biased;
                 () = self.wait_for_abort(abort) => {
                     stop_requested = true;
-                    stop_child(&mut child).await;
+                    self.stop_registered_child(&mut child, &handle).await;
                     child.wait().await
                 }
                 status = child.wait() => status,
             }
         };
+        if status.is_ok() {
+            handle.reaped.store(true, Ordering::SeqCst);
+        }
         let mut hard_stop_signal = handle.hard_stop_signal.subscribe();
         let output = if stop_requested || handle.hard_stopped.load(Ordering::SeqCst) {
             output.abort();
@@ -395,16 +444,22 @@ impl TaskEffectRuntime {
                 result = &mut output => result,
             }
         };
-        let cleanup = cleanup_staging(staging_directory).await;
-        if cleanup.is_ok() {
-            self.finish_worker(&handle);
-        }
+        let cleanup = self.cleanup_worker_staging(&handle).await;
+        let finish = if cleanup.is_ok() {
+            self.finish_worker(&handle)
+        } else {
+            Err(String::from("staging cleanup failed"))
+        };
 
         if stop_requested || handle.hard_stopped.load(Ordering::SeqCst) {
-            cleanup.map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
+            if let Err(reason) = cleanup.and(finish) {
+                return Err(WorkspaceActionHostError::EffectUnavailable { reason });
+            }
             return Ok(TaskEffectExecution::Aborted);
         }
-        cleanup.map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
+        cleanup
+            .and(finish)
+            .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
         if let Some(reason) = write_error {
             return Err(WorkspaceActionHostError::EffectUnavailable { reason });
         }
@@ -502,6 +557,8 @@ impl TaskEffectRuntime {
                     id,
                     pid,
                     process: Arc::clone(&process),
+                    staging_obligation: StdMutex::new(None),
+                    reaped: AtomicBool::new(false),
                     hard_stopped: AtomicBool::new(false),
                     hard_stop_signal,
                 });
@@ -516,9 +573,45 @@ impl TaskEffectRuntime {
         Ok(SpawnedWorker::Started { child, handle })
     }
 
-    fn finish_worker(&self, handle: &Arc<WorkerHandle>) {
+    fn attach_staging_obligation(
+        &self,
+        handle: &Arc<WorkerHandle>,
+        lease: Arc<StagingLease>,
+    ) -> Result<(), StagingCleanupFailure> {
+        let mut obligation = crate::lock_unpoison(&handle.staging_obligation);
+        if obligation.is_some() {
+            return Err(StagingCleanupFailure {
+                reason: format!("worker {} already owns staging cleanup", handle.id),
+                lease,
+            });
+        }
+        *obligation = Some(lease);
+        Ok(())
+    }
+
+    async fn cleanup_worker_staging(&self, handle: &Arc<WorkerHandle>) -> Result<(), String> {
+        let Some(lease) = crate::lock_unpoison(&handle.staging_obligation).take() else {
+            return Ok(());
+        };
+        match cleanup_staging_lease(lease).await {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                *crate::lock_unpoison(&handle.staging_obligation) = Some(failure.lease);
+                Err(failure.reason)
+            }
+        }
+    }
+
+    fn finish_worker(&self, handle: &Arc<WorkerHandle>) -> Result<(), String> {
+        if crate::lock_unpoison(&handle.staging_obligation).is_some() {
+            return Err(format!(
+                "worker {} cannot finish before staging cleanup",
+                handle.id
+            ));
+        }
         let mut registry = crate::lock_unpoison(&self.workers);
         registry.workers.remove(&handle.id);
+        Ok(())
     }
 
     pub(crate) async fn terminate_and_join(&self) -> Result<(), String> {
@@ -535,11 +628,18 @@ impl TaskEffectRuntime {
         }
         let _active = self.active.write().await;
         for worker in &workers {
-            self.finish_worker(worker);
+            if let Err(error) = self.cleanup_worker_staging(worker).await {
+                failure.get_or_insert(error);
+                continue;
+            }
+            if let Err(error) = self.finish_worker(worker) {
+                failure.get_or_insert(error);
+            }
         }
         let remaining = crate::lock_unpoison(&self.workers).workers.len();
         if remaining != 0 {
-            return Err(format!("{remaining} worker(s) remained after hard stop"));
+            let error = format!("{remaining} worker cleanup obligation(s) remained");
+            failure.get_or_insert(error);
         }
         failure.map_or(Ok(()), Err)
     }
@@ -547,6 +647,24 @@ impl TaskEffectRuntime {
     #[cfg(feature = "test-support")]
     pub(crate) fn live_workers_for_tests(&self) -> usize {
         crate::lock_unpoison(&self.workers).workers.len()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn live_worker_processes_for_tests(&self) -> usize {
+        crate::lock_unpoison(&self.workers)
+            .workers
+            .values()
+            .filter(|worker| !worker.reaped.load(Ordering::SeqCst))
+            .count()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn pending_staging_obligations_for_tests(&self) -> usize {
+        crate::lock_unpoison(&self.workers)
+            .workers
+            .values()
+            .filter(|worker| crate::lock_unpoison(&worker.staging_obligation).is_some())
+            .count()
     }
 
     #[cfg(feature = "test-support")]
@@ -595,8 +713,30 @@ impl TaskEffectRuntime {
     }
 
     #[cfg(feature = "test-support")]
+    pub(crate) fn set_test_cleanup_pause(
+        &self,
+        pause: Option<crate::staging_cleanup::StagingCleanupPause>,
+    ) {
+        *crate::lock_unpoison(&self.test_cleanup_pause) = pause;
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn set_test_cleanup_failure(&self, fail: bool) {
+        self.test_cleanup_failure.store(fail, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "test-support")]
     fn test_staging_pause(&self) -> Option<ene_action::WorkspaceEffectStagingPause> {
         crate::lock_unpoison(&self.test_staging_pause).clone()
+    }
+
+    fn staging_lease_options(&self) -> StagingLeaseOptions {
+        StagingLeaseOptions {
+            #[cfg(feature = "test-support")]
+            pause: crate::lock_unpoison(&self.test_cleanup_pause).clone(),
+            #[cfg(feature = "test-support")]
+            fail_cleanup: self.test_cleanup_failure.load(Ordering::SeqCst),
+        }
     }
 }
 
@@ -710,231 +850,6 @@ async fn negotiate_worker(
 async fn stop_child(child: &mut tokio::process::Child) {
     drop(child.kill().await);
     drop(child.wait().await);
-}
-
-fn staging_directory_identity(path: &Path) -> Result<StagingDirectoryIdentity, String> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("staging directory identity is unavailable: {error}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        Ok(StagingDirectoryIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
-    }
-    #[cfg(windows)]
-    {
-        let _ = &metadata;
-        use std::os::windows::ffi::OsStrExt as _;
-        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-        use windows_sys::Win32::Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            GetFileInformationByHandle, OPEN_EXISTING,
-        };
-
-        let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        wide.push(0);
-        // SAFETY: `wide` is NUL-terminated, the share flags permit metadata-only
-        // concurrent access, and `FILE_FLAG_BACKUP_SEMANTICS` permits opening a
-        // directory. The returned owned handle is closed below.
-        let handle = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                FILE_READ_ATTRIBUTES,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
-                std::ptr::null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(format!(
-                "staging directory identity could not open the directory: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let mut information = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
-        // SAFETY: `handle` is owned and valid, and `information` points to a
-        // writable BY_HANDLE_FILE_INFORMATION for the duration of the call.
-        let queried = unsafe { GetFileInformationByHandle(handle, &mut information) };
-        // SAFETY: `handle` was returned as an owned handle and is not used after
-        // this close.
-        let _ = unsafe { CloseHandle(handle) };
-        if queried == 0 {
-            return Err(format!(
-                "staging directory identity could not be read: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        Ok(StagingDirectoryIdentity {
-            volume: information.dwVolumeSerialNumber,
-            index: (u64::from(information.nFileIndexHigh) << 32)
-                | u64::from(information.nFileIndexLow),
-        })
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = metadata;
-        Ok(StagingDirectoryIdentity)
-    }
-}
-
-async fn prepare_staging_directory(
-    path: &Path,
-    workspace_root: &WorkspaceRoot,
-) -> Result<StagingLease, String> {
-    let path = path.to_path_buf();
-    let workspace_root = workspace_root.clone();
-    let preparation = tokio::task::spawn_blocking(move || {
-        let root = path
-            .parent()
-            .ok_or_else(|| (String::from("staging directory has no parent"), None))?;
-        let parent = root
-            .parent()
-            .ok_or_else(|| (String::from("staging root has no parent"), None))?;
-        if staging_path_contains_reparse(&path) {
-            return Err::<StagingLease, _>((
-                String::from("staging path contains a reparse point"),
-                None,
-            ));
-        }
-        workspace_root
-            .validate_staging_directory(parent)
-            .map_err(|reason| (reason, None))?;
-        match std::fs::create_dir(root) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata =
-                    std::fs::symlink_metadata(root).map_err(|error| (error.to_string(), None))?;
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    return Err::<StagingLease, _>((
-                        String::from("staging root is not a real directory"),
-                        None,
-                    ));
-                }
-            }
-            Err(error) => {
-                return Err::<StagingLease, _>((error.to_string(), None));
-            }
-        }
-        workspace_root
-            .validate_staging_directory(root)
-            .map_err(|reason| (reason, None))?;
-        if staging_path_contains_reparse(&path) {
-            return Err::<StagingLease, _>((
-                String::from("staging path became a reparse point"),
-                None,
-            ));
-        }
-        workspace_root
-            .validate_staging_directory(root)
-            .map_err(|reason| (reason, None))?;
-        if let Err(error) = std::fs::create_dir(&path) {
-            let reason = if error.kind() == std::io::ErrorKind::AlreadyExists {
-                format!("staging path already exists: {error}")
-            } else {
-                error.to_string()
-            };
-            return Err((reason, None));
-        }
-        let identity = match staging_directory_identity(&path) {
-            Ok(identity) => identity,
-            Err(reason) => return Err((reason, None)),
-        };
-        let staging = StagingLease {
-            path: path.clone(),
-            workspace_root: workspace_root.clone(),
-            identity,
-        };
-        #[cfg(unix)]
-        if let Err(error) = {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-        } {
-            return Err((error.to_string(), Some(staging)));
-        }
-        if let Err(reason) = workspace_root.validate_staging_directory(&path) {
-            return Err((reason, Some(staging)));
-        }
-        Ok(staging)
-    })
-    .await
-    .map_err(|error| format!("staging preparation task failed: {error}"))?;
-    match preparation {
-        Ok(staging) => Ok(staging),
-        Err((reason, Some(staging))) => match cleanup_staging(Some(staging)).await {
-            Ok(()) => Err(reason),
-            Err(cleanup_reason) => Err(format!("{reason}; {cleanup_reason}")),
-        },
-        Err((reason, None)) => Err(reason),
-    }
-}
-
-fn staging_metadata_is_reparse(metadata: &std::fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
-fn staging_path_contains_reparse(path: &Path) -> bool {
-    let mut current = Some(path);
-    while let Some(candidate) = current {
-        match std::fs::symlink_metadata(candidate) {
-            Ok(metadata) if staging_metadata_is_reparse(&metadata) => return true,
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return true,
-        }
-        current = candidate.parent();
-    }
-    false
-}
-
-async fn cleanup_staging(staging: Option<StagingLease>) -> Result<(), String> {
-    let Some(staging) = staging else {
-        return Ok(());
-    };
-    tokio::task::spawn_blocking(move || {
-        let path = staging.path;
-        if staging_path_contains_reparse(&path) {
-            return Err(String::from("staging path contains a reparse point"));
-        }
-        match std::fs::symlink_metadata(&path) {
-            Ok(_) => {
-                let identity = staging_directory_identity(&path)?;
-                if identity != staging.identity {
-                    return Err(String::from(
-                        "staging directory no longer matches its owned identity",
-                    ));
-                }
-                staging.workspace_root.validate_staging_directory(&path)?;
-                staging.workspace_root.validate_staging_tree(&path)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
-        }
-        if let Err(error) = std::fs::remove_dir_all(&path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(error.to_string());
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|error| format!("staging cleanup task failed: {error}"))?
 }
 
 fn worker_executable_available(path: &Path) -> bool {
@@ -1263,7 +1178,10 @@ pub(crate) async fn run_workspace_action(
     let claim_scope = executions.task_claim_scope(TaskClaimKind::Action).await;
     if abort.is_aborted() || effect_runtime.is_closing() {
         drop(claim_scope);
-        effect_runtime.stop_prepared(prepared).await;
+        effect_runtime
+            .stop_prepared(prepared)
+            .await
+            .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
         return Ok(WorkspaceActionHostOutcome::Stopped);
     }
     let claim = start_workspace_action(store, &mut tracker, command).await;
@@ -1271,7 +1189,10 @@ pub(crate) async fn run_workspace_action(
     let started = match claim {
         Ok(ActionClaimOutcome::Started(started)) => started,
         Ok(ActionClaimOutcome::NotStarted(ActionNotStarted::TaskTerminal)) => {
-            effect_runtime.stop_prepared(prepared).await;
+            effect_runtime
+                .stop_prepared(prepared)
+                .await
+                .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
             return match store.load_task(task).await? {
                 Some(record) => Ok(WorkspaceActionHostOutcome::TaskTerminal {
                     task,
@@ -1281,15 +1202,24 @@ pub(crate) async fn run_workspace_action(
             };
         }
         Ok(ActionClaimOutcome::NotStarted(ActionNotStarted::ExecutionSealed)) => {
-            effect_runtime.stop_prepared(prepared).await;
+            effect_runtime
+                .stop_prepared(prepared)
+                .await
+                .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
             return Ok(WorkspaceActionHostOutcome::ExecutionSealed { delegation });
         }
         Ok(ActionClaimOutcome::NotStarted(reason)) => {
-            effect_runtime.stop_prepared(prepared).await;
+            effect_runtime
+                .stop_prepared(prepared)
+                .await
+                .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
             return Ok(WorkspaceActionHostOutcome::NotStarted(reason));
         }
         Err(error) => {
-            effect_runtime.stop_prepared(prepared).await;
+            effect_runtime
+                .stop_prepared(prepared)
+                .await
+                .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
             return Err(error.into());
         }
     };
@@ -1329,6 +1259,9 @@ mod supervisor_tests {
     use super::{
         DispatchAbort, TaskEffectExecution, TaskEffectRuntime, WorkspaceActionHostError,
         effect_worker_command_at,
+    };
+    use crate::staging_cleanup::{
+        StagingCleanupPause, StagingLeaseOptions, cleanup_staging_lease, prepare_staging_lease,
     };
 
     #[test]
@@ -1670,7 +1603,8 @@ mod supervisor_tests {
         std::fs::write(&sentinel, b"keep").expect("sentinel write");
         let workspace_root =
             WorkspaceRoot::open(&workspace.path().to_string_lossy()).expect("workspace root");
-        let result = super::prepare_staging_directory(&existing, &workspace_root).await;
+        let result =
+            prepare_staging_lease(&existing, &workspace_root, StagingLeaseOptions::default()).await;
         assert!(result.is_err());
         assert_eq!(
             std::fs::read(&sentinel).expect("sentinel survives"),
@@ -1704,7 +1638,7 @@ mod supervisor_tests {
     }
 
     #[tokio::test]
-    async fn cleanup_refuses_a_replacement_staging_directory() {
+    async fn rename_away_cleanup_uses_the_owned_directory_object() {
         let workspace = tempfile::tempdir().expect("workspace");
         let workspace_root =
             WorkspaceRoot::open(&workspace.path().to_string_lossy()).expect("workspace root");
@@ -1712,18 +1646,80 @@ mod supervisor_tests {
             .as_path()
             .join(".ene-action-staging")
             .join("attempt");
-        let staging = super::prepare_staging_directory(&staging_path, &workspace_root)
+        let staging = prepare_staging_lease(
+            &staging_path,
+            &workspace_root,
+            StagingLeaseOptions::default(),
+        )
+        .await
+        .expect("owned staging");
+        std::fs::write(staging_path.join("target-body"), b"target-bearing content")
+            .expect("owned content");
+        let moved = staging_path.with_file_name("moved");
+        std::fs::rename(&staging_path, &moved).expect("move owned staging");
+        assert!(!staging_path.exists());
+        std::fs::create_dir(&staging_path).expect("replacement staging");
+        let sentinel = staging_path.join("sentinel");
+        std::fs::write(&sentinel, b"keep").expect("sentinel write");
+
+        cleanup_staging_lease(staging)
             .await
-            .expect("owned staging");
+            .expect("renamed owned staging cleanup");
+
+        assert!(!moved.exists());
+        assert_eq!(
+            std::fs::read(&sentinel).expect("replacement survives"),
+            b"keep"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_after_validation_never_redirects_owned_cleanup() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let barriers = tempfile::tempdir().expect("barriers");
+        let entered = barriers.path().join("validated");
+        let release = barriers.path().join("release");
+        let workspace_root =
+            WorkspaceRoot::open(&workspace.path().to_string_lossy()).expect("workspace root");
+        let staging_path = workspace_root
+            .as_path()
+            .join(".ene-action-staging")
+            .join("attempt");
+        let runtime = TaskEffectRuntime::new();
+        runtime.set_test_cleanup_pause(Some(StagingCleanupPause {
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+        let staging = prepare_staging_lease(
+            &staging_path,
+            &workspace_root,
+            runtime.staging_lease_options(),
+        )
+        .await
+        .expect("owned staging");
+        std::fs::write(staging_path.join("target-body"), b"target-bearing content")
+            .expect("owned content");
+        let cleanup = tokio::spawn(cleanup_staging_lease(staging));
+        timeout(Duration::from_secs(15), async {
+            while !entered.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cleanup identity barrier");
+
         let moved = staging_path.with_file_name("moved");
         std::fs::rename(&staging_path, &moved).expect("move owned staging");
         std::fs::create_dir(&staging_path).expect("replacement staging");
         let sentinel = staging_path.join("sentinel");
         std::fs::write(&sentinel, b"keep").expect("sentinel write");
+        std::fs::write(&release, b"release").expect("release cleanup");
 
-        let result = super::cleanup_staging(Some(staging)).await;
-
-        assert!(result.is_err());
+        cleanup
+            .await
+            .expect("cleanup task joins")
+            .expect("owned object cleanup");
+        assert!(!moved.exists());
         assert_eq!(
             std::fs::read(&sentinel).expect("replacement survives"),
             b"keep"

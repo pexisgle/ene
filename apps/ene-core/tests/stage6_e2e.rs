@@ -719,6 +719,23 @@ impl Served {
         Arc::clone(self.handle.as_ref().expect("a live HostHandle"))
     }
 
+    async fn stop_result(&mut self) -> Result<(), CoreError> {
+        self.client = None;
+        tokio::task::yield_now().await;
+        self.request_graceful_stop();
+        let finished = std::mem::replace(
+            &mut self.server,
+            tokio::spawn(async { Ok::<(), CoreError>(()) }),
+        );
+        match finished.await {
+            Ok(result) => result,
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(_) => Err(CoreError::Serving(String::from(
+                "test listener join failed",
+            ))),
+        }
+    }
+
     async fn stop(&mut self) {
         self.client = None;
         tokio::task::yield_now().await;
@@ -6929,7 +6946,11 @@ async fn missing_worker_fails_closed_before_action_claim() {
             .join("shutdown-task-workspace/missing-worker.md")
             .exists()
     );
-    served.stop().await;
+    let error = served
+        .stop_result()
+        .await
+        .expect_err("technical failure must reach shutdown");
+    assert!(error.to_string().contains("Task Agent technical failure"));
 }
 
 #[cfg(feature = "test-support")]
@@ -7005,7 +7026,11 @@ async fn stale_worker_protocol_is_rejected_before_au5_and_staging() {
             .join("shutdown-task-workspace/.ene-action-staging")
             .exists()
     );
-    served.stop().await;
+    let error = served
+        .stop_result()
+        .await
+        .expect_err("technical failure must reach shutdown");
+    assert!(error.to_string().contains("Task Agent technical failure"));
 }
 
 #[cfg(all(feature = "test-support", windows))]
@@ -7067,7 +7092,83 @@ async fn windows_junction_staging_root_is_rejected_without_deleting_its_target()
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
     assert!(std::fs::symlink_metadata(&junction).is_ok());
-    served.stop().await;
+    let error = served
+        .stop_result()
+        .await
+        .expect_err("technical failure must reach shutdown");
+    assert!(error.to_string().contains("Task Agent technical failure"));
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn host_shutdown_reports_staging_cleanup_failure_and_keeps_the_obligation() {
+    const TARGET_BODY: &str = "private staging cleanup sentinel 7193";
+    let temp = tempfile::TempDir::new().unwrap();
+    let entered = temp.path().join("staging-body-written");
+    let release = temp.path().join("never-release-staging-body");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"cleanup-failure.md","content":"private staging cleanup sentinel 7193"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served
+        .handle()
+        .set_task_effect_staging_pause_for_tests(Some(ene_action::WorkspaceEffectStagingPause {
+            entered: entered.clone(),
+            release,
+        }));
+    served
+        .handle()
+        .set_task_effect_cleanup_failure_for_tests(true);
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !entered.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the worker must write target-bearing staging content");
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 1);
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
+
+    let error = served
+        .stop_result()
+        .await
+        .expect_err("unfinished staging cleanup must fail Host shutdown");
+
+    assert!(error.to_string().contains("staging cleanup failed"));
+    assert!(!error.to_string().contains(TARGET_BODY));
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 0);
+    assert_eq!(served.handle().running_task_executions_for_tests(), 0);
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/cleanup-failure.md")
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -7297,14 +7398,13 @@ async fn host_shutdown_kills_reaps_and_joins_uncooperative_task_effect_before_re
         .await
         .expect("Host shutdown must remain bounded after the escalation");
     served.server = tokio::spawn(async { Ok::<(), CoreError>(()) });
-    assert!(matches!(
-        finished,
-        Ok(Err(CoreError::Serving(reason))) if reason.contains("quiesce exceeded")
-    ));
+    assert!(matches!(finished, Ok(Ok(()))));
     wait_until_deletion_drivers(served.handle(), 0).await;
     wait_until_deletion_blocking(served.handle(), 0).await;
 
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 0);
     assert_eq!(served.handle().live_task_effect_workers_for_tests(), 0);
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 0);
     assert_eq!(served.handle().running_task_executions_for_tests(), 0);
     assert_eq!(
         db_scalar(

@@ -688,6 +688,32 @@ impl HostHandle {
     }
 
     #[cfg(feature = "test-support")]
+    pub fn set_task_effect_cleanup_pause_for_tests(
+        &self,
+        pause: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    ) {
+        let pause = pause.map(
+            |(entered, release)| crate::staging_cleanup::StagingCleanupPause { entered, release },
+        );
+        crate::lock_unpoison(&self.task_effect_runtime).set_test_cleanup_pause(pause);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn set_task_effect_cleanup_failure_for_tests(&self, fail: bool) {
+        crate::lock_unpoison(&self.task_effect_runtime).set_test_cleanup_failure(fail);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn pending_task_effect_staging_for_tests(&self) -> usize {
+        crate::lock_unpoison(&self.task_effect_runtime).pending_staging_obligations_for_tests()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn live_task_effect_processes_for_tests(&self) -> usize {
+        crate::lock_unpoison(&self.task_effect_runtime).live_worker_processes_for_tests()
+    }
+
+    #[cfg(feature = "test-support")]
     pub fn live_task_effect_workers_for_tests(&self) -> usize {
         crate::lock_unpoison(&self.task_effect_runtime).live_workers_for_tests()
     }
