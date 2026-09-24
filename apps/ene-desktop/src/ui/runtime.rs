@@ -23,7 +23,7 @@ use crate::motion::{self, MotionEnvironment};
 use crate::secret::SecretIntake;
 use crate::session::{
     self, ChatDeliveryPhase, ChatOperation, ChatSendReport, ChatSessionOutcome,
-    ChatTechnicalFailure, SETUP_PROVIDER_OPENAI, SetupFacts,
+    ChatTechnicalFailure, ChatTurn, SETUP_PROVIDER_OPENAI, SetupFacts,
 };
 use crate::ui::deletion::DeletionPanel;
 use crate::ui::tasks::TaskPanel;
@@ -675,26 +675,32 @@ impl DesktopRuntime {
         match collected {
             ChatSessionOutcome::Completed(turn) => {
                 self.project_body_pose(PoseHint::Speaking);
+                let ChatTurn {
+                    round,
+                    stream,
+                    reply,
+                } = turn;
                 let Some(text) = self.composer.take_sendable() else {
                     return Ok(ChatSendReport::NotSent { failure: None });
                 };
                 self.timeline.push(super::presentation::Message {
-                    round: turn.round.clone(),
+                    round: round.clone(),
                     owner: true,
                     text,
                     caption: String::new(),
                 });
                 self.timeline.push(super::presentation::Message {
-                    round: turn.round.clone(),
+                    round: round.clone(),
                     owner: false,
-                    text: turn.reply.clone(),
+                    text: reply,
                     caption: String::new(),
                 });
-                self.chat_receipt = Some((turn.round.clone(), turn.stream));
+                self.chat_receipt = Some((round.clone(), stream));
                 if let Some(client) = self.client.as_mut() {
                     match session::confirm_chat_presentation(
                         client,
-                        &turn,
+                        &round,
+                        stream,
                         PresentationStatus::Presented,
                     )
                     .await
@@ -702,8 +708,9 @@ impl DesktopRuntime {
                         Ok(()) | Err(_) => {}
                     }
                 }
+                let history_result = self.refresh_history().await;
                 self.flush_pending_erasure().await;
-                match self.refresh_history().await {
+                match history_result {
                     Ok(()) => Ok(ChatSendReport::Completed),
                     Err(error) => Ok(ChatSendReport::ReplyShownHistoryRefreshFailed {
                         failure: ChatTechnicalFailure {
@@ -742,11 +749,10 @@ impl DesktopRuntime {
                         caption: String::new(),
                     });
                 }
-                self.flush_pending_erasure().await;
-                if self.refresh_history().await.is_err() {
-                    // The accepted owner projection remains round-aware even
-                    // when the follow-up history read is unavailable.
+                match self.refresh_history().await {
+                    Ok(()) | Err(_) => {}
                 }
+                self.flush_pending_erasure().await;
                 Ok(ChatSendReport::AcceptedFailure { round, failure })
             }
             ChatSessionOutcome::StreamEnded { round, end } => {
@@ -759,11 +765,10 @@ impl DesktopRuntime {
                         caption: String::new(),
                     });
                 }
-                self.flush_pending_erasure().await;
-                if self.refresh_history().await.is_err() {
-                    // The accepted owner projection remains round-aware even
-                    // when the follow-up history read is unavailable.
+                match self.refresh_history().await {
+                    Ok(()) | Err(_) => {}
                 }
+                self.flush_pending_erasure().await;
                 Ok(ChatSendReport::StreamEnded { round, end })
             }
         }

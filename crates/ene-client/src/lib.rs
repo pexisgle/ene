@@ -16,9 +16,9 @@ mod win_acl;
 pub use error::{ClientError, EnqueueFailure, RequestFailure, ResponseWaitFailure};
 pub use frames::PreparedRequest;
 pub use host_pin::trust_host_pin;
-#[cfg(any(test, feature = "test-support"))]
-pub use transport::TransportProbe;
 pub use transport::{Client, ConnectProgress, EnqueuedRequest, PendingPairingClient};
+#[cfg(any(test, feature = "test-support"))]
+pub use transport::{PendingErasureInjector, TransportProbe};
 
 pub const DEFAULT_COMPANION_REF: &str = "default";
 

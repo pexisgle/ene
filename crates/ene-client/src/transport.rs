@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ene_api::codec::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 use ene_api::runtime::HostRuntimeInfo;
-use ene_api::v1::deletion::{DeletionDemand, LocalErasureResult};
+use ene_api::v1::deletion::{ClientTempClass, DeletionDemand, LocalErasureResult};
 use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender};
 use ene_api::v1::handshake::{AuthChallenge, PairingProvisionSecret, PairingResult};
 use ene_api::v1::payload::WirePayload;
@@ -103,6 +103,8 @@ struct TransportProbeInner {
     pongs_sent: AtomicU64,
     pongs: StdMutex<VecDeque<Vec<u8>>>,
     pings: StdMutex<VecDeque<Vec<u8>>>,
+    local_erasure_results: AtomicU64,
+    presentation_wiped_results: AtomicU64,
     wake: tokio::sync::Notify,
 }
 
@@ -115,6 +117,8 @@ impl TransportProbe {
                 pongs_sent: AtomicU64::new(0),
                 pongs: StdMutex::new(VecDeque::new()),
                 pings: StdMutex::new(VecDeque::new()),
+                local_erasure_results: AtomicU64::new(0),
+                presentation_wiped_results: AtomicU64::new(0),
                 wake: tokio::sync::Notify::new(),
             }),
         }
@@ -134,6 +138,17 @@ impl TransportProbe {
             pongs.pop_front();
         }
         pongs.push_back(payload.to_vec());
+    }
+
+    fn note_local_erasure_result(&self, result: &LocalErasureResult) {
+        self.inner
+            .local_erasure_results
+            .fetch_add(1, Ordering::SeqCst);
+        if result.wiped.contains(&ClientTempClass::PresentationBuffer) {
+            self.inner
+                .presentation_wiped_results
+                .fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     async fn ping_ready(&self) {
@@ -163,9 +178,62 @@ impl TransportProbe {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn local_erasure_results(&self) -> u64 {
+        self.inner.local_erasure_results.load(Ordering::SeqCst)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn presentation_wiped_results(&self) -> u64 {
+        self.inner.presentation_wiped_results.load(Ordering::SeqCst)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn send_ping(&self, payload: &[u8]) {
         lock_probe(&self.inner.pings).push_back(payload.to_vec());
         self.inner.wake.notify_one();
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+pub struct PendingErasureInjector {
+    inner: Arc<PendingErasureInjectorInner>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct PendingErasureInjectorInner {
+    demand: StdMutex<Option<DeletionDemand>>,
+    wake: tokio::sync::Notify,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Default for PendingErasureInjector {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(PendingErasureInjectorInner {
+                demand: StdMutex::new(None),
+                wake: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl PendingErasureInjector {
+    pub fn inject(&self, demand: DeletionDemand) {
+        *lock_probe(&self.inner.demand) = Some(demand);
+        self.inner.wake.notify_waiters();
+        self.inner.wake.notify_one();
+    }
+
+    fn take(&self) -> Option<DeletionDemand> {
+        lock_probe(&self.inner.demand).take()
+    }
+
+    async fn notified(&self) {
+        self.inner.wake.notified().await;
     }
 }
 
@@ -259,6 +327,10 @@ impl Transport {
     }
 
     async fn write(&self, frame: &WireFrame) -> Result<(), ClientError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let WirePayload::LocalErasureResult(result) = &frame.payload {
+            self.probe.note_local_erasure_result(result);
+        }
         self.enqueue(frame).await.map_err(|error| match error {
             EnqueueFailure::Encode(error) => ClientError::Codec(format!("encode failed: {error}")),
             EnqueueFailure::QueueWaitTimedOut => {
@@ -651,6 +723,8 @@ pub struct Client {
     transport: Transport,
     sender: WireSender,
     state: SessionState,
+    #[cfg(any(test, feature = "test-support"))]
+    pending_erasure_injector: PendingErasureInjector,
 }
 
 fn map_enqueue_error(error: EnqueueFailure) -> ClientError {
@@ -1011,7 +1085,22 @@ impl Client {
 
     pub async fn next_frame(&mut self) -> Result<WirePayload, ClientError> {
         loop {
-            let payload = match self.transport.read().await? {
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(demand) = self.pending_erasure_injector.take() {
+                self.state.push_pending_erasure(demand);
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            let decoded = {
+                let read = self.transport.read();
+                tokio::pin!(read);
+                tokio::select! {
+                    result = &mut read => result,
+                    _ = self.pending_erasure_injector.notified() => continue,
+                }
+            };
+            #[cfg(not(any(test, feature = "test-support")))]
+            let decoded = self.transport.read().await;
+            let payload = match decoded? {
                 DecodedFrame::Known(frame) => frame.payload,
                 DecodedFrame::Unsupported { envelope, reason } => {
                     self.reject_unsupported(&envelope, &reason).await?;
@@ -1043,6 +1132,12 @@ impl Client {
     #[must_use]
     pub fn transport_probe_for_tests(&self) -> TransportProbe {
         self.transport.probe.clone()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn pending_erasure_injector_for_tests(&self) -> PendingErasureInjector {
+        self.pending_erasure_injector.clone()
     }
 
     async fn authenticate(
@@ -1110,6 +1205,8 @@ async fn finish_connect(
             connection_id: None,
         },
         state: SessionState::default(),
+        #[cfg(any(test, feature = "test-support"))]
+        pending_erasure_injector: PendingErasureInjector::default(),
     };
     let challenge_payload = session
         .transport
@@ -1597,6 +1694,7 @@ mod tests {
                 connection_id: None,
             },
             state: SessionState::default(),
+            pending_erasure_injector: PendingErasureInjector::default(),
         };
         let prepared = client.prepare(frame.payload);
         let result = client.enqueue_request(&prepared).await;
@@ -1618,6 +1716,7 @@ mod tests {
                 connection_id: None,
             },
             state: SessionState::default(),
+            pending_erasure_injector: PendingErasureInjector::default(),
         };
         let request = client.request_classified(WirePayload::PairingRequest(PairingRequest {
             device_descriptor: String::from("unknown-outcome"),

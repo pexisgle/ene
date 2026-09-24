@@ -454,13 +454,14 @@ fn stream_end(status: StreamClose) -> Option<ChatStreamEnd> {
 
 pub async fn confirm_chat_presentation(
     client: &mut Client,
-    turn: &ChatTurn,
+    round: &str,
+    stream: Option<StreamWireId>,
     status: PresentationStatus,
 ) -> Result<(), DesktopError> {
     client
         .notify(WirePayload::ConfirmPresentation(ConfirmPresentationWire {
-            round: ene_api::v1::refs::RoundWireId(turn.round.clone()),
-            stream: turn.stream,
+            round: ene_api::v1::refs::RoundWireId(round.to_owned()),
+            stream,
             status,
             detail: None,
         }))
