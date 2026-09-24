@@ -111,34 +111,49 @@ mod tests {
     }
 
     #[test]
-    fn page_bounds_match_the_wire_contract() {
+    fn usage_wire_contract_preserves_optional_fields_and_page_shape() {
         assert_eq!(USAGE_PAGE_LIMIT_MAX, 50);
         assert_eq!(USAGE_PAGE_LIMIT_DEFAULT, 50);
-    }
 
-    #[test]
-    fn request_roundtrips_through_json_with_omitted_fields() {
-        let json = r#"{"cursor":null}"#;
         let decoded: UsageSummaryRequest =
-            serde_json::from_str(json).expect("optional fields may be omitted");
-        assert_eq!(decoded.limit, None);
+            serde_json::from_str(r#"{"cursor":null,"future_optional":{"revision":2}}"#)
+                .expect("optional and unknown fields are accepted");
+        assert_eq!(decoded.from, None);
+        assert_eq!(decoded.to, None);
         assert_eq!(decoded.provider, None);
+        assert_eq!(decoded.model, None);
+        assert_eq!(decoded.consumer, None);
+        assert_eq!(decoded.purpose, None);
         assert_eq!(decoded.status, None);
+        assert_eq!(decoded.limit, None);
+        assert_eq!(decoded.cursor, None);
+
         let decoded: UsageSummaryRequest = serde_json::from_str(
-            r#"{"provider":"openai","status":"reserved","limit":10,"cursor":"cursor-1"}"#,
+            r#"{"from":"2026-09-01","to":"2026-09-30","provider":"openai","model":"gpt-4o","consumer":"companion_dialogue","purpose":"dialogue_response","status":"reserved","limit":10,"cursor":"cursor-1"}"#,
         )
         .expect("the request roundtrips");
+        assert_eq!(decoded.from.as_deref(), Some("2026-09-01"));
+        assert_eq!(decoded.to.as_deref(), Some("2026-09-30"));
         assert_eq!(decoded.provider.as_deref(), Some("openai"));
+        assert_eq!(decoded.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(decoded.consumer.as_deref(), Some("companion_dialogue"));
+        assert_eq!(decoded.purpose.as_deref(), Some("dialogue_response"));
         assert_eq!(decoded.status.as_deref(), Some("reserved"));
         assert_eq!(decoded.limit, Some(10));
         assert_eq!(
             decoded.cursor,
             Some(UsageCursorWire(String::from("cursor-1")))
         );
-    }
+        for malformed in [
+            r#"{"from":7}"#,
+            r#"{"provider":7}"#,
+            r#"{"status":[]}"#,
+            r#"{"limit":"10"}"#,
+            r#"{"cursor":7}"#,
+        ] {
+            assert!(serde_json::from_str::<UsageSummaryRequest>(malformed).is_err());
+        }
 
-    #[test]
-    fn page_carries_attribution_tokens_cost_and_caps_without_bodies() {
         let page = UsageSummaryPage {
             rows: vec![UsageSummaryRowView {
                 provider: String::from("openai"),
@@ -180,11 +195,8 @@ mod tests {
             evaluated_at: String::from("2026-09-17T00:00:00.000000000Z"),
         };
         let json = serde_json::to_string(&page).expect("the page serializes");
-        assert!(
-            json.contains("companion_dialogue"),
-            "attribution is present"
-        );
-        assert!(json.contains("cached_input"), "cost components are present");
+        assert!(json.contains("companion_dialogue"));
+        assert!(json.contains("cached_input"));
         assert!(json.contains("usage-cap-system-daily_utc-rev-1"));
         let back: UsageSummaryPage = serde_json::from_str(&json).expect("the page roundtrips");
         assert_eq!(back, page);

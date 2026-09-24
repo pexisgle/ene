@@ -736,10 +736,6 @@ async fn execute_pending(
             credential_outcome(outcome, provider, label)
         }
         PendingOp::DeletionConfirm { request_id } => {
-            #[cfg(test)]
-            if let Some(gate) = handle.host_control_confirm_gate() {
-                gate.pause().await;
-            }
             match handle.confirm_targeted_deletion(&request_id).await {
                 Ok(outcome) => {
                     let deletion = deletion_outcome(&outcome);

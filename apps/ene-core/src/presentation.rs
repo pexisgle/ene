@@ -574,10 +574,6 @@ impl HostHandle {
         if !live.connection_live {
             return Some(UndeliveredResponse::NoCurrentPresence);
         }
-        #[cfg(test)]
-        if let Some(gate) = self.fetch_gate() {
-            gate.pause().await;
-        }
         let _gate = self.presentation_gate().await;
         let conn = conn_key(&live.connection_id);
         let incarnation = (
@@ -928,13 +924,6 @@ impl HostHandle {
     ) -> Option<UndeliveredResponse> {
         let companion_key = companion.as_raw().as_uuid().as_hyphenated().to_string();
         let generation = attribution.generation.as_u64();
-        #[cfg(test)]
-        {
-            let gate = crate::lock_unpoison(&self.presentation_commit_gate).clone();
-            if let Some(gate) = gate {
-                gate.pause().await;
-            }
-        }
         let round = ene_presentation::RoundId::from_raw(RawId::new());
         let mark = ene_companion::PresentationMark {
             round: round.as_raw(),
@@ -1443,10 +1432,6 @@ impl HostHandle {
                 )];
             }
         };
-        #[cfg(test)]
-        if let Some(gate) = self.ref_mint_gate() {
-            gate.pause().await;
-        }
         let minted = self.with_presentation_state(live, |state| {
             Self::take_cursor(
                 state,
@@ -1575,10 +1560,6 @@ impl HostHandle {
                 )];
             }
         };
-        #[cfg(test)]
-        if let Some(gate) = self.ref_mint_gate() {
-            gate.pause().await;
-        }
         let minted = self.with_presentation_state(live, |state| {
             Self::take_cursor(
                 state,
@@ -1794,10 +1775,6 @@ impl HostHandle {
                 live,
                 WirePayload::SelectTaskResponse(SelectTaskResponse::UnknownRef),
             )];
-        }
-        #[cfg(test)]
-        if let Some(gate) = self.ref_mint_gate() {
-            gate.pause().await;
         }
         let details = match self
             .task_details_available(task, record.task.adopted_result.is_some())
@@ -2098,9 +2075,6 @@ impl HostHandle {
     }
 
     pub(crate) fn expire_due_receipts(&self, connection: &ConnectionWireId) {
-        #[cfg(all(test, unix))]
-        self.receipt_expiry_runs
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let conn = conn_key(connection);
         let mut state = crate::lock_unpoison(&self.presentations);
         let expired: Vec<String> = state
@@ -2189,31 +2163,6 @@ impl HostHandle {
     #[must_use]
     pub(crate) fn undelivered_wakeup(&self) -> tokio::sync::watch::Receiver<u64> {
         self.store.undelivered_wakeup()
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct TestPresentationCommitGate {
-    entered: tokio::sync::Semaphore,
-    release: tokio::sync::Semaphore,
-}
-
-#[cfg(test)]
-impl Default for TestPresentationCommitGate {
-    fn default() -> Self {
-        Self {
-            entered: tokio::sync::Semaphore::new(0),
-            release: tokio::sync::Semaphore::new(0),
-        }
-    }
-}
-
-#[cfg(test)]
-impl TestPresentationCommitGate {
-    pub(crate) async fn pause(&self) {
-        self.entered.add_permits(1);
-        let permit = self.release.acquire().await.expect("gate stays open");
-        permit.forget();
     }
 }
 

@@ -192,28 +192,20 @@ mod tests {
     }
 
     #[test]
-    fn input_debug_keeps_refs_and_redacts_body() {
+    fn round_debug_redacts_body_fields_and_keeps_correlation() {
         let rendered = format!("{:?}", input());
         assert!(rendered.contains("companion-1"));
         assert!(rendered.contains("round-1"));
         assert!(rendered.contains("local-1"));
         assert!(!rendered.contains("hello companion"));
-    }
-
-    #[test]
-    fn round_target_is_one_tagged_field() {
-        use super::RoundTarget;
 
         let new = RoundTarget::New;
         let existing = RoundTarget::Existing(RoundWireId(String::from("round-2")));
-        assert_ne!(new, existing, "the two intents stay distinct");
-        let encoded = serde_json::to_string(&existing).expect("target must serialize");
-        let decoded: RoundTarget = serde_json::from_str(&encoded).expect("target must deserialize");
-        assert_eq!(decoded, existing, "targets roundtrip as tagged values");
-    }
+        assert_ne!(new, existing);
+        let encoded = serde_json::to_string(&existing).expect("target serializes");
+        let decoded: RoundTarget = serde_json::from_str(&encoded).expect("target deserializes");
+        assert_eq!(decoded, existing);
 
-    #[test]
-    fn frame_debug_redacts_delta() {
         let frame = TextStreamFrameWire {
             stream: super::super::refs::StreamWireId(Uuid::new_v4()),
             seq: 3,
@@ -223,10 +215,7 @@ mod tests {
         let rendered = format!("{frame:?}");
         assert!(!rendered.contains("partial words"));
         assert!(rendered.contains("seq"));
-    }
 
-    #[test]
-    fn history_item_debug_redacts_text() {
         let item = HistoryItem {
             round: RoundWireId(String::from("round-9")),
             role: HistoryRole::Owner,
@@ -236,10 +225,7 @@ mod tests {
         let rendered = format!("{item:?}");
         assert!(!rendered.contains("private words"));
         assert!(rendered.contains("round-9"));
-    }
 
-    #[test]
-    fn presentation_detail_debug_redacts_value() {
         let confirm = ConfirmPresentationWire {
             round: RoundWireId(String::from("round-2")),
             stream: None,

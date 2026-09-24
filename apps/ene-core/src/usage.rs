@@ -163,10 +163,6 @@ impl HostHandle {
         };
         let cap_views = build_cap_views(request.provider.as_deref(), &caps);
         let row_views: Vec<UsageSummaryRowView> = rows.iter().map(usage_row_view).collect();
-        #[cfg(test)]
-        if let Some(gate) = self.ref_mint_gate() {
-            gate.pause().await;
-        }
         let minted = self.with_presentation_state(live, |state| {
             Self::take_cursor(
                 state,

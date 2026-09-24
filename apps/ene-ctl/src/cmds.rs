@@ -811,6 +811,36 @@ mod tests {
     };
     use ene_client::ClientError;
 
+    #[test]
+    fn request_and_management_contracts_are_checked() {
+        let cases: &[fn()] = &[
+            request_builders_use_typed_sections_and_cursors,
+            management_intents_carry_cli_owned_kind_base_view_and_provenance,
+            usage_cap_mark_for_selects_exactly_one_slot,
+        ];
+        for case in cases {
+            case();
+        }
+    }
+
+    #[test]
+    fn rendering_and_outcomes_preserve_user_visible_contracts() {
+        let cases: &[fn()] = &[
+            describe_intake_splits_accepted_and_declined_outcomes,
+            describe_management_splits_applied_retryable_terminal,
+            render_view_uses_kind_title_body_lines,
+            render_history_uses_role_text_lines,
+            renders_use_item_headline_and_continuation_lines,
+            ack_resume_fetch_and_report_describes_split_applied_retryable,
+            render_deletion_status_is_body_free_and_names_the_mark,
+            render_usage_page_prints_rows_caps_and_the_cursor,
+            render_usage_page_keeps_stale_and_unavailable_distinct,
+        ];
+        for case in cases {
+            case();
+        }
+    }
+
     fn expect_outcome(error: CliError) -> String {
         match error {
             CliError::Client(ClientError::ServerOutcome(message)) => message,
@@ -836,7 +866,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn render_view_uses_kind_title_body_lines() {
         let rendered = render_view(&fixture_view());
         assert!(
@@ -871,7 +900,6 @@ mod tests {
         ]
     }
 
-    #[test]
     fn render_history_uses_role_text_lines() {
         let rendered = render_history(&fixture_history());
         assert!(
@@ -880,7 +908,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn describe_intake_splits_accepted_and_declined_outcomes() {
         let round = describe_intake(&RoundIntakeOutcomeWire::AcceptedForRound {
             round: RoundWireId(String::from("round-3")),
@@ -926,7 +953,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn describe_management_splits_applied_retryable_terminal() {
         assert!(
             describe_management(&ManagementOutcome::AppliedAsOneTime).is_ok(),
@@ -961,7 +987,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn request_builders_use_typed_sections_and_cursors() {
         let documented = ["provider", "model", "consent", "credential", "learning"];
         assert!(
@@ -1006,7 +1031,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn management_intents_carry_cli_owned_kind_base_view_and_provenance() {
         use ene_api::v1::management::{ManagementIntentKind, RationaleOrigin};
 
@@ -1076,7 +1100,6 @@ mod tests {
         assert_eq!(usage.rationale.quote, None);
     }
 
-    #[test]
     fn renders_use_item_headline_and_continuation_lines() {
         use ene_api::v1::refs::RoundWireId;
         use ene_api::v1::undelivered::{
@@ -1180,7 +1203,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn ack_resume_fetch_and_report_describes_split_applied_retryable() {
         use ene_api::v1::round::PresentationStatus;
         use ene_api::v1::undelivered::{
@@ -1247,7 +1269,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn render_deletion_status_is_body_free_and_names_the_mark() {
         use ene_api::v1::deletion::{
             DeletionOperationStatusView, DeletionParticipantReportWire, DeletionPhaseWire,
@@ -1373,7 +1394,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn usage_cap_mark_for_selects_exactly_one_slot() {
         let page = fixture_usage_page();
         assert_eq!(
@@ -1392,7 +1412,6 @@ mod tests {
         assert_eq!(usage_cap_mark_for(&page, Some("other"), "daily_utc"), None);
     }
 
-    #[test]
     fn render_usage_page_prints_rows_caps_and_the_cursor() {
         let response = UsageSummaryResponse::Page(fixture_usage_page());
         let rendered = render_usage_page(&response).expect("a page renders");
@@ -1423,7 +1442,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn render_usage_page_keeps_stale_and_unavailable_distinct() {
         let stale = render_usage_page(&UsageSummaryResponse::StaleBaseView {
             current: Some(UsageCursorWire(String::from("cursor-9"))),

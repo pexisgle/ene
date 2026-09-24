@@ -174,163 +174,162 @@ mod tests {
     }
 
     #[test]
-    fn device_file_states_distinguish_missing_from_invalid() {
-        let dir = scratch_dir("states");
-        assert!(
-            !device_file_path(&dir).exists(),
-            "the scratch file must start absent"
-        );
-        assert!(
-            load_stored_device(&dir) == DeviceFileState::Missing,
-            "a missing file is the first-run state"
-        );
+    fn device_storage_preserves_private_atomic_documents() {
+        {
+            let dir = scratch_dir("states");
+            assert!(
+                !device_file_path(&dir).exists(),
+                "the scratch file must start absent"
+            );
+            assert!(
+                load_stored_device(&dir) == DeviceFileState::Missing,
+                "a missing file is the first-run state"
+            );
 
-        let written = std::fs::write(device_file_path(&dir), b"{not json");
-        assert!(written.is_ok(), "the corrupt fixture must write");
-        assert!(
-            load_stored_device(&dir) == DeviceFileState::Malformed,
-            "a corrupt file is a degraded state, never a first run"
-        );
+            let written = std::fs::write(device_file_path(&dir), b"{not json");
+            assert!(written.is_ok(), "the corrupt fixture must write");
+            assert!(
+                load_stored_device(&dir) == DeviceFileState::Malformed,
+                "a corrupt file is a degraded state, never a first run"
+            );
 
-        let blank = StoredDevice::new(DeviceWireId(uuid::Uuid::from_u128(1)), String::new());
-        let stored_result = store_device(&dir, &blank);
-        assert!(
-            stored_result.is_ok(),
-            "storing must succeed: {stored_result:?}"
-        );
-        assert!(
-            load_stored_device(&dir) == DeviceFileState::Malformed,
-            "a blank secret cannot prove anything and is degraded state"
-        );
-        remove_dir(&dir);
-    }
+            let blank = StoredDevice::new(DeviceWireId(uuid::Uuid::from_u128(1)), String::new());
+            let stored_result = store_device(&dir, &blank);
+            assert!(
+                stored_result.is_ok(),
+                "storing must succeed: {stored_result:?}"
+            );
+            assert!(
+                load_stored_device(&dir) == DeviceFileState::Malformed,
+                "a blank secret cannot prove anything and is degraded state"
+            );
+            remove_dir(&dir);
+        }
 
-    #[test]
-    fn stored_device_roundtrips_privately_and_redacts_its_secret() {
-        let dir = scratch_dir("roundtrip-private");
-        let stored_result = store_device(&dir, &stored());
-        assert!(
-            stored_result.is_ok(),
-            "storing must succeed: {stored_result:?}"
-        );
-        let loaded = load_stored_device(&dir);
-        assert!(
-            loaded == DeviceFileState::Loaded(stored()),
-            "the stored identity must load back, got {loaded:?}"
-        );
+        {
+            let dir = scratch_dir("roundtrip-private");
+            let stored_result = store_device(&dir, &stored());
+            assert!(
+                stored_result.is_ok(),
+                "storing must succeed: {stored_result:?}"
+            );
+            let loaded = load_stored_device(&dir);
+            assert!(
+                loaded == DeviceFileState::Loaded(stored()),
+                "the stored identity must load back, got {loaded:?}"
+            );
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+
+                let metadata = std::fs::metadata(device_file_path(&dir));
+                assert!(metadata.is_ok(), "the device file must exist");
+                let metadata = metadata.expect("the device file must exist");
+                assert!(
+                    metadata.permissions().mode() & 0o777 == 0o600,
+                    "the device file must be owner-only, got {:o}",
+                    metadata.permissions().mode() & 0o777
+                );
+            }
+
+            let rendered = format!("{:?}", stored());
+            assert!(
+                !rendered.contains("abcdef0123456789"),
+                "stored Debug must not leak the secret: {rendered:?}"
+            );
+            assert!(
+                rendered.contains("[redacted]"),
+                "stored Debug must mark the redaction: {rendered:?}"
+            );
+            assert!(
+                rendered.contains("StoredDevice"),
+                "stored Debug must name the type: {rendered:?}"
+            );
+            remove_dir(&dir);
+        }
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
 
-            let metadata = std::fs::metadata(device_file_path(&dir));
-            assert!(metadata.is_ok(), "the device file must exist");
-            let metadata = metadata.expect("the device file must exist");
+            let dir = scratch_dir("staging-failure");
+            let stored_result = store_device(&dir, &stored());
             assert!(
-                metadata.permissions().mode() & 0o777 == 0o600,
-                "the device file must be owner-only, got {:o}",
-                metadata.permissions().mode() & 0o777
+                stored_result.is_ok(),
+                "the fixture must store: {stored_result:?}"
             );
+            let before = std::fs::read(device_file_path(&dir)).unwrap_or_default();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
+                .expect("the scratch directory must be made read-only");
+
+            let enforced = std::fs::write(dir.join("probe"), b"x").is_err();
+            if enforced {
+                let replacement = StoredDevice::new(
+                    DeviceWireId(uuid::Uuid::from_u128(3)),
+                    String::from("replacement-secret"),
+                );
+                let failed = store_device(&dir, &replacement);
+                assert!(
+                    failed.is_err(),
+                    "a staging failure must be reported, got {failed:?}"
+                );
+            }
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .expect("the scratch directory must be restored");
+            let after = std::fs::read(device_file_path(&dir)).unwrap_or_default();
+            assert!(
+                after == before,
+                "a failed store must leave the previous document untouched"
+            );
+            assert!(
+                load_stored_device(&dir) == DeviceFileState::Loaded(stored()),
+                "the previous document must stay loadable"
+            );
+            remove_dir(&dir);
         }
 
-        let rendered = format!("{:?}", stored());
-        assert!(
-            !rendered.contains("abcdef0123456789"),
-            "stored Debug must not leak the secret: {rendered:?}"
-        );
-        assert!(
-            rendered.contains("[redacted]"),
-            "stored Debug must mark the redaction: {rendered:?}"
-        );
-        assert!(
-            rendered.contains("StoredDevice"),
-            "stored Debug must name the type: {rendered:?}"
-        );
-        remove_dir(&dir);
-    }
+        {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, Ordering};
 
-    #[cfg(unix)]
-    #[test]
-    fn staging_failure_keeps_the_previous_document() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let dir = scratch_dir("staging-failure");
-        let stored_result = store_device(&dir, &stored());
-        assert!(
-            stored_result.is_ok(),
-            "the fixture must store: {stored_result:?}"
-        );
-        let before = std::fs::read(device_file_path(&dir)).unwrap_or_default();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
-            .expect("the scratch directory must be made read-only");
-
-        let enforced = std::fs::write(dir.join("probe"), b"x").is_err();
-        if enforced {
-            let replacement = StoredDevice::new(
-                DeviceWireId(uuid::Uuid::from_u128(3)),
-                String::from("replacement-secret"),
-            );
-            let failed = store_device(&dir, &replacement);
-            assert!(
-                failed.is_err(),
-                "a staging failure must be reported, got {failed:?}"
-            );
-        }
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-            .expect("the scratch directory must be restored");
-        let after = std::fs::read(device_file_path(&dir)).unwrap_or_default();
-        assert!(
-            after == before,
-            "a failed store must leave the previous document untouched"
-        );
-        assert!(
-            load_stored_device(&dir) == DeviceFileState::Loaded(stored()),
-            "the previous document must stay loadable"
-        );
-        remove_dir(&dir);
-    }
-
-    #[test]
-    fn concurrent_stores_publish_only_whole_documents() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let dir = Arc::new(scratch_dir("concurrent"));
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut writers = Vec::new();
-        for seed in 0..3_u128 {
-            let dir = Arc::clone(&dir);
-            writers.push(std::thread::spawn(move || {
-                for round in 0..20_u128 {
-                    let device = StoredDevice::new(
-                        DeviceWireId(uuid::Uuid::from_u128(0x1000 + seed * 100 + round)),
-                        format!("secret-{seed}-{round}"),
-                    );
-                    let written = store_device(&dir, &device);
-                    assert!(written.is_ok(), "concurrent store must succeed");
+            let dir = Arc::new(scratch_dir("concurrent"));
+            let stop = Arc::new(AtomicBool::new(false));
+            let mut writers = Vec::new();
+            for seed in 0..3_u128 {
+                let dir = Arc::clone(&dir);
+                writers.push(std::thread::spawn(move || {
+                    for round in 0..20_u128 {
+                        let device = StoredDevice::new(
+                            DeviceWireId(uuid::Uuid::from_u128(0x1000 + seed * 100 + round)),
+                            format!("secret-{seed}-{round}"),
+                        );
+                        let written = store_device(&dir, &device);
+                        assert!(written.is_ok(), "concurrent store must succeed");
+                    }
+                }));
+            }
+            let reader_dir = Arc::clone(&dir);
+            let mut observed = 0_u32;
+            while !stop.load(Ordering::Relaxed) {
+                match load_stored_device(&reader_dir) {
+                    DeviceFileState::Loaded(_) | DeviceFileState::Missing => {}
+                    other => panic!("a partial document was observed: {other:?}"),
                 }
-            }));
-        }
-        let reader_dir = Arc::clone(&dir);
-        let mut observed = 0_u32;
-        while !stop.load(Ordering::Relaxed) {
-            match load_stored_device(&reader_dir) {
-                DeviceFileState::Loaded(_) | DeviceFileState::Missing => {}
-                other => panic!("a partial document was observed: {other:?}"),
+                observed += 1;
+                if observed > 200 {
+                    break;
+                }
             }
-            observed += 1;
-            if observed > 200 {
-                break;
+            for writer in writers {
+                writer.join().expect("writer must not panic");
             }
+            stop.store(true, Ordering::Relaxed);
+            assert!(
+                matches!(load_stored_device(&dir), DeviceFileState::Loaded(_)),
+                "the final document must be loadable"
+            );
+            remove_dir(&dir);
         }
-        for writer in writers {
-            writer.join().expect("writer must not panic");
-        }
-        stop.store(true, Ordering::Relaxed);
-        assert!(
-            matches!(load_stored_device(&dir), DeviceFileState::Loaded(_)),
-            "the final document must be loadable"
-        );
-        remove_dir(&dir);
     }
 }

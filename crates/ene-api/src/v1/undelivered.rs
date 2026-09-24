@@ -271,17 +271,14 @@ mod tests {
     };
 
     #[test]
-    fn page_bounds_match_the_wire_contract() {
+    fn undelivered_debug_redacts_body_and_keeps_accounting() {
         assert_eq!(DEFAULT_PAGE_LIMIT, 50);
         assert_eq!(MAX_PAGE_LIMIT, 50);
         assert_eq!(super::EXCERPT_MAX_BYTES, 2048);
         assert_eq!(super::MIN_SOURCE_LIMIT_BYTES, 4);
         assert_eq!(super::MAX_SOURCE_LIMIT_BYTES, 16384);
         assert_eq!(super::DEFAULT_SOURCE_LIMIT_BYTES, 4096);
-    }
 
-    #[test]
-    fn item_debug_redacts_the_excerpt_but_keeps_refs() {
         let item = UndeliveredItemView {
             reference: super::UndeliveredWireRef(String::from("und-1")),
             source: UndeliveredSourceView {
@@ -293,36 +290,19 @@ mod tests {
             truncated: true,
         };
         let rendered = format!("{item:?}");
-        assert!(
-            !rendered.contains("private managed words"),
-            "excerpt redacted: {rendered}"
-        );
-        assert!(
-            rendered.contains("und-1") && rendered.contains("subject-9"),
-            "refs stay visible: {rendered}"
-        );
-    }
+        assert!(!rendered.contains("private managed words"));
+        assert!(rendered.contains("und-1"));
+        assert!(rendered.contains("subject-9"));
 
-    #[test]
-    fn source_page_debug_redacts_text_but_keeps_accounting() {
         let page = ReportSourcePageView {
             text: String::from("private body bytes"),
             total_bytes: 9000,
             next: Some(4096),
         };
         let rendered = format!("{page:?}");
-        assert!(
-            !rendered.contains("private body bytes"),
-            "body redacted: {rendered}"
-        );
-        assert!(
-            rendered.contains("9000"),
-            "accounting stays visible: {rendered}"
-        );
-    }
+        assert!(!rendered.contains("private body bytes"));
+        assert!(rendered.contains("9000"));
 
-    #[test]
-    fn resume_debug_redacts_the_instruction() {
         let command = ResumeTask {
             task: TaskWireRef(String::from("task-1")),
             expected_revision: 3,
@@ -330,10 +310,7 @@ mod tests {
             instruction: String::from("continue the remaining work please"),
         };
         let rendered = format!("{command:?}");
-        assert!(
-            !rendered.contains("continue the remaining work"),
-            "instruction redacted: {rendered}"
-        );
-        assert!(rendered.contains("task-1"), "refs stay visible: {rendered}");
+        assert!(!rendered.contains("continue the remaining work"));
+        assert!(rendered.contains("task-1"));
     }
 }

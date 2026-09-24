@@ -31,9 +31,8 @@ fn the_bundled_motion_pack_is_projected_to_the_body() {
     assert_eq!(clips.len(), 1);
     assert_eq!(clips[0].pose, PoseHint::Idle);
 
-    let Some(exe) = BodySupervisor::locate_binary() else {
-        return;
-    };
+    let exe = BodySupervisor::locate_binary()
+        .expect("ene-body binary must be built for motion projection");
     desktop.try_spawn_body(&exe);
     desktop.tick();
     let status = desktop.snapshot().body_status;

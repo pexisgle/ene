@@ -70,8 +70,10 @@ fn credential_intent(
     }
 }
 
+static BOOT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
-fn pairing_frame_is_pre_pairing_v1() -> Result<(), String> {
+fn pairing_and_authentication_frames_preserve_identity_and_nonce() -> Result<(), String> {
     let frame = pairing_frame("Owner laptop", incarnation());
     let WirePayload::PairingRequest(request) = &frame.payload else {
         return Err(String::from("pairing builder must emit PairingRequest"));
@@ -96,11 +98,7 @@ fn pairing_frame_is_pre_pairing_v1() -> Result<(), String> {
         frame.envelope.message_type.0 == "PairingRequest",
         "pairing names its payload shape"
     );
-    Ok(())
-}
 
-#[test]
-fn capability_frame_speaks_v1_and_threads_device() -> Result<(), String> {
     let sender_device = ene_api::v1::refs::DeviceWireId(uuid::Uuid::new_v4());
     let frame = capability_frame("linux-x86_64", incarnation(), sender_device);
     let WirePayload::CapabilityAdvertise(advertise) = &frame.payload else {
@@ -124,22 +122,15 @@ fn capability_frame_speaks_v1_and_threads_device() -> Result<(), String> {
         frame.envelope.message_type.0 == "CapabilityAdvertise",
         "capability names its payload shape"
     );
-    Ok(())
-}
 
-#[test]
-fn incompatible_protocol_refusal_names_both_maxima_and_hint() {
-    use crate::ClientError;
-    use crate::transport::incompatible_protocol_error;
-    use ene_api::v1::reject::IncompatibleProtocol;
-
-    let error = incompatible_protocol_error(&IncompatibleProtocol {
-        host_max: ProtocolVersion::V1,
-        client_max: ProtocolVersion { major: 9, minor: 3 },
-        hint: String::from("use a client release sharing the host's protocol major 1"),
-    });
-    let ClientError::ServerRejected(message) = error else {
-        panic!("a major mismatch is a terminal refusal, got {error:?}");
+    let error =
+        crate::transport::incompatible_protocol_error(&ene_api::v1::reject::IncompatibleProtocol {
+            host_max: ProtocolVersion::V1,
+            client_max: ProtocolVersion { major: 9, minor: 3 },
+            hint: String::from("use a client release sharing the host's protocol major 1"),
+        });
+    let crate::ClientError::ServerRejected(message) = error else {
+        panic!("a major mismatch is a terminal refusal");
     };
     for expected in ["host max 1.0", "client max 9.3", "protocol major 1"] {
         assert!(
@@ -147,6 +138,67 @@ fn incompatible_protocol_refusal_names_both_maxima_and_hint() {
             "the refusal must carry {expected:?}: {message}"
         );
     }
+
+    let decision = decide_auth(&WirePayload::AuthResult(AuthResult::Rejected {
+        reason: String::from("unknown proof"),
+    }));
+    let AuthDecision::Guidance { message } = decision else {
+        return Err(String::from("rejection must guide reprovisioning"));
+    };
+    assert!(
+        message.contains("unknown proof"),
+        "guidance keeps the operational Host reason: {message:?}"
+    );
+    assert!(
+        message.contains("fresh pairing request"),
+        "guidance names the provisioning step: {message:?}"
+    );
+
+    let decision = decide_auth(&answer_payload());
+    let AuthDecision::Unexpected { message } = decision else {
+        return Err(String::from("foreign kinds must be unexpected"));
+    };
+    assert!(
+        message.contains("HistoryRequest") && message.contains("AuthResult"),
+        "the refusal must name both kinds: {message:?}"
+    );
+
+    let device = ene_api::v1::refs::DeviceWireId(uuid::Uuid::new_v4());
+    let frame = proof_frame("proof-hex-abc", incarnation(), device);
+    let WirePayload::AuthProof(proof) = &frame.payload else {
+        return Err(String::from("proof builder must emit AuthProof"));
+    };
+    assert!(
+        proof.proof == "proof-hex-abc",
+        "the proof value travels in the auth frame"
+    );
+    assert!(
+        frame.envelope.sender.device_id == Some(device)
+            && frame.envelope.sender.connection_id.is_none()
+            && frame.envelope.sender.incarnation_id == incarnation(),
+        "the proof names the paired device but no connection: {:?}",
+        frame.envelope.sender
+    );
+
+    let proof = crate::pairing::pairing_proof_hex("pairing-secret", "nonce-1");
+    let frame = proof_frame(
+        &proof,
+        incarnation(),
+        ene_api::v1::refs::DeviceWireId(uuid::Uuid::new_v4()),
+    );
+    let WirePayload::AuthProof(carried) = &frame.payload else {
+        return Err(String::from("proof builder must emit AuthProof"));
+    };
+    assert_eq!(
+        carried.proof, proof,
+        "the carried proof is the MAC of the secret and nonce"
+    );
+    assert_ne!(
+        crate::pairing::pairing_proof_hex("pairing-secret", "nonce-2"),
+        carried.proof,
+        "the proof is bound to the single-use nonce"
+    );
+    Ok(())
 }
 
 fn presence_fact(generation: u64) -> PresenceAttributionWire {
@@ -166,212 +218,306 @@ fn stale_answer(current_generation: u64) -> WirePayload {
 }
 
 #[test]
-fn session_tracks_latest_presence_generation_and_companion() {
-    let mut session = SessionState::default();
-    assert!(
-        session.generation().is_none(),
-        "a new session observed nothing yet"
-    );
-    assert_eq!(
-        session.companion_ref(),
-        String::from(crate::DEFAULT_COMPANION_REF),
-        "bootstrap echoes the fallback until the first fact"
-    );
-    session.observe_presence(&presence_fact(4));
-    assert!(
-        session.generation() == Some(4),
-        "the fact generation becomes current"
-    );
-    session.observe_presence(&presence_fact(7));
-    assert!(
-        session.generation() == Some(7),
-        "a newer fact supersedes: {:?}",
-        session.generation()
-    );
-    session.note_stale_generation(9);
-    assert!(
-        session.generation() == Some(9),
-        "a stale answer refreshes the running session"
-    );
-    let mut fact = presence_fact(3);
-    fact.companion = CompanionWireRef(String::from("host-issued-projection"));
-    session.observe_presence(&fact);
-    assert_eq!(
-        session.companion_ref(),
-        String::from("host-issued-projection"),
-        "after presence the session echoes the learned projection"
-    );
-    assert_eq!(
-        session.generation(),
-        Some(3),
-        "generation bookkeeping is untouched"
-    );
-}
+fn session_state_and_erasure_cover_routing_and_queues() {
+    {
+        let mut session = SessionState::default();
+        assert!(
+            session.generation().is_none(),
+            "a new session observed nothing yet"
+        );
+        assert_eq!(
+            session.companion_ref(),
+            String::from(crate::DEFAULT_COMPANION_REF),
+            "bootstrap echoes the fallback until the first fact"
+        );
+        session.observe_presence(&presence_fact(4));
+        assert!(
+            session.generation() == Some(4),
+            "the fact generation becomes current"
+        );
+        session.observe_presence(&presence_fact(7));
+        assert!(
+            session.generation() == Some(7),
+            "a newer fact supersedes: {:?}",
+            session.generation()
+        );
+        session.note_stale_generation(9);
+        assert!(
+            session.generation() == Some(9),
+            "a stale answer refreshes the running session"
+        );
+        let mut fact = presence_fact(3);
+        fact.companion = CompanionWireRef(String::from("host-issued-projection"));
+        session.observe_presence(&fact);
+        assert_eq!(
+            session.companion_ref(),
+            String::from("host-issued-projection"),
+            "after presence the session echoes the learned projection"
+        );
+        assert_eq!(
+            session.generation(),
+            Some(3),
+            "generation bookkeeping is untouched"
+        );
+    }
 
-#[test]
-fn local_erasure_demand_wipes_the_deferred_buffer_and_reports_classes() {
-    use ene_api::v1::deletion::ClientTempClass;
+    {
+        use ene_api::v1::deletion::ClientTempClass;
 
-    let mut session = SessionState::default();
-    let response_frame = || {
-        crate::frames::frame_for(
-            WirePayload::UndeliveredResponse(
-                ene_api::v1::undelivered::UndeliveredResponse::FrameTooLarge,
-            ),
+        let mut session = SessionState::default();
+        let response_frame = || {
+            crate::frames::frame_for(
+                WirePayload::UndeliveredResponse(
+                    ene_api::v1::undelivered::UndeliveredResponse::FrameTooLarge,
+                ),
+                WireSender {
+                    device_id: None,
+                    incarnation_id: incarnation(),
+                    connection_id: None,
+                },
+            )
+        };
+        session.push_deferred(response_frame());
+        assert_eq!(
+            session.take_undelivered().len(),
+            1,
+            "the deferred queue holds the response before the demand"
+        );
+        session.push_deferred(response_frame());
+        let drained = session.wipe_transient();
+        assert_eq!(
+            drained,
+            vec![
+                ClientTempClass::PresentationBuffer,
+                ClientTempClass::InputDraft
+            ]
+        );
+        assert!(
+            session.take_undelivered().is_empty(),
+            "the deferred presentation buffer is dropped whole"
+        );
+    }
+
+    {
+        use ene_api::v1::deletion::{
+            ClientTempClass, DeletionDemand, DeletionDemandWireId, DeletionTargetWire,
+        };
+
+        let mut session = SessionState::default();
+        session.set_defer_erasure(true);
+        session.push_deferred(crate::frames::frame_for(
+            WirePayload::PresenceAttribution(presence_fact(1)),
             WireSender {
                 device_id: None,
                 incarnation_id: incarnation(),
                 connection_id: None,
             },
-        )
-    };
-    session.push_deferred(response_frame());
-    assert_eq!(
-        session.take_undelivered().len(),
-        1,
-        "the deferred queue holds the response before the demand"
-    );
-    session.push_deferred(response_frame());
-    let drained = session.wipe_transient();
-    assert_eq!(
-        drained,
-        vec![
-            ClientTempClass::PresentationBuffer,
-            ClientTempClass::InputDraft
-        ]
-    );
-    assert!(
-        session.take_undelivered().is_empty(),
-        "the deferred presentation buffer is dropped whole"
-    );
-}
+        ));
+        let demand = DeletionDemand {
+            demand: DeletionDemandWireId(String::from("demand-gui")),
+            operation: ene_api::v1::refs::DeletionOperationWireRef(String::from("operation-gui")),
+            sweep: 1,
+            targets: vec![DeletionTargetWire::WipeClass {
+                class: ClientTempClass::PresentationBuffer,
+            }],
+        };
+        session.clear_deferred_frames();
+        session.push_pending_erasure(demand.clone());
+        let stashed = session.take_pending_erasure().expect("stashed demand");
+        assert_eq!(stashed.demand, demand.demand);
+        assert!(
+            session.take_pending_erasure().is_none(),
+            "one demand is consumed by the GUI participant"
+        );
+    }
 
-#[test]
-fn defer_erasure_stashes_the_demand_without_claiming_gui_classes() {
-    use ene_api::v1::deletion::{
-        ClientTempClass, DeletionDemand, DeletionDemandWireId, DeletionTargetWire,
-    };
+    {
+        assert!(
+            stale_generation_of(&stale_answer(21)) == Some(21),
+            "a stale answer yields its current generation"
+        );
+        let accepted = WirePayload::RoundIntakeOutcome(
+            ene_api::v1::round::RoundIntakeOutcomeWire::AcceptedForRound {
+                round: RoundWireId(String::from("round-1")),
+            },
+        );
+        assert!(
+            stale_generation_of(&accepted).is_none(),
+            "a non-stale answer yields nothing"
+        );
+        let history = WirePayload::HistoryRequest(history_request("companion-1", 1));
+        assert!(
+            stale_generation_of(&history).is_none(),
+            "an unrelated payload yields nothing"
+        );
+    }
 
-    let mut session = SessionState::default();
-    session.set_defer_erasure(true);
-    session.push_deferred(crate::frames::frame_for(
-        WirePayload::PresenceAttribution(presence_fact(1)),
-        WireSender {
+    {
+        let sender = WireSender {
             device_id: None,
             incarnation_id: incarnation(),
             connection_id: None,
-        },
-    ));
-    let demand = DeletionDemand {
-        demand: DeletionDemandWireId(String::from("demand-gui")),
-        operation: ene_api::v1::refs::DeletionOperationWireRef(String::from("operation-gui")),
-        sweep: 1,
-        targets: vec![DeletionTargetWire::WipeClass {
-            class: ClientTempClass::PresentationBuffer,
-        }],
-    };
-    session.clear_deferred_frames();
-    session.push_pending_erasure(demand.clone());
-    let stashed = session.take_pending_erasure().expect("stashed demand");
-    assert_eq!(stashed.demand, demand.demand);
-    assert!(
-        session.take_pending_erasure().is_none(),
-        "one demand is consumed by the GUI participant"
-    );
-}
-
-#[test]
-fn stale_generation_of_reads_only_stale_answers() {
-    assert!(
-        stale_generation_of(&stale_answer(21)) == Some(21),
-        "a stale answer yields its current generation"
-    );
-    let accepted = WirePayload::RoundIntakeOutcome(
-        ene_api::v1::round::RoundIntakeOutcomeWire::AcceptedForRound {
-            round: RoundWireId(String::from("round-1")),
-        },
-    );
-    assert!(
-        stale_generation_of(&accepted).is_none(),
-        "a non-stale answer yields nothing"
-    );
-    let history = WirePayload::HistoryRequest(history_request("companion-1", 1));
-    assert!(
-        stale_generation_of(&history).is_none(),
-        "an unrelated payload yields nothing"
-    );
-}
-
-#[test]
-fn session_frames_stamp_only_text_inputs() {
-    let sender = WireSender {
-        device_id: None,
-        incarnation_id: incarnation(),
-        connection_id: None,
-    };
-    let input = WirePayload::SubmitTextInput(submit_input(
-        "companion-1",
-        RoundTarget::New,
-        String::from("hello"),
-        String::from("en"),
-    ));
-    let stamped = frame_for_session(input, sender, Some(6));
-    assert!(
-        stamped.envelope.observed.presence_generation_view == Some(6),
-        "text input carries the session generation"
-    );
-    assert!(
-        stamped.envelope.observed.round_view.is_none(),
-        "a New target observes no round"
-    );
-    let continuing = frame_for_session(
-        WirePayload::SubmitTextInput(submit_input(
-            "companion-1",
-            RoundTarget::Existing(RoundWireId(String::from("round-1"))),
-            String::from("hello"),
-            String::from("en"),
-        )),
-        sender,
-        Some(6),
-    );
-    assert_eq!(
-        continuing.envelope.observed.round_view,
-        Some(RoundWireId(String::from("round-1"))),
-        "an Existing target carries its observed round premise"
-    );
-    let bootstrap = frame_for_session(
-        WirePayload::SubmitTextInput(submit_input(
+        };
+        let input = WirePayload::SubmitTextInput(submit_input(
             "companion-1",
             RoundTarget::New,
             String::from("hello"),
             String::from("en"),
-        )),
-        sender,
-        None,
-    );
-    assert!(
-        bootstrap
-            .envelope
-            .observed
-            .presence_generation_view
-            .is_none(),
-        "pre-fact bootstrap stamps None (NeedsRevalidation is correct)"
-    );
-    let history = frame_for_session(
-        WirePayload::HistoryRequest(history_request("companion-1", 1)),
-        sender,
-        Some(6),
-    );
-    assert!(
-        history.envelope.observed.presence_generation_view.is_none(),
-        "non-input payloads keep the None default"
-    );
+        ));
+        let stamped = frame_for_session(input, sender, Some(6));
+        assert!(
+            stamped.envelope.observed.presence_generation_view == Some(6),
+            "text input carries the session generation"
+        );
+        assert!(
+            stamped.envelope.observed.round_view.is_none(),
+            "a New target observes no round"
+        );
+        let continuing = frame_for_session(
+            WirePayload::SubmitTextInput(submit_input(
+                "companion-1",
+                RoundTarget::Existing(RoundWireId(String::from("round-1"))),
+                String::from("hello"),
+                String::from("en"),
+            )),
+            sender,
+            Some(6),
+        );
+        assert_eq!(
+            continuing.envelope.observed.round_view,
+            Some(RoundWireId(String::from("round-1"))),
+            "an Existing target carries its observed round premise"
+        );
+        let bootstrap = frame_for_session(
+            WirePayload::SubmitTextInput(submit_input(
+                "companion-1",
+                RoundTarget::New,
+                String::from("hello"),
+                String::from("en"),
+            )),
+            sender,
+            None,
+        );
+        assert!(
+            bootstrap
+                .envelope
+                .observed
+                .presence_generation_view
+                .is_none(),
+            "pre-fact bootstrap stamps None (NeedsRevalidation is correct)"
+        );
+        let history = frame_for_session(
+            WirePayload::HistoryRequest(history_request("companion-1", 1)),
+            sender,
+            Some(6),
+        );
+        assert!(
+            history.envelope.observed.presence_generation_view.is_none(),
+            "non-input payloads keep the None default"
+        );
+    }
+
+    {
+        use super::session::{FrameDecision, decide_frame};
+
+        let own = message_id(1);
+        let fact = script_frame(
+            WirePayload::PresenceAttribution(presence_fact(3)),
+            message_id(2),
+            Some(own),
+        );
+        assert!(
+            matches!(decide_frame(own, &fact), FrameDecision::AbsorbPresence(_)),
+            "facts absorb"
+        );
+        let answer = script_frame(answer_payload(), message_id(3), Some(own));
+        assert!(
+            decide_frame(own, &answer) == FrameDecision::Answer(answer_payload()),
+            "a reply_to match answers"
+        );
+        let stranger = script_frame(answer_payload(), message_id(4), Some(message_id(9)));
+        assert!(
+            decide_frame(own, &stranger) == FrameDecision::Defer,
+            "anything else defers"
+        );
+        let hint = script_frame(
+            WirePayload::BodyStateHint(BodyStateHint {
+                asset_ref: String::from("bundled:ene"),
+                pose_hint: String::from("idle"),
+            }),
+            message_id(5),
+            Some(own),
+        );
+        assert!(
+            matches!(decide_frame(own, &hint), FrameDecision::AbsorbBodyHint),
+            "BodyStateHint is a fact, never an answer, even with matching reply_to"
+        );
+    }
+
+    {
+        let mut session = SessionState::default();
+        session.push_deferred(script_frame(
+            WirePayload::UndeliveredResponse(
+                ene_api::v1::undelivered::UndeliveredResponse::NoCurrentPresence,
+            ),
+            message_id(999),
+            None,
+        ));
+        for index in 0..DEFERRED_CAP {
+            let reply_to = u128::try_from(index).map_or(0, |value| value + 1000);
+            session.push_deferred(script_frame(
+                WirePayload::UndeliveredResponse(
+                    ene_api::v1::undelivered::UndeliveredResponse::FrameTooLarge,
+                ),
+                message_id(reply_to + 500),
+                Some(message_id(reply_to)),
+            ));
+        }
+        let drained = session.take_undelivered();
+        assert_eq!(
+            drained.len(),
+            DEFERRED_CAP,
+            "the queue stays at its cap, so the overflow dropped the oldest frame"
+        );
+        assert!(
+            drained.iter().all(|frame| matches!(
+                frame.payload,
+                WirePayload::UndeliveredResponse(
+                    ene_api::v1::undelivered::UndeliveredResponse::FrameTooLarge
+                )
+            )),
+            "the distinguishable oldest frame dropped first"
+        );
+    }
+
+    {
+        use ene_api::v1::deletion::{
+            ClientTempClass, DeletionDemand, DeletionDemandWireId, DeletionTargetWire,
+        };
+
+        let demand = |name: String| DeletionDemand {
+            demand: DeletionDemandWireId(name),
+            operation: ene_api::v1::refs::DeletionOperationWireRef(String::from("operation-1")),
+            sweep: 1,
+            targets: vec![DeletionTargetWire::WipeClass {
+                class: ClientTempClass::PresentationBuffer,
+            }],
+        };
+        let mut session = SessionState::default();
+        for index in 0..PENDING_ERASURE_CAP {
+            session.push_pending_erasure(demand(format!("demand-{index}")));
+        }
+        session.push_pending_erasure(demand(String::from("demand-overflow")));
+        assert_eq!(
+            session.take_pending_erasure().map(|item| item.demand.0),
+            Some(String::from("demand-1")),
+            "the oldest demand drops first"
+        );
+    }
 }
 
-static BOOT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[test]
-fn boot_incarnation_is_one_per_process_and_advances_per_boot() {
+fn boot_incarnation_persists_and_serializes_each_transition() {
     use crate::incarnation::{advance_counter, boot_incarnation, counter_path, reset_for_tests};
 
     let _guard = BOOT_SERIAL
@@ -379,19 +525,15 @@ fn boot_incarnation_is_one_per_process_and_advances_per_boot() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("ene-ctl-incarnation-{}-{name}", std::process::id(),))
+        std::env::temp_dir().join(format!("ene-ctl-incarnation-{}-{name}", std::process::id()))
     }
 
     fn remove_dir(dir: &std::path::Path) {
-        if std::fs::remove_dir_all(dir).is_err() {
-            // Best effort.
-        }
+        if std::fs::remove_dir_all(dir).is_err() {}
     }
 
     let dir = scratch("boot");
-    if std::fs::remove_dir_all(&dir).is_err() {
-        // Absent is the expected case; leftovers from a failed run clear here.
-    }
+    remove_dir(&dir);
     let created = std::fs::create_dir_all(&dir);
     assert!(created.is_ok(), "scratch dir must create: {created:?}");
     reset_for_tests();
@@ -437,20 +579,9 @@ fn boot_incarnation_is_one_per_process_and_advances_per_boot() {
     );
     remove_dir(&dir);
     reset_for_tests();
-}
 
-#[test]
-fn boot_incarnation_fails_closed_on_corrupt_or_exhausted_counters() {
-    use crate::incarnation::{boot_incarnation, counter_path, reset_for_tests};
-
-    let _guard = BOOT_SERIAL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let dir = std::env::temp_dir().join(format!(
-        "ene-ctl-incarnation-corrupt-{}",
-        std::process::id(),
-    ));
+    let dir = scratch("corrupt");
+    remove_dir(&dir);
     assert!(std::fs::create_dir_all(&dir).is_ok());
     let exhausted = u64::MAX.to_string();
     for (name, bytes) in [
@@ -473,25 +604,11 @@ fn boot_incarnation_fails_closed_on_corrupt_or_exhausted_counters() {
             "{name} failure must not rewrite the counter"
         );
     }
-    assert!(std::fs::remove_dir_all(&dir).is_ok() || !dir.exists());
+    remove_dir(&dir);
     reset_for_tests();
-}
 
-#[test]
-fn concurrent_boot_advances_serialize_without_loss() {
-    use crate::incarnation::{advance_counter, counter_path, reset_for_tests};
-
-    let _guard = BOOT_SERIAL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let dir = std::env::temp_dir().join(format!(
-        "ene-ctl-incarnation-concurrent-{}",
-        std::process::id(),
-    ));
-    if std::fs::remove_dir_all(&dir).is_err() {
-        // Absent is the expected case.
-    }
+    let dir = scratch("concurrent");
+    remove_dir(&dir);
     assert!(std::fs::create_dir_all(&dir).is_ok());
     reset_for_tests();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
@@ -519,7 +636,7 @@ fn concurrent_boot_advances_serialize_without_loss() {
         stored.trim() == "8",
         "every advance must land exactly once, got {stored:?}"
     );
-    assert!(std::fs::remove_dir_all(&dir).is_ok() || !dir.exists());
+    remove_dir(&dir);
     reset_for_tests();
 }
 
@@ -630,177 +747,6 @@ fn prepared_requests_mint_once_and_retry_with_fresh_transport_ids() -> Result<()
         first.envelope.observed.presence_generation_view,
         second.envelope.observed.presence_generation_view,
         "retries preserve the observed premise"
-    );
-    Ok(())
-}
-
-#[test]
-fn decide_frame_classifies_facts_answers_and_deferrals() {
-    use super::session::{FrameDecision, decide_frame};
-
-    let own = message_id(1);
-    let fact = script_frame(
-        WirePayload::PresenceAttribution(presence_fact(3)),
-        message_id(2),
-        Some(own),
-    );
-    assert!(
-        matches!(decide_frame(own, &fact), FrameDecision::AbsorbPresence(_)),
-        "facts absorb"
-    );
-    let answer = script_frame(answer_payload(), message_id(3), Some(own));
-    assert!(
-        decide_frame(own, &answer) == FrameDecision::Answer(answer_payload()),
-        "a reply_to match answers"
-    );
-    let stranger = script_frame(answer_payload(), message_id(4), Some(message_id(9)));
-    assert!(
-        decide_frame(own, &stranger) == FrameDecision::Defer,
-        "anything else defers"
-    );
-    let hint = script_frame(
-        WirePayload::BodyStateHint(BodyStateHint {
-            asset_ref: String::from("bundled:ene"),
-            pose_hint: String::from("idle"),
-        }),
-        message_id(5),
-        Some(own),
-    );
-    assert!(
-        matches!(decide_frame(own, &hint), FrameDecision::AbsorbBodyHint),
-        "BodyStateHint is a fact, never an answer, even with matching reply_to"
-    );
-}
-
-#[test]
-fn deferred_queue_drops_the_oldest_frame_at_capacity() {
-    let mut session = SessionState::default();
-    session.push_deferred(script_frame(
-        WirePayload::UndeliveredResponse(
-            ene_api::v1::undelivered::UndeliveredResponse::NoCurrentPresence,
-        ),
-        message_id(999),
-        None,
-    ));
-    for index in 0..DEFERRED_CAP {
-        let reply_to = u128::try_from(index).map_or(0, |value| value + 1000);
-        session.push_deferred(script_frame(
-            WirePayload::UndeliveredResponse(
-                ene_api::v1::undelivered::UndeliveredResponse::FrameTooLarge,
-            ),
-            message_id(reply_to + 500),
-            Some(message_id(reply_to)),
-        ));
-    }
-    let drained = session.take_undelivered();
-    assert_eq!(
-        drained.len(),
-        DEFERRED_CAP,
-        "the queue stays at its cap, so the overflow dropped the oldest frame"
-    );
-    assert!(
-        drained.iter().all(|frame| matches!(
-            frame.payload,
-            WirePayload::UndeliveredResponse(
-                ene_api::v1::undelivered::UndeliveredResponse::FrameTooLarge
-            )
-        )),
-        "the distinguishable oldest frame dropped first"
-    );
-}
-
-#[test]
-fn pending_erasure_queue_drops_the_oldest_demand_at_capacity() {
-    use ene_api::v1::deletion::{
-        ClientTempClass, DeletionDemand, DeletionDemandWireId, DeletionTargetWire,
-    };
-
-    let demand = |name: String| DeletionDemand {
-        demand: DeletionDemandWireId(name),
-        operation: ene_api::v1::refs::DeletionOperationWireRef(String::from("operation-1")),
-        sweep: 1,
-        targets: vec![DeletionTargetWire::WipeClass {
-            class: ClientTempClass::PresentationBuffer,
-        }],
-    };
-    let mut session = SessionState::default();
-    for index in 0..PENDING_ERASURE_CAP {
-        session.push_pending_erasure(demand(format!("demand-{index}")));
-    }
-    session.push_pending_erasure(demand(String::from("demand-overflow")));
-    assert_eq!(
-        session.take_pending_erasure().map(|item| item.demand.0),
-        Some(String::from("demand-1")),
-        "the oldest demand drops first"
-    );
-}
-
-#[test]
-fn decide_auth_distinguishes_guidance_and_unexpected_results() -> Result<(), String> {
-    let decision = decide_auth(&WirePayload::AuthResult(AuthResult::Rejected {
-        reason: String::from("unknown proof"),
-    }));
-    let AuthDecision::Guidance { message } = decision else {
-        return Err(String::from("rejection must guide reprovisioning"));
-    };
-    assert!(
-        message.contains("unknown proof"),
-        "guidance keeps the operational Host reason: {message:?}"
-    );
-    assert!(
-        message.contains("fresh pairing request"),
-        "guidance names the provisioning step: {message:?}"
-    );
-
-    let decision = decide_auth(&answer_payload());
-    let AuthDecision::Unexpected { message } = decision else {
-        return Err(String::from("foreign kinds must be unexpected"));
-    };
-    assert!(
-        message.contains("HistoryRequest") && message.contains("AuthResult"),
-        "the refusal must name both kinds: {message:?}"
-    );
-    Ok(())
-}
-
-#[test]
-fn proof_frame_names_the_paired_device() -> Result<(), String> {
-    use ene_api::v1::refs::DeviceWireId;
-    let device = DeviceWireId(uuid::Uuid::new_v4());
-    let frame = proof_frame("proof-hex-abc", incarnation(), device);
-    let WirePayload::AuthProof(proof) = &frame.payload else {
-        return Err(String::from("proof builder must emit AuthProof"));
-    };
-    assert!(
-        proof.proof == "proof-hex-abc",
-        "the proof value travels in the auth frame"
-    );
-    assert!(
-        frame.envelope.sender.device_id == Some(device)
-            && frame.envelope.sender.connection_id.is_none()
-            && frame.envelope.sender.incarnation_id == incarnation(),
-        "the proof names the paired device but no connection: {:?}",
-        frame.envelope.sender
-    );
-    Ok(())
-}
-
-#[test]
-fn proof_derives_from_the_secret_and_the_single_use_nonce() -> Result<(), String> {
-    use ene_api::v1::refs::DeviceWireId;
-    let proof = crate::pairing::pairing_proof_hex("pairing-secret", "nonce-1");
-    let frame = proof_frame(&proof, incarnation(), DeviceWireId(uuid::Uuid::new_v4()));
-    let WirePayload::AuthProof(carried) = &frame.payload else {
-        return Err(String::from("proof builder must emit AuthProof"));
-    };
-    assert_eq!(
-        carried.proof, proof,
-        "the carried proof is the MAC of the secret and nonce"
-    );
-    assert_ne!(
-        crate::pairing::pairing_proof_hex("pairing-secret", "nonce-2"),
-        carried.proof,
-        "the proof is bound to the single-use nonce"
     );
     Ok(())
 }

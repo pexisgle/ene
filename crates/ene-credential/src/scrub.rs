@@ -224,72 +224,54 @@ mod scrub_tests {
     }
 
     #[tokio::test]
-    async fn registered_values_are_redacted_and_revision_names_the_set() {
-        let (refs, store) = registry(&["sk-abc"], CredentialSetRevision::from_u64(5));
-        let proof = CredentialScrubber {
-            refs: &refs,
-            store: &store,
+    async fn registered_values_are_redacted() {
+        let cases: &[(&[&str], u64, &str, &str)] = &[
+            (
+                &["sk-abc"],
+                5,
+                "token sk-abc tail",
+                "token [credential] tail",
+            ),
+            (&["sk-abc", "sk-abcdef"], 1, "sk-abcdef", "[credential]"),
+            (&["cred"], 2, "token cred tail", "token [credential] tail"),
+        ];
+
+        for &(values, revision, text, expected) in cases {
+            let (refs, store) = registry(values, CredentialSetRevision::from_u64(revision));
+            let proof = CredentialScrubber {
+                refs: &refs,
+                store: &store,
+            }
+            .scrub(text)
+            .await
+            .expect("readable registry");
+            assert_eq!(proof.text(), expected);
+            assert_eq!(
+                proof.credential_set(),
+                CredentialSetRevision::from_u64(revision)
+            );
         }
-        .scrub("token sk-abc tail")
-        .await
-        .expect("readable registry");
-        assert_eq!(proof.text(), "token [credential] tail");
-        assert_eq!(proof.credential_set(), CredentialSetRevision::from_u64(5));
     }
 
     #[tokio::test]
-    async fn the_longer_value_is_removed_whole() {
-        let (refs, store) = registry(&["sk-abc", "sk-abcdef"], CredentialSetRevision::from_u64(1));
-        let proof = CredentialScrubber {
-            refs: &refs,
-            store: &store,
+    async fn scrub_failures_fail_closed() {
+        let cases: &[(&[&str], &str)] = &[(&["c", "]x"], "cx"), (&[""], "any text")];
+        for &(values, text) in cases {
+            assert_eq!(
+                error_of(values, text).await,
+                SecretScrubError::SecretUnavailable
+            );
         }
-        .scrub("sk-abcdef")
-        .await
-        .expect("readable registry");
-        assert_eq!(proof.text(), "[credential]");
-    }
 
-    #[tokio::test]
-    async fn a_value_inside_the_marker_is_still_proven_absent() {
-        let (refs, store) = registry(&["cred"], CredentialSetRevision::from_u64(2));
-        let proof = CredentialScrubber {
-            refs: &refs,
-            store: &store,
-        }
-        .scrub("token cred tail")
-        .await
-        .expect("a marker-substring value must not defeat the absence proof");
-        assert_eq!(proof.text(), "token [credential] tail");
-    }
-
-    #[tokio::test]
-    async fn a_value_reconstructed_at_a_marker_boundary_fails_closed() {
-        assert_eq!(
-            error_of(&["c", "]x"], "cx").await,
-            SecretScrubError::SecretUnavailable
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unreadable_registry_fails_closed() {
         let registry = BrokenRevisionRegistry(Vec::new());
         let scrubber = CredentialScrubber {
             refs: &registry,
             store: &MemoryCredentialStore::new(),
         };
         match scrubber.scrub("unrelated").await {
-            Ok(_) => panic!("an unreadable registry cannot prove absence"),
+            Ok(_) => panic!("scrub must fail closed"),
             Err(error) => assert_eq!(error, SecretScrubError::RegistryUnavailable),
         }
-    }
-
-    #[tokio::test]
-    async fn an_empty_bearer_cannot_prove_absence() {
-        assert_eq!(
-            error_of(&[""], "any text").await,
-            SecretScrubError::SecretUnavailable
-        );
     }
 
     #[tokio::test]

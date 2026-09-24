@@ -202,7 +202,7 @@ mod tests {
     };
 
     #[test]
-    fn deletion_target_roundtrips_with_colons_and_unicode() {
+    fn deletion_target_parser_is_exact_and_bounded() {
         for text in [
             "secret",
             "with:colons:inside",
@@ -220,10 +220,6 @@ mod tests {
             parse_deletion_target(&security).map(|request| request.purpose()),
             Some(DeletionPurposeWire::Security)
         );
-    }
-
-    #[test]
-    fn deletion_target_parser_rejects_other_families_and_shapes() {
         for raw in [
             "deletion:",
             "deletion:privacy",
@@ -235,52 +231,18 @@ mod tests {
             "task:not-a-uuid",
             "",
         ] {
-            let target = ManagementTargetWire(String::from(raw));
-            assert!(
-                parse_deletion_target(&target).is_none(),
-                "the deletion grammar rejects {raw:?}"
-            );
+            assert!(parse_deletion_target(&ManagementTargetWire(String::from(raw))).is_none());
         }
         assert_eq!(DELETION_TARGET_PREFIX, "deletion:");
-    }
-
-    #[test]
-    fn deletion_target_bounds_the_exact_text() {
         let at_limit = "x".repeat(DELETION_EXACT_TEXT_MAX_BYTES);
         assert!(
             parse_deletion_target(&deletion_target(DeletionPurposeWire::Privacy, &at_limit))
-                .is_some(),
-            "a target at the bound is admissible"
+                .is_some()
         );
         let over = "x".repeat(DELETION_EXACT_TEXT_MAX_BYTES + 1);
         assert!(
-            parse_deletion_target(&deletion_target(DeletionPurposeWire::Privacy, &over)).is_none(),
-            "a target over the bound is refused, never truncated"
+            parse_deletion_target(&deletion_target(DeletionPurposeWire::Privacy, &over)).is_none()
         );
-    }
-
-    #[test]
-    fn parsed_request_debug_redacts_the_owner_body() {
-        let request =
-            parse_deletion_target(&deletion_target(DeletionPurposeWire::Privacy, "raw secret"))
-                .expect("the built target must parse");
-        let rendered = format!("{request:?}");
-        assert!(
-            !rendered.contains("raw secret"),
-            "the exact text never renders through Debug: {rendered}"
-        );
-        assert!(
-            rendered.contains("Privacy"),
-            "the purpose stays visible: {rendered}"
-        );
-        assert!(
-            !rendered.to_lowercase().contains("exact_text: \"raw"),
-            "the body is redacted: {rendered}"
-        );
-    }
-
-    #[test]
-    fn phase_tokens_are_stable() {
         assert_eq!(DeletionPhaseWire::Active.as_str(), "active");
         assert_eq!(DeletionPhaseWire::Held.as_str(), "held");
         assert_eq!(DeletionPhaseWire::Finalizing.as_str(), "finalizing");
@@ -288,9 +250,18 @@ mod tests {
     }
 
     #[test]
-    fn demand_and_result_round_trip_without_a_target_body() {
+    fn deletion_owner_body_never_enters_debug_or_wire() {
         use super::super::refs::DeletionOperationWireRef;
         use super::{DeletionDemand, DeletionDemandWireId, DeletionTargetWire, LocalErasureResult};
+
+        let owner_body = "raw owner body marker 7f6d";
+        let request =
+            parse_deletion_target(&deletion_target(DeletionPurposeWire::Privacy, owner_body))
+                .expect("the built target must parse");
+        let rendered = format!("{request:?}");
+        assert!(!rendered.contains(owner_body));
+        assert!(rendered.contains("Privacy"));
+        assert!(!rendered.to_lowercase().contains("exact_text: \"raw"));
 
         let demand = DeletionDemand {
             demand: DeletionDemandWireId(String::from("demand-1")),
@@ -308,14 +279,11 @@ mod tests {
         let payload = super::super::payload::WirePayload::DeletionDemand(demand.clone());
         assert_eq!(payload.message_type(), "DeletionDemand");
         let json = serde_json::to_string(&payload).expect("the demand must serialize");
-        assert!(
-            !json.to_lowercase().contains("deletion:"),
-            "the wire never carries the mechanical target grammar: {json}"
-        );
-        assert!(
-            !json.contains("target-body"),
-            "no body can ride a demand: {json}"
-        );
+        assert!(!json.contains(owner_body));
+        assert!(!json.to_lowercase().contains("deletion:"));
+        assert!(!json.contains("target-body"));
+        assert!(!format!("{demand:?}").contains("target-body"));
+
         let result = LocalErasureResult {
             demand: demand.demand.clone(),
             operation: demand.operation.clone(),
@@ -329,6 +297,5 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&result).expect("serializes"))
                 .expect("round-trips");
         assert_eq!(round_trip, result);
-        assert!(!format!("{demand:?}").contains("target-body"));
     }
 }

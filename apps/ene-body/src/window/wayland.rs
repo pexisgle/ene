@@ -1003,14 +1003,14 @@ mod imp {
         use super::presentation_output;
 
         #[test]
-        fn sync_output_wins_when_the_compositor_sends_it() {
-            assert_eq!(presentation_output("DP-1", Some("HDMI-A-1")), "DP-1");
-        }
-
-        #[test]
-        fn entered_output_is_the_sync_output_fallback() {
-            assert_eq!(presentation_output("", Some("HDMI-A-1")), "HDMI-A-1");
-            assert_eq!(presentation_output("", None), "");
+        fn presentation_output_prefers_sync_then_entered_output() {
+            for (sync, entered, expected) in [
+                ("DP-1", Some("HDMI-A-1"), "DP-1"),
+                ("", Some("HDMI-A-1"), "HDMI-A-1"),
+                ("", None, ""),
+            ] {
+                assert_eq!(presentation_output(sync, entered), expected);
+            }
         }
     }
 }

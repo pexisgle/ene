@@ -552,8 +552,10 @@ mod tests {
         ActionCertaintyWire, AppendHistoryCommand, CommandId, CompanionId, HistoryMessage,
         HistoryRole, RoundIntentMark, TerminalKindWire,
     };
+    use crate::dialogue::{DialogueTaskCommand, TaskReport};
     use ene_presence::PresenceGeneration;
     use ene_primitive::{RawId, WallClockWithTz};
+    use ene_task::TaskProgress;
 
     fn clock() -> WallClockWithTz {
         WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00")
@@ -598,24 +600,44 @@ mod tests {
     }
 
     #[test]
-    fn history_debug_redacts_text_and_keeps_refs() {
+    fn sensitive_debug_fields_are_redacted() {
         let item = message();
-        let rendered = format!("{item:?}");
-        assert!(
-            !rendered.contains("private words"),
-            "text redacted: {rendered}"
-        );
-        assert!(rendered.contains("en"), "lang stays: {rendered}");
-    }
+        let command = command();
+        let fingerprint = command
+            .request_fingerprint()
+            .expect("a keyed command carries a request fingerprint");
+        let report = TaskReport {
+            progress: TaskProgress::Completed,
+            workspace_folder: None,
+            save_target: None,
+            result_body: Some(String::from("private final words")),
+            result_adopted: true,
+            correlated_attempts: Vec::new(),
+            other_attempts: Vec::new(),
+        };
+        let propose = DialogueTaskCommand::ProposeTask {
+            purpose: String::from("private purpose"),
+        };
+        let steer = DialogueTaskCommand::Steer {
+            instruction: String::from("private instruction"),
+            purpose: Some(String::from("private steering purpose")),
+        };
+        let cases = [
+            (format!("{item:?}"), "private words", Some("en")),
+            (format!("{command:?}"), "private words", Some("en")),
+            (format!("{fingerprint:?}"), "private words", None),
+            (format!("{report:?}"), "private final words", None),
+            (format!("{propose:?}"), "private purpose", None),
+            (format!("{steer:?}"), "private instruction", None),
+            (format!("{steer:?}"), "private steering purpose", None),
+        ];
 
-    #[test]
-    fn command_debug_redacts_text_and_keeps_lang() {
-        let rendered = format!("{:?}", command());
-        assert!(
-            !rendered.contains("private words"),
-            "text redacted: {rendered}"
-        );
-        assert!(rendered.contains("en"), "lang stays: {rendered}");
+        for (rendered, sensitive, retained) in cases {
+            assert!(!rendered.contains(sensitive), "{rendered}");
+            if let Some(retained) = retained {
+                assert!(rendered.contains(retained), "{rendered}");
+            }
+        }
     }
 
     #[test]
@@ -645,11 +667,6 @@ mod tests {
             .request_fingerprint()
             .expect("a keyed command carries a request fingerprint");
         assert_eq!(fingerprint.round_intent, RoundIntentMark::Auto);
-        let rendered = format!("{fingerprint:?}");
-        assert!(
-            !rendered.contains("private words"),
-            "body redacted: {rendered}"
-        );
         let mut same = keyed.clone();
         same.round = RawId::new();
         same.round_wire = Some(String::from("rotated"));

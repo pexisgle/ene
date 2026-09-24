@@ -18,8 +18,6 @@ mod permission;
 mod presence;
 mod preservation;
 mod task;
-#[cfg(any(test, feature = "test-support"))]
-mod test_parks;
 mod usage_cap;
 
 pub use companion::UndeliveredExcerpt;
@@ -55,25 +53,21 @@ async fn run_deletion_blocking<T: Send + 'static>(
 ) -> T {
     #[cfg(any(test, feature = "test-support"))]
     {
-        let parks = Arc::clone(&store.test_parks);
+        let live = Arc::clone(&store.deletion_blocking_live);
         run_blocking(move || {
-            parks
-                .deletion_blocking_live
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             struct Live {
-                parks: Arc<test_parks::TestParks>,
+                counter: Arc<std::sync::atomic::AtomicUsize>,
             }
             impl Drop for Live {
                 fn drop(&mut self) {
-                    self.parks
-                        .deletion_blocking_live
+                    self.counter
                         .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 }
             }
             let _live = Live {
-                parks: Arc::clone(&parks),
+                counter: Arc::clone(&live),
             };
-            parks.deletion_blocking.pause_blocking_if_armed();
             work()
         })
         .await
@@ -113,7 +107,7 @@ pub struct Store {
     conn: Arc<Mutex<Connection>>,
     undelivered: UndeliveredSignal,
     #[cfg(any(test, feature = "test-support"))]
-    test_parks: Arc<test_parks::TestParks>,
+    deletion_blocking_live: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Store {
@@ -136,25 +130,8 @@ impl Store {
             conn: Arc::new(Mutex::new(conn)),
             undelivered: UndeliveredSignal::new(),
             #[cfg(any(test, feature = "test-support"))]
-            test_parks: Arc::new(test_parks::TestParks::default()),
+            deletion_blocking_live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
-    }
-
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub async fn relax_durability_for_tests(&self) -> Result<(), StoreError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let conn = conn.lock().map_err(|_| {
-                StoreError::OpenFailed(String::from("test store connection lock is poisoned"))
-            })?;
-            conn.pragma_update(None, "journal_mode", "MEMORY")
-                .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
-            conn.pragma_update(None, "synchronous", "OFF")
-                .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
-            Ok(())
-        })
-        .await
     }
 
     #[cfg(feature = "test-support")]
@@ -188,327 +165,7 @@ impl Store {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn live_deletion_blocking_sections_for_tests(&self) -> usize {
-        self.test_parks
-            .deletion_blocking_live
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_deletion_blocking_park_for_tests(&self) {
-        self.test_parks.deletion_blocking.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_deletion_blocking_park_for_tests(&self) {
-        self.test_parks.deletion_blocking.wait_entered().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_deletion_blocking_park_for_tests(&self) {
-        self.test_parks.deletion_blocking.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_observation_write_park_for_tests(&self) {
-        self.test_parks.observation_write.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_observation_write_park_for_tests(&self) {
-        self.test_parks.observation_write.wait_entered().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_observation_write_park_for_tests(&self) {
-        self.test_parks.observation_write.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_erasure_mutation_park_for_tests(&self) {
-        self.test_parks.erasure_mutation.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_erasure_mutation_park_for_tests(&self) {
-        self.test_parks.erasure_mutation.wait_entered().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_erasure_mutation_park_for_tests(&self) {
-        self.test_parks.erasure_mutation.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_device_auth_file_park_for_tests(&self) {
-        self.test_parks.device_auth_file.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_device_auth_file_park_for_tests(&self) {
-        self.test_parks.device_auth_file.wait_entered().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_device_auth_file_park_for_tests(&self) {
-        self.test_parks.device_auth_file.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_client_demand_park_for_tests(&self) {
-        self.test_parks.client_demand.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_client_demand_park_for_tests(&self) {
-        self.test_parks.client_demand.wait_entered().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_client_demand_park_for_tests(&self) {
-        self.test_parks.client_demand.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_host_transient_queue_park_for_tests(&self) {
-        self.test_parks.host_transient_queue.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_host_transient_queue_park_for_tests(&self) {
-        self.test_parks.host_transient_queue.wait_entered().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_host_transient_queue_park_for_tests(&self) {
-        self.test_parks.host_transient_queue.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_learning_take_park_for_tests(&self) {
-        self.test_parks.learning_take.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_learning_take_park_for_tests(&self) {
-        self.test_parks.learning_take.wait_entered().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_learning_take_park_for_tests(&self) {
-        self.test_parks.learning_take.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_learning_formation_park_for_tests(&self) {
-        self.test_parks.learning_formation.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_learning_formation_park_for_tests(&self) {
-        self.test_parks.learning_formation.wait_entered().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_learning_formation_park_for_tests(&self) {
-        self.test_parks.learning_formation.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_erasure_mutation_if_armed_for_tests(&self) {
-        self.test_parks.erasure_mutation.pause_if_armed().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_client_demand_if_armed_for_tests(&self) {
-        self.test_parks.client_demand.pause_if_armed().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_host_transient_queue_if_armed_for_tests(&self) {
-        self.test_parks.host_transient_queue.pause_if_armed().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_learning_take_if_armed_for_tests(&self) {
-        self.test_parks.learning_take.pause_if_armed().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_learning_formation_if_armed_for_tests(&self) {
-        self.test_parks.learning_formation.pause_if_armed().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_host_transient_verified_record_park_for_tests(&self) {
-        self.test_parks.host_transient_verified_record.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_host_transient_verified_record_park_for_tests(&self) {
-        self.test_parks
-            .host_transient_verified_record
-            .wait_entered()
-            .await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_host_transient_verified_record_park_for_tests(&self) {
-        self.test_parks.host_transient_verified_record.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_host_transient_verified_record_if_armed_for_tests(&self) {
-        self.test_parks
-            .host_transient_verified_record
-            .pause_if_armed()
-            .await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_learning_pin_queue_park_for_tests(&self) {
-        self.test_parks.learning_pin_queue.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_learning_pin_queue_park_for_tests(&self) {
-        self.test_parks.learning_pin_queue.wait_entered().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_learning_pin_queue_park_for_tests(&self) {
-        self.test_parks.learning_pin_queue.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_learning_pin_queue_if_armed_for_tests(&self) {
-        self.test_parks.learning_pin_queue.pause_if_armed().await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn arm_host_transient_arrival_publish_park_for_tests(&self) {
-        self.test_parks.host_transient_arrival_publish.arm();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn wait_host_transient_arrival_publish_park_for_tests(&self) {
-        self.test_parks
-            .host_transient_arrival_publish
-            .wait_entered()
-            .await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn release_host_transient_arrival_publish_park_for_tests(&self) {
-        self.test_parks.host_transient_arrival_publish.release();
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn pause_host_transient_arrival_publish_if_armed_for_tests(&self) {
-        self.test_parks
-            .host_transient_arrival_publish
-            .pause_if_armed()
-            .await;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn fail_host_transient_arrivals_until_allow_for_tests(&self) {
-        self.test_parks
-            .fail_host_transient_arrival_sticky
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn allow_host_transient_arrival_for_tests(&self) {
-        self.test_parks
-            .fail_host_transient_arrival_sticky
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn fail_deletion_operation_material_for_tests(
-        &self,
-        operation: ene_preservation::DeletionOperationId,
-    ) {
-        *self
-            .test_parks
-            .fail_deletion_material
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(operation);
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn allow_deletion_operation_material_for_tests(&self) {
-        *self
-            .test_parks
-            .fail_deletion_material
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn host_transient_arrival_classify_fails_for_tests(
-        &self,
-        operation: ene_preservation::DeletionOperationId,
-    ) -> bool {
-        *self
-            .test_parks
-            .fail_deletion_material
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            == Some(operation)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn host_transient_arrival_attempts_for_tests(&self) -> u64 {
-        self.test_parks
-            .host_transient_arrival_attempts
+        self.deletion_blocking_live
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 }

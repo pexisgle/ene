@@ -51,10 +51,23 @@ mod tests {
     #[test]
     fn only_a_local_wss_url_parses_as_a_port() {
         assert_eq!(info("wss://127.0.0.1:43121").local_port(), Some(43121));
-        assert_eq!(info("wss://localhost:43121").local_port(), None);
-        assert_eq!(info("wss://192.168.1.9:43121").local_port(), None);
-        assert_eq!(info("http://127.0.0.1:43121").local_port(), None);
-        assert_eq!(info("wss://127.0.0.1:0").local_port(), None);
-        assert_eq!(info("wss://127.0.0.1:not-a-port").local_port(), None);
+        for url in [
+            "wss://[::1]:43121",
+            "wss://[::ffff:127.0.0.1]:43121",
+            "wss://localhost:43121",
+            "wss://127.0.0.2:43121",
+            "wss://192.168.1.9:43121",
+            "http://127.0.0.1:43121",
+            "wss://127.0.0.1:0",
+            "wss://127.0.0.1:65536",
+            "wss://127.0.0.1:18446744073709551616",
+            "wss://127.0.0.1:-1",
+            "wss://127.0.0.1:not-a-port",
+            "wss://127.0.0.1:43121x",
+            "wss://127.0.0.1:43121/path",
+            "wss://127.0.0.1:",
+        ] {
+            assert_eq!(info(url).local_port(), None, "{url}");
+        }
     }
 }

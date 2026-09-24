@@ -542,7 +542,6 @@ mod tests {
 
     #[test]
     fn motion_set_shape_is_checked_before_any_file_is_opened() {
-        assert!(MotionSetInfo { clips: Vec::new() }.validate().is_err());
         assert_eq!(
             MotionSetInfo { clips: Vec::new() }
                 .validate()

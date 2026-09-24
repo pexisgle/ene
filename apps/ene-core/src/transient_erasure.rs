@@ -321,10 +321,6 @@ async fn experience_covers_operation(
     current: DeletionOperationRef,
     experiences: &[ExperienceCandidate],
 ) -> Result<bool, PreservationTechnicalError> {
-    #[cfg(any(test, feature = "test-support"))]
-    if store.host_transient_arrival_classify_fails_for_tests(current.operation) {
-        return Err(PreservationTechnicalError::StorageUnavailable);
-    }
     let material = match store.deletion_operation_material(current.operation).await? {
         DeletionMaterialOutcome::Material(material) => material,
         DeletionMaterialOutcome::Missing | DeletionMaterialOutcome::Destroyed => return Ok(false),
@@ -521,10 +517,6 @@ impl HostTransientParticipant {
         &self,
         fact: ParticipantCompletionFact,
     ) -> Result<ParticipantCompletionOutcome, PreservationTechnicalError> {
-        #[cfg(any(test, feature = "test-support"))]
-        self.store
-            .pause_host_transient_verified_record_if_armed_for_tests()
-            .await;
         let _gate = self.arrival.lock().await;
         let inflight = self.arrival.inflight_pins();
         let unpublished = self.arrival.has_unpublished();
@@ -579,8 +571,6 @@ impl ErasureParticipant for HostTransientParticipant {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ParticipantCompletionFact> + Send + '_>>
     {
         Box::pin(async move {
-            #[cfg(any(test, feature = "test-support"))]
-            self.store.pause_erasure_mutation_if_armed_for_tests().await;
             let current = match self
                 .store
                 .erasure_condition_is_current(command.condition())
@@ -644,10 +634,6 @@ impl ErasureParticipant for HostTransientParticipant {
                 }
                 (identities, selected, generation)
             };
-            #[cfg(any(test, feature = "test-support"))]
-            self.store
-                .pause_host_transient_queue_if_armed_for_tests()
-                .await;
             let covered = match self
                 .store
                 .erasure_sources_covered(command.condition(), identities.clone())
@@ -1064,11 +1050,6 @@ impl ErasureParticipant for ClientIncarnationParticipant {
                     WallClockWithTz::now(),
                 );
             }
-            #[cfg(any(test, feature = "test-support"))]
-            self.registry
-                .store
-                .pause_client_demand_if_armed_for_tests()
-                .await;
             let Some(connection) = self.registry.current_connection(self.identity) else {
                 return ParticipantCompletionFact::held(
                     condition,
@@ -1140,10 +1121,6 @@ impl HostHandle {
             return true;
         };
         let identity = ClientTransientRegistry::identity_for(counter, random);
-        #[cfg(test)]
-        if let Some(gate) = self.delivery_evidence_gate() {
-            gate.pause().await;
-        }
         self.store
             .note_client_delivery_evidence(identity)
             .await

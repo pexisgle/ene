@@ -403,27 +403,28 @@ mod tests {
     use super::{IpcEndpoint, parse_endpoint};
 
     #[test]
-    fn default_endpoint_is_stdio() {
-        let default = parse_endpoint(["ene-body"]).expect("default parse");
-        let explicit = parse_endpoint(["ene-body", "--ipc-stdio"]).expect("explicit stdio parse");
-        assert_eq!(default, IpcEndpoint::Stdio);
-        assert_eq!(explicit, IpcEndpoint::Stdio);
-    }
+    fn endpoint_selection_is_explicit_and_unambiguous() {
+        let cases: &[(&[&str], Result<IpcEndpoint, &str>)] = &[
+            (&["ene-body"], Ok(IpcEndpoint::Stdio)),
+            (&["ene-body", "--ipc-stdio"], Ok(IpcEndpoint::Stdio)),
+            #[cfg(unix)]
+            (&["ene-body", "--ipc-fd", "1"], Err("ipc-fd")),
+            #[cfg(unix)]
+            (
+                &["ene-body", "--ipc-stdio", "--ipc-unix", "/tmp/x"],
+                Err("only one"),
+            ),
+        ];
 
-    #[cfg(unix)]
-    #[test]
-    fn inherited_stdio_fds_are_rejected() {
-        let err = parse_endpoint(["ene-body", "--ipc-fd", "1"]).expect_err("fd 1");
-        let text = err.to_string();
-        assert!(text.contains("ipc-fd"), "{text}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn combined_endpoints_are_rejected() {
-        let err = parse_endpoint(["ene-body", "--ipc-stdio", "--ipc-unix", "/tmp/x"])
-            .expect_err("combined");
-        let text = err.to_string();
-        assert!(text.contains("only one"), "{text}");
+        for (args, expected) in cases {
+            let actual = parse_endpoint(args.iter().copied());
+            match (actual, expected) {
+                (Ok(actual), Ok(expected)) => assert_eq!(actual, *expected),
+                (Err(actual), Err(expected)) => {
+                    assert!(actual.to_string().contains(expected), "{actual}");
+                }
+                (actual, expected) => panic!("unexpected parse result: {actual:?} vs {expected:?}"),
+            }
+        }
     }
 }

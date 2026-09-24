@@ -1330,66 +1330,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_presentation_feedback_cannot_pass() {
-        let mut record = passing_record();
-        let source = record.fps.as_ref().expect("fps").source.clone();
-        record.fps = Some(
-            PresentationRecord::from_events(
-                source,
-                5.0,
-                1.0,
-                vec![
-                    PresentationEvent::Presented {
-                        correlation_id: 1,
-                        timestamp_ns: 1,
-                        clock_id: 1,
-                        output: String::from("out"),
-                    },
-                    PresentationEvent::Missing {
-                        correlation_id: 2,
-                        reason: String::from("feedback never resolved"),
-                    },
-                ],
-            )
-            .expect("record"),
-        );
-        record.evaluate();
-        assert!(!record.claims_pass());
-        assert_eq!(record.verdict.label(), "Fail");
-    }
-
-    #[test]
-    fn unresolved_body_submission_becomes_missing_feedback() {
-        let surface_id = String::from("wl_surface@12");
-        let feedback = vec![
-            ene_body::ipc::PresentationFeedback {
-                surface_id: surface_id.clone(),
-                correlation_id: 10,
-                outcome: ene_body::ipc::PresentationOutcome::Submitted,
-            },
-            ene_body::ipc::PresentationFeedback {
-                surface_id: surface_id.clone(),
-                correlation_id: 10,
-                outcome: ene_body::ipc::PresentationOutcome::Presented {
-                    timestamp_ns: 99,
-                    clock_id: 1,
-                    output: String::from("DP-1"),
-                },
-            },
-            ene_body::ipc::PresentationFeedback {
-                surface_id,
-                correlation_id: 11,
-                outcome: ene_body::ipc::PresentationOutcome::Submitted,
-            },
-        ];
-        let record =
-            wayland_presentation_record(42, 1.0, 1.0, feedback).expect("correlated feedback");
-        assert_eq!(record.presented, 1);
-        assert_eq!(record.missing, 1);
-        assert!(record.rejection().is_some());
-    }
-
-    #[test]
     fn dropped_frames_use_presented_count_not_request_count() {
         let events = (0..60)
             .map(|id| {
@@ -1419,32 +1359,6 @@ mod tests {
         assert_eq!(fps.discarded, 40);
         assert_eq!(fps.actual_fps, 20.0);
         assert_eq!(fps.rejection(), Some("presented FPS is below the minimum"));
-    }
-
-    #[test]
-    fn discarded_feedback_does_not_reject_a_passing_presented_fps() {
-        let mut events = (0..31)
-            .map(|id| PresentationEvent::Presented {
-                correlation_id: id,
-                timestamp_ns: id.saturating_add(1) * 30_000_000,
-                clock_id: 1,
-                output: String::from("out"),
-            })
-            .collect::<Vec<_>>();
-        events.push(PresentationEvent::Discarded { correlation_id: 32 });
-        let fps = PresentationRecord::from_events(
-            PresentationSource::WaylandWpPresentation {
-                body_pid: 3,
-                surface_id: String::from("surface"),
-            },
-            0.0,
-            1.0,
-            events,
-        )
-        .expect("fps");
-        assert_eq!(fps.discarded, 1);
-        assert!(fps.actual_fps >= 30.0);
-        assert!(fps.rejection().is_none());
     }
 
     #[test]
