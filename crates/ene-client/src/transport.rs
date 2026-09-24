@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use ene_api::codec::{DecodedFrame, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 use ene_api::runtime::HostRuntimeInfo;
-use ene_api::v1::deletion::{ClientTempClass, DeletionDemand, LocalErasureResult};
+#[cfg(any(test, feature = "test-support"))]
+use ene_api::v1::deletion::ClientTempClass;
+use ene_api::v1::deletion::{DeletionDemand, LocalErasureResult};
 use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, WireSender};
 use ene_api::v1::handshake::{AuthChallenge, PairingProvisionSecret, PairingResult};
 use ene_api::v1::payload::WirePayload;
