@@ -664,7 +664,11 @@ fn effect_worker_command() -> EffectWorkerCommand {
             stdin_write_marker: None,
         };
     };
-    effect_worker_command_at(&current, &file_name, cfg!(debug_assertions))
+    effect_worker_command_at(
+        &current,
+        &file_name,
+        cfg!(debug_assertions) || cfg!(feature = "test-support"),
+    )
 }
 
 fn effect_worker_command_at(
