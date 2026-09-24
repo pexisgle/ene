@@ -14,7 +14,7 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{BaseViewMark, CommandWireId};
-use ene_desktop::session;
+use ene_desktop::session::{self, ChatSendReport};
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 
@@ -206,7 +206,8 @@ async fn assign_learning(desktop: &mut DesktopRuntime) {
 #[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn say(desktop: &mut DesktopRuntime, text: &str) {
     desktop.composer_mut().set_draft(text.to_owned());
-    desktop.send_text().await.expect("chat turn must complete");
+    let report = desktop.send_text().await.expect("chat turn must complete");
+    assert!(matches!(report, ChatSendReport::Completed));
 }
 
 #[expect(clippy::expect_used, clippy::panic, reason = "test fixture helper")]

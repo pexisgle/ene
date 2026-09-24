@@ -139,7 +139,8 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
     desktop
         .composer_mut()
         .set_draft(format!("please remember {TARGET}"));
-    desktop.send_text().await.expect("plant the target");
+    let report = desktop.send_text().await.expect("plant the target");
+    assert!(matches!(report, ChatSendReport::Completed));
     desktop.composer_mut().set_draft(format!("draft {TARGET}"));
     desktop.composer_mut().begin_composition();
     match desktop.refresh_memory().await {
@@ -369,7 +370,8 @@ async fn killing_body_leaves_chat_settings_and_cancel_alive() {
     desktop
         .composer_mut()
         .set_draft(String::from("chat without body"));
-    desktop.send_text().await.expect("chat survives Body kill");
+    let report = desktop.send_text().await.expect("chat survives Body kill");
+    assert!(matches!(report, ChatSendReport::Completed));
     desktop
         .refresh_setup()
         .await
@@ -399,7 +401,8 @@ async fn send_text_presents_its_collected_turn() {
     pair_and_setup(&mut desktop, &handle).await;
 
     desktop.composer_mut().set_draft(String::from("ack me"));
-    desktop.send_text().await.expect("send_text");
+    let report = desktop.send_text().await.expect("send_text");
+    assert!(matches!(report, ChatSendReport::Completed));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         if unpresented_count(&handle).await == 0 {
