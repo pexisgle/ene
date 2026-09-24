@@ -1018,8 +1018,8 @@ fn intake_notice(ja: bool, refusal: &ChatIntakeRefusal) -> (String, bool) {
                 "The message is too long to send. Shorten it and send it again.",
             ),
             "stopped-companion" => (
-                "パートナーの状態を確認してから、もう一度送信してください。",
-                "Check the Companion state, then send the message again.",
+                "パートナーの状態を確認して、実行できる状態に戻してから、もう一度送信してください。",
+                "Check the Companion state, restore it to a running state, then send the message again.",
             ),
             "unknown-companion" | "missing-generation-view" => (
                 "送信前の接続状態を確認できませんでした。接続を更新してから、もう一度送信してください。",

@@ -662,7 +662,10 @@ impl DesktopRuntime {
         let lang = self.locale.as_tag().to_string();
         let collected = match self.client.as_mut() {
             Some(client) => session::submit_and_collect(client, &text, &lang).await,
-            None => return Ok(ChatSendReport::NotConnected),
+            None => {
+                self.composer.restore_unsent(text);
+                return Ok(ChatSendReport::NotConnected);
+            }
         };
         match collected {
             Ok(ChatSessionOutcome::Completed(turn)) => {
