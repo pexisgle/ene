@@ -79,7 +79,7 @@
 
 ### 3.2 Owner 意図 / Permission 判断 / 実対象との対応
 
-- アクションの認可判断に必要な材料は、`(実行主体と委任チェーン, 対象タスクとワークスペースの範囲, 目的, 具体的な操作対象と種別, 送信先と想定される外部作用, 使用するデータ, コストやリスク, 依拠したユーザーの意図やルール)` の完全なセットです。
+- アクションの認可判断に必要な材料は、`(実行主体, Workspace Task 所属なら依拠 TaskRef・委任・Workspace 範囲、Backup 専用 Task 所属なら TaskRef・保存済み Started occurrence または Owner Run now source・point・保全出力 scope・Owner 選択の現在保存先、直接操作ならオーナー指示の由来・担当 Companion・指示と許可が及ぶ対象範囲, 目的, 具体的な操作対象と種別, 送信先と想定される外部作用, 使用するデータ, コストやリスク, 依拠したユーザーの意図やルール)` の完全なセットです。直接操作に架空の Task や委任を補ってはなりません。
 
 ### 3.3 Task / delegation / Task Agent との対応
 
@@ -91,7 +91,7 @@
 
 - アクションの進行状態は、`(受付, 開始, 把握された外部作用, 結果の確定度, 停止要求, 停止結果)` を厳密に区別します。内部ログの保存成功と外部への作用成功は別であり、外部通信の成功と内部保存の成功も別です。
 - 結果の確定度は、少なくとも `確認済み成功（ConfirmedSuccess） / 確認済み失敗（ConfirmedFailure） / 成否不明（Unknown）` を区別します。キャンセルを受け付けたことと停止が完了したこと、通信が通ったことと操作が成功したこと、画面に表示されたことと認可されたことはそれぞれ全く別の事象です。
-- 重複の可能性がある再送やリトライは、すべて新しい試行として扱い、成否不明や二重実行の管理対象とします。「同じ試行が続いているだけ」として管理をスキップしてはいけません。
+- 新たな外部作用として認めた再送やリトライは新しい試行として扱い、成否不明や二重実行の管理対象とします。同じ受付の再送は既存の事実を読み戻し、Backup 専用 Task の同じ Task / 手動管理バックアップの同じ source から新たな出力を始めません。「同じ試行が続いているだけ」として新しい外部作用の管理をスキップしてはいけません。
 - 遅延して届いた結果は元の試行履歴に記録し、現在のタスクの達成や次のアクションへ無条件に自動採用してはいけません。
 
 ### 3.5 Companion / Client / presence / round との対応
@@ -103,6 +103,7 @@
 
 - すべてのデータ保持者（各機能だけでなく、処理中のコンテキスト、派生データ、キャッシュ、端末側の一時コピー、返却待ちの結果を持つコンポーネントを含む）は、進行中の削除操作に対して `(情報源との関係, 処理中の利用状況, 局所的な削除・検証状況, 再保存の防止, 未確認範囲)` を説明できなければなりません。
 - 元データを削除した後に依存関係まで一緒に消滅してしまい、遅れて届いた古いデータを識別できなくなるような実装は禁止します。テキスト本文そのものを残さずに、対応関係のハッシュや識別情報のみを保持して再保存を防ぐ工夫が必要です。
+- Task Agent の source identity / `data_use` は送信する transcript 本文の coverage を保証しません。送信する論理本文は別途 current mechanical condition に照合します。完了後の旧 in-flight 結果は、削除開始で durable に確定した operation / provenance cut と delegation・inference・Action attempt の由来 / 順序から識別します。対象本文・本文 hash・検索 token は完了後の識別子として保持せず、由来不明なら本文を拒否します。完了後の新しい Owner source は同じ文字列でも新しい経験となります。
 
 ### 3.7 Backup / Restore での復元 state と現在環境との対応
 
@@ -226,7 +227,7 @@ enum ReportStatus {
 
 `UndeliveredId` は個体調整が発行する durable identity です。`UndeliveredSource` は `TaskRecord { task, fact }`、`HistoryMessage(message_id)`、`ActivityRecord(activity_id)` の閉じた和型とします。会話返信は既存の History を直接参照し、同じ本文の activity record を作りません。これは活動記録への参照の具体化であり、History の ownership は変えません。
 
-Task の `fact` は `TaskRevision(TaskRef)`、`Delegation(DelegationId)`、`ActionAttempt { attempt, certainty }`、`ResultRecorded(TaskResultId)`、`ResultAdopted(TaskResultId)`、`Terminal { task, progress: Failed | Cancelled }` です。型は発生元を識別する相関であり、状態のコピーや実行指示ではありません。`Started` は初期 TaskRevision、`InProgress` は Delegation、`Completed` は ResultAdopted から説明できるため、同じ遷移の Terminal 通知を重複登録しません。各参照が指す原本と登録契機は [PR §4.6](persistence-recovery.md#46-未伝達は発生元の-fact-と不可分に登録する) に定めます。
+Task の `fact` は `TaskRevision(TaskRef)`、`BackupTaskResume { owner_source_kind, owner_source_id }`、`Delegation(DelegationId)`、`ActionAttempt { attempt, certainty }`、`ResultRecorded(TaskResultId)`、`ResultAdopted(TaskResultId)`、`BackupTaskCompleted(TaskId)`、`Terminal { task, progress: Failed | Cancelled }` です。Backup 専用 AU17 の明示 resume は revision / delegation を作らず `backup_task_resume` の指示 source を参照し、Backup 専用 agentless 完了は ResultAdopted を持たず保存済み source・point・成功 marker・唯一の ConfirmedSuccess な出力試行を検証した Task の Completed 遷移を参照します。型は発生元を識別する相関であり、状態のコピーや実行指示ではありません。通常 Task の `Started` は初期 TaskRevision、`InProgress` は Delegation、`Completed` は ResultAdopted、Backup 専用 Task の `Completed` は BackupTaskCompleted から説明し、同じ遷移の Terminal 通知を重複登録しません。失敗・中断は両種とも既存の Terminal に帰属します。各参照が指す原本と登録契機は [PR §4.6](persistence-recovery.md#46-未伝達は発生元の-fact-と不可分に登録する) に定めます。
 
 cardinality は `(companion, source)` ごとに最大 1 行です。同じ source の再通知は既存 identity と状態を保ちます。後続 fact は新しい行なので、古い ACK は後続 fact を報告済みにできません。送信用の `PresentationReceiptId` は入出力・提示が発行する一時 identity とし、認証済み connection、Round、presence generation、選択した `UndeliveredId` 集合を Host メモリで対応付けます。receipt は接続の置き換え・切断・再起動を跨いで有効になりません。要約済みかどうかは receipt と生成中の表示データから分かる一時状態であり、`Summarized` 列や要約本文の正本は作りません。
 
@@ -250,7 +251,9 @@ struct TaskRevision(u64); // 同一タスクに対する指示や目標の変更
 // Cancelled は「中断要求を受理した」ことだけを表し、外部作用の停止完了・Unknown の解消を表さない。
 // 受理後に失われ得るのはローカルの Future / cancellation token / 停止 handle だけで、開始済み試行の
 // durable 相関と Unknown は維持する。Cancelled の Task は再開せず（progress を戻さず、同じ Task の
-// delegation を再利用せず）、再実行は新しい Task の下に新しい delegation を作成して行う。
+// delegation を再利用せず）、新たな作業は別 Task として扱う。旧 Unknown は維持する。
+// 通常 Task は新 Task・新 delegation / agent、Backup 専用 Task は認証済み Owner Run now
+// または将来の別の予定回に基づく新 Task・point の agentless producer を使い、AU3 は行わない。
 // execution seal はこれとは別の gate である: final result の到着（AU15a）が 1 delegation を seal し、
 // Task が InProgress のままでも AU14/AU5 は ExecutionSealed として拒否する。
 // Completed への CAS（AU15b）は、同じ不分区間で Task-wide completion barrier（同じ TaskId に属する
@@ -272,6 +275,12 @@ struct TaskAgentEphemeralId(/* 一時的なエージェントID。永続デー�
 struct WorkspaceAssocId(/* 不透明なID */);
 struct ScheduleId(/* 不透明なID */);
 struct ScheduleOccurrenceId(/* 不透明なID */);
+
+// Backup 専用 Task の由来。Run now は予定回の identity を持たない。
+enum BackupTaskSource {
+    StartedOccurrence { schedule: ScheduleId, occurrence: ScheduleOccurrenceId },
+    RunNow { schedule: ScheduleId, instruction: OwnerInstructionSourceRef },
+}
 
 struct TaskRef {
     task: TaskId,
@@ -304,7 +313,7 @@ struct DelegationScope {
 struct DelegatedWorkspace {
     assoc: WorkspaceAssocId,                 // 写し元の関連付け識別子（対応関係の来歴）
     folder: WorkspaceFolderRef,              // 委任時点のフォルダ（写し）
-    save_target: Option<WorkspaceFolderRef>, // 委任時点の保存先（写し）
+    save_target: Option<WorkspaceFolderRef>, // 委任時点の明示保存先（写し）。None や Workspace の書込み権は最終成果物の保存許可ではない
 }
 
 struct DelegationRef {
@@ -330,13 +339,13 @@ struct ScheduleOccurrenceRef {
     occurrence_status: OccurrenceStatus,
 }
 
-enum OccurrenceStatus { Missed, Started, CancelledAsTaskContract }
+enum OccurrenceStatus { Missed, Started, Unclassified }
 ```
 
 - タスクレコードの寿命は、担当コンパニオンへの参照によって勝手に決められるものではありません。担当コンパニオンが削除された後であっても、残されたタスクレコードには管理画面等から安全にアクセスできなければなりません。
 - 委任レコードの存在は、Task Agent のプロセス・コンテキスト・メモリが現在も生きていることを意味しません。再起動後は委任の対応関係のみを復元し、ephemeral な実行文脈は失われたものとして扱い、Agent の自動再起動やタスクの自動再開を行いません。委任の継続・停止・受領の状態を再構成するスライスは、それぞれの状態の producer と対で状態表現を追加します。
 - 同じタスクの同じリビジョンに対する複数の委任は許可され、単一委任の制約を課しません（並列委任は正当な実行形態です）。再委任やリトライは新しい委任 identity で開始し、既存の委任 identity を再利用しません。
-- **明示 resume の identity**: `(T, r)` の中断作業を再開する受理は、同じ `TaskId = T` の新 revision `r+1` と、その revision に依拠する新しい `DelegationId`・`TaskAgentEphemeralId` を不可分に作ります。目的が同じなら `TaskPurposeRef` は引き継ぎます。既存の採用指示 entry は再作成せず、再開指示のみ新しい `TaskContextEntryId` で採用します。Workspace の関連付け identity も引き継ぎ、新 delegation の scope は現在の関連付けから凍結します。旧 delegation、旧 result、旧 attempt はすべて元の revision に残り、新 delegation の依拠集合に付け替えません。`TaskRecoveryGeneration`、`current_delegation`、`resumed` flag は不要です。一般の AU3 は同一 revision への複数委任を引き続き許しますが、resume は Task 全体の継続指示なので必ず revision を前進させます（[IB H-A.1](interface-boundaries.md#h-a1-中断-task-の明示-resume)）。
+- **明示 resume の identity**: 通常 Task の `(T, r)` の再開は、同じ Task の新 revision `r+1`・Owner 再開指示 entry と、その revision に依拠する新しい `DelegationId`・`TaskAgentEphemeralId` を不可分に作ります。目的 identity と Workspace association を引き継ぎ、新 delegation の scope は現在の関連付けから凍結します。Backup 専用 Task は `TaskRef = (T, r)` と目的・保存済み Started occurrence / Run now source・種別を維持し、新 Owner 再開指示の body-free な受付 fact（依拠 `TaskRef` と指示 source の相関）だけを同じ Task に記録します。delegation / agent / Workspace も新しい `TaskContextEntryId` も作りません。point・attempt は元の `TaskRef` のまま同じ未完了作業の検証・完了で参照し、付け替えや再送をしません。再開指示本文は History / 管理 activity が保持し、Task は複製しません。通常 Task の既存採用指示 entry は再作成せず、再開指示だけ新しい entry で採用します。`TaskRecoveryGeneration`、`current_delegation`、`resumed` flag は不要です。通常の AU3 は同一 revision への複数委任を引き続き許します（[IB H-A.1](interface-boundaries.md#h-a1-中断-task-の明示-resume)）。
 - 委任は割り当て（assignment）の identity を保存しません。Task Agent の推論割り当ては受付（K-E）時に委任元が依拠する現在の Capability 同意から live に解決し、durable な帰属は推論試行行の `(consumer, purpose, delegation, 依拠 TaskRef)` 対応が担います。解決済みの割り当て経路を、生きた許可として委任から再利用してはなりません。
 - すべての軽微な操作を無理にタスク化する必要はありませんが、まとまった一連の外部作業をタスク化せずに雑に実行することも禁止します。
 
@@ -353,7 +362,7 @@ enum ActionCertainty {
 /// 実行直前に解決された実際の操作対象。構築は実行・拡張の解決処理を通し、
 /// 呼び出し側が入力文字列から直接組み立てません（公開コンストラクタは store の
 /// 読み戻しとテスト用。入力文字列の一致を同一性の根拠にしない）。
-struct RealTargetRef { /* canonical な絶対パス。秘密ではない */ }
+struct RealTargetRef { /* 解決時の canonical な絶対パス。秘密ではない */ }
 
 /// 確定度の判断根拠（closed world。エージェントの自己申告を語彙として受け付けない）。
 enum EffectGrounds {
@@ -362,13 +371,40 @@ enum EffectGrounds {
     OutcomeUnverified,    // 作用が起きた可能性があるが確認できない（Unknown のまま保持）
 }
 
+/// 直接操作の由来・scope は Task や委任の代用品ではない。
+enum ActionAssociation {
+    TaskBound {
+        task: TaskRef,
+        scope: TaskBoundActionScope,
+    },
+    Direct {
+        instruction: OwnerInstructionSourceRef, // オーナー指示の正本への由来参照
+        companion: Option<CompanionId>,
+        target_scope: AuthorizedTargetScopeRef, // 指示と許可が及ぶ対象範囲の照合材料（許可証ではない）
+        system_operation: Option<SystemActionOperation>, // None companion は管理起点の列挙用途のみ
+        manual_backup_point: Option<BackupPointId>, // ManualBackupExport の Management source にだけ必須
+    },
+}
+enum TaskBoundActionScope {
+    Workspace { delegation: DelegationId, workspace: WorkspaceAssocId },
+    BackupTaskExport {
+        source: BackupTaskSource,
+        backup_point: BackupPointId,
+        output_scope: BackupOutputScopeRef,
+        setting: BackupSettingRef,
+        setting_revision: BackupSettingRevision,
+    },
+}
+struct BackupOutputScopeRef(RawId); // 保全 owner が確定した当該 backup point の出力範囲
+struct BackupSettingRevision(u64);
+enum OwnerInstructionSourceRef { Conversation(MessageId), Management(ActivityId) }
+enum SystemActionOperation { ManualBackupExport, CharacterPackageImport, CharacterExport }
+struct AuthorizedTargetScopeRef(RawId); // 現在の許可は別途照合
+
 /// 実行・拡張機能が管理する、把握された外部作用の記録。
-/// この段階では task / delegation / workspace は必須（Task に紐づく Workspace 内操作のみ）。
 struct ActionAttemptRef {
     attempt: ActionAttemptId,
-    task: TaskRef,                  // 依拠したタスクリビジョン（軽微な単発操作の producer は後続スライス）
-    delegation: DelegationId,
-    workspace: WorkspaceAssocId,    // 開始時に照合した現在の関連付け（委任 scope_copy ではない）
+    association: ActionAssociation,
     real_target: RealTargetRef,     // パス解決等を経た具体的な操作対象（単なる文字列一致ではない）
     operation: OperationKind,       // List | Read | Create | Edit を混同しない（Delete/Execute は後続スライス）
     relied_evaluation: RawId,       // Permission-owned ActionPermissionEvaluationId の opaque な対応識別子（K-B.1 の今回限りの判断。single-use。評価ログ行そのものではない）
@@ -385,9 +421,17 @@ struct PermissionEvaluationRef {
 struct PermissionEvaluationId(/* 不透明なID */);
 ```
 
+現行 Stage 4 の Workspace 内ファイル Action は `ActionAssociation::TaskBound { scope: Workspace { .. } }` だけを生成し、`TaskRef`・`DelegationId`・`WorkspaceAssocId` をすべて必須とします。後続の `BackupTaskExport` は保存済みの `BackupTaskSource` が Started occurrence または認証済み Owner の Run now 操作である Backup 専用 Task だけに使い、`TaskRef`、由来、保全 owner の backup point / output scope、Owner 選択の現在 `backup_setting` 保存先を結びます。Run now は元回の発生キー・status・cursor を消費せず独立の Task です。両種とも委任・Workspace を合成せず、外部 Create 以外に転用しません。Backup 専用 Task への AU3 は試行の有無にかかわらず拒否し、通常 Task の Workspace Action をバックアップ出力候補とみなしません。`Direct` は後続の直接操作 producer と対で有効化する帰属表現であり、Task 所属試行を `Direct` に付け替えて Task の現在性を省略しません。`Direct { companion: Some(_), system_operation: None }` はオーナー指示の正本への由来・担当 Companion・許可対象 scope と Running gate を持ちます。`Direct { companion: None, system_operation: Some(_) }` は認証済み第一者管理 source と列挙された手動バックアップ外部出力、Character Package import 読込、Companion 非依存の Character export のいずれかだけに限り、対象 scope・操作・用途・実対象を束縛します。会話 source の None、Companion 付き system operation、用途の無い None を拒否し、Task・委任・Workspace・Companion を捏造しません。どちらの帰属でも試行 identity・実対象・操作種別・依拠した今回限りの権限判断・確定度とその客観的根拠は実行・拡張 owner が保持し、`Unknown` を推測で成功・失敗へ変更しません。
+
+Backup 専用 Task の種別・source は AU4 の revision 前進でも不変です。AU4 は backup 以外の目的への変更と既存 point の依拠 TaskRef を切断する前進を拒否し、AU17 は revision も進めず同じ TaskRef / source / purpose を保って agentless に残作業を受理します。Run now の認証・最新 Owner 入力・対象 schedule の照合は Task 作成時に済ませ、以後は保存済み provenance の非改ざんと現在の Task / Permission / 担当・設定を照合します。後の無関係な会話入力や Schedule の変更・停止・削除は元 Task を取り消しません。管理 source identity の失効・偽造と同じ Task の Cancel / steering は別途拒否します。
+
+`RealTargetRef` は試行と対象の対応を永続記録するための記述であり、保存したパスを後から開く権限や、現在も同じ実体を指す証明ではありません。実行・拡張担当は別に、Workspace Task 所属なら Workspace root、Backup 専用 Task なら Owner 選択の現在保存先、直接操作なら許可された対象範囲の起点から解決した実対象（新規作成では検証済み親ディレクトリと leaf）を保持する非永続の実行用 guard を持ち、認可・試行開始・実際の作用を同じ guard に結び付けます。管理起点の package Read は Character owner の検証へ渡す前に Action 試行の結果として追跡し、手動 backup の外部書込も同じ結果・`Unknown` を保全 owner の成功判定と区別します。再起動後の記録の読み戻しで guard を復元したことにはせず、新たな作用には新しい解決と認可が必要です。
+
+手動バックアップの一管理要求は一つの point に固定し、同じ source の受付再送では保存済み point と試行の状態を返します。既存試行が `Unknown` なら source・point・対象を変えても再出力せず、保全 owner の成功 marker は Action の成功と区別して検証します。新たな外部出力が必要なら Owner の**新たな**明示管理要求と新 point に基づき現在の許可と旧 `Unknown` の二重実行リスクを評価し、旧試行の確定度を変更しません。
+
 - アクションの受付、開始、作用、確定度、タスクの達成、制御変更、未伝達メッセージ、監査ログは、それぞれ独立した事実であり別個の機能が管理します。
 - 外部サービスからの「成功」レスポンスは、対象や作用の対応関係を確認した上で初めて証拠として扱います。AIエージェントの自己申告を成否の証拠にしてはいけません。
-- 再試行やリトライは新しい `ActionAttemptId` を発行して実行します。重複実行のリスクがある処理を「同じ試行が続いているだけ」とみなしてはいけません。
+- 新たな外部作用として許された再試行やリトライは新しい `ActionAttemptId` を発行します。ただし Backup 専用 Task の外部出力は Task ごとに、手動管理バックアップは管理 source ごとに最大一試行だけです。受付再送は既存事実を返し、追加の外部出力は Owner の新たな明示指示による新 Task / 管理 source と新 point を要します。重複実行のリスクがある処理を「同じ試行が続いているだけ」とみなしてはいけません。
 
 ### 5.5 権限・制約・認証情報・推論割当・利用量
 
@@ -562,23 +606,24 @@ struct ParticipantCompletionRef { /* 各コンポーネントにおける処理�
 |---|---|---|
 | **文脈（Context）の参照・選択** | 要求の `(利用主体, 用途, タスク・委任, 目的・追加指示の前提, 活動継続関係)` × 各情報の `(担当機能, 情報源範囲, リビジョン, スコープ, 制限)` × 現在のセキュリティ制約 | 目的が成立しないとして文脈不足に戻します。別の無関係な活動へ勝手に付け替えてはいけません。 |
 | **プロバイダへの実送信（初回・フォールバック・再送・継続）** | 論理的な選択範囲 × 解決された割り当て経路と実送信先・データ・用途・取り扱い・費用の同意 × 最新の認証用途・制限・保留・利用量 × 元の要求範囲 | 送信を阻止します。同意が得られていない不足を、テキストを勝手に削ることでこっそり解消してはいけません。 |
-| **アクションの新規開始** | アクション試行が前提とする `(タスクリビジョン, 委任スコープ, ワークスペース範囲, 具体的操作対象と種別, 依拠した権限)` × 現在の `(最新タスクリビジョン, 委任の有効性, ワークスペースの有効性, 解決された実対象, 最新の許可・端末・コスト・停止・保留・消去・復元条件)` × 端末依存なら滞在世代と接続状況 | 処理を開始しません。古い判定や解決済み経路だけで開始してはいけません。ユーザー確認待ちの場合は実行せず待機します。 |
-| **重要変化の再評価** | 操作対象の変更、操作種別の変更、外部作用の拡大、タスクの目的や追加指示の変更、委任やワークスペースの変更、滞在端末の変更、ルールや同意・認証情報の変更、コストやリスクの増大、停止や保留の発生 | 該当する場合は権限を再評価します。無関係な画面テーマの変更や音声の準備完了などを理由に余計な再評価を強制してはいけません。 |
-| **タスク達成の受入** | 到着した final result の `(結果ID, 委任から解決する依拠 TaskRef, delegation = execution lifetime)` × 現在の `(task.revision, purpose identity, task.progress)` × delegation から列挙した Action 試行の authoritative set と claim の完全一致（membership は final result 到着（seal）時点で固定） × 各試行の確定度（すべて `ConfirmedSuccess` のみ完了可。空集合は durable に空の場合のみ。seal 後の証拠更新で再評価可能） × Task-wide completion barrier（同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いこと。result-local set の外も対象） | final result の到着時に本文・identity を採用判定より先に durable record し、同じ不分区間で delegation を seal します（1 delegation につき final result は最大 1 つ。2 つ目の final result は fail closed）。1 回の inference turn の provider 出力は final result でも seal でもありません。依拠リビジョンが前進済み、または `task.progress` が terminal（`Completed` / `Failed` / `Cancelled`）なら現在へ採用せず `RecordedToOriginalOnly` として元の依拠リビジョンへ記録します（中断 AU16 が durable な `cancelled` を確定していれば、この terminal 判定で採用を拒否します。cancel 専用の追加条件は置きません）。blockers（authoritative set の `ConfirmedSuccess` 以外 ∪ 同じ `TaskId` の全 revision / 全 delegation の `Unknown`。集合として重複を 1 回に畳む）が空でなければ `WithheldByEffectFacts` として完了せず、`Unknown` を自己申告で昇格させません（barrier で見つけた試行は `task_result_attempt` に刻印せず、cross-delegation / 旧 revision の `ConfirmedSuccess` / `ConfirmedFailure` は barrier だけを理由に block しません）。claim の欠如・追加・重複は技術的エラーとして fail closed します（単独の `attempt_refs` を完了根拠にしません）。同じ結果IDの retry は本文を増やさず二度完了しません。目的の照合は identity / revision correspondence で行い、本文の文字列一致は使いません。 |
+| **アクションの新規開始** | `ActionAssociation` の帰属別の前提（現行 Stage 4 の Workspace Task 所属は `TaskRef`・委任スコープ・Workspace 範囲、V47 の Backup 専用 Task は TaskRef・保存済み Started occurrence または Owner Run now source・point・保全出力 scope・現在の設定、後続の直接軽微操作はオーナー指示の由来・Companion・指示と許可が及ぶ対象範囲）と具体的操作対象・種別・依拠した今回の権限判断 × 現在の帰属別条件（Workspace Task 所属なら最新 Task revision・委任・Workspace、Backup 専用 Task は現在の Task・保存済み source・point・設定、直接なら指示の現在性・許可対象範囲）と解決された実対象・最新の許可・端末・コスト・停止・保留・消去・復元条件 × 端末依存なら滞在世代と接続状況 | 処理を開始しません。古い判定や解決済み経路だけで開始してはいけません。ユーザー確認待ちの場合は実行せず待機します。直接操作へ偽の Task 条件を課さず、Task 所属を直接操作に読み替えて照合を省きません。 |
+| **重要変化の再評価** | 操作対象の変更、操作種別の変更、外部作用の拡大、Task 所属なら目的・追加指示・委任・Workspace の変更、直接操作ならオーナー指示・許可対象範囲の変更、滞在端末の変更、ルールや同意・認証情報の変更、コストやリスクの増大、停止や保留の発生 | 該当する場合は権限を再評価します。無関係な画面テーマの変更や音声の準備完了などを理由に余計な再評価を強制してはいけません。 |
+| **タスク達成の受入** | 到着した final result の `(結果ID, 委任から解決する依拠 TaskRef, delegation = execution lifetime)` × 現在の `(task.revision, purpose identity, task.progress)` × delegation から列挙した Action 試行の authoritative set と claim の完全一致（membership は final result 到着（seal）時点で固定） × 各試行の確定度（`Unknown` は完了不可。確認済み無作用失敗のみ Task owner が代替達成・残作業・客観的根拠を検証して非依拠判断を durable 記録すれば完了可。部分的作用・不足は保留。空集合は durable に空の場合のみ） × Task-wide completion barrier（同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いこと。result-local set の外も対象） | final result の到着時に消去照合済みの本文（held なら body-free）・identity を採用判定より先に durable record し、同じ不分区間で delegation を seal します（1 delegation につき final result は最大 1 つ。2 つ目の final result は fail closed）。1 回の inference turn の provider 出力は final result でも seal でもありません。依拠リビジョンが前進済み、または `task.progress` が terminal（`Completed` / `Failed` / `Cancelled`）なら現在へ採用せず `RecordedToOriginalOnly` として元の依拠リビジョンへ記録します（中断 AU16 が durable な `cancelled` を確定していれば、この terminal 判定で採用を拒否します。cancel 専用の追加条件は置きません）。blockers（authoritative set の `Unknown` / 非依拠判断が成立しない失敗 ∪ 同じ `TaskId` の全 revision / 全 delegation の `Unknown`。重複は 1 回）が空でなければ `WithheldByEffectFacts` として完了せず、`Unknown` を自己申告で昇格させません（barrier で見つけた試行は `task_result_attempt` に刻印せず、cross-delegation / 旧 revision の `ConfirmedSuccess` / `ConfirmedFailure` は barrier だけを理由に block しません）。claim の欠如・追加・重複は技術的エラーとして fail closed します（単独の `attempt_refs` を完了根拠にしません）。同じ結果IDの retry は本文を増やさず二度完了しません。目的の照合は identity / revision correspondence で行い、本文の文字列一致は使いません。 |
 | **結果の長期記憶・要約化** | 到着した結果の `(情報源範囲, 取得日時, 依拠リビジョン)` × 現在の `(最新記憶リビジョン, スコープ, 制約)` | 遅れて届いた記憶形成処理が、現在の最新記憶を無条件に上書きしてはいけません。到着順だけを理由に新旧を決めてはいけません。 |
 | **権限・ルール解釈の採用** | モデルによる「許可」の出力、外部引用、過去の許可ログ、復元ルール、プロンプト内の文脈、キャッシュ判定 × 現在の `(最新ルールリビジョン, 同意, 端末条件, コスト上限, 失効・停止・消去・復元保留)` | セキュリティ制御を勝手に変更してはいけません。恒久的なルール変更は、解釈結果と適用範囲を提示し、保存と取り消し（Undo）の枠組みを経ます。 |
 | **クライアント依存活動の開始・継続** | 端末が申告する世代番号 × ホストPCが管理する最新滞在世代番号 × 実際の接続疎通と機能の可用性 × 最新の権限や保留状態 | 接続や状態が確認できない場合は処理を継続しません。古い一時キャッシュや過去の承認情報だけで成立させてはいけません。 |
 | **端末切り替え期間中の処理** | `旧端末に滞在 / 移行中 / 新端末に滞在 / アクティブなし / 停止中 / 復旧待ち` の区別 × 処理がどちらの端末に紐付いているか | 移行期間中は新旧どちらの端末でも端末依存の新規処理を開始しません。移動元の処理は安全な区切りまで完了させ、未終了の外部作用を別端末へ勝手に引き継ぎません。 |
 | **削除区間中のデータ受入・生成・再保存** | 届いた・生成された情報の `(情報源との関係, 取得日時, 削除区間との関係)` × 進行中の消去条件 `(operation, sweep, valid_interval)` × 各機能の局所検証 | 削除区間に該当するデータはすべて消去対象とし、実行中の処理が誤って再保存しないようにブロックします。削除が完了していないのに完了と表示してはいけません。 |
-| **プロバイダ送信の開始（data-use admission）** | 送信する論理入力の canonical source 相関 `(採用目的・全採用指示の origin.source)` × 現在の消去条件 `(operation, sweep, valid_interval)` × 既存のタスク・同意・認証情報 premise × already-started use としての attempt 相関 | coverage がある送信は開始せず、provider へ 0 バイトも送りません（`DataUseHeld` 相当の data-use hold として区別し、source absence / stale revision / storage エラーへ丸めません）。claim が先に確定した送信は already-started use として削除参加に列挙され、遅延結果は受入境界で照合され再保存されません（確定度は改ざんしません）。 |
+| **プロバイダ送信の開始（data-use admission）** | 送信する論理入力の canonical source 相関 `(採用目的・全採用指示の origin.source)` × 現在の消去条件 `(operation, sweep, valid_interval)` × 既存のタスク・同意・認証情報 premise × already-started use としての attempt 相関 | coverage がある送信は開始せず、provider へ 0 バイトも送りません（`DataUseHeld` 相当の data-use hold として区別し、source absence / stale revision / storage エラーへ丸めません）。claim が先に確定した attempt は、実送信済みと推定せず already-started use の相関として削除参加に列挙され、最終 dispatch gate でも再照合し、遅延結果は受入境界で照合され再保存されません（確定度は改ざんしません）。 |
 | **バックアップ復元後の処理利用** | 処理が前提とする `(復元世代番号, 同意リビジョン, 認証情報, 依拠ルール)` × 現在の `(最新復元世代, 最新認証ストア, 最新制約, 復元後の保留状態)` | 復元前の古いセッションや古い同意情報だけで、外部通信やタスクを自動実行してはいけません。一括有効化が行われた後も現在の最新条件を守ります。 |
 | **利用コスト・リソース枠の継続判定** | 消費の `(用途・送信先, 報告済み/成否不明/処理中の区分)` × 現在の上限枠やリソース状況 | 処理中や成否不明な枠を勝手にゼロとみなさず、並行リクエストによる上限超過を防止します。安全な継続が判断できない場合は、データを保持したまま安全に停止し、ユーザーの判断を待ちます。 |
 
 ### 6.3 試行・重複・不明の扱い
 
-- リトライ、再送、フォールバック、再委任は、新しいアクション試行ID（`ActionAttemptId`）を発行して実行します。重複実行のリスクがある再送処理を「同じ試行が続いているだけ」とみなしてはいけません。
+- 新たな外部作用として認められたリトライ、再送、フォールバック、再委任には新しいアクション試行ID（`ActionAttemptId`）を発行し、元試行との相関と重複実行リスクを保持します。同じ要求の受付再送は既存試行の状態を読み戻し、新しい外部作用の許可とみなしません。Backup 専用 Task の同じ `TaskId` と手動バックアップの同じ管理 `ActivityId` は外部出力を最大一試行に固定し、元試行が `Unknown` でも `ConfirmedFailure` でも同じ source の新試行を作りません。追加出力は Owner の新たな明示指示から、前者は新しい Task / point、後者は新しい管理 source / point を作って現在の権限と元試行の重複リスクを評価します。重複実行のリスクがある再送処理を「同じ試行が続いているだけ」とみなしてはいけません。
 - **成否不明（Unknown）な状態は粘り強く維持します**。単にキャンセルを受け付けた、通信が成功した、画面に表示された、再接続された、復元されたといった間接的な出来事だけで、勝手に成功や失敗に書き換えてはいけません。事実確認が取れた確実な証拠がある場合にのみ確定度を更新します。
-- 遅れて届いた final result の帰属と採用は、まず本文・identity を 1 回だけ durable record（到着 record）として delegation を seal してから、delegation 行 → 依拠タスクリビジョン → 現在のタスクの順に辿って検証します。目的は依拠したリビジョンの `task_revision` スナップショットから identity / adopted_revision の対応で解決し、本文文字列の一致では照合しません。依拠 Action 試行は adoption と同一の不可分区间で durable に検証し、その集合は caller の自己申告ではなく delegation（execution lifetime）から完全列挙した authoritative set とします（claim との欠如・追加・重複は技術的エラー。membership は seal 時点で固定され、seal 後の certainty 更新では変わりません）。authoritative set に `ConfirmedSuccess` 以外が 1 つでもあれば現在 Task を完了しません。さらに、同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が 1 つでも残れば（Task-wide completion barrier）、その Action が result の依拠集合に属さなくても現在 Task を完了しません（blockers は両者の和集合とし、重複は 1 回。barrier の試行は result-local 相関として刻印しません）。seal 後に客観的証拠で確定度が進展した場合は同じ result の再評価で完了が成立し得ます。「元の依拠リビジョンへ事実として残すこと」と「現在のタスクへ採用・完了すること」は明確に分離し、結果 identity の PK・1 delegation につき final result 最大 1 つ・progress の CAS によって二重 arrival・二重完了を防ぎます。seal 後は同じ execution からの新規 inference claim / Action 開始を拒否し、Task が non-terminal なら新しい delegation D2 として work を継続できます（D1 を再利用しません）。
+- Task 結果の依拠 Action 試行の authoritative set は `ActionAssociation::Task` の `DelegationId` から列挙します。後続の直接操作に属する試行は Task の delegation 集合や Task-wide completion barrier に混入させず、その試行自身の帰属と確定度を実行・拡張 owner に残します。
+- 遅れて届いた final result の帰属と採用は、まず消去照合済みの本文または body-free erasure-held の identity を 1 回だけ durable record（到着 record）として delegation を seal してから、delegation 行 → 依拠タスクリビジョン → 現在のタスクの順に辿って検証します。目的は依拠したリビジョンの `task_revision` スナップショットから identity / adopted_revision の対応で解決し、本文文字列の一致では照合しません。依拠 Action 試行は adoption と同一の不可分区間で durable に検証し、その集合は caller の自己申告ではなく delegation（execution lifetime）から完全列挙した authoritative set とします（claim との欠如・追加・重複は技術的エラー。membership は seal 時点で固定され、seal 後の certainty 更新では変わりません）。authoritative set の `Unknown` は必ず完了を阻止します。`ConfirmedFailure` + `RefusedBeforeEffect` は、Task owner が現在の目的に対する代替達成・残作業・客観的根拠を検証し、非依拠判断を採用と不可分に記録する場合だけ許容します。部分的作用・根拠不足は保留します。さらに、同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が 1 つでも残れば（Task-wide completion barrier）、その Action が result の依拠集合に属さなくても現在 Task を完了しません（blockers は両者の和集合とし、重複は 1 回。barrier の試行は result-local 相関として刻印しません）。seal 後に客観的証拠で確定度が進展した場合は同じ result の再評価で完了が成立し得ます。確認済み無作用失敗の非依拠判断は `task_result_attempt` の全試行相関に付随する Task owner の判断として保持し、目的達成の検証記録への参照と残作業なしの判断を採用済み result から読み戻します。Action owner の `ConfirmedFailure` / `RefusedBeforeEffect` はそのまま保持し、根拠参照が確認できなければ完了しません。「元の依拠リビジョンへ事実として残すこと」と「現在のタスクへ採用・完了すること」は明確に分離し、結果 identity の PK・1 delegation につき final result 最大 1 つ・progress の CAS によって二重 arrival・二重完了を防ぎます。seal 後は同じ execution からの新規 inference claim / Action 開始を拒否し、Task が non-terminal なら新しい delegation D2 として work を継続できます（D1 を再利用しません）。
 
 ### 6.4 世代タグの付与規則
 
@@ -599,8 +644,8 @@ struct ParticipantCompletionRef { /* 各コンポーネントにおける処理�
 |---|---|---|
 | **個体・キャラクター適用関係** | `(CompanionId, CharacterId, CharacterRevision, 適用パーツ群, OwnerSelectionRef)` | 編集途中やエクスポートの中断があっても、直前の正常状態と適用関係を保持します。未確認の編集データを勝手にマスターにしてはいけません。 |
 | **会話ログ・活動記録・未伝達メッセージ** | 会話履歴の元データ（発話者、文脈）、保存された活動記録、進行中の意味判断、`UndeliveredRef` と伝達状況 | 画面描画用の一時バッファや音声バッファは消えても構いませんが、ユーザーから受理した指示や未伝達メッセージは決して失ってはいけません。 |
-| **タスク・委任・コンテキスト・ワークスペース・スケジュール** | `(TaskId, TaskRevision, 目標・担当・TaskProgress・待機・未完了事項)`, `(TaskResultId, 依拠 TaskRef, DelegationId = execution lifetime, 結果本文 1 行, 採用検証済み Action 試行相関, 採用リビジョン)`（1 delegation につき最大 1 行で、行の存在がその execution の seal）, `(DelegationId, TaskRef, 委任元・範囲)`（作成スライスは対応関係まで。停止・受領状態は producer スライスで追加）, `TaskContextEntry`（採用された識別情報・由来・取得日時）, ワークスペース関連付け, スケジュール設定とタイムゾーン | 再起動で中断されたタスクは、保存済みの進捗や成否不明な状態を示してユーザーの明示的な再開指示を待ちます（cancel された Task は再開せず、再実行は新しい Task の下に新しい delegation を作成して行います）。到着済み・採用未確定の結果は本文と execution seal を保持したまま提示し、採用済み結果と `WithheldByEffectFacts` で記録だけされた結果を区別して、行の存在だけでは採用・完了・再実行しません。PR §6.4 の起動処理は全 gate を再照合した AU15b の機械的な再評価だけを許可し、provider / Action / runner は起動しません。Task が `completed` の場合、completion commit 時点で同じ Task の `Unknown` な Action 試行が 0 件だったという Task-wide completion barrier の不変条件を、`action_attempt` の durable facts から復元できます（cache・summary・marker は追加しません）。エージェントの終了やコンパニオンの削除によってタスク記録を勝手に消してはいけません。 |
-| **アクションの把握された外部作用・成否不明・停止結果** | `(ActionAttemptId, タスク・委任対応, 具体的操作対象と種別, 確定度, 根拠対応, 保留状態)` | メモリ上のバッファが消えても作用の記録を保持します。成否不明（Unknown）を勝手に未実行に戻してはいけません。 |
+| **タスク・委任・コンテキスト・ワークスペース・スケジュール** | `(TaskId, TaskRevision, 目標・担当・TaskProgress・待機・未完了事項)`, `(TaskResultId, 依拠 TaskRef, DelegationId = execution lifetime, 安全な結果本文 1 行または body-free held, 採用検証済み Action 試行相関, 採用リビジョン)`（1 delegation につき最大 1 行で、行の存在がその execution の seal）, `(DelegationId, TaskRef, 委任元・範囲)`（作成スライスは対応関係まで。停止・受領状態は producer スライスで追加）, `TaskContextEntry`（採用された識別情報・由来・取得日時）, ワークスペース関連付け, スケジュール設定とタイムゾーン、Backup 専用 Task の閉じた Started occurrence / 認証済み Owner Run now source と同じ TaskRef に結ぶ body-free な Owner resume 受付 fact（Run now は元回の key / status / cursor を変更しない） | 再起動で中断されたタスクは、保存済みの進捗や成否不明な状態を示してユーザーの明示的な再開指示を待ちます。cancel された Task は再開・再出力せず、旧 `Unknown` を保持します。新たな Owner 依頼による通常 Task は新 Task・delegation / agent、Backup 専用 Task は認証済み Owner Run now または将来の別の予定回による新 Task・point の agentless producer（AU3 なし）とし、現在の Permission・設定・Stop・消去・復元と二重実行リスクを再評価してから開始します。Run now は元の missed occurrence の key / status / cursor を変更しません。手動管理 Direct は Task を作りません。到着済み・採用未確定の結果は本文と execution seal を保持したまま提示し、採用済み結果と `WithheldByEffectFacts` で記録だけされた結果を区別して、行の存在だけでは採用・完了・再実行しません。PR §6.4 の起動処理は全 gate を再照合した AU15b の機械的な再評価だけを許可し、provider / Action / runner は起動しません。Task が `completed` の場合、completion commit 時点で同じ Task の `Unknown` な Action 試行が 0 件だったという Task-wide completion barrier の不変条件を、`action_attempt` の durable facts から復元できます（cache・summary・marker は追加しません）。エージェントの終了やコンパニオンの削除によってタスク記録を勝手に消してはいけません。 |
+| **アクションの把握された外部作用・成否不明・停止結果** | `(ActionAttemptId, TaskRef・Workspace 委任または Backup 専用 Task の Started occurrence / 認証済み Owner Run now source・point・出力 scope・設定、あるいは直接操作のオーナー指示由来・Companion・対象範囲, 具体的操作対象と種別, 確定度, 根拠対応, 保留状態)`。直接操作の帰属は後続 producer と対で永続化します。 | メモリ上のバッファが消えても作用の記録を保持します。成否不明（Unknown）を勝手に未実行に戻してはいけません。 |
 | **長期記憶・要約・根拠・スコープ** | 要約データと `SummaryGroundsRef`, 長期記憶（現在値・重要度・スコープ・過去履歴）, スキル（有効リビジョン・過去履歴・原本対応）, 関係性（現在値・根拠）, コンパニオン状態 | 派生データ（ベクトルインデックス、キャッシュなど）は独立した復元対象とせず、古い派生データから勝手に権限や状態を復活させてはいけません。 |
 | **権限・制約・同意・コスト上限・利用実績** | ルール本文・解釈・スコープ・`RuleRevision`・取り消し履歴, 認可判断ログ, プロバイダ同意・端末条件・禁止ルール・コスト上限, 利用実績（報告済み・不明・処理中の区分） | 過去の許可ログを現在の生きた許可として復活させてはいけません。コスト上限用の利用実績は、キャッシュクリアや再起動を理由に勝手にゼロにリセットしてはいけません。 |
 | **認証情報（Credential）** | 最新の認証情報ストア（秘密値、用途、参照、有効性、登録・更新・失効状態） | バックアップファイルに秘密値を含めてはいけません。リストア復元によって古いAPIキーへ巻き戻してはいけません。 |
@@ -623,8 +668,8 @@ struct ParticipantCompletionRef { /* 各コンポーネントにおける処理�
 ### 7.3 再起動を跨ぐ必要がある重要データのまとめ
 
 - **成否不明なアクション結果**: 確定度 `Unknown`、根拠の対応関係、保留フラグ。
-- **遅延結果の帰属に必要な情報**: `(試行ID, タスクリビジョン前提, 情報源範囲, 世代番号)` の対応関係（本文の重複コピーは不要）。
-- **結果の到着・採用・完了確定に必要な情報**: `(TaskResultId, 依拠 TaskRef, DelegationId = execution lifetime, 検証済み Action 試行相関, 採用リビジョン, Task progress)` の対応関係。結果本文は finalization 境界で 1 行だけ durable 化し、同じ不分区間で delegation を seal して保持するため、採用前でも本文と execution seal を失いません。1 delegation につき final result は最大 1 つであり、seal 後は同じ execution からの新規 work を拒否します。結果不明な確定度は再起動後も `Unknown` のまま維持し、seal 後の証拠更新で adoption を再評価し得ます。
+- **遅延結果の帰属に必要な情報**: `(試行ID, Task 所属なら依拠タスクリビジョン・委任、直接操作ならオーナー指示由来・Companion・対象範囲, 情報源範囲, 世代番号)` の対応関係（本文の重複コピーは不要）。
+- **結果の到着・採用・完了確定に必要な情報**: `(TaskResultId, 依拠 TaskRef, DelegationId = execution lifetime, 検証済み Action 試行相関, 採用リビジョン, Task progress)` の対応関係。安全な結果本文だけを finalization 境界で 1 行 durable 化し、同じ不分区間で delegation を seal して保持するため、採用前でも本文と execution seal を失いません。1 delegation につき final result は最大 1 つであり、seal 後は同じ execution からの新規 work を拒否します。結果不明な確定度は再起動後も `Unknown` のまま維持し、seal 後の証拠更新で adoption を再評価し得ます。
 - **個人データ完全削除の再保存防止に必要な情報**: 消去条件、有効時間区間、完了境界、保留フラグ。
 - **リストア復元の整合性保護に必要な情報**: `RestoreGeneration` と復元操作自体の受理・隔離・保留対応（切り替え成立まで復元前の正常データを破壊しない）。
 - **古い端末メッセージの識別に必要な情報**: `PresenceGeneration` と滞在帰属、接続状況、復旧ヒントの対応関係。
@@ -633,7 +678,7 @@ struct ParticipantCompletionRef { /* 各コンポーネントにおける処理�
 ### 7.4 鮮度落ち（Stale）や遅延結果の判定に必要な情報
 
 - 各情報の `(担当機能, リビジョンや取得日時, スコープ, 制約)` と、要求の `(利用目的, 指示の前提, 活動の継続関係)`。
-- 各アクション試行の `(試行ID, タスクリビジョン前提, 委任スコープ, 具体的操作対象と種別, 依拠した権限)` と、現在の最新条件のセット。
+- 各アクション試行の `(試行ID, Task 所属ならタスクリビジョン前提・委任スコープ・Workspace 範囲、直接操作ならオーナー指示由来・Companion・対象範囲, 具体的操作対象と種別, 依拠した権限)` と、現在の帰属別の最新条件のセット。
 - 各結果の `(結果ID, 依拠リビジョン, 委任, Action 試行相関, 採用状態)` と、現在の `(task.revision, purpose identity, progress)`。
 - 各滞在帰属の `(世代番号, 現在の接続・可用性, 許可・停止・保留状態)`。
 - 各削除操作の `(操作ID, 世代番号, 有効区間)` と、各データの `(情報源との関係, 取得日時)`。
@@ -667,8 +712,8 @@ struct ParticipantCompletionRef { /* 各コンポーネントにおける処理�
 | **文脈の参照・選択・変換** | 第8.1項の要求情報、情報の単位、境界トークン、不足理由。データ変換を行う際は依存元とセキュリティ制約を確実に引き継ぐこと。モデルの自己申告だけで依存関係を勝手に解除しないこと。 |
 | **プロバイダへの実送信** | 論理的な選択範囲、解決された割り当て経路、実送信先・データ・用途・取り扱い・費用の同意対応、認証用途・制限・保留・利用量、元の要求範囲。費用の報告済み・不明・処理中の区分。 |
 | **タスク化・委任・追加指示・結果統合・中断** | 意図、目標、追加指示の前提、ワークスペース条件、中断対象の `TaskId` と受理（`task.progress` の `cancelled` への CAS commit。停止完了や外部作用の確定度は含まない）、進捗（TaskProgress。terminal（`Cancelled` を含む）の admission gate を含む）、結果IDと結果本文（finalization 時に 1 回だけ durable record し、同じ不分区間で delegation を seal。1 delegation につき final result は最大 1 つ）、依拠 TaskRef と delegation（execution lifetime。0..N inference turn / 0..N Action attempt / 0..1 final result）、delegation から完全列挙した Action 試行集合（authoritative set。membership は seal 時点で固定）と claim の完全一致、Task-wide completion barrier（同じ `TaskId` に属する全 revision / 全 delegation の Action 試行に `Unknown` が無いこと。result-local 相関とは別）、採用リビジョン、待機理由、反映できなかった理由と代替案の対応。会話ログとタスク反映内容の区別。 |
-| **アクション要求・試行・停止・結果** | アクション試行参照（試行ID、タスク、委任、ワークスペース、実対象、操作種別、依拠した権限）、認可判断の参照、対象解決の前提、コスト・停止・保留・消去・復元の各条件、把握された作用と確定度。 |
-| **権限判断の依頼と回答** | 判断対象（主体、委任、タスク、ワークスペース、目的、操作対象、送信先、データ、作用、コストリスク）、依拠したルールと同意の対応、重要変化の有無、現在の有効性の確定結果。判断ログと生きた許可の区別。 |
+| **アクション要求・試行・停止・結果** | アクション試行参照（試行ID、Workspace Task 所属なら TaskRef・委任・Workspace、Backup 専用 Task 所属なら TaskRef・保存済み Started occurrence または Owner Run now source・point・出力 scope・設定、直接操作ならオーナー指示由来・Companion・対象範囲、実対象、操作種別、依拠した権限）、認可判断の参照、対象解決の前提、コスト・停止・保留・消去・復元の各条件、把握された作用と確定度。現行 Stage 4 の開始可能な帰属は Task 所属だけ。 |
+| **権限判断の依頼と回答** | 判断対象（主体、Workspace Task 所属なら委任・Task・Workspace、Backup 専用 Task 所属なら Task・保存済み source・point・出力 scope・現在設定、直接操作ならオーナー指示由来・Companion・対象範囲、目的、操作対象、送信先、データ、作用、コストリスク）、依拠したルールと同意の対応、重要変化の有無、現在の有効性の確定結果。判断ログと生きた許可の区別。 |
 | **滞在先・ラウンド・入出力** | 滞在帰属情報（個体、状態、アクティブ端末、世代番号）、端末からの入力候補、会話ラウンドID、新旧・移行中・アクティブなし・停止中の区分。生成と提示の区別、送信と報告完了の区別。 |
 | **画面監視（Observer）のルーティング** | ルーティングコンテキスト（情報源、対象、目的、制約、選択前提）、取得元端末、取得日時、候補の対応関係。異なる文脈が混ざったデータを無条件に配送しないこと。対象コンパニオンが利用可能な背景のみを渡すこと。 |
 | **長期記憶・要約・根拠** | 要約と根拠の参照、訂正と状況変化の区別、過去の時間的有効性、スコープと制約。古い要約文を訂正後の最新記憶の代わりに使わないこと。 |
@@ -688,9 +733,9 @@ struct ParticipantCompletionRef { /* 各コンポーネントにおける処理�
 ### 9.2 アクションの実行（Action Execution）
 
 - **遅延結果の隔離**: キャンセル、追加指示、権限失効の後に遅れて届いた結果は、元のアクション試行やタスク履歴にのみ記録し、過去の承認を勝手に復活させたり、新しい目標の達成として採用したり、後続処理を自動開始したりしないこと。
-- **リトライ**: 新しいアクション試行IDを発行して実行し、重複実行のリスクをユーザーに提示すること。別ルートを使ってこっそり再実行するような迂回を行わないこと。
+- **リトライ**: 新しい外部作用が許される場合だけ、新しいアクション試行IDと元試行の相関を発行し、重複実行のリスクをユーザーに提示すること。同じ受付の再送は既存 fact を返し、Backup 専用 Task の同じ Task・手動バックアップの同じ管理 source の外部出力は二度目を拒否すること。別ルートを使ってこっそり再実行するような迂回を行わないこと。
 - **キャンセル**: 要求の受付と実際の停止完了を明確に区別し、停止できなかった外部作用や成否不明な状態を正直に記録・報告すること。AIモデルの正常終了を待たずに即座に応答すること。
-- **ホスト再起動**: 再起動で中断されたタスクは、保存済みの進捗や成否不明な状態を示してユーザーの明示的な再開指示を待つこと（cancel された Task は再開せず、再実行は新しい Task の下に新しい delegation を作成して行う）。成否不明な外部作用を勝手に自動再実行しないこと。
+- **ホスト再起動**: 再起動で中断されたタスクは、保存済みの進捗や成否不明な状態を示してユーザーの明示的な再開指示を待つこと。cancel された同じ Task は再開・再出力しない。別の作業は新たな Owner 意図と現在の Permission・設定・Stop・消去・復元・二重実行リスクを確認し、通常 Task なら新 Task・delegation / agent、Backup 専用 Task なら認証済み Owner Run now または将来の別の予定回に基づく新 Task・point の agentless producer（AU3 なし）で行い、元の missed occurrence は変更しない。旧 `Unknown` を維持し、成否不明な外部作用を勝手に自動再実行しないこと。手動管理 Direct は Task 不要。
 - **タスクエージェントへの委任**: 委任元の親が持たない権限を勝手に付与せず、独立したAPIキー、独立したコスト上限、独自の長期人格などを持たせないこと。
 
 ### 9.3 個人データ完全削除（Targeted Deletion）

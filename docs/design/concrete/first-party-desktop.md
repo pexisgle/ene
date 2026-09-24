@@ -135,9 +135,9 @@ body → desktop:
 
 ### 5.1 二つの channel と Owner 確認
 
-要件「信頼境界」の本人による直接確認を、[Runtime Topology の信頼前提](../architecture/runtime-topology.md#第一者確認面の信頼前提)の下で満たす。確認面の由来、確認対象の freshness、ユーザーの直接操作は別の条件であり、すべて必要である。
+Host-local 高権限操作について要件「信頼境界」の本人による直接確認を、[Runtime Topology の信頼前提](../architecture/runtime-topology.md#第一者確認面の信頼前提)の下で満たす。確認面の由来、確認対象の freshness、ユーザーの直接操作は別の条件であり、すべて必要である。
 
-- **Client channel**（同一 PC も WSS＋MessagePack、`ene-api`）: pairing、session、chat、filtered management、Task、erasure。接続先の発見、Host の TLS 検証、ローカル受付、`SameMachine` の判定は [IPC 第10節](host-client-ipc.md#10-transport) に従う。`ene-client` が接続情報を読み取り、GUI と CLI は同じ接続経路を使う。`ManagementIntent` は候補であり、`confirmed=true` は `DeniedByBoundary`。ローカルトークンを持つことも最終確認にはならない。
+- **Client channel**（同一 PC も WSS＋MessagePack、`ene-api`）: pairing、session、chat、filtered management、Task、erasure。接続先の発見、Host の TLS 検証、ローカル受付、`SameMachine` の判定は [IPC 第10節](host-client-ipc.md#10-transport) に従う。`ene-client` が接続情報を読み取り、GUI と CLI は同じ接続経路を使う。`ManagementIntent` は候補であり、`confirmed=true` は `DeniedByBoundary`。ローカルトークンを持つことも最終確認にはならない。Targeted Deletion に限る認証済み Client の専用 Owner 確認は §5.1.6 に従う。
 - **Host-local control**（`ene-local-control`）: **要求専用 listener** と **非公開の確認 channel** に分ける。前者は公開 local endpoint の request / 非秘密 outcome、後者は Host が起動した GUI への challenge、秘密 intake、session completion を扱う。二つの役割は別の frame enum と dispatch にし、requester に確認 frame を decode・転送させない。どちらも同一 PC を含め通常 Client の WSS や `ene-api` に載せない。第4節の投影 IPC も専用経路を維持する。
 
 要求専用 listener は Linux の保護された runtime directory + peer UID、Windows の logon SID DACL + peer token / `PIPE_REJECT_REMOTE_CLIENTS` で同じ local user に限定する。ただし local transport の適格性を確認権限にしない。複数 requester は利用できるが、listener から seat を取得する操作は提供しない。
@@ -180,7 +180,7 @@ GUI は Host が提示した対象を表示し、当該面の直接確認イベ�
 
 | 主体・条件 | 最終確認 | 強制手段・前提 |
 |---|---|---|
-| remote / 通常 Client、製品 `ene-ctl` | 不可 | Client wire に完了権限がない |
+| remote / 通常 Client、製品 `ene-ctl` | Host-local 高権限確認は不可 | Client wire に Host-local seat の完了権限がない。Targeted Deletion 専用確認は §5.1.6 |
 | 同一 UID の requester（空席時を含む）、`ene-core approve-*` | 不可 | 要求専用 listener は seat 発行も completion も提供しない |
 | Host が起動した公式 GUI | 直接操作後だけ可能 | 継承 endpoint + child 生存記録 + session + owner の現在性照合 |
 | Body / tool / plugin / LLM の入力 | 不可 | endpoint を渡さず、結果 DTO を completion にしない |
@@ -191,7 +191,7 @@ GUI は Host が提示した対象を表示し、当該面の直接確認イベ�
 
 #### 5.1.5 要求受付・GUI 不在・CLI
 
-高権限の対象はペアリング承認、credential 登録・更新・失効、バックアップ復元と復元後の一括有効化、全データリセット、同等の信頼基点変更である。Targeted Deletion 等の既存 Host-local 最終確認も同じ要求/確認分離を使い、対象の意味は各 owner が保持する。
+高権限の対象はペアリング承認、credential 登録・更新・失効、バックアップ復元と復元後の一括有効化、全データリセット、同等の信頼基点変更である。これらの Host-local seat と確認経路は維持する。Targeted Deletion はこの高権限リストに含めず、§5.1.6 の専用確認を使う。対象の意味は各 owner が保持する。
 
 `ene-core approve-*` は要求専用 listener へ対象と期待前提を送り、Host 発行の request ID と非秘密 outcome を受ける。名前に approve を含んでも CLI は最終確認者ではない。GUI の seat が埋まっていても要求を受付可能とし、Host がその GUI へ challenge を渡す。
 
@@ -205,6 +205,14 @@ GUI は Host が提示した対象を表示し、当該面の直接確認イベ�
 | owner が commit | owner の確定 outcome。完了前の受付を成功表示しない |
 
 Host 未起動時の `approve-*` は `HostUnavailable` を返して明示起動を案内する。旧 offline mutation を fallback として残さない。製品の初回起動は第2節の launcher が Host を起動するため、通常セットアップで CLI 起動手順を要求しない。
+
+#### 5.1.6 Targeted Deletion 専用の Client 直接確認
+
+ペアリング済み remote Client の Owner は、Host GUI が無くても同じ通常 Client の first-party 専用面で Targeted Deletion を開始できる。Host は正規化した operation / request ID、privacy / security purpose、対象・範囲、影響・除外事項、expected currentness を提示する。信頼する公式 Client の専用入力 handler は、その内容を表示してから現在の Owner の明示的な直接操作を受けた場合にだけ completion を生成する。通常 chat、management intent、CLI、tool / plugin の API や同居 process の任意 IPC に handler を公開せず、ene 管理の LLM / tool / Computer Use による入力・確認の代行を Client と発行側で拒否する。Host 発行の one-shot・短期限 challenge を認証済み device / session / connection / Client incarnation / Host incarnation と operation・目的・対象・影響・expected currentness に束縛する。Host は当該接続上の専用 completion とこれらの一致・現在性を検証して、認証済み Client が報告した現在の Owner 確認を信頼して受理する。Host には同じ Client 端末で偽造した UI 入力・completion と Owner の物理入力を区別する証拠はなく、公式 UI 由来や人の操作そのものを暗号学的に証明しない。Client process / OS / 公式コード / 対話 session の完全性がこの経路の信頼前提である。`confirmed=true`、nonce を知っていること、Client 自称の first-party 属性、別端末からの代理承認、画面表示 ACK は専用確認の代わりにならない。対象 Client の接続切断・置換・認証失効、期限切れ、Host restart で未消費の確認を失効させる。
+
+remote の登録済み Credential は非秘密 ref を通常の削除専用画面で選ぶ。Owner が任意 `ExactText` 値を指定する場合は、Host で秘密値と照合する**前**から秘密を含み得るため、同じ公式 Client の別の削除専用秘密入力 handler だけが短寿命の secret-bearing deletion input frame を発行する。通常 chat / management DTO、履歴、下書き、Client 長期 cache、log、Body には入力を複製しない。Host の credential owner が限定照合し、Client への preview は値や hash でなく一時 handle・非秘密対象 / 影響とする。入力失効・切断・期限切れで buffer と未消費確認を無効化する。Client / transport / Host がこの境界を提供できない場合は remote 値指定を受理せず、登録対象の ref 選択を提示する。Host GUI がなくても ref 指定は利用できる。
+
+preservation owner は削除開始直前に operation、目的、対象、影響、expected currentness と確認 provenance を現在の対象・接続・認証・未消費状態に短く再比較する。満たせなければ mutation 前に hold / refusal とする。開始後は [Targeted Deletion Lifecycle](targeted-deletion-lifecycle.md) の durable condition・sweep・復旧へ進む。この確認と値入力 channel は API キー登録・端末 pairing・backup restore・全 reset 等の Host-local seat に転用しない。指定 Credential の deletion では ref または専用値入力の範囲確定、影響説明、credential owner の参加を要し、通常の credential 登録・更新を remote に拡張しない。
 
 requester が切断しても確認 authority は移らない。受理済み request の状況は同じ request ID で照会できる。未確定 session は Host restart で失効し、確定済み操作は各 owner の durable outcome から確認する。応答喪失を理由に mutation を自動再送しない。outcome が判明しない場合は `OutcomeUnavailable` と読み取り導線を返す。queue、pending 数、待機時間には上限を置き、満杯は `BackpressureHold` とする。
 
@@ -224,7 +232,7 @@ ene が所有し、破棄を **強制できる** 区間:
 | C1 | first-party 秘密入力 widget が ene で確保したバッファ | Owner が打った直後だけ | control intake 成功直後に zeroize。cancel / timeout / 窓 close でも破棄。crash は best-effort |
 | C2 | GUI と Host の専用確認 channel の secret-bearing frame | intake 中だけ | candidate の保存または拒否後に drop / zeroize。通常 request listener では受理しない |
 | C3 | `ene-credential` 私有の candidate / immutable snapshot / scoped lease | 保存準備、公開世代、実行中利用・遅延結果の秘密除去に必要な間 | candidate 不採用時、snapshot / lease の最終利用終了時に zeroize。[世代公開契約](credential-publication.md)に従い、通常 DTO や public 戻り値に出さない |
-| C4 | OS 保護ストアの version ごとの item | durable な正本と未公開 candidate | 明示更新・失効の後処理、または全データリセット。未確認の破棄は CleanupPending。backup に入れず、restore で巻き戻さない |
+| C4 | OS 保護ストアの version ごとの item | durable な正本と未公開 candidate | 明示更新・失効の後処理、登録済み秘密自体が指定された Targeted Deletion の認証秘密 owner による局所消去、または全データリセット。指定削除では遅延結果・stream の本文を必要に応じて body-free unavailable に固定してから全対象 version を破棄・検証する。未確認は削除 participant を pending とし完了としない。backup に入れず、restore で巻き戻さない |
 | C5 | 認証用途の scoped request/header | 当該 I/O 中だけ | I/O 完了・取消時に破棄。lease は遅延結果の秘密除去まで保持し、Task 結果やツール引数へ clone しない |
 
 C1 は通常のテキスト入力ではない。timeline / 検索 / 永続 undo / 下書き保存の対象にしない。IME の未確定を chat へ commit しない。ene のコードが clipboard へコピーしない。
@@ -235,10 +243,12 @@ C1 は通常のテキスト入力ではない。timeline / 検索 / 永続 undo 
 - `app.db` / `ene-store`、通常の GUI 永続 state、コマンドライン、製品の env put 経路
 - 通常 DTO の `Debug` / `Display` / serde エラー、tracing、audit、debug dump
 - バックアップ、crash report の自動外部送信
-- Targeted Deletion の検索コーパス・検索トークン・削除対象本文。削除 sweep は秘密デストラクタではない。登録キーを「ユーザー内容」として ingest しない
-- widget を `ErasureParticipant` に見立てて秘密寿命を削除協調へ預けること。ユーザーが chat に貼ったキー類似文字列の除去は既存 scrub（S-3）であり、OS store の破棄ではない
+- Targeted Deletion の検索コーパス・検索トークン・削除対象本文。GUI や汎用 sweep を OS store の秘密デストラクタにせず、登録キーを「ユーザー内容」として ingest しない。登録された秘密自体が削除対象なら認証秘密 owner が参加する
+- widget を `ErasureParticipant` に見立てて秘密寿命を削除協調へ預けること。ユーザーが chat に貼ったキー類似文字列の除去は既存 scrub（S-3）であり、登録済み秘密自体の指定がない限り OS store の破棄ではない
 
 `ene-local-control` の秘密フィールドは redacted 型にする。通常 DTO の Debug 実装・log マクロ・永続化に秘密寿命を依存させない。Control 完了や拒否の監査は `CredentialRef` / session id / outcome だけを残し、生値を残さない。
+
+上の禁止は通常の GUI / Client / 永続領域に対するものです。削除専用の値入力は provider credential の Host-local 登録用 C1 / C2 とは別の短寿命区間として扱い、登録値と一致した場合だけ認証秘密 owner が operation 専用 OS material を保持します。OS 保存前に非秘密 preparation を durable 化し、開始 commit で operation に付け替えます。起動時の mutating reconciliation はその専用 namespace の全候補を列挙し、operation に属さない残存材料の削除を検証してから credential の正常利用と新規削除を許可します。未確認は保留し、通常の読み取りで sweep を開始しません（[Credential publication §4.1](credential-publication.md#41-登録秘密を対象とする-targeted-deletion)）。
 
 **ene が破棄を保証できない残差（脅威として残し、無いとは書かない）:**
 

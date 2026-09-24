@@ -21,8 +21,8 @@
 - オーナー管理画面（Management Surface）と高権限操作の確認境界（第18節）。最終確認の判定手段は [First-party desktop](first-party-desktop.md) と第10.3節。
 - 3D/VRM 立ち絵などの表示リソースの供給（第19節）。Body overlay process は本プロトコルの参加者ではない。
 - 通信電文 DTO の擬似コード定義（第21節）。Host 側の内部ドメイン型に安易に `Serialize` を付けて直接公開することはせず、通信 DTO からドメインコマンドへの変換点を明確にします。
-- シリアライズ形式の選定と比較（第7節）。単にデータ形式を選ぶだけで後方互換性が自動的に解決されるとは仮定しません。
-- プロトコルのバージョン管理と互換性ルール（第7節）。
+- シリアライズ形式の選定と比較（第7節）。データ形式とは独立に、現行プロトコルとの一致を検証します。
+- プロトコルの現行版照合と不一致時の拒否（第7節）。
 - 機能の交渉（Capability Negotiation）（第8節）。Client の自己申告は事実の提示にすぎず、実行権限（Permission）そのものとはみなしません。
 - 認証とペアリング（第9節）。暗号ライブラリや鍵形式を過剰に固定せず、秘密情報を平文の通常電文に乗せない規約を定めます。
 - トランスポート層のサポート範囲とアダプター境界（第10節）。
@@ -58,8 +58,9 @@ IB 第15節で定めた「ネットワーク越境可能なインターフェー
 | W-6 | 共有画面観測・キャプチャの Client 側入出力 | キャプチャを実行する実体が Client であり、Host が発行する許可チケットによって制御されるため | X-E（ルーティングの両端のみ） | キャプチャチケット、キャプチャ画像フレーム（候補データ）、受入結果。ルーティングの内部判断や専用のプロバイダー割り当て情報は出さない |
 | W-7 | 立ち絵や演出用のアセットリソース | 表示用のアセット（3Dモデル・モーション等）の提供元が Host（静的定義）で、利用者が Client であるため | C-A のアセット利用部分 | アセット記述子＋バイナリデータ分割チャンク。キャラクターの適用関係や個体の経験状態は出さない |
 | W-8 | 個人データ完全削除（Targeted Deletion）への Client 参加 | 接続中の Client 端末が一時的に保持しているキャッシュデータも削除対象となるため | D-B の Client 宛て部分 | 削除要求コマンド（削除対象の平文本文は含めない）、ローカル削除結果。削除対象の本文や検索用トークンを Client 側で永続化させてはならない |
-| W-9 | オーナー管理画面の入口と表示 | 設定や管理操作の入力画面が Client にあっても、操作の確定は Host 側の各担当者が行うため | IB 第9節 `ManagementOperationCommand` の Client 側入口 | 管理操作の意図（intent）、フィルタリングされた表示データ。高権限操作の要求を送信することは可能だが、最終確認は必ず Host PC 上の信頼された第一者管理画面で行う（§18）。制御のマスターデータ、秘密情報、過去の判定結果のコピーは出さない |
-| W-10 | Client 端末依存の外部操作（Computer Use 等）の遂行 | 実際の操作を実行する対象デバイスが Client 端末そのものであるため | K-J（Client 限定作用）＋ K-H の Client 向け投影 | 操作コマンド（具体的なデバイス操作指示のみ）、受付確認、進捗報告、実行結果事実。権限の認可判定ロジックや許可条件は出さない |
+| W-9 | オーナー管理画面の入口と表示 | 設定や管理操作の入力画面が Client にあっても、操作の確定は Host 側の各担当者が行うため | IB 第9節 `ManagementOperationCommand` の Client 側入口 | 管理操作の意図（intent）、フィルタリングされた表示データ。Host-local 高権限操作の最終確認は Host PC 上の専用第一者面で行う（§18）。Targeted Deletion の専用確認は §18.3 に従う。制御のマスターデータ、秘密情報、過去の判定結果のコピーは出さない |
+| W-10 | Client 端末依存の外部操作（Computer Use 等）の遂行 | 実際の操作を実行する対象デバイスが Client 端末そのものであるため | K-J（Client 限定作用）＋ K-H の Client 向け投影 | 操作コマンド（具体的なデバイス操作指示のみ）、受付確認、手動入力による割込事実、進捗報告、実行結果事実。権限の認可判定ロジックや許可条件は出さない |
+| W-11 | Targeted Deletion 専用 Owner 確認 | Host GUI が無くてもペアリング済み Client から削除を開始できるため | D-A の deletion admission | Host が提示する操作 ID・目的・対象範囲・影響・expected currentness と一回限りの challenge、同じ認証済み Client の専用確認フローからの completion。Owner の直接操作は信頼する Client 側の責務であり、Host が物理入力を証明するものではない（§18.3）。通常の intent や一般 credential 管理に流用しない |
 
 ### 2.2 越境させないもの（Host-local に留める）
 
@@ -69,7 +70,7 @@ IB 第15節で定めた「ネットワーク越境可能なインターフェー
   - **理由**: 前提条件の比較とデータ更新を Host 側の単一 SQLite トランザクション内で不可分に実行するためです。DB トランザクションを Client 側へ露出させてはいけません。また、認証の秘密情報を通常の通信経路に乗せてはなりません。
 - 画面観測専用の LLM プロバイダー割り当て情報や、ルーティングのドメイン的な判断そのもの。Client に権威ある情報として公開しません。Client が見るのはキャプチャチケットと自分自身のキャプチャ結果だけです。
 - リポジトリの不可分な前提比較、利用枠の事前予約、バックアップ復元の本番切り替え。これらを通信電文に乗せてはなりません。
-- 高権限操作の最終確認（§18）。Client の自己申告は確認ではありません。[First-party desktop](first-party-desktop.md) 第5節に従い、Host が起動した GUI に継承した専用 channel 上の `ConfirmationSession` と直接操作を必要とします。公開 local listener の接続者は空席でも seat を取れません。nonce は freshness のみであり、Computer Use の `EffectReport` は完了ではありません。
+- Host-local 高権限操作の最終確認（§18.1）。Client の自己申告は確認ではありません。[First-party desktop](first-party-desktop.md) 第5節に従い、Host が起動した GUI に継承した専用 channel 上の `ConfirmationSession` と直接操作を必要とします。公開 local listener の接続者は空席でも seat を取れません。nonce は freshness のみであり、Computer Use の `EffectReport` は完了ではありません。Targeted Deletion 専用の認証済み Client 直接確認（§18.3）は別の経路であり、この seat を遠隔に渡しません。
 
 ### 2.3 選別の帰結
 
@@ -78,7 +79,7 @@ IB 第15節で定めた「ネットワーク越境可能なインターフェー
 
 ## 3. Protocol layer 構成
 
-通信電文の意味（セマンティクス）と、下位の通信トランスポート層を明確に分離します。また、メッセージの配送や互換性を担うエンベロープ（外封）と、ビジネスデータを運ぶペイロード（中身）を分離し、エンベロープ自体にドメインとしての決定権限を持たせないようにします。
+通信電文の意味（セマンティクス）と、下位の通信トランスポート層を明確に分離します。また、メッセージの配送や現行版照合を担うエンベロープ（外封）と、ビジネスデータを運ぶペイロード（中身）を分離し、エンベロープ自体にドメインとしての決定権限を持たせないようにします。
 
 ```mermaid
 flowchart TB
@@ -87,7 +88,7 @@ flowchart TB
     CMap["Client 側 IPC アダプター<br/>DTO ↔ 画面表示・デバイス操作"]
   end
   subgraph Wire["通信電文 (バージョン管理, MessagePack を標準形式とする)"]
-    Env["外封エンベロープ<br/>(ルーティング / 互換性チェックのみ)"]
+    Env["外封エンベロープ<br/>(ルーティング / 現行版照合のみ)"]
     Pay["ドメインペイロード<br/>(型付けされた業務データ)"]
     Blob["バイナリアタッチメント<br/>(音声 / キャプチャ画像 / アセット分割データ)"]
   end
@@ -112,7 +113,7 @@ flowchart TB
   HMap <--> Dom
 ```
 
-通常 Client channel の transport は WSS に統一します。Host-local control と GUI–Body 間の投影 IPC はこの図の対象外です。専用の確認・秘密入力経路を通常 Client channel に統合しません（第10.3節）。
+通常 Client channel の transport は WSS に統一します。Host-local control と GUI–Body 間の投影 IPC はこの図の対象外です。Host-local 高権限確認・秘密入力経路を通常 Client channel に統合しません（第10.3節）。Targeted Deletion の専用確認電文だけは §18.3 に従います。
 
 各層の責務と境界：
 
@@ -120,7 +121,7 @@ flowchart TB
 |---|---|---|
 | トランスポート層アダプター | フレームの送受信、生存監視（ハートビート）、背圧（バックプレッシャー）の伝達、相手の切断検知 | ドメイン的な意味、存在状態、権限許可、リビジョン世代の判定。単に通信がつながっていることだけをもって存在状態や報告完了とみなさない |
 | 接続認証 | デバイスのペアリング、セッション確立、失効処理、再認証（第9節） | ドメインとしての権限許可、タスクへの進捗反映、外部作用の確定 |
-| 外封エンベロープ | ルーティング先ヒント、互換性検証（プロトコルバージョン・メッセージ種別・相関 ID）、重複配送の抑止キー（第5・6節） | ドメインの担当責任、決定権限。エンベロープが正しく届いたことだけをもって処理の完了とみなさない |
+| 外封エンベロープ | ルーティング先ヒント、現行版照合（プロトコルバージョン・メッセージ種別・相関 ID）、重複配送の抑止キー（第5・6節） | ドメインの担当責任、決定権限。エンベロープが正しく届いたことだけをもって処理の完了とみなさない |
 | ドメインペイロード | 型付けされたメッセージデータ（第4節のパターン別）。Client からは候補・観測結果・確認を送り、Host からは確定事実・決定結果・指示コマンドを送る | Host 内部限定の判定条件全文、認証用の秘密情報、判定ログの生コピー |
 | バイナリアタッチメント | 音声フレーム、キャプチャ画像、アセット分割データの生バイト列（記述子 DTO と対応付けられる） | ドメイン的な解釈。対応する記述子のない独立したアタッチメントを解釈してはならない |
 | Host 側 IPC マッピング | 通信 DTO のバリデーション、電文参照からドメイン前提構造体への変換、ドメイン確定事実から DTO への投影（第25節） | 採否、達成、許可、確定度の判断（これらは各ドメイン担当者の責務） |
@@ -145,14 +146,14 @@ flowchart TB
 - ストリームの open が成功したことだけをもって、やり取り（Round）や存在状態、権限が成立したとみなしてはなりません。
 - 進捗報告（progress）が届いたことだけで確定度を進めてはなりません。完了結果が「成否不明（Unknown）」であった場合、それを勝手に未実行や成功へ書き換えてはなりません。
 
-## 5. Wire envelope — routing / compatibility 用
+## 5. Wire envelope — routing / version check 用
 
-外封エンベロープは、電文のルーティングと互換性検証のためだけに存在します。エンベロープ自体がドメインの決定権威になってはなりません。エンベロープの検証が通ったことと、中のデータ（ペイロード）が受け入れられたことは全く別の問題です。Host 側のマッピング処理は、エンベロープの正当性を確認した後にペイロードをバリデーションし、ドメインの前提構造体に変換して各担当者の照合へ渡します。
+外封エンベロープは、電文のルーティングと現行版照合のためだけに存在します。エンベロープ自体がドメインの決定権威になってはなりません。エンベロープの検証が通ったことと、中のデータ（ペイロード）が受け入れられたことは全く別の問題です。Host 側のマッピング処理は、エンベロープの正当性を確認した後にペイロードをバリデーションし、ドメインの前提構造体に変換して各担当者の照合へ渡します。
 
 ```rust
 // ene-api::v1::envelope（擬似コード。通信 DTO であり内部ドメイン型ではない）
 struct WireEnvelope {
-    protocol: ProtocolVersion,      // プロトコルのメジャー・マイナーバージョン（第7節）
+    protocol: ProtocolVersion,      // 現行プロトコルの識別子（第7節）
     message_id: WireMessageId,      // トランスポート層での重複排除用キー（第6節）
     correlation: WireCorrelation,   // リクエスト/レスポンス、コマンド/ack の対応付け
     sender: WireSender,             // 送信デバイス / インカーネーション / コネクション（第11節）
@@ -182,7 +183,8 @@ struct ObservedMarks {
 エンベロープの取り扱いルール：
 - `message_type` はルーティングのヒントにすぎず、ペイロードの意味を勝手に決めるものではありません。未知のメッセージ種別を受信した場合は `UnsupportedMessage` として安全に拒否し、中身を推測して処理してはいけません。
 - ストリームの対応付けは、ペイロード側の `StreamWireId`（第13節）で運びます。
-- `observed` フィールドは Client の勝手な主張ではなく、「Client がどの時点の表示を見てこの電文を送ったか」という前提の写しです。Host はこれを永続化データおよび現在の最新状態と比較し、食い違いがあれば古い電文（Stale）として安全に不受理にします。Client が「自分は最新である」と自称しただけで処理を受け入れてはなりません。
+- `observed` フィールドは Client の勝手な主張ではなく、「Client がどの時点の表示を見てこの電文を送ったか」という前提の写しです。Host はこれを永続化データおよび現在の最新状態と比較し、食い違いがあれば古い電文（Stale）として安全に不受理にします。ただし `ManualInputInterrupt` は元試行で手動入力を検出した事実であり、§11.2・§15.2 の相関検証を満たす場合、`observed.presence_generation_view` が元の G で現在が G+1 でもドメイン入口より前に破棄しません。再接続時の `ActionFenceState` は元試行の事実通知ではなく現在のローカル fence 状態の同期であり、元 G の `observed` を流用しません（§11.2）。Client が「自分は最新である」と自称しただけで処理を受け入れてはなりません。
+- `LocalErasureResult` の相関にはエンベロープの `correlation.command_id` / `reply_to` に加え、ペイロード内の必須 `(operation, sweep)` を使います。応答先が存在する場合は元の demand との一致も検証します。通信上の応答先や到着順だけから current sweep を推定してはなりません（§17）。
 - ペアリングトークンやセッション証明、暗号鍵などの秘密情報を、通常のペイロードやエンベロープに乗せてはいけません。これらは認証専用の独立した電文フレーム（第9節）でのみ扱います。
 - 時刻情報は壁時計時刻＋作成時のタイムゾーンを保持します（CI §4.6）。時刻の前後関係をリビジョン世代の代わりにしたり、古いかどうかの判定根拠にしたりしてはいけません。
 
@@ -223,8 +225,9 @@ struct ObservedMarks {
 - **やり取りの区切り（Round）**: 会話の1往復ごとの区切りであり、Host が発行する `RoundWireId` で識別します。`message_id` や `request_id` とは全く別物です。古い Round への入力や未提示の出力を、新しい Round へ勝手に付け替えてはなりません（CI §3.5）。
 - **存在状態の世代（Presence Generation）**: Host 側が絶対的な決定権を持つライフサイクルの世代番号（`PresenceGeneration`）です。Client 側は `observed.presence_generation_view` として自分が見た値の写しを返すだけにすぎません。世代番号が一致していることだけでは不十分であり、現在の接続状態、デバイスの利用可能性、権限許可、一時停止や保留状態なども Host 側が厳密に照合します（CI §5.6）。
 - **Client の起動世代（Client Incarnation）**: Client アプリが新しく起動するたびに新しく発行される識別子（第11節）です。接続セッションやプロセス、存在世代とは独立した概念です。
+- **Action dispatch namespace / epoch / Interrupt fence token**: Computer Use の発行区間は Host が発行する `(ActionDispatchNamespaceWire, ActionDispatchEpochWire)` で識別します。epoch の大小は同じ namespace・対象 Client 内でだけ比較し、復元による master 切替では新しい namespace を発行します。`InterruptFenceToken` は対象 Client が手動入力時に新たに生成してローカル fence に結び付ける本文を持たない推測不能値です（§15）。いずれも接続・incarnation、presence generation、Round、§6.2 の retry-admissible sender epoch や権限許可とは別物です。
 
-## 7. Serialization と protocol versioning
+## 7. Serialization と現行 protocol version の照合
 
 ### 7.1 serialization 選択
 
@@ -241,33 +244,20 @@ struct ObservedMarks {
 
 すべての通信 DTO は、JSON としても自然に表現できるデータ構造（文字列、数値、真偽値、配列、マップのみで構成し、巨大なバイナリデータはアタッチメントとして分離）として定義し、実際の通信電文上は MessagePack で効率的にエンコードします。デバッグ表示、一般ログ、監査ログでは JSON 形式で出力します。また、音声フレームやキャプチャ画像、アセットのバイナリデータはペイロード内に base64 埋め込みするのではなく、バイナリアタッチメントフレームとして記述子 DTO と対応付けて送信します（第21節）。
 
-データ形式を選んだことだけで互換性が自動的に保証されるわけではありません。互換性は以下の規約によって厳格に維持します。
+データ形式を選んだことだけでは、現行プロトコルへの適合は保証されません。受信時には以下を検証します。
 
-**データフィールドの互換性規約**:
-- オプショナルなフィールド（`Option<T>`）の追加は後方互換として許容します。受信側は未知のフィールドを受信した場合、エラーにせず無視して処理を継続します（ログに残すことは推奨）。ただし、無視したことを理由に元の意味を勝手に改変してはなりません。
-- 必須フィールドの追加、既存フィールドの意味変更、単位の変更、enum のバリアントの意味変更は互換性を壊す変更（破壊的変更）とみなし、メジャーバージョンの引き上げ（major version bump）を必須とします。推測で適当に処理してはなりません。
+**現行スキーマの検証規約**:
+- 必須フィールドの欠落や未知のフィールド（オプショナル項目も含む）は拒否します。受信側は未知の項目を無視して旧スキーマとして処理しません。既知の `Option<T>` の省略だけを定義済みの意味で扱います。
+- フィールドや enum の意味・単位を変更する際は現行スキーマとプロトコル識別子を更新します。古い形式を推測して解釈しません。
 - enum は無制限に拡張可能（open enum）としては扱いません。未知のバリアントを受信した場合は、そのメッセージを `UnsupportedFieldValue` として安全に拒否します。デフォルトのバリアントへ勝手に読み替えてはなりません。
 - 各種 ID、リビジョン番号、世代番号、相関キーは、必ず独立した明示的なフィールドとしてシリアライズします。本文のテキスト文字列をパースして照合に使うような実装は禁止します（CI §4.6）。
 
-### 7.2 protocol versioning
+### 7.2 現行 protocol version の照合
 
-- エンベロープに `ProtocolVersion { major: u16, minor: u16 }` を含めます。`major` は互換性のない仕様変更の境界を表し、`minor` はオプショナル項目の追加など後方互換性のある範囲を表します。
-- 接続時に行う機能交渉（第8節）において、コネクションごとに合意したバージョン（negotiated version）を確定し、接続レコードに記録します。以降の電文はすべてその合意バージョンに基づいて解釈されます。1つの接続の中で異なるバージョンが勝手に混在することを許しません。
-- 未知のオプショナルフィールドを受信した場合 → 無視して処理を継続します。
-- 未知のメッセージ種別を受信した場合 → `UnsupportedMessage`（ドメイン結果）として安全に拒否し、接続自体は維持します。その指示による副作用は一切発生させません。
-- 破壊的変更を伴う場合 → メジャーバージョンを引き上げます。理解できないメジャーバージョンの電文は処理を行わず、`IncompatibleProtocol` で明確に拒否します。
-- **Host 側が新しく、Client 側が古い場合**: Host は合意した古いバージョンの範囲内でやり取りするか、共通するバージョンが存在しない場合はバージョンアップを促す情報（upgrade hint）を添えて接続を拒否します。古い Client に対して、解釈できない新しい仕様の電文を黙って送りつけてはいけません。
-- **Client 側が新しく、Host 側が古い場合**: Client は Host が対応している上限バージョンへダウングレードして通信するか、対応不能として切断します。Host 側は理解できない新しい仕様の電文を推測で処理してはなりません。
-
-バージョン互換性の判定基準マトリクス：
-
-| 組み合わせ | 処理方針 |
-|---|---|
-| メジャー一致・マイナー一致 | 通常通り安全に処理します |
-| メジャー一致・片方のマイナーが古い | 古い側の理解できる範囲で処理します。未知のオプショナルフィールドは無視します。古い側から送信されなかった不足フィールドは、新しい側でデフォルト値に無理に当てはめるのではなく「省略された（未指定）」として扱います（「制約なし」への勝手な読み替えは禁止） |
-| メジャー不一致（共通のメジャーがない） | 相互運用を中止し、`IncompatibleProtocol { host_max, client_max, hint }` で接続を拒否します。適当な互換動作は行いません |
-| 未知のメッセージ種別（合意バージョン内） | その電文のみを `UnsupportedMessage` として拒否し、接続は維持します |
-| 未知の enum バリアント / 必須フィールドの欠落 | その電文のみを拒否（`UnsupportedFieldValue` / `MissingRequiredField`）し、他の正常な通信には波及させません |
+- エンベロープの `ProtocolVersion { major: u16, minor: u16 }` は現行スキーマの識別子です。major / minor の一部だけで互換性を判定しません。変更時は現行版を更新し、旧版の解釈・フォールバックは設けません。
+- `CapabilityAdvertise.protocol` とそのエンベロープの `protocol` は Host の現行版と完全一致させます。Host は `CapabilityAcknowledged` で同じ版を確認し、Client も Host の版を照合します。この確認は Paired phase（再接続では Accepted からの bind と一体）の同一 connection 上で認証チャレンジより先に行い、接続レコードに版を記録します（§9.3）。機能・利用可能状態の申告（§8）とプロトコル版の選択を混同しません。
+- 版が一致しない場合は major / minor のいずれでも `IncompatibleProtocol { host_version, client_version }` として明示的に拒否して接続を終了します。未知の版の電文を解釈したり、古い版へダウングレードしたりしません。以降の同一接続の電文にも、記録された現行版との一致を要求します。
+- 現行版の未知のメッセージ種別は `UnsupportedMessage` としてその電文を拒否し、副作用を起こしません。未知のフィールド、enum バリアント、必須フィールドの欠落もそれぞれ不正な電文として拒否し、既知の値へ読み替えません。
 
 ## 8. Capability negotiation
 
@@ -276,13 +266,13 @@ Client 端末によって、3D立ち絵（Body）、音声合成/認識（Voice�
 ```rust
 // ene-api::v1::capability（擬似コード）
 struct CapabilityAdvertise {
-    supported_protocol: Vec<ProtocolVersion>, // 対応プロトコルバージョンの一覧
+    protocol: ProtocolVersion,                // 現行版との一致確認用。選択候補の一覧ではない
     limits: ClientLimits,                     // フレームサイズ上限や同時ストリーム数上限の申告
     platform: PlatformDescriptor,             // OSやデバイス種別の表示情報（権限許可の根拠には使わない）
 }
 
-struct NegotiatedConnection {
-    version: ProtocolVersion,          // Host が合意・決定したプロトコルバージョン
+struct CapabilityAcknowledged {
+    protocol: ProtocolVersion,         // Host の現行版。一致しなければ認証へ進まない
 }
 ```
 
@@ -290,7 +280,7 @@ struct NegotiatedConnection {
 - **機能申告（Claim）と権限許可（Permission）は別物です。** Host 側は Client からの「対応可能」という事実申告と、実際の「実行権限」や「現在の接続帰属」を別々に照合します。Client が対応可能と申告していても、ユーザーによる明示的な許可、キャラクターの存在帰属、デバイスの承認がない限り処理を開始してはいけません。
 - Host は Client からの申告を「現在利用可能な事実（Availability Fact）」として記録し、外部操作の可否判定、画面観測の対象選定、ルーティング、UI表示の判断材料として活用します。申告があることだけで能力を盲信せず、必要に応じて到達性やデバイス許可を合わせて確認します。
 - Client 側の状態変化（全画面表示の開始、デバイスの切断、高負荷、マイクのミュート等）は、`CapabilityUpdate` や `AvailabilityFact` の電文によって随時 Host へ通知されます。ただし、状態変化の前に発行されたチケットやコマンドの有効期限が勝手に延長されることはなく、各処理の受付時に最新状態と照合されます。
-- 合意されたプロトコルバージョンは接続レコードに保持され、復元世代（`RestoreGeneration`）や存在世代（`PresenceGeneration`）とは独立した別次元の情報として管理します。これらを混同してはいけません。
+- 照合済みの現行プロトコル版は接続レコードに保持され、復元世代（`RestoreGeneration`）や存在世代（`PresenceGeneration`）とは独立した別次元の情報として管理します。これらを混同してはいけません。
 
 ## 9. Authentication / pairing
 
@@ -318,8 +308,8 @@ struct NegotiatedConnection {
 
 ### 9.3 connection authentication・reconnect authentication
 
-1. コネクションが確立するたびに、`AuthChallenge（Host の使い捨て乱数 nonce）→ AuthProof（Client の所有証明）→ AuthResult（Host の判定結果 ＋ ConnectionWireId 付与）` のハンドシェイクを実行します。Host は現在のデバイス認証ストア（E）にある有効なペアリング情報および検証材料と照合し、存在しない場合、失効している場合、または確認できない場合は接続を拒否します。Client は秘密情報そのものを平文で送るのではなく、暗号学的な所有証明のみを送信します。具体的な方式は自由としますが、「秘密情報を平文で露出させないこと」「nonce を使い捨てること」「過去の証明を再利用させないこと」を必須条件とします。
-2. 認証が成功した際、Host はそのコネクション専用の `ConnectionWireId` を発行し、デバイスごとの現在の有効な接続を更新します。以降、Client から Host への電文には必ず `sender.connection_id` を付与します。認証前の電文はペアリングおよび認証手続き専用のものに限定し、業務的なドメイン操作は一切受け付けません。
+1. コネクションが確立するたびに、Paired phase で `CapabilityAdvertise → CapabilityAcknowledged` により現行プロトコル版を相互確認し、続いて `AuthChallenge（Host の使い捨て乱数 nonce）→ AuthProof（Client の所有証明）→ AuthResult（Host の判定結果 ＋ ConnectionWireId 付与）` のハンドシェイクを実行します。Host は現在のデバイス認証ストア（E）にある有効なペアリング情報および検証材料と照合し、存在しない場合、失効している場合、または確認できない場合は接続を拒否します。Client は秘密情報そのものを平文で送るのではなく、暗号学的な所有証明のみを送信します。具体的な方式は自由としますが、「秘密情報を平文で露出させないこと」「nonce を使い捨てること」「過去の証明を再利用させないこと」を必須条件とします。
+2. 認証が成功した際、Host はそのコネクション専用の `ConnectionWireId` を発行し、デバイスごとの現在の有効な接続を更新します。以降、Client から Host への電文には必ず `sender.connection_id` を付与します。認証前の電文はペアリング、capability 申告と現行版照合、認証手続き専用のものに限定し、業務的なドメイン操作は一切受け付けません。
 3. 再接続（Reconnect）時は、常に新しいコネクションとしてゼロから認証をやり直します。古い `ConnectionWireId`、古いストリーム、古いチケット、古いやり取り（Round）をそのまま引き継いではなりません。古いコネクション ID を乗せた電文は、ドメイン処理を実行する前に `StaleConnection` として安全に拒否します。
 
 #### connection phase と replacement（Stage 5）
@@ -328,7 +318,7 @@ current の選択に paired socket count を使う案は、未認証・supersede
 
 `authenticated` は、その connection で所有証明が成功した事実です。`current` は Host の device ごとの current slot がその connection を指すことです。domain ingress と presence の到達性に使えるのは、両方を満たし、閉じておらず、device が現在も有効な connection だけです。paired socket の数や過去の認証成功回数は使用しません（[#1384](https://github.com/pexisgle/ene/issues/1384)）。
 
-connection は `Accepted → Paired → Challenged → Authenticated → Superseded | Closed` の一方向に進めます。失敗した認証は `Closed`、任意 phase の transport 終了も `Closed` とします。新規 pairing は承認完了で Accepted から Paired へ進みます。再接続では最初の `CapabilityAdvertise.sender.device_id` を既存の非失効 device と照合し、Accepted からの device bind・Paired への移行・capability 受付を一つの phase 操作にします（ID 解決だけでは authenticated/current になりません）。以後 `CapabilityAdvertise` は Paired で一度だけ受け、nonce は Challenged の AuthProof 一度で消費します。phase 不一致には `InvalidHandshakePhase` を返し、nonce や negotiated terms を変更しません。Superseded は復活不能で、同じ socket の pairing/capability/auth を含め、帰属を検証できる電文は `StaleConnection` とします（[#1385](https://github.com/pexisgle/ene/issues/1385)）。§11.3 の型付き stale 拒否後も socket を維持してよいものの、新規認証には必ず別 connection を開きます。
+connection は `Accepted → Paired → Challenged → Authenticated → Superseded | Closed` の一方向に進めます。失敗した認証は `Closed`、任意 phase の transport 終了も `Closed` とします。新規 pairing は承認完了で Accepted から Paired へ進みます。再接続では最初の `CapabilityAdvertise.sender.device_id` を既存の非失効 device と照合し、Accepted からの device bind・Paired への移行・capability 受付を一つの phase 操作にします（ID 解決だけでは authenticated/current になりません）。以後 `CapabilityAdvertise` は Paired で一度だけ受け、現行版の完全一致を確認してから challenge を発行し、nonce は Challenged の AuthProof 一度で消費します。phase 不一致には `InvalidHandshakePhase` を返し、nonce や確認済みの版・機能申告を変更しません。版の不一致は `IncompatibleProtocol` で接続を終了します。Superseded は復活不能で、同じ socket の pairing/capability/auth を含め、帰属を検証できる電文は `StaleConnection` とします（[#1385](https://github.com/pexisgle/ene/issues/1385)）。§11.3 の型付き stale 拒否後も socket を維持してよいものの、新規認証には必ず別 connection を開きます。
 
 - AuthProof の検証後、Host は短い connection 所有区間で phase と device の有効性を再確認し、旧 current を Superseded にして新 current を設置します。`AuthResult::Accepted` はこの変更の後に送ります。応答が失われても旧 current へ戻しません。認証処理が同時ならこの設置順で最後の成功 connection が current になり、非 current の socket が AuthProof を再送して競争し直すことはできません。
 - replacement が同じ Client の `Present` 中に、current 不在区間なしで成立した場合、帰属先と PresenceGeneration は維持します。ただし旧 connection の Round、stream、presentation receipt、再試行 epoch は無効になり、新 connection は新しい Round だけを使います。旧 socket を持つことは新 connection の認証や提示の成功を意味しません。
@@ -412,7 +402,7 @@ TCP の接続元 IP、Client の platform / descriptor、保存済みの通信�
 
 Client は process boot 時にローカルな Client data directory ごとの永続 counter を排他更新し、乱数と組み合わせた `ClientIncarnationId` を一度だけ生成して全 connection で再利用します（[#1387](https://github.com/pexisgle/ene/issues/1387)）。同じ process の reconnect では counter を進めません。counter の読込・書込・排他・上限確認に失敗した場合は接続を開始せず、PID や時刻へ fallback しません。
 
-counter の owner は Client で、`client-incarnation.counter` に 1 個の u64 を保持します。初回 pairing 前にも生成でき、接続先 Host や DeviceWireId の発行には依存しません。安定した別ファイル `client-incarnation.lock` の OS 排他を取り、counter 読込 → checked increment → 同じ directory 内の temp file の sync / atomic rename を完了してから生成値を公開します。counter 初期値は 0、最初の公開値は 1 です。元ファイルが存在するのに読めない・壊れている場合は初期化し直しません。restart ではこの counter だけを読み戻し、過去の incarnation 自体は復元しません。接続 metadata の全消去時だけ counter も除去し、新しい乱数との組で旧区間と区別します。これは接続用 metadata であり、私的な本文キャッシュではありません。Host の照合は §11.1 の current slot と認証済み組の一致によります。
+counter の owner は Client で、`client-incarnation.counter` に 1 個の u64 を保持します。初回 pairing 前にも生成でき、接続先 Host や DeviceWireId の発行には依存しません。Client data directory が新規作成ならその作成エントリを持つ親（新規作成した祖先も含む）を永続化します。安定した別ファイル `client-incarnation.lock` の OS 排他を取り、counter 読込 → checked increment → 同じ directory 内の temp file の sync → atomic rename → 親 directory の永続化を完了してから生成値を公開します。rename の原子性だけでは電源断後の counter 更新を保証できません。永続化に失敗した場合は接続せず、counter 初期値は 0、最初の公開値は 1 です。元ファイルが存在するのに読めない・壊れている場合は初期化し直しません。restart ではこの counter だけを読み戻し、過去の incarnation 自体は復元しません。接続 metadata の全消去時だけ counter も除去し、新しい乱数との組で旧区間と区別します。これは接続用 metadata であり、私的な本文キャッシュではありません。Host の照合は §11.1 の current slot と認証済み組の一致によります。
 
 ### 11.2 wire property
 
@@ -421,9 +411,13 @@ counter の owner は Client で、`client-incarnation.counter` に 1 個の u64
   1. `device_id` が正式にペアリング済みであり、失効していないこと。
   2. `connection_id` がそのデバイスの現在有効な接続と一致していること（認証後の通常電文に適用）。
   3. `incarnation_id` が Client の現在の起動世代と一致していること（過去のプロセスからの遅延電文は拒否）。
-  4. `observed.presence_generation_view` が現在のキャラクター存在世代と一致していること（Client 端末に依存する操作の場合）。
+  4. `observed.presence_generation_view` が現在のキャラクター存在世代と一致していること（Client 端末に依存する操作の場合。ただし下記の `ManualInputInterrupt` の元試行への事実通知を除く）。
   5. `round_view` が現在のやり取り（Round）と一致していること（該当する操作の場合）。
 - 認証済みのコマンドは、上記の 1〜3 を満たした有効なセッションのものだけが第6.2節の冪等性検証へ進みます。無効になった過去セッションからの電文はセッション検証の段階で即座に拒否されるため、古いマーカーをクリーンアップした後であっても処理が勝手に再実行される危険はありません。
+- `ManualInputInterrupt` に限り、1〜3 の current sender 接続・incarnation と active namespace を必須として先に照合した上で、4 の現在値との一致を入口の条件にしません。必須の `observed.presence_generation_view = Some(G)` と payload の `generation = G` を元 `ClientActionCommand` の G に照合し、現在が G+1 でも元試行の割込事実として §21 の担当へ渡します。元の operation / attempt / `(namespace, epoch)` / 対象 Client / 発行先 connection・incarnation と必須の fence token、同 namespace の元 epoch 以上の `fenced_through` を照合し、欠落・未知・不一致は拒否します。旧 connection・旧 restore namespace の再送はこの例外の対象外です。fence 範囲は対象 Client の既発行区間に限り、古い G の通知だけで範囲外の新試行を hold しません。
+- `ActionFenceState` は bind 後または同じ現行接続での token 更新時に current sender からのみ受け、現在の接続・incarnation・対象 Client・bind namespace と highwater / token / fenced stamp の整合を検証して当該 Client の発行 gate に反映します。token があっても受付済み open がなければ stamp は `None` です。元 G の観測や旧接続の `ManualInputInterrupt` を再生する電文ではなく、元試行への割込事実・作用結果・certainty へ変換しません。ただし元の通知が失われた場合でも、検証済みの fence 範囲に対する新規発行を保留し、結果不明の元試行を再開しません（§15.2・§21）。
+- Action の新しい接続では、現在の Host を §10.4 の方法で検証し、§9.3 の所有証明と current slot の設置が成功した**後**、Host が現在の master に結び付けた `ActionNamespaceBind` を当該接続・incarnation・対象 Client に送ります。bind の発行、master 切替、接続の失効を直列化し、切替前に認証成功した接続でも切替後に旧 bind を設置しません。Client は検証済み Host の現行認証接続でだけ bind を採用し、古い接続・namespace の受信キューを無効にしてから、token が `None` の場合も必ず `ActionFenceState` を返信します。Host はその bind に対する状態を current sender から受け取り、発行 gate と直列に照合するまで open を発行しません。Client も bind と状態送信前は open / command を開始しません。Client の申告はローカル観測値であり、master の切替・接続認証・発行権限を作りません。
+- 復元 staging では発行を止め、復元前の live 発行 gate の `highest_issued` と到達可能な認証済み Client から得た highwater を把握します。Client 不達・highwater 不明を backup の値と一致する証拠にはしません。復元 backup の最大値より live 値が高くても、その値や復元前の外部作用 fact を新 master に混ぜません。完全置換の切替に合わせて Host が新しい推測不能な namespace（既知の namespace との衝突は拒否）を Host-local の復元制御記録に永続化し、どの master が active かと不可分に公開します。これはバックアップの業務マスターの一部ではなく、新 master 上で新規発行を隔離する制御 metadata です。切替失敗・再起動・対応不明なら発行 gate を閉じ、旧 namespace の認証接続を復活させません。旧接続を失効させて再認証・新 bind を要求し、旧接続や旧 namespace のコマンド・割込・結果を新 master の試行へ写像しません（§15.2）。
 - Client 側が「自分は最新である」と主張しただけでは成立しません。Host 側の永続化データおよびリアルタイムの最新状態との照合が必須です。確認が取れない状態を「最新である」と勝手に推定してはなりません。
 
 ### 11.3 stale 時の扱い
@@ -497,6 +491,7 @@ enum MoveOutcome {
 - **新規対話の開始と追加入力**: Round の指定は tagged `RoundTarget` で1つのフィールドに集約し、`round: Option<_>` と `fresh: bool` のような別々のフラグ組合せは持ちません（基盤計画 F1）。`RoundTarget::New` で新しい Round の開始を要求し、`RoundTarget::Existing(round)` で払い出された Round への追加入力を指定します。`observed.presence_generation_view` は必須、`observed.round_view` は `New` では None（有れば `StaleRound`）、`Existing` では指定した Round と同じ写し（不一致は `StaleRound`）とし、第一者 Client はターゲットと一致する写しを必ず載せます。Host 側の `ene-presentation::round` が現在の接続、帰属、権限許可、停止・保留状態を厳格に照合した上で Round を解決し、`AcceptedForRound { round }` を返します。通信マッピング層が勝手に Round ID を発行してはいけません。以降のその対話への追加入力は `Existing` に払い出された ID を指定し、古い Round が拒否されたからといってターゲットを `New` へすり替えて再送し、チェックを迂回してはいけません（再送は同一 `command_id`・同一ターゲットのまま行います）。
 - **新規 Round 要求の再試行と冪等性**: 初回入力（`RoundTarget::New`）がネットワーク不調で再送された場合、第6.2節の冪等性ルールに従います。同一セッション内で同じ `command_id` かつ同じフィンガープリントの再送であれば、Host は初回に発行した Round ID と結果をそのまま返し、2つ目の異なる Round を勝手に発行してはなりません。セッションが有効である間はこの対応を確実に保持します。
 - **逐次出力の完了条件**: テキストのストリーミングは `StreamWireId` ＋ `seq` ＋ `is_final` で順序制御します。`is_final = true` を伴わないフレームの到着をもって出力を完了とみなしてはなりません。
+- **provider 本文の送信境界**: `TextStreamFrame` 等の provider 由来の本文は、[Credential Publication §4](credential-publication.md#4-並行する-scrub利用と失効) の ticket / delegation と revision に束縛した連続 scrub 後の確定済み部分に限ります。生 chunk や個別 chunk だけを scrub した断片を送信キュー・codec・WSS へ渡しません。credential 更新と競合した未送信部分は元の stream に継ぎ足さず、stale として閉じてから、必要なら元の論理本文を現在の秘密集合で再 scrub した別の送信として扱います。既に始まった部分は送信・受信・提示を区別して元の `StreamWireId` と順序に帰属させます。
 - **未提示メッセージの引き継ぎ**: テキスト表示・音声再生のいずれも成立する前に切断等が発生した未提示の出力は、後述の `UndeliveredSummary`（第18節、W-3）に引き継がれ、次に接続した Client 端末上で、最新の状況や削除状態と照合された上で要約報告されます。送信や受信の完了をもって「報告完了」とみなしてはなりません。
 
 ### 13.2 Voice
@@ -584,16 +579,31 @@ Host 側での実行直前検証（Live authorization）、対象端末の特定
 
 | 電文名 | 通信方向 | パターン | 意味・役割 |
 |---|---|---|---|
-| `ClientActionCommand` | Host → Client | コマンド | 具体的なデバイス操作の指示（`OperationWireId`・`AttemptWireRef`・対象Client参照・世代番号・操作内容・制約条件・冪等性キー）。認可の内部判定ロジック自体は含めない |
+| `ActionNamespaceBind` | Host → Client | 接続の Action 発行空間の通知 | 認証・current slot 設置後、active master の namespace を現行接続に束縛する。Client の申告から namespace を採用しない |
+| `ActionEpochOpen` | Host → Client | 発行区間の開始 | bind 済みの現在認証接続に新 attempt の `(namespace, epoch)` を束縛する。割込後は Client の最新 fence token を返す。割込前に受付済みの open は token を後付けしても再有効化しない。受付は操作成功や旧試行の確定ではない |
+| `ClientActionCommand` | Host → Client | コマンド | 具体的なデバイス操作の指示（`OperationWireId`・`AttemptWireRef`・action dispatch epoch・対象Client参照・世代番号・操作内容・制約条件・冪等性キー）。認可の内部判定ロジック自体は含めない |
 | `ActionReceiptAck` | Client → Host | 受付確認 | 受領確認（`Received \| RejectedStale \| DeniedByHold \| UnsupportedCapability`）。受け取ったことの確認であり、操作の成功や完了ではない |
 | `ActionProgress` | Client → Host | 進捗報告 | 処理の中間報告（`progress_seq`・状態ヒント）。処理の完了ではない |
 | `EffectReport` | Client → Host | 完了報告 | 実際の操作結果報告（`ConfirmedSuccess \| ConfirmedFailure \| Unknown` ＋ 根拠参照）。成否不明（`Unknown`）は安全に維持される |
+| `ManualInputInterrupt` | Client → Host | 割込事実通知 | 実対象 Client 上の手動入力で新しい fence token を生成し受付済み区間を無効化した事実。元コマンドの operation / attempt / epoch / presence generation / connection / incarnation と、その時点の fence 上限に結び、停止完了や Task Cancel を宣言しない |
+| `ActionFenceState` | Client → Host | fence / highwater 同期 | bind 済みの現行接続で token の有無にかかわらず、ローカル fence の対象区間と Client が実際に見た・受け付けた最大 epoch を伝える。元試行の割込事実・作用結果の再送ではない |
 | `ActionCancel` | Host → Client | コマンド | 操作の中断・停止要求（第16節参照）。電文が届いたことだけをもって停止完了とみなさない |
 
 ### 15.2 規則
 
-- Host は、実行直前のその場検証（K-B による今回の1回限りの確定）を通過して初めて `ClientActionCommand` を発行します。電文には、今回の試行参照（`AttemptWireRef`）、一連の論理操作ID（`OperationWireId`）、存在世代、対象端末参照、および具体的なデバイス操作指示を含めます。タスクのリビジョン前提、委任スコープ、操作対象の詳細な解決情報、依拠した権限ルールの全文などは電文に乗せず、Host 側のマッピング層で保持します。
-- Client はコマンドを受信したら直ちに `ActionReceiptAck` を返信します。ここで返される `Received` は「電文を正しく受け取った」という確認にすぎず、操作の成功、実行開始、完了のいずれをも意味しません。世代番号が古い場合や能力不足である場合は、`RejectedStale` などを返して処理を拒絶します。
+- Host は、実行直前のその場検証（K-B による今回の1回限りの確定）を通過して初めて `ClientActionCommand` を発行します。電文には、対象 Companion（`CompanionWireRef`）、今回の試行参照（`AttemptWireRef`）、一連の論理操作ID（`OperationWireId`）、発行区間（`ActionEpochStampWire`）、存在世代、対象端末参照、発行先 connection・incarnation、および具体的なデバイス操作指示を含めます。タスクのリビジョン前提、委任スコープ、操作対象の詳細な解決情報、依拠した権限ルールの全文などは電文に乗せず、Host 側のマッピング層で保持します。
+- **Stop と command transport 開始の境界**: AU5 の attempt commit、`ActionEpochOpen` の発行・受付、Host の application queue / writer queue への投入は、後日の `ClientActionCommand` 送信許可でも外部作用開始の証拠でもありません。Host writer はコマンドごとに、元 attempt / `(namespace, epoch)` / operation / 対象 Companion・Client / 発行先 connection・incarnation / generation を固定し、codec / TLS / OS の取り消せない送信経路へ渡す直前の短い gate で、同じ SQLite master の現在の Companion `Running`・削除開始 hold・消去条件・帰属・認可等の開始条件と元試行の発行 hold を再比較します。この gate は Stop の `Stopped` commit と直列化します。Stop が先なら writer は未送信 command を全 queue から取り消し、transport に **0 byte** と証明できる場合だけ未送信と記録します。後の Resume・再接続・新しい token を旧 attempt の送信許可にしません。比較後に背圧・接続待機・非同期 queue が残るなら開始済みとせず gate を解放し、その待機の後で同じ比較をやり直します。
+- Stop の commit と Host の command 送信開始は、同じ master の単一 writer と短い共有 publication gate で直列化します。Host は元 attempt・接続・incarnation・namespace・epoch・command の対応と配送可能性を durable commit して DB transaction を解放し、gate を保持したまま ready 済みの順序付き transport writer で有界・同期・nonblocking first-write を行います。OS 側が正の byte を受理するか、実際に開始した byte の不可逆 handoff を確認した点だけを Host dispatch の線形化点とし、Stop より先なら元 attempt の **started external attempt（送信開始済み・作用可能）** とします。queue / TLS buffer への格納や将来の flush は開始ではありません。未開始と以後の送信不能を証明できれば gate を解放し、現在条件を再照合するまで再試行せず、未送信 terminal 化には元 command の送信不能を fence します。証明不能・部分開始なら `Unknown` を維持し、残りの byte は再 gate できなければ送信不能にします。DB lock を持ったまま `.await` や I/O をせず、gate 内で接続・背圧待ち、blocking TLS / OS I/O、配送・ACK・実操作完了を待ちません。first-write をこの境界で保証できない transport は 0 byte のまま保留します。durable fact と first-write の間の crash は作用可能 / `Unknown` とし、起動時にその行を送信待ちとして replay しません。事前記録や first-write だけを Client の実操作成功と断定しません。
+- Stop が送信開始より後でも、届いた command が Client の queue に留まり、Stop commit 後かつ Client の停止通知到達前に実入力を始める可能性があります。Host の線形化で保証する「Stop 先勝ちなら新規開始なし」は新しい **Host dispatch** についてであり、分散した Client の物理入力開始を Stop commit と原子的に同期できるとの主張ではありません。その到達前の in-flight は Stop より先に不可逆 dispatch された元試行にのみ帰属させ、Host は `Stopped` の `PresenceAttributionFact` と当該試行の `ActionCancel` を速やかに伝え、Client は現行接続・帰属・世代・停止状態の受信後にローカルの開始 gate / queue を閉じます。ローカル fence 成立後は旧 command を開始せず、既に開始した作用は best-effort で止めます。停止通知の遅延・喪失、Client 切断、ACK だけから停止完了も未実行も推定せず、証拠がなければ元試行を `Unknown` に保ちます。手動割込の `InterruptFenceToken` は別のローカル fence であり、Host Stop の通知や認可に代用しません。
+- Host は active master に結び付く namespace と対象 Client ごとの発行区間を直列化し、各 attempt に一意な、同じ namespace・対象 Client 内で厳密に増加する epoch（0・欠落は無効）を発行します。同じ attempt の複数の `ClientActionCommand` は同じ `(namespace, epoch)` を持ち、新 epoch に元 attempt を再利用しません。割込を観測した後は対象 Client の fence 範囲にある既発行試行を hold し、**その割込後**のユーザーと合意した明示的な新指示、結果不明なら重複リスクへの判断、現在条件での再認可を経てのみ新 epoch と新 attempt を mint し、現在認証済みの接続に束縛した `ActionEpochOpen` に観測済みの最新 fence token を echo します。割込前に作成・送信・キュー済みの別 attempt の open に後から token を付けたり、元 attempt を新 epoch に転用したりしません。Host は namespace ごとの発行済み最大 epoch（`highest_issued`）と `(namespace, epoch)` / attempt / 発行先の対応を復旧可能に保持します。`highest_issued` は未配送の open も含む Host の mint 済み最大値で、Client は知り得ず発行権威も持ちません。同じ namespace で次に発行する値は `highest_issued`、現行接続で検証した Client の `highest_seen` と `highest_accepted`、restore staging の live highwater のいずれよりも大きくします。overflow や対応関係・上限の確認不能時は発行しません。Host restart / connection replacement で旧 attempt を再開せず、接続が変わっても同じ namespace の epoch を再利用しません。新 epoch の受付は元試行の `Unknown` を解消しません。
+- Client の `highest_seen` はその起動中、検証済み Host の認証接続で対象・namespace が一致した `ActionEpochOpen` を受信した最大値で、token 不一致などで拒否した open も含みます。`highest_accepted` はそのうち実際に受理した最大値です（未観測は `None`）。両者は同じ namespace 内でしか比較せず、`highest_accepted <= highest_seen` とします。受信したことと Host が発行したことは異なり、Client に未着の `highest_issued` は Host が保持します。Client は同一プロセスの再接続ではこの観測 highwater と fence/token を維持し、bind に応じて現在 namespace の値（未観測なら `None`）と切替直前の旧 namespace の値を `ActionFenceState` で報告します。Host は current sender / bind を検証して観測値を発行 gate の下限として取り込むだけで、Client の報告を Owner 指示・権限・未記録の外部作用 fact とみなしません。現行 namespace に Host の発行記録にない高値が報告された場合、単に counter を進めて正当な発行とみなさず、対応不明として gate を閉じます。
+- backup の master 最大値が 4 で復元前の Host live `highest_issued` または同じ Client の `highest_seen` が 10 なら、4 から旧 namespace で再開しません。復元切替時に新しい推測不能な namespace を mint・永続化し、新 master の新 namespace の発行最大値を 0 から開始します。旧 namespace の 10 と新 namespace の 1 は大小比較せず、旧 namespace の open / command は新 bind で無条件に拒否します。復元が繰り返されても毎回新 namespace とし、通常の Host restart は namespace を維持して発行最大値を読み戻します。Host-local の active namespace と master の対応が失われたときは推測で旧 namespace を再利用せず、再度の隔離・新 namespace の耐久的な切替が確定するまで発行しません。新しい Client process が旧 highwater / token を知らなくても、新しい incarnation と接続への認証・新 bind の後にだけ新 namespace の指示を受け付けます。復元前の元試行は新 attempt の根拠にならず、元の作用が既に始まった可能性は `Unknown` として扱い、Owner の新指示・重複リスク判断・現在条件での再認可を経ずに再実行しません。
+- Client はコマンドを受信したら直ちに `ActionReceiptAck` を返信します。妥当な stamp の `Received` は「電文を正しく受け取った」という確認にすぎず、操作の成功、実行開始、完了のいずれをも意味しません。元 epoch の fence や未受付・旧 epoch には `DeniedByHold` / `RejectedStale`、世代番号が古い場合や能力不足にも該当する拒否を返し、操作を開始しません。
+- Client は `Received` の返信・キュー投入後も、実入力の各開始点で現行接続・incarnation・namespace / epoch・対象 Companion / Client / generation・現在のローカル停止 / 手動割込 fence を同じローカル排他下で再照合します。現行の `Stopped` の `PresenceAttributionFact` を受けたら対象 Companion の受付済み open と未開始 command を無効化し、当該試行の `ActionCancel` でも該当する未開始 command を無効化します。同じ排他下で新しい入力開始を拒否し、後の Resume や別試行の受付によって旧 command を復活させません。通信断・connection replacement・bind 切替では旧接続の未開始 queue を破棄し、停止の通知が届かなかった可能性を Host の成功証拠にしません。Stop の通知と競合して Client 側で既に開始した入力は元試行の進行中作用であり、停止結果・作用結果を別々に報告します。
+- Client は bind 済みの現在認証接続上で `ActionEpochOpen` の active namespace・発行先 connection・incarnation / 対象 Companion・Client / generation / operation / 新 attempt を照合し、同じ namespace の既知の `highest_seen` より大きい Host 発行 epoch のみ受付けます。一度でもローカル fence を立てた起動区間では epoch の大小だけでは受付けず、open の `interrupt_fence_token` がその対象 Client・incarnation の**現在の**ローカル token と一致することを必須にします。割込前に限り token は `None` とし、値を伴う open は拒否します。新 epoch を受け付けても token は消さず、その起動区間の後続 open にも最新 token を要求します。割込前にキュー・送信された高い epoch の open は token 欠落・不一致で拒否し、token を後から得た同じ open / attempt の再送でも解除しません。さらに、割込前に**受付済み**の別 epoch / attempt の open も割込時に全て無効化し、同じ open / attempt を token 付きで再送しても復活させません。新 epoch の受付と操作開始を fence 更新との排他下で確定するまで元の fence を緩めません。各 `ClientActionCommand` は開始点でも current 接続・incarnation・namespace と**割込後に受付けた** epoch / attempt / operation / 対象 Companion・Client / generation の完全一致を要求し、手動入力がなお継続中なら新 epoch でも開始しません。epoch 欠落・0・未知、別 namespace、既に fenced またはより古い epoch、未受付の新 epoch の指示は副作用なしで拒否します。新 epoch を受け付けた後で旧 epoch の未着コマンドや旧 `ActionEpochOpen` が届いても旧操作を開始しません。`command_id`・到着順・同一 presence generation だけで新旧を推定しません。
+- Computer Use 中は実対象 Client でユーザーのマウス移動・キーボード入力を検出し、自身が発行した自動入力を除外します。画面観測やモデル出力を手動入力の証拠にしません。検出・自己入力との区別・操作開始との排他性を確保できない Client は操作を開始せず、実行中に検出の保証を失ったときも新たな操作を止めます。検出時は Host の応答を待たず、対象 Client の**全ての受付済み Computer Use epoch / command** を、open 受付・各操作開始と同じ排他下で無効化します。その時点の active namespace の `highest_accepted` を `fenced_through` とし、本文を持たず推測不能な新しい `InterruptFenceToken` をローカル fence に束縛します。`fenced_through` は割込時点の受付上限であり、操作中の元 epoch だけや `highest_seen`、Host の未配送分 `highest_issued` ではありません。該当する受付済み指示は command の到着前・受領確認済み・キュー済みでも fence 後に開始しません。再度手動入力を検出したら token を更新し、新たな受付上限で fence を更新して前の token を echo する open も拒否します。元コマンドのない区間の更新は現行接続の `ActionFenceState` で伝え、Host はそれ以前に mint した attempt を解除に使いません。token を安全に生成・保持できなければ fence を解除せず操作を開始しません。各操作の開始点では Client が把握する直近の帰属・許可・中断状態と、受付時の token が現在の token に一致することを排他下で照合します。割込前に開始した作用だけはベストエフォートで停止し、止まったと推定しません。
+- Client は fence を立てた後、当該時点でコマンドを受け取っていた影響試行ごとに `ManualInputInterrupt` を送ります。元の `OperationWireId` / `AttemptWireRef` / action dispatch epoch、コマンドの presence generation、受信時の connection / incarnation、新 token と同時に確定した `fenced_through` を必須で運び、`observed.presence_generation_view` も元の G とします。open だけを受付けて command がまだない試行は架空の元コマンド通知を作らず、現行接続の `ActionFenceState` によって fence 範囲を同期します。通知送信の成否にかかわらず受付済み区間の無効化を維持します。Host は現在の認証済み接続・incarnation と元コマンドおよび同 namespace・対象 Client の発行記録に対する fence 上限を検証し、元試行ごとに割込事実を帰属させます。対象 Client の当該 namespace で `fenced_through` 以下の既発行 attempt は個別に発行 hold とし、上限を超える割込前の open / command も古い attempt として再開・token 後付けしません。元試行のない状態同期も発行 gate を止めます。Client は同じ接続の割込通知・状態同期を fence 更新順に送信し、Host は同順に gate へ反映します。fence 更新・hold と次の指示の発行判定を直列化し、hold 後に旧 attempt へ発行しません。最新の token を後続の古い通知で巻き戻さず、順序を確認できなければ新 open を発行せず状態を同期し直します。通知受信と競合して既に送信済みの指示も Client の fence が抑止します。遅延した旧 token / 旧 fence 上限の通知を割込後の新 attempt の hold に転用しません。通知は停止 ACK でも作用の確定結果でもありません。
+- 入力終了・接続 replacement・再接続・在席回復・復元切替だけで fence / Host 側の保留を解除したり、元のコマンドを再送・再開したりしません。通知より先に切断した場合、Host は停止成功を推定せず作用可能性を排除できない試行をそれぞれ `Unknown` として保留し、接続 replacement 時も未解決の Computer Use を引き継ぎません。Client は同一プロセスの再接続でもローカル fence / token と namespace ごとの観測 highwater を保持し、旧接続の受付済み command は無効のまま、再認証後の現在接続で Host の `ActionNamespaceBind` を検証して `ActionFenceState` を送ります。新規接続では token が `None` でもこの状態を送信し、Host は状態を照合するまで open を発行せず、Client も bind・状態送信前に open を受け付けません。割込通知が旧接続で失われても、旧 `ManualInputInterrupt` を新接続で再送せず、状態同期は元試行の割込事実・停止成功・certainty を捏造しません。未解決の試行は各々の作用可能性と証拠に応じて `Unknown` / hold とし、同期した token の後で明示された新指示・重複リスクの判断・再認可を経た新 attempt にだけ echo します。復元の新 namespace でも同一プロセスの現在の token は維持し、旧 namespace の fenced stamp と token を現行接続で報告しますが、旧 stamp は新 namespace の epoch 比較には用いません。旧 namespace の受付済み open / command は bind 切替時に無効にし、新 namespace の新規 open だけが最新 token で受付可能です。Client の再起動・別 incarnation では token と揮発性 highwater を持ち越さず、旧接続・旧 incarnation 宛ての指示は無効で、新接続に旧 epoch / command を受理・持ち込みません。新しい操作はユーザーと合意した新指示、現在条件による再認可、新 attempt・新 namespace 内の新 epoch の現在認証済み接続での受付を要し、元試行の結果不明は別に保持します。token の一致は割込後の鮮度照合に限り、Owner 確認・認証・Action の許可や外部への権限付与にはなりません。
 - 外部作用の最終結果は、Client からの `EffectReport` に含まれる確定度（Certainty）によって確定します。通信途絶や応答消失、確認不能によって生じた「成否不明（`Unknown`）」を、勝手に「未実行」「成功」「失敗」へ書き換えてはなりません。Host は試行状態を `Unknown` のまま永続化し、二重実行のリスクを明示した上でユーザーの判断を仰ぎます（CCT §8）。
 - **成否不明時の安易な自動再試行の禁止**: 通信切断や応答消失が発生したからといって、システムが勝手に外部操作を自動再試行してはなりません。トランスポート層の再送（同一 `command_id` ＋ 新規 `message_id`）は、同一セッション内での重複受信の防止と ack の再送に限定されます。外部への実操作をやり直すには、必ず新しい試行識別子（新 `AttemptWireRef`）を発行し、ユーザーの明示的な確認・判断を経る必要があります。Client 側も再接続時に古いコマンドを勝手に自動再実行してはなりません。
 - 外部操作（Computer Use）の実行対象は、現在アクティブな Client 端末に厳格に限定されます（安全性要件）。キャラクターの移動が発生した場合は、操作が安全に区切れるところまで移動の確定を遅らせ、移動前の端末で行っていた外部操作を移動先の別端末で勝手に自動再実行させてはなりません。また、環境観測が有効化されていることだけをもって、外部操作の実行が承認されたと誤認してはなりません。
@@ -610,6 +620,8 @@ Host 側での実行直前検証（Live authorization）、対象端末の特定
 | `StopAck` | 実行側 → 要求元 | 完了報告（停止側） | 実際の停止結果（`Stopped \| AlreadyCompleted \| StopUnknown` ＋ すでに発生した作用や未保存状態の報告）。外部作用のロールバックを保証するものではない |
 | `EffectCertaintyUpdate` | 実行側 → 要求元 | 確定事実通知 | 外部作用の最終的な確定度（`ConfirmedSuccess \| ConfirmedFailure \| Unknown`）。新しい客観的証拠が得られた場合にのみ更新 |
 
+- `ManualInputInterrupt`（§15.1）は Client が手動入力を検出し最新の fence token を mint して対象 Client の受付済み Computer Use 区間を無効化した事実を元コマンドの試行に結び付ける通知です。`ActionFenceState` は現行接続へのローカル fence 範囲の同期であって、元試行の割込事実や結果の通知ではありません。`CancelRequest` は相手へ停止を要求する別のコマンドであり、Client が Host 往復を待ってから止める経路として使いません。Host の `ActionCancel` もローカル fence の代わりにはなりません。Host は割込を受けたら当該対象 Client・namespace の fence 範囲の以後の発行を試行ごとに止め、進行中の作用をベストエフォートで停止させますが、通知・停止要求・`CancelReceived`・`StopAck` を `EffectReport` の代わりにはしません。確認できた作用と不明な作用の certainty は各元試行について独立に更新します。
+- 手動入力による割込を Task 全体の `cancel_task` へ写像しません。無関係な Host 側作業を一律停止せず、入力終了や通知消失を再開許可とも扱いません。通知より前の切断では Host は停止成功を推定せず、元試行の `Unknown` と発行 hold を維持します。
 - Host から Client へのデバイス操作のキャンセルと、Client から Host への推論・ストリーム中断（発話割り込みや回答生成の停止等）の双方向において、全く同一の区別を適用します。
 - 将来の破棄（Future drop）やネットワーク接続の切断をもって、処理の停止が完了したとみなしてはなりません。停止指示の後に遅延して届いた実行結果は、元の試行（Attempt）や操作（Operation）に正しく記録し、現在の処理に勝手に採用したり、後続の処理を自動開始させたりしてはなりません。
 - **タスクの中断（Task Cancel）との境界**: タスク単位の中断は、ここで扱う operation / stream / attempt 単位の wire-level cancel とは別の境界です。タスク中断は Host 内で個体調整（会話）または第一者管理経路から作業担当（`cancel_task`、AU16）へ直接届き、`reason` 本文を Task へ複製せず、要求元（会話履歴・管理経路の記録）が理由を保持します。`CancelRequestWire.reason` は wire-level の停止要求専用であり、Task の durable state には渡しません。cancel 後に禁止されるのは新規 work の admission と現在 Task への採用・lifecycle 前進であり、already-started activity の事実記録（AU15a の到着 record/seal、AU15b の検証済み相関、Action certainty、利用量など）は引き続き許可されます。
@@ -623,8 +635,8 @@ Client 端末内に Ene 管理下の一時的なキャッシュデータが存�
 | 電文名 | 通信方向 | パターン | 意味・役割 |
 |---|---|---|---|
 | `DeletionDemand` | Host → Client | コマンド | ローカルキャッシュの削除要求（`DeletionOpWireId`・走査世代 sweep・有効期間・対象記述子。平文本文は含めない） |
-| `DeletionProgress` | Client → Host | 進捗報告 | 削除処理の進捗報告（任意） |
-| `LocalErasureResult` | Client → Host | 完了報告（局所） | Client 内での検証・削除結果（消去完了・未確認範囲・到達不能などの内訳）。これ自体は全域完了ではない |
+| `DeletionProgress` | Client → Host | 進捗報告 | `(operation, sweep)` に紐づく削除処理の進捗報告（任意） |
+| `LocalErasureResult` | Client → Host | 完了報告（局所） | `(operation, sweep)` に紐づく Client 内での検証・削除結果（消去完了・未確認範囲・到達不能などの内訳）。これ自体は全域完了ではない |
 | `DeletionCompletedNotice` | Host → Client | 確定事実通知 | 全参加者の完了、残存検証、処理期間中の再到着データの取り込み、検索トークンの完全破棄・復元不能化までがすべて完了した後の「全域完了通知」。Client 側の免責証拠としては扱わない |
 
 ### 17.2 target / condition の Client 向け representation（本文を送らない）
@@ -632,7 +644,7 @@ Client 端末内に Ene 管理下の一時的なキャッシュデータが存�
 ```rust
 struct DeletionDemand {
     operation: DeletionOpWireId,
-    sweep: u64,
+    sweep: u64, // DeletionSweepGeneration の wire 表現。0 は無効
     valid_interval: ValidIntervalWire,
     targets: Vec<DeletionTargetWire>,
 }
@@ -643,9 +655,12 @@ enum DeletionTargetWire {
 }
 ```
 
+`DeletionProgress` も必須 `(operation, sweep)` に進捗を結び、`LocalErasureResult` と同じ demand に対してのみ送信します。進捗は完了 fact になりません。
+
 - 削除対象の機械的検索文字列そのものを Client へ送ることはしません。Client は、データ分類（class）＋ 時間範囲（interval）＋ アイテム参照（item ref）によって特定できる一時データを確実に消去（wipe）し、消去範囲および確認できなかった範囲を Host へ報告します。システム全体の機械的な検索・残存検証は Host 側が責任を持って実行します（意味的な言い換え特定などの完全性を Client 側に要求・保証しません。CI §3.6）。
-- Client は `LocalErasureResult { wiped, unverified_range, unreachable_detail }` を返信します。通信途絶や未確認の範囲を勝手に「消去成功」と読み替えてはなりません。また、再接続時に古いキャッシュデータを Host へ持ち帰って記憶を再形成させてはなりません。
-- 過去の古い削除操作（旧 operation や旧 sweep）に対する遅延報告は、現在の全域完了の証拠としては採用せず、元の操作記録に留めます。
+- Client は `LocalErasureResult { operation, sweep, wiped, item_results, unverified_range }` を要求の `(operation, sweep)` とともに返信します。通信途絶や未確認の範囲を勝手に「消去成功」と読み替えてはなりません。また、再接続時に古いキャッシュデータを Host へ持ち帰って記憶を再形成させてはなりません。
+- Host は応答の必須 `(operation, sweep)`（sweep 0 は無効）を元の demand・required participant・Host の current erasure condition と照合し、同じ組の結果だけを current sweep の participant fact に変換します。欠落、要求との不一致、未知の参照は不受理とし、到着順・`command_id`・`reply_to` から sweep を補いません。過去の古い削除操作（旧 operation や旧 sweep）に対する遅延報告は、現在の全域完了の証拠としては採用せず、元の操作記録に留めます。
+- Host はストリームの最初だけでなく、本文を持つ各 frame / attachment chunk の送信確定点で current erasure condition と phase を照合し、配送可能性をその部分より先に durable に記録します。対象文字列を frame 境界で分断して照合から逃がしてはなりません。Client も各部分の表示・保持前に現在の削除 fence を適用します。削除要求を受けた後、該当 class に対する旧送信区間の body-bearing frame を遅れて受信しても表示・保持せずに拒否します。同じ connection 上では削除要求と body-bearing frame の送信・処理順を保ち、接続置換後は旧 connection からの body-bearing frame を拒否します。並行処理やアタッチメントによってこの順序・区間の区別を保証できない場合は、Client が確認なしに受け取る経路を作らず保留します。Host は送信前の durable な配送可能性と outstanding delivery を追跡し、旧送信区間の収束・Client 側の不受理と class 全域の消去を確認してから current sweep の `LocalErasureResult` を `Verified` に採用します。古い frame が消去後に届き得る状態や確認不能な状態は `Held` とし、単なる ACK や再接続を完了証拠にしません（[Targeted Deletion Lifecycle §8.1](targeted-deletion-lifecycle.md#81-client-participant)）。
 - `DeletionDemand` に含まれる Client 向けの対象記述子は削除処理中のみメモリに保持し、処理完了後に速やかに破棄します。Host 側の機械的検索トークンは、PR / CCT の規約に従い、すべての参加者の完了集約、残存検証、および処理期間中の再到着データの取り込みを終えた後に、確実に消去または復元不能化（暗号鍵の破棄等）を行い、その完了を確認してからシステム全域での完全削除完了を永続化します。最終消去と完了マーカーの記録が不可分に完了するまでの間は、削除処理中（`finalizing`）として保留状態を維持します。完了記録や監査ログに対象の平文本文を戻してはなりません。
 
 ## 18. Management surface
@@ -659,8 +674,10 @@ enum DeletionTargetWire {
 - **対象となる操作**: デバイスのペアリング承認・再ペアリング、デバイスの信頼関係や機能許可の変更・失効（自身の端末を含む）、認証秘密（Credential）の登録・更新・差し替え・失効、バックアップ復元の実行確認と復元データの一括有効化、全データ削除（Full Reset）の確認。また、同一の信頼境界やアクセス制御を変更する操作（ローカル MCP のサンドボックス外実行の例外許可や重要変更など）も同一の厳格な確認を通します。操作種別の名前ではなく、実際の操作対象とシステムへの影響度に基づいて分類し、汎用設定のリセットなどを経由した迂回を決して許しません。
 - **Host PC 上の第一者管理画面の判定**: Host が信頼されたインストールから GUI を起動し、その child にだけ継承した専用 endpoint と process 生存記録から `FirstPartyControlSeat` を発行します。session は Host incarnation / seat generation / channel / 操作対象 / expected revision に束縛し、GUI の直接確認後に同じ channel から届く completion を owner の確定境界で照合します。通常 Client、要求専用 listener、別 endpoint の nonce、PID の自己申告は `DeniedByBoundary` です。空席でも同一 UID の接続者を確認者にしません。Host / GUI restart は session を失効させます。初回セットアップも同じ経路です。OS・インストール・対話 session の完全性という保証前提は [Runtime Topology](../architecture/runtime-topology.md#第一者確認面の信頼前提)、実行手順と outcome は [First-party desktop](first-party-desktop.md) 第5節に従います。
 - **リモートからの要求の受入フロー**: リモート端末からの高権限操作の要求はリクエストとして受け付け、`NeedsClarification` とフィルタリングされた閲覧ビューを返し、Host PC 側での最終確認待ち状態であることを画面に表示します。「リモート側ですでに承認済みである」という申告や、リモートからの代行承認は `DeniedByBoundary` として拒否し、変更は適用しません。Host PC 上でユーザー自身が変更内容と影響を確認した事実があって初めて、Host 内部で現在の前提条件と紐付けられて各担当者へ手渡されます。この最終確認の電文をリモート通信に乗せることはなく、確認完了後に操作対象が変更された場合や前提世代が古くなった場合は、再確認を必須とします。確認結果の使い回しや包括的な流用は禁止します。
-- **自動化・外部入力による代理確認の禁止**: Computer Use、ツール実行、MCP Apps、プラグイン、LLM の出力、リモートからの代理入力は、確認完了の入力経路ではない。ene 認可の Computer Use は確認面を操作対象にできない。座った GUI をクリックした後から「Computer Use だった」と却下することはできない。管理画面の利用においてキャラクターが稼働中であることは必須ではなく、テキスト操作から直接アクセス可能であり、メイン LLM や長時間タスク、立ち絵描画、音声出力の成功を待つことなく確実に操作できます。
-- **通常操作との分離**: 通常のフィルタリングされた設定閲覧、キャラクターの停止、キャンセル、承認の拒否などは、既存のリモート通信経路から安全に実行できます。バックアップ作成や通常の会話削除を含む複合操作全体を一括して高権限扱いにするのではなく、上記に該当する危険な操作に対してのみ個別の確認条件を適用します。また、認証秘密の平文入力や保管は保護された Host ローカルの設定経路でのみ扱い、通信電文のペイロードに乗せることは決してありません。
+- **自動化・外部入力による代理確認の禁止**: Computer Use、ツール実行、プラグイン、LLM の出力、リモートからの代理入力は、確認完了の入力経路ではない。ene 認可の Computer Use は確認面を操作対象にできない。座った GUI をクリックした後から「Computer Use だった」と却下することはできない。管理画面の利用においてキャラクターが稼働中であることは必須ではなく、テキスト操作から直接アクセス可能であり、メイン LLM や長時間タスク、立ち絵描画、音声出力の成功を待つことなく確実に操作できます。
+- **通常操作との分離**: 通常のフィルタリングされた設定閲覧、キャラクターの停止、キャンセル、承認の拒否などは、既存のリモート通信経路から安全に実行できます。バックアップ作成や通常の会話削除を含む複合操作全体を一括して高権限扱いにするのではなく、上記に該当する危険な操作に対してのみ個別の確認条件を適用します。Credential の通常登録・更新・差し替え用の秘密平文 intake は保護された Host-local 設定経路だけで扱い、通常の通信電文には載せません。Targeted Deletion の remote `ExactText` は §18.3 の削除専用 WSS secret-bearing input frame に限る例外であり、登録・更新の遠隔許可にはなりません。
+
+Targeted Deletion は上記 Host-local 高権限操作の一覧に含めません。指定 Credential deletion は §18.3 の削除専用確認と credential owner participation に従い、登録・更新・差し替えの通常経路とは区別します。
 
 ### 18.2 DTO と受入
 
@@ -675,7 +692,7 @@ struct ManagementIntent {
 enum ManagementOutcome {
     AppliedAsOneTime,                   // 今回限りの適用として完了
     StoredAsRuleView,                   // ルールとして保存完了
-    NeedsClarification,                 // Host PC でのユーザー確認待ち
+    NeedsClarification,                 // 操作ごとの Owner 確認待ち
     DeniedByBoundary,                   // セキュリティ境界違反による拒否
     StaleBaseView { current: ViewMark },// 閲覧した前提が古いため再取得が必要
     HeldByOperation,                    // 他の重要処理（削除中等）による保留
@@ -700,6 +717,14 @@ Task の read query は保存済み lifecycle と現在の実行登録の有無�
 
 wire ref はこの接続の query で Host が canonical ID から発行・解決します。restart 後に古い wire ref が解決不能なら `UnknownRef` とし、Client は query で再取得します。wire ref を TaskId へ cast したり、失われた会話 projection を履歴の全文走査で推測したりしません。
 
+### 18.3 Targeted Deletion 専用の Owner 確認
+
+`RequestDeletionBackupRestoreReset` 等の management intent は削除開始権限を持ちません。Targeted Deletion に限り、ペアリング済み remote を含む同じ通常 Client の専用 first-party 面で Owner が直接確認できます。Host は操作 / request ID、明示された privacy / security purpose、機械的な対象・範囲、影響・除外事項、expected revision / generation を正規化して提示します。公式 Client はこの内容を表示し、現在の Owner の明示的な操作後だけ専用 completion を生成します。通常 `ManagementIntent`、chat、CLI や tool / plugin にその生成経路を公開せず、ene 管理の LLM / tool / Computer Use に確認を代行させません。Host 発行の一回限り・短期限 challenge を操作・目的・対象・影響・expected currentness と device / authenticated session / current connection / Client incarnation / Host incarnation に束縛し、当該接続の専用電文と一致・期限・未消費・現在性を検証します。これは認証済み Client の現在の Owner confirmation の報告を信頼して受理する境界です。Host は同じ端末での偽造 UI 入力や completion と実際の物理入力を区別できず、first-party UI 由来・人の操作自体を暗号学的に証明しません。Client process / OS / 公式コード / 対話 session の完全性を信頼前提とします。`confirmed=true`、認証済みの一般電文のみ、nonce の自己申告、画面表示 ACK、別 Client の代理承認、LLM / tool / Computer Use の出力は確認に昇格させません。Client の専用確認面は ene Computer Use の対象・入力注入から除外します。
+
+対象選択の wire は二経路です。`RegisteredCredential { ref }` は Client が非秘密の登録参照を選び、通常の削除専用 request / preview / completion に参照と非秘密の範囲だけを載せます。`ExactText` は Owner が入力した任意の文字列が Host で判定される前から登録秘密値と同一になり得るため、通常の request / preview / completion、management / chat DTO、Client 長期 cache、replay queue、log / Debug / telemetry には載せません。remote の値指定を提供する場合に限り、認証済み first-party WSS connection 上の **secret-bearing deletion input frame** を分離し、削除専用入力面から一回だけ送ります。frame の型・長さ上限と request ID、device / session / current connection / incarnation、短期限、削除専用 scope を受信入口で検証し、通常 handler や plugin / tool / Body に公開せず、Host は限定 buffer で受けて直ちに認証秘密 owner に直接照合させます。Client・Host は intake / 拒否 / 切断 / timeout で一時 buffer を無効化・zeroize し、再接続や retry 時に値を再送しません。Host は登録値に一致した場合も生値を Client DTO / 通常 SQLite へ移さず、非秘密の対象参照・同値登録の影響を提示します。preview と confirmation challenge は値や hash ではなく一時入力 handle と確定した範囲に束縛し、値入力の失効時には確認も失効させます。登録秘密値を検証材料として OS に保存する場合は非秘密の準備 identity を先に durable 化し、開始 commit でその材料を operation に結び付けます。確認失効や開始失敗時は孤立材料を検証消去し、開始後は機械的残存検証まで保護します（[Targeted Deletion Lifecycle §3.1](targeted-deletion-lifecycle.md#31-operation-中だけ保持する検索材料)）。この限定 frame の非保持・短寿命・owner 到達を保証できない接続では remote 値指定を受理せず、登録対象は ref 指定へ誘導します。
+
+確認を受けても Host の preservation owner が deletion-start の短い admission 境界で operation、目的、対象・影響、expected currentness、接続と確認 provenance、期限・未消費状態を現在値と再比較して一回だけ消費します。失効・接続置換・切断・Host restart・対象の変化・確認不能は mutation 前に hold / refusal とし、古い確認を新しい接続へ引き継ぎません。Host GUI が無いことだけを理由に remote Client の ref 指定を拒否しません。開始後の durable condition・sweep・復旧は [Targeted Deletion Lifecycle](targeted-deletion-lifecycle.md) に従います。登録済み Credential の ref 指定では秘密値を wire へ出さず、値指定時の限定入力は登録・更新の remote 解放に使いません。§18.1 の Host-local 高権限 seat は引き続き API キー登録、端末 pairing、backup restore、全 reset 等に必須です。
+
 ## 19. Body / presentation resources
 
 - Host は、3D立ち絵（VRM）、モーション設定、音声プロファイルなどの静的表示アセットを、アセット記述子（Descriptor）＋ 分割チャンクストリームとして供給します。キャラクターの適用関係や個体の経験状態は送信しません。また、Host 内部のマスターデータの主キーとして勝手に再利用できる形式でアセット ID を渡してはなりません。
@@ -716,7 +741,7 @@ wire ref はこの接続の query で Host が canonical ID から発行・解�
 |---|---|---|---|---|
 | M-1 | `PairingRequest / PairingResult` | Client → Host / Host → Client | リクエスト / レスポンス | Host（§18 の Host PC 上でのユーザー最終確認）。Client 要求はあくまで申込み |
 | M-2 | `AuthChallenge / AuthProof / AuthResult` | Host → Client / Client → Host / Host → Client | リクエスト / レスポンス（認証専用） | Host。古い証明や材料を使って復活させてはならない |
-| M-3 | `CapabilityAdvertise / NegotiatedConnection` | Client → Host / Host → Client | リクエスト / レスポンス（接続時） | Host（合意バージョンの決定）。Client 申告は動作状況の事実 |
+| M-3 | `CapabilityAdvertise / CapabilityAcknowledged` | Client → Host / Host → Client | リクエスト / レスポンス（Paired phase） | 双方が現行版の一致を確認。Client の機能申告は動作状況の事実 |
 | M-4 | `CapabilityUpdate / AvailabilityFact` | Client → Host | 確定事実通知 | Host（判断材料として受領）。権限許可や存在成立ではない |
 | M-5 | `MoveIntent / MoveOutcome (TransitionAck)` | Client → Host / Host → Client | コマンド ＋ 受付確認 | 接続・存在担当（帰属の確定）。移動意図は個体調整または Client |
 | M-6 | `PresenceAttributionFact` | Host → Client | 確定事実通知（購読型） | 接続・存在担当。最新値として古い通知を自動上書き |
@@ -728,16 +753,17 @@ wire ref はこの接続の query で Host が canonical ID から発行・解�
 | M-12 | `VoiceStreamOpen / AudioFrame / VoiceControl / VoiceStreamClose` | 双方向 | ストリーム ＋ コマンド | やり取りの実際は入出力・提示担当。会話の意味判断は個体調整担当 |
 | M-13 | `EligibilityFact / CaptureTicket` | Host → Client | 確定事実通知 / コマンド | 共有観測担当（観測対象・タイミングの制御） |
 | M-14 | `CaptureFrame / CaptureOutcome` | Client → Host / Host → Client | コマンド ＋ 受付確認 | 共有観測担当（ルーティングの採否）。受信は理解や発話判断ではない |
-| M-15 | `ClientActionCommand / ActionReceiptAck / ActionProgress / EffectReport` | Host → Client / Client → Host | コマンド ＋ 受付確認 ＋ 進捗 ＋ 完了報告 | 実行・拡張担当（外部作用・確定度）。コマンド到着と操作成功は別 |
-| M-16 | `ActionCancel (CancelRequest) / CancelReceived / StopAck / EffectCertaintyUpdate` | 双方向 | コマンド ＋ 受付確認 ＋ 完了 ＋ 確定事実通知 | 各担当者（事実の帰属）。電文到着と停止完了は別 |
+| M-15 | `ActionNamespaceBind / ActionFenceState / ActionEpochOpen / ClientActionCommand / ActionReceiptAck / ActionProgress / ManualInputInterrupt / EffectReport` | Host → Client / Client → Host | 認証後の namespace bind・必須 highwater 同期 ＋ 発行区間の開始 ＋ コマンド ＋ 受付確認 ＋ 進捗 ＋ Client ローカル割込事実 ＋ 完了報告 | 実行・拡張担当（元 namespace・epoch・試行の割込帰属、外部作用・確定度）と接続担当（現行接続の照合）。旧 restore namespace の command / report は新 master に採用せず、Client は割込前の高い epoch の open も token で拒否する |
+| M-16 | `ActionCancel (CancelRequest) / CancelReceived / StopAck / EffectCertaintyUpdate` | 双方向 | 停止要求コマンド ＋ 受付確認 ＋ 停止結果 ＋ 確定事実通知 | 各担当者（事実の帰属）。`ManualInputInterrupt` は停止要求・Task Cancel ではなく、電文到着と停止完了は別 |
 | M-17 | `DeletionDemand / DeletionProgress / LocalErasureResult / DeletionCompletedNotice` | Host → Client / Client → Host | コマンド ＋ 受付確認相当 ＋ 確定事実通知 | 保全・消去担当（全域完了の確定）。局所完了と全域完了は別 |
-| M-18 | `ManagementIntent / ManagementOutcome` | Client → Host / Host → Client | コマンド ＋ 受付確認（要求 ＋ 決定結果） | 各制御担当者。intent は提案。高権限操作の最終確認は本電文ではなく §18 の Host PC 側で直接行う |
+| M-18 | `ManagementIntent / ManagementOutcome` | Client → Host / Host → Client | コマンド ＋ 受付確認（要求 ＋ 決定結果） | 各制御担当者。intent は提案。Host-local 高権限確認は §18.1、Targeted Deletion の専用確認は §18.3 に従い、本電文の自己申告では完了しない |
 | M-19 | `ManagementViewRequest / ManagementView` | Client → Host / Host → Client | リクエスト / レスポンス | 各担当者（表示用データへの投影）。ビューはマスターデータではない |
 | M-20 | `AssetDescriptorRequest / AssetDescriptor / AssetChunkStream` | Client → Host / Host → Client | リクエスト / レスポンス ＋ ストリーム | キャラクター担当（静的定義の供給）。適用の確定は個体調整担当 |
 | M-21 | `BodyStateHint` | Host → Client | 確定事実通知 | 個体調整担当（活動状態）＋ 認識・学習担当（内的状態の意味）。描画の直接指示ではない |
 | M-22 | `RevocationNotice` | Host → Client | 確定事実通知 | 権限担当 ＋ 接続担当。電文が届かない場合でも失効自体は即座に確定 |
 | M-23 | `UnsupportedMessage / IncompatibleProtocol` | Host → Client（主に） | 拒否通知（第24節） | トランスポート / マッピング層。副作用なし |
 | M-24 | `CommandReplayRejectWire` | 受信側 → コマンド送信側 | 型付き通信拒否通知 | コマンド相関・冪等性境界。ドメイン処理に入る前に `CommandIdConflict` や、結果を保持していない非ID発行コマンドの `AlreadyProcessed` を返す。副作用なし |
+| M-25 | `DeletionConfirmationChallenge / DeletionConfirmationResponse / DeletionStartOutcome` | Host → Client / Client → Host / Host → Client | 専用 first-party 確認 ＋ 開始結果 | 保全・消去担当。認証済み接続・専用面の入力由来と Host の開始直前再比較が揃ったときだけ admission。intent や表示 ACK は確認ではない（§18.3） |
 
 ## 21. Wire DTO（pseudo-code）
 
@@ -746,6 +772,7 @@ wire ref はこの接続の query で Host が canonical ID から発行・解�
 ```rust
 // ---- 共通型 ----
 struct ProtocolVersion { major: u16, minor: u16 }
+struct IncompatibleProtocol { host_version: ProtocolVersion, client_version: ProtocolVersion }
 struct WireMessageId(/* 不透明値; 新規送信ごとに必ず新しく発行 */);
 struct RequestWireId(/* 不透明値 */);
 struct CommandWireId(/* 不透明値 */);
@@ -843,11 +870,36 @@ enum CaptureOutcomeWire {
 }
 
 // ---- 外部操作 (Action) ----
+struct ActionDispatchNamespaceWire(/* Host が master 切替ごとに新規発行する推測不能値 */);
+struct ActionDispatchEpochWire(/* 同 namespace・対象 Client 内で Host が単調増加させる値。0 は無効 */);
+struct ActionEpochStampWire { namespace: ActionDispatchNamespaceWire, epoch: ActionDispatchEpochWire }
+struct InterruptFenceToken(/* Client が手動入力ごとに新規生成する推測不能な本文なし値。許可ではない */);
+struct ActionNamespaceBindWire {
+    namespace: ActionDispatchNamespaceWire,
+    target_client: ClientWireRef,
+    target_connection: ConnectionWireId,
+    target_incarnation: ClientIncarnationId,
+}
+struct ActionEpochOpenWire {
+    stamp: ActionEpochStampWire,
+    operation: OperationWireId,
+    attempt: AttemptWireRef,
+    companion: CompanionWireRef,
+    target_client: ClientWireRef,
+    generation: u64,
+    target_connection: ConnectionWireId,
+    target_incarnation: ClientIncarnationId,
+    interrupt_fence_token: Option<InterruptFenceToken>, // 同 incarnation で割込前は None、割込後は最新 token
+}
 struct ClientActionCommandWire {
     operation: OperationWireId,
     attempt: AttemptWireRef,
+    stamp: ActionEpochStampWire,
+    companion: CompanionWireRef,
     target_client: ClientWireRef,
     generation: u64,
+    target_connection: ConnectionWireId,
+    target_incarnation: ClientIncarnationId,
     device_op: DeviceOpWire,
     constraint: ActionConstraintWire,
     idempotency_key: CommandWireId,
@@ -857,17 +909,54 @@ struct DeviceOpWire {
     target: DeviceTargetWire,
     params: DeviceParamsWire,
 }
-enum ActionReceiptAckWire {
+struct ActionReceiptAckWire {
+    stamp: ActionEpochStampWire,
+    operation: OperationWireId,
+    attempt: AttemptWireRef,
+    outcome: ActionReceiptOutcomeWire,
+}
+enum ActionReceiptOutcomeWire {
     Received,
     RejectedStale { current_generation: u64 },
     DeniedByHold { reason: HoldReasonWire },
     UnsupportedCapability,
 }
+struct ActionProgressWire {
+    stamp: ActionEpochStampWire,
+    operation: OperationWireId,
+    attempt: AttemptWireRef,
+    progress_seq: u64,
+    state_hint: ActionProgressHintWire,
+}
 struct EffectReportWire {
     operation: OperationWireId,
     attempt: AttemptWireRef,
+    stamp: ActionEpochStampWire,
     certainty: CertaintyWire,
     grounds_ref: GroundsRefWire,
+}
+struct ManualInputInterruptWire {
+    operation: OperationWireId,
+    attempt: AttemptWireRef,
+    stamp: ActionEpochStampWire,
+    fenced_through: ActionEpochStampWire, // 同じ割込で無効化した受付済み epoch の上限。同 namespace で stamp 以上
+    generation: u64,                       // 元の ClientActionCommand の presence generation
+    origin_connection: ConnectionWireId, // 指示を受けた接続。sender と照合する
+    origin_incarnation: ClientIncarnationId,
+    interrupt_fence_token: InterruptFenceToken,
+}
+struct ActionFenceStateWire {
+    namespace: ActionDispatchNamespaceWire, // 現行接続の bind と一致
+    highest_seen: Option<ActionDispatchEpochWire>, // この namespace の受信済み open 最大値。拒否も含む
+    highest_accepted: Option<ActionDispatchEpochWire>, // この namespace の受付済み open 最大値
+    previous_highwater: Option<ActionHighwaterWire>, // 同一プロセスが直前の別 namespace を観測した場合
+    fenced_through: Option<ActionEpochStampWire>, // 最後の割込時の受付上限。旧 namespace の stamp も保持・報告する
+    interrupt_fence_token: Option<InterruptFenceToken>, // 割込後は必ず Some。受付済み open がなく fenced_through=None でも Some
+}
+struct ActionHighwaterWire {
+    namespace: ActionDispatchNamespaceWire,
+    highest_seen: Option<ActionDispatchEpochWire>,
+    highest_accepted: Option<ActionDispatchEpochWire>,
 }
 
 // ---- 中断・キャンセル (Cancel) ----
@@ -881,12 +970,13 @@ enum StopAckWire { Stopped, AlreadyCompleted, StopUnknown }
 // ---- 個人データ完全削除 (Deletion) ----
 struct DeletionDemandWire {
     operation: DeletionOpWireId,
-    sweep: u64,
+    sweep: u64, // DeletionSweepGeneration の wire 表現。0 は無効
     valid_interval: ValidIntervalWire,
     targets: Vec<DeletionTargetWire>,
 }
 struct LocalErasureResultWire {
     operation: DeletionOpWireId,
+    sweep: u64, // demand の sweep をそのまま返す。0 は無効
     wiped: Vec<WipedClassWire>,
     item_results: Vec<ItemErasureResultWire>,
     unverified_range: Vec<UnverifiedRangeWire>,
@@ -907,14 +997,16 @@ struct ManagementViewWire {
 | `ConfirmPresentation` | 該当 Round の未伝達報告状況の更新（提示 Round と presented / unknown。wire の `Failed` は presented=false の unknown として記録） | 個体調整担当（報告状況）＋ 入出力・提示担当 |
 | `MoveIntent` | `RequestMoveCommand`（IB X-A） | 接続・存在担当 |
 | `CaptureFrame` | `PublishObservationCandidate` の Client 由来部分（IB X-E） | 共有観測担当 |
-| `ActionReceiptAck` / `EffectReport` | `ReportEffectFact` の Client 由来部分（IB K-H） | 実行・拡張担当 |
-| `LocalErasureResult` | `ParticipantCompletionFact` の Client 参加分（IB D-B） | 保全・消去担当（集約） |
+| `ActionReceiptAck` / `ActionProgress` / `EffectReport` | current sender と active `(namespace, epoch)` / operation / attempt / 対象・発行先を元コマンドに照合した場合だけ `ReportEffectFact` の Client 由来部分（IB K-H）へ写像。復元前の旧接続・旧 namespace の報告を復元後 master の作用 fact にしない | 実行・拡張担当 |
+| `ManualInputInterrupt` | §11.2 の current authenticated sender と必須 `origin_connection` / `origin_incarnation`、active namespace の一致、`observed.presence_generation_view = Some(generation)`、元コマンドの operation / attempt / `(namespace, epoch)` / generation / 対象 Client / 発行先、および必須 token・同 namespace で元 epoch 以上かつ検証済み発行上限以下の `fenced_through` を照合する。元 G が現在 G+1 でも入口で stale として捨てず、元試行への割込事実と対象 Client の fence 範囲に属する既発行 attempt ごとの hold・発行 gate の最新 token に写像。欠落・未知・旧 restore namespace の stamp は拒否し、遅延した旧 token の通知を新 attempt の hold や token の巻き戻しに使わない。作用結果は `ReportEffectFact` / `EffectReport` で別途確定 | 実行・拡張担当（該当試行の発行停止・事実の帰属）。接続・存在担当は sender の現在値を照合し、Task Cancel へは変換しない |
+| `ActionFenceState` | bind 後、token が `None` でも必須。current sender・接続・incarnation・対象 Client・bind namespace と highwater の順序（`highest_accepted <= highest_seen`、未知は両方 None）を検証する。token が `None` なら fenced stamp は `None`、token が `Some` でも受付済み open のない割込なら stamp は `None`。stamp が現行 namespace なら `highest_accepted` 以下かつ既発行値であること、旧 namespace なら報告済みの旧 highwater と矛盾しないことを照合する。旧 namespace の highwater / fence は現行接続の発行 gate の鮮度入力に限り、旧接続の通知・元試行の fact / certainty に変換しない。不明・逆行・同一接続の更新順不定は発行保留 | 接続担当（現行接続）＋ 実行・拡張担当（発行 gate）。認可・Owner 確認ではない |
+| `LocalErasureResult` | 必須 `(operation, sweep)` を demand と current condition に照合してから `ParticipantCompletionFact.condition` の Client 参加分（IB D-B）へ写像 | 保全・消去担当（集約） |
 | `ManagementIntent` | `ProposeControlChangeCommand` 等の意図データ供給（IB K-A、第9節） | 権限・制約担当 ＋ 各ドメイン担当 |
 | `CommandReplayRejectWire` | ドメイン層へマッピングしない。送信者セッション、フィンガープリント、冪等性マーカーの通信境界で直接処理する | プロトコル相関境界（ドメイン決定権威ではない） |
 
 ## 22. Backpressure and streams
 
-以下の制御は同一 PC / remote の WSS 接続で共通に適用します。WebSocket の送信バッファだけに任せず、application queue、書込待ち、分割 message の再構成にも第10.2節の上限を適用します。Ping / Pong / Close の処理が業務電文の待ちで無期限に止まらない構成とし、通信層の Pong を業務上の ACK に変換しません。
+以下の制御は同一 PC / remote の WSS 接続で共通に適用します。WebSocket の送信バッファだけに任せず、application queue、書込待ち、分割 message の再構成にも第10.2節の上限を適用します。Ping / Pong / Close の処理が業務電文の待ちで無期限に止まらない構成とし、通信層の Pong を業務上の ACK に変換しません。provider 由来の本文を含む queue / 書込待ちの項目は scrub 証明と由来相関を失わず、ready 済み connection の各 chunk の実送信開始点で Credential Publication §4 の最終 gate を通します。enqueue 時だけの照合や、既に codec / TLS buffer に渡した未開始の body-bearing bytes を後で無条件に flush する方式は使いません。送信 owner は共有 publication gate 下で同じ master の現在性と配送可能性を比較・durable commit し、SQLite transaction を解放して guard を保持したまま有界の同期 nonblocking first-write を実行します。TLS buffer への格納だけではなく当該 byte の OS への正の受理または実際に開始した不可逆 handoff を確認してから guard を解放します。EAGAIN・背圧で未開始なら guard を解放して待ち、再試行時に現在性を再比較します。開始を確定した部分だけを元の接続・stream・順序に帰属させ、後続 byte / chunk は再び gate を通します。送信前の削除条件・配送可能性の durable 記録に失敗した部分は Client へ 0 byte とし、送信結果不明なら Unknown として自動再送しません。gate 中の `.await` / blocking OS・TLS I/O や物理配送の完了待ちは行わず、上記の有界 nonblocking first-write のみを許します。
 
 すべてのメッセージに対して、システム全体での厳密な一意の順序付け（global total ordering）を求める必要はありません。順序が厳密に求められるのは、特定のストリーム内（`StreamWireId`＋`seq`）だけであり、独立したストリーム間や、各種の事実（fact）・コマンド（command）の間には大域的な順序関係を課しません。また、重要な制御メッセージ（control message）を高頻度な画面キャプチャフレームと同じ方針で安易に破棄（drop）してはなりません。
 
@@ -932,11 +1024,11 @@ struct ManagementViewWire {
 
 ## 23. Security
 
-- **通信路（wire）に絶対に流してはならない情報**：
-  各種認証情報（Credential）の秘密値、ホスト内部でのみ必要な権限判定の詳細、他のパートナー（Companion）のプライベートなルーティング情報、必要以上の過去ログや記憶データ（Memory / History）、削除対象となった個人データの本文の不要な複製。
+- **通常の通信電文（wire）に流してはならない情報**：
+  各種認証情報（Credential）の秘密値、ホスト内部でのみ必要な権限判定の詳細、他のパートナー（Companion）のプライベートなルーティング情報、必要以上の過去ログや記憶データ（Memory / History）、削除対象となった個人データの本文の不要な複製。唯一、remote Owner の任意 `ExactText` 入力が照合前から登録秘密と一致し得るため、§18.3 の削除専用 WSS secret-bearing input frame には入力値を一度だけ載せられます。通常の削除 DTO、chat、management、ログ・監査・Debug への複製は禁止し、この例外を Credential 登録・更新・差し替えに転用しません。
   UI表示用のビュー・要約・記述子は適切にフィルタリングした投影データに留め、判断の根拠となった私的な全文、判定情報のコピー、内部の秘密情報を含めてはなりません。
 - **クライアントから受け取るフィールドは未検証入力（untrusted input）として厳格に検証する**：
-  ホスト側の受信マッピングでは、文字列長の上限チェック、enumバリアントの正当性確認、IDの不透明形式チェック、数値の範囲チェック、クライアントが申告した `observed`（観測値）とホスト側の現在値との照合（クライアントの申告を勝手にマスターデータ化しない）、認証情報や秘密情報らしき文字列の混入検査（検出時は受信拒否して監査ログに記録。ただし完全な自動検出は保証できないため、要件の認証情報管理節に従う）を必ず行います。
+  通常の受信マッピングでは、文字列長の上限チェック、enumバリアントの正当性確認、IDの不透明形式チェック、数値の範囲チェック、クライアントが申告した `observed`（観測値）とホスト側の現在値との照合（クライアントの申告を勝手にマスターデータ化しない）、認証情報や秘密情報らしき文字列の混入検査（検出時は受信拒否して秘密を含まない監査事実だけを記録。ただし完全な自動検出は保証できない）を行います。§18.3 の専用 frame は値が秘密かどうかを判定する前から保護し、通常フィールドの秘密混入拒否を適用して目的の入力を拒否しません。代わりに frame 種別・長さ・認証済みの現行 connection / device / session / incarnation・request / challenge・期限・未消費・削除専用 scope を入口で検証し、受信直後に限定 buffer から credential owner へ渡して短命の入力を zeroize します。拒否時も値・hash を audit に記録しません。
 - **型安全な Rust の DTO であることをセキュリティ境界の代替と過信しない**：
   DTO のデシリアライズに成功したことと、入力値が正当で安全であることは別です。マッピング処理の必須フェーズとして明示的な `validate()` の呼び出しを義務付けます。
 - **ログ・監査ログ・デバッグ出力に秘密値や削除対象の本文を出力しない**：
@@ -951,8 +1043,8 @@ struct ManagementViewWire {
 | レイヤー | 種別 | 具体例 | 扱い・対処方針 |
 |---|---|---|---|
 | 通信（transport） | 接続切断（connection lost） | ピアの切断・TLSハンドシェイク失敗 | コネクションを終了する。現在の在席帰属・試行状態・未伝達メッセージはホストの永続ストレージに残し、再接続時は新しいコネクションとして再度認証を行う |
-| 通信（transport） | デコード失敗（decode failure） | MessagePack デコード失敗・フレームサイズ上限超過 | 該当フレームを破棄し、可能であれば `DecodeFailed` を相手へ通知する。副作用は発生させない。エラーが頻発・累積する場合は接続を切断する |
-| 通信（transport） | 非対応プロトコル | メジャーバージョンの不一致・認証前のドメイン操作要求 | `IncompatibleProtocol` で直ちに拒絶する。勝手な推測で解釈しない |
+| 通信（transport） | デコード失敗（decode failure） | MessagePack デコード失敗・フレームサイズ上限超過・現行版スキーマに未知のフィールドや必須フィールドの欠落 | 該当フレームを破棄し、可能であれば `DecodeFailed` を相手へ通知する。副作用は発生させない。エラーが頻発・累積する場合は接続を切断する |
+| 通信（transport） | 非対応プロトコル | 現行版との major または minor の不一致 | `IncompatibleProtocol { host_version, client_version }` で明示的に拒絶し、接続を終了する。認証前のドメイン操作要求は `InvalidHandshakePhase` で拒否する。勝手な推測で解釈しない |
 | 通信（transport） | 認証失敗 | 証明書の不一致・失効済みデバイス・ナンス（nonce）の再利用 | `AuthFailed` で拒絶する。古い認証情報を使って勝手に復活させない |
 | 通信拒絶（wire reject） | コマンド同一性の衝突／過去結果の取得不能 | `CommandReplayRejectWire::CommandIdConflict`・`AlreadyProcessed` | 現在認証されている送信者エポックのマーカーおよびフィンガープリントと照合し、ドメイン層へ渡す前に通信境界で直ちに返却する。`CommandIdConflict` は同一IDで内容が異なる不正な再送を副作用なしで拒絶する。`AlreadyProcessed` は過去の詳細な結果を保持していない非ID発行型コマンドにのみ用いる。クライアントに安易な新IDでの再送を促してはならない |
 | ドメイン拒絶（domain reject） | 期限切れ（stale）の世代／接続／化身 | `StaleConnection`・`StaleIncarnation`・`StalePresence`・`StaleRound`・`StaleTicket`・`StaleStream` | 現在の状態への反映を不採用とする。元のラウンド・元の試行・元のチケットへの紐付け記録に留め、新しいラウンドや試行へ勝手に付け替えない |
@@ -990,11 +1082,12 @@ struct ManagementViewWire {
 
 各検証シナリオの合格基準は、「通信層での送受信成功を、ドメイン層での処理成功へ勝手に読み替えないこと」です。
 
-### V-1 Client connect → authenticate → capability advertise
+### V-1 Client connect → capability advertise → challenge → authenticate
 
-1. 未ペアリングのクライアントからの最初の `PairingRequest` は、`sender.device_id = None`、自前の化身ID（incarnation）、`connection_id = None` で送信され、`request_id` または `message_id` でメッセージを対応付けます。これはまだ認証済みのコマンド送信者エポックではありません。ペアリング済みのクライアントは `AuthChallenge` → `AuthProof` の手順を踏み、`AuthProof` 等の認証メッセージでは `device_id = Some` かつ `connection_id = None` が許容されます。通常のペイロードに秘密情報を直接載せてはなりません。
-2. ホストは認証成功時に `ConnectionWireId` を発行し、これ以降のドメインコマンドにおいて「現在認証済みの送信者エポック」が成立します。続いてクライアントから `CapabilityAdvertise` を受け取り、双方が合意したプロトコルバージョンを確定します。なお、クライアントからの機能申告は単なる「利用可能な状態の事実（availability fact）」であり、実行許可や在席の成立を意味するものではありません。高度な機能の申告は、必要な開発ステージで段階的に導入します。
-3. **失格条件**: 上記の認証前（pre-auth）の例外を除き、送信者（sender）フィールドを欠落させてはなりません。認証を受けていない状態でのドメイン操作要求は一切受理せず、失効したデバイスの古い認証情報を使って接続を復活させてはなりません。
+1. 未ペアリングのクライアントからの最初の `PairingRequest` は、`sender.device_id = None`、自前の化身ID（incarnation）、`connection_id = None` で送信され、`request_id` または `message_id` でメッセージを対応付けます。これはまだ認証済みのコマンド送信者エポックではありません。新規ペアリングは承認後に Paired へ進みます。承認済みデバイスの再接続では、最初の `CapabilityAdvertise.sender.device_id` で device を bind して Paired への移行とその申告の受付を一体で行います。
+2. Client は `connection_id = None` の `CapabilityAdvertise { protocol, limits, platform }` をこの接続で一度だけ送り、Host はエンベロープを含め現行版との完全一致を確認して `CapabilityAcknowledged { protocol }` を返します。Client も Host の版を確認します。版の不一致では `IncompatibleProtocol` により接続を閉じ、チャレンジへ進みません。機能申告は「利用可能な状態の事実（availability fact）」であり、実行許可や在席ではありません。高度な機能の申告は必要な開発ステージで段階的に導入します。
+3. その後に Host の `AuthChallenge` → Client の `AuthProof` → Host の `AuthResult` を同じ接続で実行します。`AuthProof` 等の認証メッセージでは `device_id = Some` かつ `connection_id = None` が許容されます。Host は認証成功時に `ConnectionWireId` を発行し、以降のドメインコマンドで現在認証済みの送信者エポックが成立します。通常のペイロードに秘密情報を直接載せてはなりません。
+4. **失格条件**: 上記の認証前（pre-auth）の例外を除き、送信者（sender）フィールドを欠落させてはなりません。認証を受けていない状態でのドメイン操作要求、認証後の capability 再申告、失効したデバイスの古い認証情報による接続復活は受理しません。
 
 ### V-2 Owner Text → Host → response stream → presentation acknowledgement
 
@@ -1017,16 +1110,37 @@ struct ManagementViewWire {
 
 ### V-5 Client disconnect during Computer Use
 
-1. クライアント上で外部アクション（`ClientActionCommand { operation, attempt }`）を実行している最中に、クライアントのネットワーク切断を検知します。切断の検知は、ホスト側の在席帰属の永続記録を直ちに破棄することを意味しません。
+1. クライアント上で外部アクション（`ClientActionCommand { operation, attempt, epoch }`）を実行している最中に、クライアントのネットワーク切断を検知します。切断の検知は、ホスト側の在席帰属の永続記録を直ちに破棄することを意味しません。
 2. ホストは該当のアクション試行（attempt）を「成否不明（`Unknown`）」として保持し、ベストエフォートでの停止処理を試みます。停止できなかった可能性、判明している副作用、不明な状態をそのまま正確に記録して報告します。勝手に「成功」や「未実行」へ書き換えてはなりません。
 3. 自動的な再試行（retry）や、別のクライアントでの自動的な再実行を行ってはなりません。再実行には必ず新しい試行IDの発行と、オーナー自身による再判断が必要です。
 4. 切断が確定した場合、実行中（Running）だった在席は状態定義（SD-Presence）の CAS に基づき、利用可能なホストPC本体のクライアントへ安全にフォールバック（引き継ぎ）します。引き継ぎ候補がない場合や確認できない場合は `NoActive`（在席なし、理由: `DisconnectFallback`）とします。ホスト側クライアントを勝手にバックグラウンド起動してはならず、過去のアクションは元の試行IDに紐付けたまま保持します。切断されたクライアントが後から再接続してきても、この在席を自動的に元へ戻してはなりません。
 
+### V-5a Stop vs ClientActionCommand の送信開始・Client queue
+
+1. AU5 が先に commit し、同じ `(namespace, epoch)` の open と command が Host queue に入ります。Client の `ActionReceiptAck`、open の受付、queue への投入だけでは外部作用の開始・停止結果を確定しません。Stop が writer の最終 gate に先行して `Stopped` を commit した場合、Host は当該 command を transport に 0 byte のまま破棄し、Client 側に既に配送されていないことを確認できる command だけ未送信とします。古い open だけでは実操作を開始しません。
+2. 逆順では、Host の短い gate が不可逆な command 送信開始を引き受け、元 attempt にその可能性を durable に残した後で Stop が commit します。Client がまだ queue に置いていても、この command は Stop より先に発行済みの試行として扱います。停止通知を受けた Client はその command の未開始入力をローカル gate で拒否し、開始済みの入力は best-effort で停止します。通知の到達前に Client が入力を開始し得ることを Stop 後の新 Host dispatch と混同せず、`StopAck` / `ActionReceiptAck` だけで作用なし・停止成功とはしません。結果不明なら元 attempt の `Unknown` を維持します。
+3. 書込待ち・transport 開始前の crash・切断で 0 byte と以後の送信不能が証明できない場合は未送信と断定せず、元試行に作用可能性を残します。再接続後の `ActionNamespaceBind` / `ActionFenceState` は旧 command の replay 許可にならず、新接続・別 incarnation・restore 後の別 namespace では旧 queue / open / command を受け付けません。手動割込 token の更新、Stop 後の Resume、`Received` の再送によって元 attempt を再開しません。
+
 ### V-6 reconnect with unresolved Action
 
-1. クライアントが新しいコネクションとして再度認証を行います。過去の古いストリーム、古いチケット、古いラウンド、古い送信者エポックをそのまま引き継いではなりません。
+1. クライアントが新しいコネクションとして再度認証を行い、Host の `ActionNamespaceBind` を検証してから現行接続で `ActionFenceState` を送ります。token が `None` でも必須です。同一プロセスならローカル fence / token と観測 highwater は維持し、Host は状態を照合するまで新しい open を発行しません。過去の古いストリーム、古いチケット、古いラウンド、古い送信者エポック、action dispatch `(namespace, epoch)` をそのまま引き継いではなりません。
 2. ホストは未確定のアクション試行を `Unknown` のままクライアントに提示し、重複実行のリスクを明示してオーナーの判断を求めます。過去のコマンドを自動再実行したり、古い確認応答（Ack）を復活させたりしてはなりません。
-3. 古いコネクション情報を載せたままの通信再試行は、ドメイン処理を実行する手前で `StaleConnection` として拒絶します。新しい接続先で同じ外部アクションを再度実行したい場合は、通信の再送ではなく、新しい試行IDの発行とオーナーの明確な判断を経て行わなければなりません。
+3. 古いコネクション情報を載せたままの通信再試行は、ドメイン処理を実行する手前で `StaleConnection` として拒絶します。新しい接続先で同じ外部アクションを再度実行したい場合は、通信の再送ではなく、オーナーの明確な判断と新しい試行ID・新 epoch の発行、現在認証済みの接続での最新 token を伴う `ActionEpochOpen` 受付を経なければなりません。別 incarnation なら前の token を持ち越さず、元試行の `Unknown` / hold と明示的な再指示の条件を保ちます。
+
+### V-6a Computer Use 中の手動入力と割込通知の競合
+
+1. 対象 Client は現在認証済み接続 C・incarnation I 上で namespace N を bind し、`ActionFenceState { namespace=N, highest_seen=None, highest_accepted=None, fenced_through=None, interrupt_fence_token=None }` を送ります。`ActionEpochOpen { stamp=(N,E), operation=O, attempt=A, generation=G, target_connection=C, target_incarnation=I, interrupt_fence_token=None }` を受け付け、同じ stamp の `ClientActionCommand` の操作中に、別 attempt A2 の `ActionEpochOpen { stamp=(N,E2), interrupt_fence_token=None }` も**割込前に受付けます**（E2 > E、A2 の command は未開始）。ここで手動入力を検出した Client は操作開始・open 受付と排他に token T を mint し、受付済みの E と E2 の双方を無効化して `fenced_through=(N,E2)` とします。E の進行中の作用はベストエフォートで止めます。
+2. E2 の command が割込後に到着しても、受付済み open の古い token は T に一致せず開始しません。先に command を受領確認・キュー済みだった場合も同じです。割込前に Host が送信・キュー済みで Client に未着の E3 > E2 の open は T 欠落で拒否し、元 attempt を token 付きで再送しても受付けません。異なる namespace の古いキューも現行 bind に一致せず拒否します。`highest_seen` は拒否した E3 を含みますが、fence 上限は割込時の `highest_accepted=E2` であって E3 ではありません。
+3. Client は `ManualInputInterrupt { operation=O, attempt=A, stamp=(N,E), fenced_through=(N,E2), generation=G, origin_connection=C, origin_incarnation=I, interrupt_fence_token=T }` を `observed.presence_generation_view=Some(G)` とともに現在認証済みの C から送ります。現在の presence が G+1 でも Host は元コマンドと発行上限を照合し、A の割込事実を A にだけ帰属させ、A / E と A2 / E2 の発行を各々 hold します。A2 が open だけなら架空の `ManualInputInterrupt` や停止成功を作らず、`ActionFenceState` でも fence 上限を伝えます。A2 にも受信済み command があればその元コマンドに相関した通知を別に送り、開始有無・作用結果を A と独立に扱います。Host は割込前の A2 / E2 や E3 の attempt に T を後付けせず、割込後の明示的なユーザー指示、各結果不明の重複リスクへの判断、再認可を経て別の新 attempt A4 と E3 より高い epoch E4 を発行します。`ActionEpochOpen { stamp=(N,E4), attempt=A4, target_connection=C, target_incarnation=I, interrupt_fence_token=Some(T) }` の受付後にだけ E4 の指示を開始できます。再度手動入力で T2 を mint した後は T を伴う受付済み E4 も無効です。
+4. 通知前に切断・connection replacement が起きて届かなかった場合、Host は物理的な停止を推定せず A を `Unknown` / hold とし、A2 も発行 hold とします。A2 に command を発行済みで作用可能性を排除できなければ A2 も独立に `Unknown`、open のみで command を一度も発行していないと発行記録から確定できるなら A2 の作用を捏造せず未開始とします。同一 process の Client は現行接続 C2 で N を bind し、`ActionFenceState { namespace=N, highest_seen=Some(E3), highest_accepted=Some(E2), fenced_through=Some((N,E2)), interrupt_fence_token=Some(T) }` を送ります（E3 拒否後の例）。Host は発行記録との照合により fence 範囲を hold し、新 epoch を E3 より高くします。旧 C の遅延通知は current sender 照合で拒否し、新接続へ付け替えません。状態同期は元の割込事実や停止結果を作らず、同期後の明示指示・再認可を経た別 attempt の open だけが T を echo できます。Client 再起動・別 incarnation では T を持ち越さず、旧 epoch の指示も新接続に持ち込みません。
+5. 各試行の `EffectReport` と停止結果は元の operation / attempt / stamp / 発行先との相関が通ったものだけを独立に記録し、停止確認がない部分は `Unknown` のままです。復元で namespace が切り替われば旧接続の割込・結果は新 master の試行へ写像せず、新 namespace の新 attempt は明示指示・再認可を要します。入力終了・再接続・割込通知の消失を元指示の再開条件や Task Cancel と解釈しません。token は Owner 確認や Action 認可ではありません。
+
+### V-6b backup master への全置換と Action epoch 巻き戻り
+
+1. 旧 master の namespace N で Host は Client に epoch 10 まで発行し、Client は `highest_seen=Some(10)`、`highest_accepted=Some(10)` を保持しています（割込があれば `fenced_through=Some((N,10))` と token T も保持）。backup の発行最大値は 4 です。Host は restore staging で発行を止め、live `highest_issued=10` と Client の現行接続の highwater を把握します。旧接続・指示を失効させ、未確定の外部作用を「未実行」と断定しません。
+2. 完全置換の確定時に Host は N と異なる新 namespace N2 を active master に不可分に bind して永続化します。backup の epoch 4 の元 attempt を N2 の試行として採用せず、N の 10 を新 master の外部作用 fact に混ぜません。元接続 C の遅延 `ActionEpochOpen { stamp=(N,10) }`、command、`ManualInputInterrupt`、`EffectReport` は旧区間として拒否し、N2 の認可・結果には転用しません。
+3. 同一 Client process は検証済み Host に新接続 C2 で再認証して N2 の `ActionNamespaceBind` を受け、旧 C / N のキューを破棄します。`ActionFenceState { namespace=N2, highest_seen=None, highest_accepted=None, previous_highwater=Some((N,10,10)), fenced_through=Some((N,10)), interrupt_fence_token=Some(T) }` を current sender で返します。割込がなければ `fenced_through=None, interrupt_fence_token=None` でも送信は必須です。Host は報告を旧作用の確定結果にせず、active namespace と Client が知る同一 namespace の値、staging の live 値を照合します。N2 の値は未観測であり N の 10 と大小比較しません。
+4. 復元後の安全保留と新 Owner 指示、結果不明なら重複リスクへの判断、現在条件での再認可を経て Host は N2 の新 attempt に epoch 1 を発行します。新接続・incarnation と現在の token（割込がなければ `None`）を伴う open に限り Client は受付けます。旧キューの高 epoch open は旧 namespace で拒否し、同じ namespace で割込前にキューされた高 epoch open は token 不一致で拒否します。新 process / incarnation I2 への再起動で旧 highwater と T が不明でも、旧 C / I 宛て指示は拒否し、I2 の再認証、N2 の bind、token None を含む必須状態同期、同じ新指示・再認可の後でだけ新 attempt を受付けます。どちらも旧 attempt の再送ではありません。
 
 ### V-7 Voice interruption
 
@@ -1042,8 +1156,8 @@ struct ManagementViewWire {
 
 ### V-9 Targeted Deletion while Client offline
 
-1. ホストが個人データ完全削除の要求（`DeletionDemand { operation }`）を発行します。このときオフライン等で到達できないクライアントは `pending/unreachable`（保留・到達不能）として記録し、決して「削除成功」と誤認してはなりません。
-2. そのクライアントが後から再接続してきた際、ホストは進行中の一連の削除要求（demand）を再送します（クライアントに残存していた古いデータがホストへ持ち帰られるのを防ぐため）。クライアントは該当クラスのキャッシュ消去と対象データの参照破棄を行い、`LocalErasureResult { wiped, unverified_range }` をホストへ返します。
+1. ホストが個人データ完全削除の要求（`DeletionDemand { operation, sweep }`）を発行します。このときオフライン等で到達できないクライアントは `pending/unreachable`（保留・到達不能）として記録し、決して「削除成功」と誤認してはなりません。
+2. そのクライアントが後から再接続してきた際、ホストは current `(operation, sweep)` の削除要求（demand）を送ります（クライアントに残存していた古いデータがホストへ持ち帰られるのを防ぐため）。クライアントは該当クラスのキャッシュ消去と対象データの参照破棄を行い、`LocalErasureResult { operation, sweep, wiped, item_results, unverified_range }` をホストへ返します。Host は元の demand と current condition の双方に `(operation, sweep)` が一致する結果だけを現在の participant fact に採用し、旧 sweep の遅延結果を元の記録に留めます。sweep 欠落・0・demand と異なる sweep の結果を current として採用しないことも検証します。
 3. ホストは、すべての参加者の消去結果の集約、残存データの機械的検証、および処理区間内に遅れて届いたデータの取り込み確認をすべて満たした上で、検索用トークンを完全に除去または復元不能化し、その安全な完了を確認してから、全域での削除完了を永続ストレージに記録します。トークンの最終消去と完了フラグの書き込みを1つの不可分な処理として完了できない間は、状態を `finalizing`（最終処理中）として安全のための保留（hold）を維持します。一部のクライアントでの消去が完了しただけで安易に全体の保留を解除してはならず、完了ログに対象の本文データを復元してはなりません。
 
 ### V-10 Host restart → reconnect → presence restoration
@@ -1052,10 +1166,10 @@ struct ManagementViewWire {
 2. ホストは、再起動前に接続していたクライアントからの再認証や応答を、現在の `RecoveryWait` の状態、復旧先の正当性、現行の接続、権限、および排他性と厳格に照合します。すべての正当性が確認できた場合にのみ `Present`（在席中）として確定し、確認できなければアクティブな在席なしとします。クライアント側からの単なる `MoveIntent` を復旧の根拠として受け入れてはなりません。
 3. 再起動前の古い一時状態、古い承認フラグ、すでに解決済みの経路情報だけを根拠にして、在席・実行許可・処理再開を勝手に成立させてはなりません。中断されたタスクやアクションを、事前の確認なしに自動実行する権限を与えてはなりません。
 
-### V-11 Host newer / old Client
+### V-11 現行プロトコルの不一致
 
-1. ネゴシエーションの結果、双方がサポートするプロトコルに共通のメジャーバージョンが存在しない場合、ホストは `IncompatibleProtocol { host_max, client_max, hint }` を返して接続を明示的に拒絶します。互換性があると思い込んで勝手な推測で通信を継続してはなりません。
-2. 共通のメジャーバージョンが存在する場合、ホストは古い側のクライアントが理解できるバージョンの範囲に合わせて通信を行います。クライアントが理解できない未知のオプショナルフィールドは無視し、未対応の必須フィールドを含むメッセージは送信しません。理解できない新しい意味論のメッセージを、古いクライアントへ無言で送りつけてはなりません。
+1. 同じ接続上の `CapabilityAdvertise` とそのエンベロープを Host の現行版と比較します。major が同じでも minor が異なる場合を含め、完全一致しなければ `IncompatibleProtocol { host_version, client_version }` で接続を拒否し、AuthChallenge や業務電文を開始しません。Client も `CapabilityAcknowledged` の版が自身の現行版と異なれば接続を終了します。
+2. 認証後のエンベロープも接続に記録した現行版との完全一致を要求します。途中で別の版へ切り替わった電文は処理せず接続を終了します。現行版の未知のフィールドは無視せず拒否し、旧版へのダウングレードや旧 DTO の解釈を行いません。機能・利用可能状態の更新は版の選択には影響しません。
 
 ### V-12 duplicate / delayed message and idempotency retention
 
@@ -1072,11 +1186,13 @@ struct ManagementViewWire {
 2. その後バックアップから復元（Restore）を行っても、`device_ref` や `device_permission` などの設定情報が復元されるだけであり、削除されたE側の暗号材料は復元されないため、デバイスDの古い認証情報による再接続は確実に拒絶されます。機能設定のみを復元した場合であっても、復元された権限が現在の信頼境界（E側 trust）を超えて勝手に有効化されることはありません。
 3. 完全初期化（Full Reset）を実行すると、E側の信頼情報や認証材料もすべて安全に消去されます。初期化後に古いバックアップを復元したり、古いクライアントの認証材料を使ったりしても、過去の信頼関係が復活することはありません。再ペアリングを行うには、新しい識別子を発行し、信頼できるホストPC上での直接の最終確認を改めて行う必要があります。
 
-### V-14 Remote 管理要求 → Host-local 最終確認
+### V-14 Remote 高権限管理要求 → Host-local 最終確認
 
 1. ペアリング済みのリモートクライアントから、新しいデバイスの追加承認、認証情報の差し替え、デバイスの失効、バックアップ復元や完全初期化などの管理意図（intent）が送られてきます。ホストはこの要求を受け取っても、`NeedsClarification`（確認が必要）を返してホストPCの画面に確認待ちのダイアログを表示するに留め、設定変更や破壊的な処理を勝手に開始してはなりません。
 2. リモート / 通常 Client / 同一 UID requester の自己申告、別 endpoint からの nonce、Computer Use の `EffectReport` を拒否します（`DeniedByBoundary`）。空席時も requester は seat を取得できません。Host が起動した GUI の専用 channel と直接確認だけが最終確認の経路であり、ene Computer Use はこの面へ入力できません。保証対象外の OS セッション侵害は Runtime Topology の信頼前提に従います。
 3. 信頼できるホストPC本体の画面（Host-local surface）において、オーナー自身が対象・変更内容・影響範囲を目視で確認した後、担当ドメインが現在の前提条件を再照合して初めて変更を適用します。確認中に対象の状態が変わったり期限切れになったりした場合は、最初から確認をやり直します。なお、バックアップ復元の実行と、復元された設定の一括有効化は、安全のため必ず別々の手順として確認を行います。
+
+Targeted Deletion はこの Host-local 高権限シナリオに含めません。ペアリング済み remote Client が Host GUI 不在でも同じ通常 Client の専用面で目的・対象・影響を表示して Owner の直接操作を受け、Host が専用 completion の現在の device / session / connection / incarnation と expected currentness を開始直前に再比較してから durable condition を commit するケースは §18.3 の信頼前提で受け入れます。`confirmed=true` や別端末の代理確認、切断後の古い確認では開始しません。
 
 ### V-15 WSS の接続準備・Host 検証・ローカル受付
 
