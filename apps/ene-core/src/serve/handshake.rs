@@ -97,7 +97,7 @@ impl HostHandle {
                 .copied()
                 .max_by_key(|version| (version.major, version.minor))
                 .unwrap_or(frame.envelope.protocol);
-            return vec![incompatible_protocol(frame, live, client_max)];
+            return vec![incompatible_protocol(&frame.envelope, live, client_max)];
         }
         let claimed = frame
             .envelope

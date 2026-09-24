@@ -44,6 +44,8 @@ macro_rules! wire_payload {
                     $(Self::$variant(_) => stringify!($variant)),+
                 }
             }
+
+            pub const KNOWN_MESSAGE_TYPES: &'static [&'static str] = &[$(stringify!($variant)),+];
         }
     };
 }

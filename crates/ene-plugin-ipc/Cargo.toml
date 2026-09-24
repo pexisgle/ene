@@ -11,5 +11,8 @@ rmp-serde.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+uuid.workspace = true
+
 [lints]
 workspace = true

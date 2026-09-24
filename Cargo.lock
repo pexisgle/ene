@@ -1352,6 +1352,7 @@ dependencies = [
  "ene-api",
  "ene-plugin-ipc",
  "hmac",
+ "rmp-serde",
  "serde",
  "serde_json",
  "sha2",
@@ -1413,6 +1414,7 @@ dependencies = [
  "ene-store",
  "ene-task",
  "hmac",
+ "rmp-serde",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1553,6 +1555,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]
