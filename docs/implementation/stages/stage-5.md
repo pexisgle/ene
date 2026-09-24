@@ -25,7 +25,7 @@ Client を閉じても Host-only Task を継続し、再接続先へ未伝達の
 
 前の gate が揃う前に後続の実行経路を enable しません。各行は必要に応じてさらに小さな stacked PR に分割します。
 
-以下の OS transport とその検証は Stage 5 完了時点の実装範囲です。通常 Client channel の現行設計は [IPC 第10節](../../design/concrete/host-client-ipc.md#10-transport) の WSS 統一に更新しました。置換実装と両 OS の回帰は [Stage 7 A2](stage-7.md#a2-通常-client-通信の-wss-統一未実装) で行い、Stage 5 の既存検証を WSS の検証済み証拠として扱いません。
+以下の OS transport とその検証は Stage 5 完了時点の実装範囲です。通常 Client channel の現行設計は [IPC 第10節](../../design/concrete/host-client-ipc.md#10-transport) の WSS 統一に更新しました。置換実装と両 OS の回帰は [Stage 7 A2](stage-7.md#a2-通常-client-通信の-wss-統一) で行い、Stage 5 の既存検証を WSS の検証済み証拠として扱いません。
 
 | 順 | 実装範囲と責務 | 完了条件 |
 |---|---|---|

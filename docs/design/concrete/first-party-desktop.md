@@ -273,7 +273,7 @@ C1 は通常のテキスト入力ではない。timeline / 検索 / 永続 undo 
 | `apps/ene-ctl` | CLI Client。Client channel のみ | 既存。control は話さない |
 | `apps/ene-desktop` | 製品 GUI と first-party 確認面 | A1（接続）/ B（画面） |
 | `apps/ene-body` | VRM overlay | D。compile 隔離のため別 package |
-| `crates/ene-client` | Host Client WSS 接続（接続先の発見・TLS、handshake、correlation、device identity、erasure participant） | A1 で `ene-ctl` から抽出。WSS 統一は [Stage 7 A2](../../implementation/stages/stage-7.md#a2-通常-client-通信の-wss-統一未実装) で行う。GUI は `ene-ctl` に依存しない |
+| `crates/ene-client` | Host Client WSS 接続（接続先の発見・TLS、handshake、correlation、device identity、erasure participant） | A1 で `ene-ctl` から抽出。WSS 統一は [Stage 7 A2](../../implementation/stages/stage-7.md#a2-通常-client-通信の-wss-統一) で行う。GUI は `ene-ctl` に依存しない |
 | `crates/ene-local-control` | 要求専用 DTO と専用確認 DTO を分ける。`ene-api` に載せず、秘密フィールドは redacted | A1 と同時の最小 crate |
 
 作らない: `ene-stage`, `ene-stage-ui`, `ene-vrm`, `ene-tray-linux`。トレイは Milestone 1 に無い。`ene-character` / `ene-plugin-host` も GUI のために先行 scaffold しない。同梱 `ene` の VRM は install asset とし、Host が W-7 descriptor を出し、GUI が Body へパス/バイトだけ渡す。

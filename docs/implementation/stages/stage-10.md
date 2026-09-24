@@ -67,7 +67,7 @@ WSS / 入力境界の確定 ─────────→ 音声 Client 統合�
 
 ## 4. 他の作業との接点
 
-[Stage 7 A2](stage-7.md#a2-通常-client-通信の-wss-統一未実装) と [基盤計画 F1](../follow-ups/foundation.md) の round 指定を音声入力の接続前に調整します。Host / Client 間の音声統合は WSS の公開境界を使い、旧 transport 用と新 transport 用の二つの production 経路を作りません。D0、対象検索、音声デバイスの技術成立 probe は独立して先行できます。
+[Stage 7 A2](stage-7.md#a2-通常-client-通信の-wss-統一) と [基盤計画 F1](../follow-ups/foundation.md) の round 指定を音声入力の接続前に調整します。Host / Client 間の音声統合は WSS の公開境界を使い、旧 transport 用と新 transport 用の二つの production 経路を作りません。D0、対象検索、音声デバイスの技術成立 probe は独立して先行できます。
 
 [基盤計画](../follow-ups/foundation.md) の未知 payload と表示言語・起動パスは、各境界の変更時に調整します。primitive 整理など無関係な follow-up の全件完了を、この Stage の一律な開始条件にはしません。
 

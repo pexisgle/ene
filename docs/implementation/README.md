@@ -81,7 +81,7 @@ Stage 文書は**実装方法を具体化する場所**であり、新しい製�
 
 ### 4.1 直近の進め方
 
-まず [Stage 7 A2](stages/stage-7.md#a2-通常-client-通信の-wss-統一未実装) の WSS 統一を進めます。wire の未決事項は [基盤計画](follow-ups/foundation.md) と照合し、既存の確認 channel や Body 投影まで WSS に混ぜません。公式 VRM、物理 HiDPI、指定 OS と統合後の再検証は [Desktop 計画](follow-ups/desktop.md) と Stage 7 F に従います。
+まず [Stage 7 A2](stages/stage-7.md#a2-通常-client-通信の-wss-統一) の WSS 統一を進めます。wire の未決事項は [基盤計画](follow-ups/foundation.md) と照合し、既存の確認 channel や Body 投影まで WSS に混ぜません。公式 VRM、物理 HiDPI、指定 OS と統合後の再検証は [Desktop 計画](follow-ups/desktop.md) と Stage 7 F に従います。
 
 次の製品機能は、Schedule だけを先に実装するのではなく、**音声で Task を依頼・変更・確認・中止・再開する最小経路**を優先します。Stage 10 の番号は変えず、[D0 の要件・設計更新](stages/stage-10.md#2-d0-要件と設計を先に確定する) を A2 と並行して進めます。通常の Task UX と提示確認の意味は製品要件・受け入れ条件・内部設計が定め、この実装ガイドだけでは変更しません。
 
