@@ -6554,6 +6554,122 @@ async fn a_saturated_application_queue_still_moves_pongs_and_close() {
 }
 
 #[tokio::test]
+async fn an_unparked_burst_dispatches_before_held_overflow_and_answers_ping() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let input = "unparked burst input";
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![(
+            on_latest_owner(input),
+            Call::stream(
+                "BURST-STREAM-REPLY",
+                (0..8).map(|index| format!("burst-{index} ")).collect(),
+                Duration::from_millis(20),
+            ),
+        )],
+        &[],
+    ));
+    let mut served = serve_and_setup(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let companion = served.client().companion_ref();
+    let target = served.client().round_target();
+    let first = served
+        .client()
+        .prepare(WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            target,
+            String::from(input),
+            String::from("en"),
+        )));
+    served
+        .client()
+        .send_prepared_for_tests(&first)
+        .await
+        .expect("the first application frame must enter the transport");
+
+    // Keep the application burst ahead of the first business operation. The
+    // provider is actively streaming, not parked; the old select order could
+    // nevertheless keep pulling frames into `held` before dispatching it.
+    let burst = MIRRORED_STREAM_BUFFER_FRAMES + MIRRORED_READ_AHEAD_FRAMES - 1;
+    let ping_payload = b"unparked-burst-ping";
+    let probe = served.client().transport_probe_for_tests();
+    for index in 0..burst {
+        if index == 8 {
+            served.client().send_transport_ping_for_tests(ping_payload);
+        }
+        let request = served
+            .client()
+            .prepare(WirePayload::HistoryRequest(cmds::history_request(
+                &companion, None, 1,
+            )));
+        served
+            .client()
+            .send_prepared_for_tests(&request)
+            .await
+            .expect("every bounded application burst frame must be accepted");
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while transport.sends() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first business operation must dispatch before held overflow");
+    assert!(
+        transport.sends() >= 1,
+        "the burst must not close the connection before business dispatch"
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if probe.take_pongs().iter().any(|pong| pong == ping_payload) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the Host must answer the burst's Client Ping with a bounded Pong");
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let WirePayload::TextStreamClose(close) = served
+                .client()
+                .next_frame()
+                .await
+                .expect("the connection must remain usable after the burst")
+            {
+                assert_eq!(
+                    close.status,
+                    ene_api::v1::round::StreamClose::Completed,
+                    "the first burst operation must complete normally"
+                );
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the active business stream must finish after the burst");
+
+    let answer = ask(
+        served.client(),
+        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
+        "history after the unparked burst",
+    )
+    .await
+    .expect("the same connection must answer a later request after the burst");
+    assert!(
+        matches!(answer, WirePayload::HistoryResponse(_)),
+        "got {answer:?}"
+    );
+    served.stop().await;
+}
+
+#[tokio::test]
 async fn an_application_frame_past_the_read_ahead_window_fails_the_connection() {
     let dir = tempfile::tempdir().expect("temp dir");
     let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));

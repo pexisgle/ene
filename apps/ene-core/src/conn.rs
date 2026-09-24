@@ -1259,12 +1259,13 @@ async fn serve_connection(
                 }
             };
             // Biased order is the connection's progress guarantee: shutdown,
-            // liveness/Ping, EOF/Close, transport control, pairing, and the
-            // monotonic receipt deadline are all polled ahead of business
-            // delivery, so continuous business output can never starve them.
-            // Every branch above the last one consumes its event when it
-            // fires, and business delivery still runs whenever they are
-            // pending — neither direction starves.
+            // liveness/Ping, EOF/Close, transport control, the monotonic
+            // receipt deadline, pairing, and dispatchable held work are
+            // polled ahead of application ingress. Continuous application
+            // frames therefore cannot starve business dispatch or control;
+            // business output remains below ingress so streaming cannot
+            // monopolize the loop. Every branch consumes its event when it
+            // fires.
             tokio::select! {
                 biased;
                 () = wait_for_shutdown(&mut shutdown) => {
@@ -1312,14 +1313,34 @@ async fn serve_connection(
                     drop(ended);
                     break 'connection;
                 }
-                maybe = frames_rx.recv(), if !busy => {
-                    let Some(frame) = maybe else {
+                payload = control_rx.recv() => {
+                    let Some(payload) = payload else {
                         break 'connection;
                     };
-                    if held.len() >= STREAM_BUFFER_FRAMES {
+                    if !send_transport_message(&mut write_half, Message::Pong(payload.into()), &mut shutdown).await {
                         break 'connection;
                     }
-                    held.push_back(frame);
+                }
+                () = timer => {
+                    // The receipt deadline is a state transition on the
+                    // monotonic clock (IPC §13.3): expiry runs whether or not
+                    // a business handler is running. Only publishing what
+                    // comes next waits for the handler, so unsolicited output
+                    // keeps its send order.
+                    handle.expire_due_receipts(&connection);
+                    if !busy {
+                        advance_output(
+                            &mut write_half,
+                            &handle,
+                            &table,
+                            &connection,
+                            &template,
+                            &mut terminal,
+                            &mut shutdown,
+                            &mut push_blocked,
+                        )
+                        .await;
+                    }
                 }
                 () = std::future::ready(()), if !busy && !suspected && !held.is_empty() => {
                     if *shutdown.borrow() {
@@ -1336,14 +1357,6 @@ async fn serve_connection(
                     pending_dispatch = Some((frame.clone(), live.clone()));
                     busy = true;
                     if jobs_tx.send(BusinessJob { frame, live }).await.is_err() {
-                        break 'connection;
-                    }
-                }
-                payload = control_rx.recv() => {
-                    let Some(payload) = payload else {
-                        break 'connection;
-                    };
-                    if !send_transport_message(&mut write_half, Message::Pong(payload.into()), &mut shutdown).await {
                         break 'connection;
                     }
                 }
@@ -1370,6 +1383,15 @@ async fn serve_connection(
                     if !write_response(&mut write_half, response, &mut terminal, &mut shutdown).await {
                         break 'connection;
                     }
+                }
+                maybe = frames_rx.recv(), if !busy => {
+                    let Some(frame) = maybe else {
+                        break 'connection;
+                    };
+                    if held.len() >= STREAM_BUFFER_FRAMES {
+                        break 'connection;
+                    }
+                    held.push_back(frame);
                 }
                 changed = wake.changed(), if !busy => {
                     if changed.is_err() {
@@ -1402,27 +1424,6 @@ async fn serve_connection(
                         .await
                     {
                         push_blocked = true;
-                    }
-                }
-                () = timer => {
-                    // The receipt deadline is a state transition on the
-                    // monotonic clock (IPC §13.3): expiry runs whether or not
-                    // a business handler is running. Only publishing what
-                    // comes next waits for the handler, so unsolicited output
-                    // keeps its send order.
-                    handle.expire_due_receipts(&connection);
-                    if !busy {
-                        advance_output(
-                            &mut write_half,
-                            &handle,
-                            &table,
-                            &connection,
-                            &template,
-                            &mut terminal,
-                            &mut shutdown,
-                            &mut push_blocked,
-                        )
-                        .await;
                     }
                 }
                 outgoing = business_out_rx.recv() => {

@@ -208,10 +208,12 @@ impl Transport {
         let (inbound_tx, inbound) = mpsc::channel(TRANSPORT_QUEUE);
         let (outbound, outbound_rx) = mpsc::channel(TRANSPORT_QUEUE);
         let (control, control_rx) = mpsc::channel(CONTROL_QUEUE);
-        // One terminal per connection: the reader and the writer store their
-        // failure here without awaiting the application, and this capacity
-        // bounds that hand-over.
+        // One terminal per connection: the reader owns the final hand-over so
+        // it can combine its read-ahead with a writer failure. The writer's
+        // one-slot mailbox only carries the reason; neither hand-over waits
+        // for the application.
         let (terminal, terminal_rx) = mpsc::channel(1);
+        let (writer_failure, writer_failure_rx) = mpsc::channel(1);
         let (writer_gone, writer_gone_rx) = tokio::sync::watch::channel(());
         #[cfg(any(test, feature = "test-support"))]
         let probe = TransportProbe::new();
@@ -222,7 +224,7 @@ impl Transport {
             sink,
             outbound_rx,
             control_rx,
-            terminal.clone(),
+            writer_failure,
             #[cfg(any(test, feature = "test-support"))]
             probe.clone(),
             writer_gone,
@@ -234,6 +236,7 @@ impl Transport {
             terminal,
             #[cfg(any(test, feature = "test-support"))]
             probe.clone(),
+            writer_failure_rx,
             writer_gone_rx,
         ));
         Self {
@@ -314,15 +317,16 @@ impl Transport {
 /// Owns the write half: transport Pongs, requested transport Pings, and
 /// application frames are written here under one bounded write wait, so
 /// neither a Host that stops reading nor a stalled application can own this
-/// task forever. A write failure is stored in the terminal slot without
-/// waiting for the application, and `_writer_gone` is dropped when this
-/// writer ends; the reader observes the closed watch and stops with it.
+/// task forever. A write failure is put in a one-slot mailbox without waiting
+/// for the application, and `_writer_gone` is dropped when this writer ends;
+/// the reader combines that reason with its read-ahead before handing off the
+/// terminal state.
 #[cfg(any(test, feature = "test-support"))]
 async fn write_half<S>(
     sink: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
     mut outbound: mpsc::Receiver<Vec<u8>>,
     mut control: mpsc::Receiver<Vec<u8>>,
-    terminal: mpsc::Sender<Terminal>,
+    writer_failure: mpsc::Sender<Failure>,
     probe: TransportProbe,
     _writer_gone: tokio::sync::watch::Sender<()>,
 ) where
@@ -339,14 +343,14 @@ async fn write_half<S>(
                 };
                 probe.note_pong_sent();
                 if !send_bounded(&mut sink, Message::Pong(payload.into())).await {
-                    surface_write_failure(&terminal);
+                    surface_write_failure(&writer_failure);
                     return;
                 }
             }
             () = probe.ping_ready() => {
                 while let Some(payload) = probe.take_ping() {
                     if !send_bounded(&mut sink, Message::Ping(payload.into())).await {
-                        surface_write_failure(&terminal);
+                        surface_write_failure(&writer_failure);
                         return;
                     }
                 }
@@ -357,7 +361,7 @@ async fn write_half<S>(
                     return;
                 };
                 if !send_bounded(&mut sink, Message::Binary(body.into())).await {
-                    surface_write_failure(&terminal);
+                    surface_write_failure(&writer_failure);
                     return;
                 }
             },
@@ -370,7 +374,7 @@ async fn write_half<S>(
     sink: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
     mut outbound: mpsc::Receiver<Vec<u8>>,
     mut control: mpsc::Receiver<Vec<u8>>,
-    terminal: mpsc::Sender<Terminal>,
+    writer_failure: mpsc::Sender<Failure>,
     _writer_gone: tokio::sync::watch::Sender<()>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
@@ -385,7 +389,7 @@ async fn write_half<S>(
                     return;
                 };
                 if !send_bounded(&mut sink, Message::Pong(payload.into())).await {
-                    surface_write_failure(&terminal);
+                    surface_write_failure(&writer_failure);
                     return;
                 }
             }
@@ -395,7 +399,7 @@ async fn write_half<S>(
                     return;
                 };
                 if !send_bounded(&mut sink, Message::Binary(body.into())).await {
-                    surface_write_failure(&terminal);
+                    surface_write_failure(&writer_failure);
                     return;
                 }
             },
@@ -416,11 +420,11 @@ where
     )
 }
 
-fn surface_write_failure(terminal: &mpsc::Sender<Terminal>) {
+fn surface_write_failure(writer_failure: &mpsc::Sender<Failure>) {
     let reason = Failure::Transport(String::from(
         "websocket write failed: the Host stopped accepting data",
     ));
-    fail_with(VecDeque::new(), terminal, reason);
+    drop(writer_failure.try_send(reason));
 }
 
 /// Owns the read half: Ping → Pong, Close, EOF, and read failures are
@@ -433,12 +437,15 @@ fn surface_write_failure(terminal: &mpsc::Sender<Terminal>) {
 /// silence. Terminal conditions hand their buffered frames and the reason to
 /// the terminal slot in one non-blocking step and end this task, so reaching
 /// the terminal state never depends on the application draining anything.
+/// The reader also owns writer-failure handoff, so a writer race cannot
+/// discard the frames already held in the read-ahead window.
 async fn read_half<S>(
     stream: futures_util::stream::SplitStream<WebSocketStream<S>>,
     inbound: mpsc::Sender<DecodedFrame>,
     control: mpsc::Sender<Vec<u8>>,
     terminal: mpsc::Sender<Terminal>,
     #[cfg(any(test, feature = "test-support"))] probe: TransportProbe,
+    mut writer_failure: mpsc::Receiver<Failure>,
     mut writer_gone: tokio::sync::watch::Receiver<()>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -454,6 +461,10 @@ async fn read_half<S>(
             biased;
             gone = writer_gone.changed() => {
                 drop(gone);
+                let reason = writer_failure.recv().await.unwrap_or_else(|| {
+                    Failure::Transport(String::from("the websocket writer ended"))
+                });
+                fail_with(read_ahead, &terminal, reason);
                 return;
             }
             permit = inbound.reserve(), if !read_ahead.is_empty() => match permit {
@@ -502,6 +513,10 @@ async fn read_half<S>(
                 #[cfg(any(test, feature = "test-support"))]
                 probe.note_host_ping();
                 if control.send(payload.to_vec()).await.is_err() {
+                    let reason = writer_failure.recv().await.unwrap_or_else(|| {
+                        Failure::Transport(String::from("the websocket writer ended"))
+                    });
+                    fail_with(read_ahead, &terminal, reason);
                     return;
                 }
             }
@@ -546,9 +561,8 @@ async fn read_half<S>(
 
 /// Stores the buffered frames together with the terminal reason so
 /// `Transport::read()` can surface the data first and the failure last.
-/// Nothing here awaits the application. Only one terminal fits the slot; a
-/// losing race keeps the already-stored terminal, so a failure is never
-/// dropped in silence.
+/// Nothing here awaits the application. The reader is the sole producer, so
+/// the one-slot terminal cannot be overwritten by a writer race.
 fn fail_with(
     read_ahead: VecDeque<DecodedFrame>,
     terminal: &mpsc::Sender<Terminal>,
@@ -773,6 +787,17 @@ impl Client {
         prepared: &PreparedRequest,
     ) -> Result<WirePayload, ClientError> {
         self.pump(prepared.frame(self.sender, self.state.generation()))
+            .await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn send_prepared_for_tests(
+        &mut self,
+        prepared: &PreparedRequest,
+    ) -> Result<(), ClientError> {
+        self.transport
+            .write(&prepared.frame(self.sender, self.state.generation()))
             .await
     }
 
@@ -1307,6 +1332,97 @@ mod tests {
             rendered.contains("the connection to the Host ended")
                 || rendered.contains("websocket read failed"),
             "the transport end must surface as a transport failure, got {eof:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_failure_preserves_read_ahead_before_terminal_without_a_drain() {
+        let (client, mut server) = ws_pair(true).await;
+        let mut transport = Transport::spawn_stream(client);
+        let total = TRANSPORT_QUEUE + READ_AHEAD_FRAMES;
+
+        // Fill both bounded application buffers while the consumer remains
+        // completely idle. The padding makes the arrival order observable.
+        for padding in 0..total {
+            server
+                .send(Message::Binary(bulky_frame(padding).into()))
+                .await
+                .expect("the inbound saturating frame must send");
+        }
+        let probe = transport.probe.clone();
+        server
+            .send(Message::Ping(b"read-ahead-ready".as_slice().into()))
+            .await
+            .expect("the inbound ordering marker must send");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while probe.host_pings() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the reader must consume the inbound burst before the writer failure");
+
+        // The server never reads. Filling the bounded writer queue while its
+        // socket window is stalled makes the writer fail independently of the
+        // application consumer.
+        let outbound = transport.outbound_for_tests();
+        let body = bulky_frame(8 * 1024);
+        let writer = tokio::spawn(async move {
+            for _ in 0..64 {
+                if outbound.send(body.clone()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::pause();
+        tokio::time::advance(WRITE_WAIT + Duration::from_secs(2)).await;
+        tokio::time::resume();
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !transport.reader_task.is_finished() || !transport.writer_task.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the pump must reach terminal state without an application drain");
+        tokio::time::timeout(Duration::from_secs(10), writer)
+            .await
+            .expect("the application writer must stop after the transport fails")
+            .expect("the writer task must not panic");
+
+        let mut paddings = Vec::with_capacity(total);
+        for _ in 0..total {
+            let frame = tokio::time::timeout(Duration::from_secs(10), transport.read())
+                .await
+                .expect("the buffered frames must surface")
+                .expect("the buffered frames must decode");
+            let DecodedFrame::Known(frame) = frame else {
+                panic!("the buffered frame must be known, got {frame:?}");
+            };
+            let WirePayload::PairingRequest(request) = frame.payload else {
+                panic!(
+                    "expected buffered application frames, got {}",
+                    frame.payload.message_type()
+                );
+            };
+            paddings.push(request.device_descriptor.len());
+        }
+        assert_eq!(
+            paddings,
+            (0..total).collect::<Vec<_>>(),
+            "a writer failure must preserve every read-ahead frame in arrival order"
+        );
+
+        let failure = tokio::time::timeout(Duration::from_secs(10), transport.read())
+            .await
+            .expect("the writer failure must surface behind the buffered frames")
+            .expect_err("the bounded writer failure must end the transport");
+        assert!(
+            format!("{failure:?}").contains("websocket write failed"),
+            "the writer-side reason must not be lost in the terminal race, got {failure:?}"
         );
     }
 
