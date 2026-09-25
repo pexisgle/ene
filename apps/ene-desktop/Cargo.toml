@@ -23,7 +23,6 @@ ene-api = { path = "../../crates/ene-api" }
 ene-client = { path = "../../crates/ene-client" }
 ene-config = { path = "../../crates/ene-config" }
 ene-local-control = { path = "../../crates/ene-local-control" }
-ene-plugin-ipc = { path = "../../crates/ene-plugin-ipc" }
 ene-desktop-ui = { path = "../ene-desktop-ui" }
 ene-body = { path = "../ene-body" }
 serde.workspace = true

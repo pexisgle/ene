@@ -386,7 +386,10 @@ pub fn control_socket_path(data_dir: &Path) -> PathBuf {
 #[cfg(windows)]
 #[must_use]
 pub fn control_pipe_name(data_dir: &Path) -> String {
-    format!("{}-control", ene_plugin_ipc::pipe_name(data_dir))
+    format!(
+        "{}-control",
+        ene_local_control::channel::windows_pipe_name(data_dir)
+    )
 }
 
 #[cfg(unix)]

@@ -384,7 +384,10 @@ async fn connect_requester(data_dir: &Path) -> Result<tokio::net::UnixStream, De
 async fn connect_requester(
     data_dir: &Path,
 ) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, DesktopError> {
-    let pipe = format!("{}-control", ene_plugin_ipc::pipe_name(data_dir));
+    let pipe = format!(
+        "{}-control",
+        ene_local_control::channel::windows_pipe_name(data_dir)
+    );
     tokio::net::windows::named_pipe::ClientOptions::new()
         .open(&pipe)
         .map_err(|error| DesktopError::Transport(format!("requester listener: {}", error.kind())))

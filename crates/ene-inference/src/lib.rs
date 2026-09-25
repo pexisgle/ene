@@ -818,7 +818,8 @@ fn not_sent_for_deny(code: DenyCode) -> NotSentReason {
     }
 }
 
-pub mod fake {
+#[cfg(test)]
+mod fake {
     use std::future::Future;
     use std::pin::Pin;
 

@@ -22,7 +22,6 @@ mod contract_tests {
             "ene-core",
             "ene-local-control",
             "ene-credential",
-            "ene-plugin-ipc",
         ] {
             assert!(
                 !manifest.contains(banned),

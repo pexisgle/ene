@@ -28,7 +28,6 @@ ene-credential = { path = "../../crates/ene-credential" }
 ene-inference = { path = "../../crates/ene-inference" }
 ene-learning = { path = "../../crates/ene-learning" }
 ene-permission = { path = "../../crates/ene-permission" }
-ene-plugin-ipc = { path = "../../crates/ene-plugin-ipc" }
 ene-presence = { path = "../../crates/ene-presence" }
 ene-presentation = { path = "../../crates/ene-presentation" }
 ene-preservation = { path = "../../crates/ene-preservation" }

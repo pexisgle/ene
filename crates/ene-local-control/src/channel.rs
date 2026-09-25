@@ -3,6 +3,18 @@ pub const CONFIRMATION_MODE_STDIO: &str = "stdio";
 
 pub const MAX_CONTROL_FRAME_BYTES: u32 = 16 * 1024;
 
+#[must_use]
+pub fn windows_pipe_name(data_dir: &std::path::Path) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut tag = FNV_OFFSET;
+    for byte in data_dir.as_os_str().as_encoded_bytes() {
+        tag ^= u64::from(*byte);
+        tag = tag.wrapping_mul(FNV_PRIME);
+    }
+    format!(r"\\.\pipe\ene-{tag:016x}")
+}
+
 pub fn encode_body<T: serde::Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
     let body = serde_json::to_vec(value)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
