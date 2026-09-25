@@ -10,6 +10,8 @@ use ene_body::ipc::{
     encode_parent, frame_len,
 };
 
+const EVENT_QUEUE_CAPACITY: usize = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyStatus {
     Absent,
@@ -84,7 +86,7 @@ impl BodySupervisor {
             Ok(mut child) => {
                 let stdin = child.stdin.take();
                 let stdout = child.stdout.take();
-                let (tx, rx) = mpsc::channel();
+                let (tx, rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
                 let reader = stdout.map(|mut stdout| {
                     thread::spawn(move || {
                         let mut buf = Vec::new();
