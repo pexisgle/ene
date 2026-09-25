@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use zeroize::Zeroizing;
+
 use ene_primitive::{RawId, WallClockWithTz};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -158,15 +160,20 @@ impl FileDeviceAuthStore {
             return Ok(0);
         }
         self.with_mutation_lock(|| {
-            let mut entries = self.read_entries()?;
-            let before = entries.len();
-            entries
-                .retain(|key, entry| !key.contains(target) && !entry.descriptor.contains(target));
-            let removed = before - entries.len();
-            if removed > 0 {
-                self.write_entries(&entries)?;
+            let entries = self.read_entries()?;
+            let mut retained = BTreeMap::new();
+            let mut removed = 0_u64;
+            for (key, entry) in entries {
+                if entry_matches_target(&key, &entry, target)? {
+                    removed = removed.saturating_add(1);
+                } else {
+                    retained.insert(key, entry);
+                }
             }
-            Ok(removed as u64)
+            if removed > 0 {
+                self.write_entries(&retained)?;
+            }
+            Ok(removed)
         })
     }
 
@@ -175,10 +182,13 @@ impl FileDeviceAuthStore {
             return Ok(0);
         }
         let entries = self.read_entries()?;
-        Ok(entries
-            .iter()
-            .filter(|(key, entry)| key.contains(target) || entry.descriptor.contains(target))
-            .count() as u64)
+        entries.iter().try_fold(0_u64, |count, (key, entry)| {
+            if entry_matches_target(key, entry, target)? {
+                Ok(count.saturating_add(1))
+            } else {
+                Ok(count)
+            }
+        })
     }
 
     fn read_entries(&self) -> Result<BTreeMap<String, StoredDeviceAuth>, CredentialTechnicalError> {
@@ -262,6 +272,23 @@ impl FileDeviceAuthStore {
         }
         enforce_owner_only(&self.path)
     }
+}
+
+fn entry_matches_target(
+    key: &str,
+    entry: &StoredDeviceAuth,
+    target: &str,
+) -> Result<bool, CredentialTechnicalError> {
+    if key.contains(target) || entry.descriptor.contains(target) || entry.secret_hex == target {
+        return Ok(true);
+    }
+    let bytes = decode_hex_lower(&entry.secret_hex).ok_or_else(|| {
+        CredentialTechnicalError::StorageUnavailable {
+            reason: String::from("device-auth entry holds malformed secret material"),
+        }
+    })?;
+    let secret = Zeroizing::new(bytes);
+    Ok(secret.as_slice() == target.as_bytes())
 }
 
 #[derive(Debug, Serialize, Deserialize)]

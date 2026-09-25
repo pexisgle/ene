@@ -286,4 +286,21 @@ mod tests {
         assert_eq!(file.count_target_text("target-label").unwrap(), 0);
         assert!(file.load_secret(&device).unwrap().is_none());
     }
+
+    #[test]
+    fn exact_target_erases_a_matching_device_secret() {
+        let (_dir, file, _path) = device_file();
+        let matching = DeviceId(RawId::new());
+        let unrelated = DeviceId(RawId::new());
+        file.save_secret(&matching, "phone", "device-secret")
+            .unwrap();
+        file.save_secret(&unrelated, "laptop", "other-secret")
+            .unwrap();
+
+        assert_eq!(file.count_target_text("device-secret").unwrap(), 1);
+        assert_eq!(file.erase_target_text("device-secret").unwrap(), 1);
+        assert!(file.load_secret(&matching).unwrap().is_none());
+        assert!(file.load_secret(&unrelated).unwrap().is_some());
+        assert_eq!(file.count_target_text("device-secret").unwrap(), 0);
+    }
 }
