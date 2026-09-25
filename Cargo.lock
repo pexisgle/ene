@@ -1413,6 +1413,9 @@ version = "0.1.0"
 dependencies = [
  "ene-permission",
  "ene-primitive",
+ "libc",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -1535,6 +1538,7 @@ dependencies = [
  "ene-task",
  "futures-util",
  "hmac",
+ "libc",
  "rcgen",
  "rmp-serde",
  "rusqlite",

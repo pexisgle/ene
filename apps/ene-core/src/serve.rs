@@ -333,6 +333,8 @@ pub struct HostHandle {
     pub(crate) learning_worker: AsyncMutex<()>,
     pub(crate) companion_wire: String,
     pub(crate) task_executions: std::sync::Arc<crate::task_run::TaskExecutionRegistry>,
+    pub(crate) task_agent_quiesce_timeout: StdMutex<std::time::Duration>,
+    pub(crate) task_effect_runtime: StdMutex<crate::action::TaskEffectRuntime>,
     pub(crate) conversation_tasks: crate::task_control::ConversationTaskProjection,
     pub(crate) presentations: Arc<StdMutex<crate::presentation::PresentationState>>,
     pub(crate) presentation_lock: AsyncMutex<()>,
@@ -497,6 +499,8 @@ impl HostHandle {
             learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
             task_executions: std::sync::Arc::new(crate::task_run::TaskExecutionRegistry::default()),
+            task_agent_quiesce_timeout: StdMutex::new(crate::task_run::TASK_AGENT_QUIESCE_TIMEOUT),
+            task_effect_runtime: StdMutex::new(crate::action::TaskEffectRuntime::new()),
             conversation_tasks: crate::task_control::ConversationTaskProjection::default(),
             presentations: Arc::clone(&presentations),
             presentation_lock: AsyncMutex::new(()),
@@ -667,6 +671,90 @@ impl HostHandle {
         Ok(outcome)
     }
 
+    pub(crate) async fn abort_task_agents_for_host_shutdown(&self) {
+        self.task_executions.abort_for_host_shutdown().await;
+    }
+
+    pub(crate) fn close_task_effect_admission(&self) {
+        crate::lock_unpoison(&self.task_effect_runtime).close_admission();
+    }
+
+    pub(crate) async fn terminate_and_join_task_effects(&self) -> Result<(), CoreError> {
+        let runtime = crate::lock_unpoison(&self.task_effect_runtime).clone();
+        runtime
+            .terminate_and_join()
+            .await
+            .map_err(CoreError::Serving)
+    }
+
+    pub(crate) fn verify_task_effect_shutdown(&self) -> Result<(), CoreError> {
+        crate::lock_unpoison(&self.task_effect_runtime)
+            .verify_shutdown()
+            .map_err(CoreError::Serving)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn install_uncooperative_task_effect_runtime_for_tests(
+        &self,
+        executable: std::path::PathBuf,
+        args: Vec<String>,
+        envs: Vec<(String, String)>,
+    ) {
+        let runtime = crate::action::TaskEffectRuntime::for_test_command(executable, args, envs);
+        *crate::lock_unpoison(&self.task_effect_runtime) = runtime;
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn set_task_effect_staging_pause_for_tests(
+        &self,
+        pause: Option<ene_action::WorkspaceEffectStagingPause>,
+    ) {
+        crate::lock_unpoison(&self.task_effect_runtime).set_test_staging_pause(pause);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn set_task_effect_cleanup_pause_for_tests(
+        &self,
+        pause: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    ) {
+        let pause = pause.map(
+            |(entered, release)| crate::staging_cleanup::StagingCleanupPause { entered, release },
+        );
+        crate::lock_unpoison(&self.task_effect_runtime).set_test_cleanup_pause(pause);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn set_task_effect_cleanup_failure_for_tests(&self, fail: bool) {
+        crate::lock_unpoison(&self.task_effect_runtime).set_test_cleanup_failure(fail);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn set_task_effect_staging_helper_pause_for_tests(
+        &self,
+        stage: &str,
+        entered: std::path::PathBuf,
+        release: std::path::PathBuf,
+        canary: Option<std::path::PathBuf>,
+    ) {
+        crate::lock_unpoison(&self.task_effect_runtime)
+            .set_test_staging_helper_pause(stage, entered, release, canary);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn pending_task_effect_staging_for_tests(&self) -> usize {
+        crate::lock_unpoison(&self.task_effect_runtime).pending_staging_obligations_for_tests()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn live_task_effect_processes_for_tests(&self) -> usize {
+        crate::lock_unpoison(&self.task_effect_runtime).live_worker_processes_for_tests()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn live_task_effect_workers_for_tests(&self) -> usize {
+        crate::lock_unpoison(&self.task_effect_runtime).live_workers_for_tests()
+    }
+
     pub fn install_task_launcher(
         &self,
         launcher: std::sync::Arc<dyn crate::task_run::TaskAgentLauncher>,
@@ -763,6 +851,53 @@ impl HostHandle {
         self.task_launcher.get()
     }
 
+    pub(crate) fn task_agent_quiesce_timeout(&self) -> std::time::Duration {
+        *crate::lock_unpoison(&self.task_agent_quiesce_timeout)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_task_agent_quiesce_timeout_for_tests(&self, timeout: std::time::Duration) {
+        *crate::lock_unpoison(&self.task_agent_quiesce_timeout) = timeout;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn arm_inference_claim_pause_for_tests(&self) {
+        self.task_executions
+            .arm_task_claim_pause_for_tests(crate::task_run::TaskClaimKind::Inference);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn arm_action_claim_pause_for_tests(&self) {
+        self.task_executions
+            .arm_task_claim_pause_for_tests(crate::task_run::TaskClaimKind::Action);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn arm_action_effect_pause_for_tests(&self) {
+        self.task_executions
+            .arm_task_claim_pause_for_tests(crate::task_run::TaskClaimKind::ActionEffect);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn wait_task_claim_pause_for_tests(&self) {
+        self.task_executions.wait_task_claim_pause_for_tests().await;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn release_task_claim_pause_for_tests(&self) {
+        self.task_executions.release_task_claim_pause_for_tests();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn wait_task_host_shutdown_for_tests(&self) {
+        self.task_executions.wait_host_shutdown_for_tests().await;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn running_task_executions_for_tests(&self) -> usize {
+        self.task_executions.running_task_executions_for_tests()
+    }
+
     #[cfg(test)]
     pub(crate) fn test_task_control_gate(
         &self,
@@ -802,17 +937,23 @@ impl HostHandle {
             }
         };
         let executor = HostInference::new(&self.store, &self.cred_store, &self.tracker, transport);
-        let inference = TaskAgentInferenceAdapter::new(&executor, &registration.cancellation);
+        let inference = TaskAgentInferenceAdapter::new(
+            &executor,
+            Arc::clone(&self.task_executions),
+            registration.dispatch_abort(),
+        );
         let instructions = OwnerInstructionSource::new(&self.store);
         let scrubber = CredentialScrubber {
             refs: &self.store,
             store: &self.cred_store,
         };
+        let effect_runtime = crate::lock_unpoison(&self.task_effect_runtime).clone();
         crate::task_run::run_task_agent_execution(
             &self.store,
             &instructions,
             &inference,
             &scrubber,
+            &effect_runtime,
             crate::task_run::DEFAULT_MAX_TURNS,
             &registration,
         )

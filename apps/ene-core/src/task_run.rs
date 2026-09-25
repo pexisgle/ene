@@ -12,17 +12,50 @@ use ene_task::{
 };
 use std::sync::Arc;
 
-use crate::action::{WorkspaceActionHostError, WorkspaceActionHostOutcome, run_workspace_action};
+use crate::action::{
+    TaskEffectRuntime, WorkspaceActionHostError, WorkspaceActionHostOutcome, run_workspace_action,
+};
 use crate::serve::{CoreError, HostHandle};
 
 pub const DEFAULT_MAX_TURNS: u32 = 16;
+pub(crate) const TASK_AGENT_QUIESCE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskClaimKind {
+    Inference,
+    Action,
+    #[cfg(any(test, feature = "test-support"))]
+    ActionEffect,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct TaskClaimPause {
+    kind: TaskClaimKind,
+    entered: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TaskClaimPause {
+    fn new(kind: TaskClaimKind) -> Self {
+        Self {
+            kind,
+            entered: std::sync::atomic::AtomicBool::new(false),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct TaskExecutionRegistry {
     running: std::sync::Mutex<std::collections::HashMap<ene_task::DelegationId, RunningExecution>>,
     reservations:
         std::sync::Mutex<std::collections::HashMap<ene_task::DelegationId, ene_task::TaskId>>,
-    commit_scope: tokio::sync::Mutex<()>,
+    commit_scope: Arc<tokio::sync::Mutex<()>>,
+    host_shutdown: DispatchAbort,
+    #[cfg(any(test, feature = "test-support"))]
+    claim_pause: std::sync::Mutex<Option<Arc<TaskClaimPause>>>,
 }
 
 pub enum TakeReservation<'a> {
@@ -49,8 +82,83 @@ impl TaskExecutionRegistry {
         signalled
     }
 
-    pub async fn commit_scope(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.commit_scope.lock().await
+    pub(crate) async fn abort_for_host_shutdown(&self) {
+        let _commit = self.commit_scope().await;
+        self.host_shutdown.abort();
+    }
+
+    pub(crate) fn abort_for_host_shutdown_without_commit_scope(&self) {
+        self.host_shutdown.abort();
+    }
+
+    pub async fn commit_scope(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.commit_scope).lock_owned().await
+    }
+
+    pub(crate) async fn task_claim_scope(
+        &self,
+        _kind: TaskClaimKind,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        #[cfg(any(test, feature = "test-support"))]
+        self.pause_before_task_claim(_kind).await;
+        self.commit_scope().await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn arm_task_claim_pause_for_tests(&self, kind: TaskClaimKind) {
+        *crate::lock_unpoison(&self.claim_pause) = Some(Arc::new(TaskClaimPause::new(kind)));
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn wait_task_claim_pause_for_tests(&self) {
+        loop {
+            let pause = crate::lock_unpoison(&self.claim_pause).clone();
+            if pause.is_some_and(|pause| pause.entered.load(std::sync::atomic::Ordering::SeqCst)) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn release_task_claim_pause_for_tests(&self) {
+        if let Some(pause) = crate::lock_unpoison(&self.claim_pause).as_ref() {
+            pause.release.notify_waiters();
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn pause_after_task_effect_for_tests(&self) {
+        self.pause_before_task_claim(TaskClaimKind::ActionEffect)
+            .await;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    async fn pause_before_task_claim(&self, kind: TaskClaimKind) {
+        let pause = {
+            let configured = crate::lock_unpoison(&self.claim_pause).clone();
+            configured.filter(|pause| pause.kind == kind)
+        };
+        let Some(pause) = pause else {
+            return;
+        };
+        let released = pause.release.notified();
+        pause
+            .entered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        released.await;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn wait_host_shutdown_for_tests(&self) {
+        while !self.host_shutdown.is_aborted() {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn running_task_executions_for_tests(&self) -> usize {
+        crate::lock_unpoison(&self.running).len()
     }
 
     pub fn reserve(&self, delegation: ene_task::DelegationId, task: ene_task::TaskId) -> bool {
@@ -95,6 +203,7 @@ impl TaskExecutionRegistry {
             None => return TakeReservation::Unreserved,
         }
         let cancellation = DispatchAbort::default();
+        let dispatch_abort = cancellation.linked_to(&self.host_shutdown);
         running.insert(
             delegation,
             RunningExecution {
@@ -106,6 +215,8 @@ impl TaskExecutionRegistry {
             registry: self,
             delegation,
             cancellation,
+            host_shutdown: self.host_shutdown.clone(),
+            dispatch_abort,
         })
     }
 
@@ -117,7 +228,29 @@ impl TaskExecutionRegistry {
 pub struct TaskExecutionRegistration<'a> {
     registry: &'a TaskExecutionRegistry,
     delegation: ene_task::DelegationId,
-    pub cancellation: DispatchAbort,
+    cancellation: DispatchAbort,
+    host_shutdown: DispatchAbort,
+    dispatch_abort: DispatchAbort,
+}
+
+impl TaskExecutionRegistration<'_> {
+    pub(crate) fn dispatch_abort(&self) -> &DispatchAbort {
+        &self.dispatch_abort
+    }
+
+    pub(crate) fn task_executions(&self) -> &TaskExecutionRegistry {
+        self.registry
+    }
+
+    fn stop_outcome(&self) -> Option<TaskAgentRunOutcome> {
+        if self.cancellation.is_aborted() {
+            Some(TaskAgentRunOutcome::Cancelled)
+        } else if self.host_shutdown.is_aborted() {
+            Some(TaskAgentRunOutcome::HostShutdown)
+        } else {
+            None
+        }
+    }
 }
 
 impl Drop for TaskExecutionRegistration<'_> {
@@ -212,6 +345,7 @@ pub enum TaskAgentRunOutcome {
         attempt: ene_action::ActionAttemptId,
     },
     Cancelled,
+    HostShutdown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -236,16 +370,19 @@ impl From<ene_task::TaskTechnicalError> for TaskAgentRunError {
     }
 }
 
-pub async fn run_task_agent_execution(
+pub(crate) async fn run_task_agent_execution(
     store: &Store,
     instructions: &impl TaskInstructionSource,
     inference: &impl TaskAgentInference,
     scrubber: &impl SecretScrubber,
+    effect_runtime: &TaskEffectRuntime,
     max_turns: u32,
     registration: &TaskExecutionRegistration<'_>,
 ) -> Result<TaskAgentRunOutcome, TaskAgentRunError> {
     let delegation = registration.delegation;
-    let cancellation = &registration.cancellation;
+    if let Some(outcome) = registration.stop_outcome() {
+        return Ok(outcome);
+    }
     if execution_already_started(store, delegation).await? {
         return Ok(TaskAgentRunOutcome::Refused(
             TaskAgentRunRefusal::ExecutionAlreadyStarted { delegation },
@@ -255,8 +392,8 @@ pub async fn run_task_agent_execution(
     let mut attempt_refs: Vec<RawId> = Vec::new();
     let mut turn = 0_u32;
     loop {
-        if cancellation.is_aborted() {
-            return Ok(TaskAgentRunOutcome::Cancelled);
+        if let Some(outcome) = registration.stop_outcome() {
+            return Ok(outcome);
         }
         if turn >= max_turns {
             return Ok(TaskAgentRunOutcome::TurnLimitReached { turns: turn });
@@ -309,7 +446,11 @@ pub async fn run_task_agent_execution(
                 return Ok(TaskAgentRunOutcome::NotSent(reason));
             }
             TaskAgentTurnOutcome::Aborted => {
-                return Ok(TaskAgentRunOutcome::Cancelled);
+                return Ok(if registration.cancellation.is_aborted() {
+                    TaskAgentRunOutcome::Cancelled
+                } else {
+                    TaskAgentRunOutcome::HostShutdown
+                });
             }
         };
         if !produced.adoption_consent_current {
@@ -336,11 +477,14 @@ pub async fn run_task_agent_execution(
                 return Ok(TaskAgentRunOutcome::Finalized { result, acceptance });
             }
             Ok(TaskAgentDirective::Act(request)) => {
-                if cancellation.is_aborted() {
-                    return Ok(TaskAgentRunOutcome::Cancelled);
+                if let Some(outcome) = registration.stop_outcome() {
+                    return Ok(outcome);
                 }
                 let action = run_workspace_action(
                     store,
+                    registration.task_executions(),
+                    effect_runtime,
+                    registration.dispatch_abort(),
                     delegation,
                     request.operation,
                     request.path.clone(),
@@ -348,6 +492,13 @@ pub async fn run_task_agent_execution(
                 )
                 .await?;
                 match action {
+                    WorkspaceActionHostOutcome::Stopped => {
+                        return Ok(if registration.cancellation.is_aborted() {
+                            TaskAgentRunOutcome::Cancelled
+                        } else {
+                            TaskAgentRunOutcome::HostShutdown
+                        });
+                    }
                     WorkspaceActionHostOutcome::Completed {
                         attempt,
                         effect,
@@ -639,12 +790,15 @@ pub trait TaskAgentLauncher: Send + Sync {
     fn launch(&self, delegation: ene_task::DelegationId);
 }
 
+type TaskAgentJoinResult = Result<TaskAgentRunOutcome, TaskAgentRunError>;
+
 pub struct BackgroundTaskAgent<T> {
     handle: std::sync::Weak<HostHandle>,
     transport: Arc<T>,
-    tasks: std::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
+    tasks: std::sync::Mutex<Option<tokio::task::JoinSet<TaskAgentJoinResult>>>,
     shutdown: tokio::sync::Mutex<()>,
     failure: std::sync::Mutex<Option<CoreError>>,
+    quiesce_timeout: std::sync::Mutex<std::time::Duration>,
 }
 
 impl<T> BackgroundTaskAgent<T> {
@@ -656,10 +810,16 @@ impl<T> BackgroundTaskAgent<T> {
             tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
             shutdown: tokio::sync::Mutex::new(()),
             failure: std::sync::Mutex::new(None),
+            quiesce_timeout: std::sync::Mutex::new(TASK_AGENT_QUIESCE_TIMEOUT),
         }
     }
 
     pub(crate) fn abort(&self) {
+        if let Some(handle) = self.handle.upgrade() {
+            handle
+                .task_executions
+                .abort_for_host_shutdown_without_commit_scope();
+        }
         let tasks = crate::lock_unpoison(&self.tasks).take();
         drop(tasks);
     }
@@ -667,16 +827,87 @@ impl<T> BackgroundTaskAgent<T> {
     pub(crate) async fn shutdown_and_join(&self) -> Result<(), CoreError> {
         let _shutdown = self.shutdown.lock().await;
         let tasks = crate::lock_unpoison(&self.tasks).take();
+        let handle = self.handle.upgrade();
+        if let Some(handle) = &handle {
+            handle.close_task_effect_admission();
+        }
+        self.signal_host_shutdown().await;
         let Some(mut tasks) = tasks else {
-            return Ok(());
+            let mut failure = crate::lock_unpoison(&self.failure).take();
+            if let Some(handle) = &handle {
+                if let Err(error) = handle.terminate_and_join_task_effects().await {
+                    record_core_failure(&mut failure, error);
+                }
+                if let Err(error) = handle.verify_task_effect_shutdown() {
+                    record_core_failure(&mut failure, error);
+                }
+            }
+            return failure.map_or(Ok(()), Err);
         };
         let mut failure = crate::lock_unpoison(&self.failure).take();
-        while let Some(result) = tasks.join_next().await {
-            if result.is_err() {
-                failure.get_or_insert_with(task_agent_join_failure);
+        let quiesce_timeout = handle.as_ref().map_or_else(
+            || *crate::lock_unpoison(&self.quiesce_timeout),
+            |handle| handle.task_agent_quiesce_timeout(),
+        );
+        let joined = tokio::time::timeout(quiesce_timeout, async {
+            while let Some(result) = tasks.join_next().await {
+                record_task_agent_result(&mut failure, result);
+            }
+        })
+        .await;
+        if joined.is_err() {
+            if let Some(handle) = &handle
+                && let Err(error) = handle.terminate_and_join_task_effects().await
+            {
+                record_core_failure(&mut failure, error);
+            }
+            tasks.abort_all();
+            while let Some(result) = tasks.join_next().await {
+                record_task_agent_result(&mut failure, result);
+            }
+            if let Some(handle) = &handle
+                && let Err(error) = handle.verify_task_effect_shutdown()
+            {
+                record_core_failure(&mut failure, error);
+            }
+            return failure.map_or(Ok(()), Err);
+        }
+        if let Some(handle) = &handle {
+            if let Err(error) = handle.terminate_and_join_task_effects().await {
+                record_core_failure(&mut failure, error);
+            }
+            if let Err(error) = handle.verify_task_effect_shutdown() {
+                record_core_failure(&mut failure, error);
             }
         }
         failure.map_or(Ok(()), Err)
+    }
+
+    async fn signal_host_shutdown(&self) {
+        if let Some(handle) = self.handle.upgrade() {
+            handle.abort_task_agents_for_host_shutdown().await;
+        }
+    }
+}
+
+fn record_core_failure(failure: &mut Option<CoreError>, error: CoreError) {
+    failure.get_or_insert(error);
+}
+
+fn record_task_agent_result(
+    failure: &mut Option<CoreError>,
+    result: Result<TaskAgentJoinResult, tokio::task::JoinError>,
+) {
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            failure.get_or_insert_with(|| {
+                CoreError::Serving(format!("Task Agent technical failure: {error}"))
+            });
+        }
+        Err(_) => {
+            failure.get_or_insert_with(task_agent_join_failure);
+        }
     }
 }
 
@@ -698,14 +929,14 @@ where
             return Err(TaskAgentRunRefusal::ExecutionUnavailable { delegation });
         };
         while let Some(result) = tasks.try_join_next() {
-            if result.is_err() {
-                crate::lock_unpoison(&self.failure).get_or_insert_with(task_agent_join_failure);
-            }
+            let mut failure = crate::lock_unpoison(&self.failure);
+            record_task_agent_result(&mut failure, result);
         }
         let transport = Arc::clone(&self.transport);
         tasks.spawn(async move {
-            drop(handle.run_task_agent(transport.as_ref(), delegation).await);
+            let result = handle.run_task_agent(transport.as_ref(), delegation).await;
             handle.task_executions.release(delegation);
+            result
         });
         Ok(())
     }
@@ -744,6 +975,50 @@ mod launcher_tests {
         > {
             Box::pin(std::future::pending())
         }
+    }
+
+    #[tokio::test]
+    async fn host_shutdown_abort_is_distinct_from_task_cancellation() {
+        let registry = TaskExecutionRegistry::default();
+        let task = ene_task::TaskId::generate();
+        let delegation = ene_task::DelegationId::generate();
+        assert!(registry.reserve(delegation, task));
+        let TakeReservation::Admitted(registration) = registry.take_reservation(delegation, task)
+        else {
+            panic!("the reservation must enter the running registry");
+        };
+
+        registry.abort_for_host_shutdown().await;
+
+        assert!(registration.dispatch_abort.is_aborted());
+        assert!(!registration.cancellation.is_aborted());
+        assert!(registration.host_shutdown.is_aborted());
+        assert_eq!(
+            registration.stop_outcome(),
+            Some(TaskAgentRunOutcome::HostShutdown)
+        );
+    }
+
+    #[test]
+    fn task_cancellation_aborts_dispatch_without_relabelling_host_shutdown() {
+        let registry = TaskExecutionRegistry::default();
+        let task = ene_task::TaskId::generate();
+        let delegation = ene_task::DelegationId::generate();
+        assert!(registry.reserve(delegation, task));
+        let TakeReservation::Admitted(registration) = registry.take_reservation(delegation, task)
+        else {
+            panic!("the reservation must enter the running registry");
+        };
+
+        assert!(registry.cancel(task));
+
+        assert!(registration.dispatch_abort.is_aborted());
+        assert!(registration.cancellation.is_aborted());
+        assert!(!registration.host_shutdown.is_aborted());
+        assert_eq!(
+            registration.stop_outcome(),
+            Some(TaskAgentRunOutcome::Cancelled)
+        );
     }
 
     #[tokio::test]
@@ -786,6 +1061,7 @@ mod launcher_tests {
                 .await
                 .unwrap();
                 drop(worker);
+                Ok(TaskAgentRunOutcome::Cancelled)
             });
         entered_rx.await.unwrap();
         let mut joining = std::pin::pin!(launcher.shutdown_and_join());
@@ -856,6 +1132,7 @@ mod launcher_tests {
             tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
             shutdown: tokio::sync::Mutex::new(()),
             failure: std::sync::Mutex::new(None),
+            quiesce_timeout: std::sync::Mutex::new(TASK_AGENT_QUIESCE_TIMEOUT),
         };
         let (held, released) = tokio::sync::oneshot::channel::<()>();
         crate::lock_unpoison(&launcher.tasks)
@@ -864,6 +1141,7 @@ mod launcher_tests {
             .spawn(async move {
                 std::future::pending::<()>().await;
                 drop(held);
+                std::future::pending::<TaskAgentJoinResult>().await
             });
         drop(launcher);
         assert!(released.await.is_err());
@@ -894,11 +1172,61 @@ mod launcher_tests {
                 std::future::pending::<()>().await;
                 drop(handle);
                 drop(held);
+                std::future::pending::<TaskAgentJoinResult>().await
             });
         assert!(weak.upgrade().is_some());
         launcher.abort();
         assert!(released.await.is_err());
         assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn domain_stop_outcomes_are_not_task_agent_technical_failures() {
+        let launcher = BackgroundTaskAgent {
+            handle: std::sync::Weak::new(),
+            transport: Arc::new(NoProvider),
+            tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+            shutdown: tokio::sync::Mutex::new(()),
+            failure: std::sync::Mutex::new(None),
+            quiesce_timeout: std::sync::Mutex::new(TASK_AGENT_QUIESCE_TIMEOUT),
+        };
+        {
+            let mut registry = crate::lock_unpoison(&launcher.tasks);
+            let tasks = registry.as_mut().unwrap();
+            tasks.spawn(async { Ok(TaskAgentRunOutcome::Cancelled) });
+            tasks.spawn(async { Ok(TaskAgentRunOutcome::HostShutdown) });
+        }
+
+        launcher.shutdown_and_join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_agent_technical_failure_reaches_shutdown_accounting() {
+        let launcher = BackgroundTaskAgent {
+            handle: std::sync::Weak::new(),
+            transport: Arc::new(NoProvider),
+            tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+            shutdown: tokio::sync::Mutex::new(()),
+            failure: std::sync::Mutex::new(None),
+            quiesce_timeout: std::sync::Mutex::new(TASK_AGENT_QUIESCE_TIMEOUT),
+        };
+        {
+            let mut registry = crate::lock_unpoison(&launcher.tasks);
+            registry.as_mut().unwrap().spawn(async {
+                Err(TaskAgentRunError::Action(
+                    WorkspaceActionHostError::EffectUnavailable {
+                        reason: String::from("staging cleanup failed"),
+                    },
+                ))
+            });
+        }
+
+        let error = launcher
+            .shutdown_and_join()
+            .await
+            .expect_err("technical task failure must reach shutdown");
+        assert!(error.to_string().contains("Task Agent technical failure"));
+        assert!(error.to_string().contains("staging cleanup failed"));
     }
 
     #[tokio::test]
@@ -912,6 +1240,7 @@ mod launcher_tests {
             tasks: std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
             shutdown: tokio::sync::Mutex::new(()),
             failure: std::sync::Mutex::new(None),
+            quiesce_timeout: std::sync::Mutex::new(TASK_AGENT_QUIESCE_TIMEOUT),
         };
         let (release, wait) = tokio::sync::oneshot::channel::<()>();
         let (panicking, panicked) = tokio::sync::oneshot::channel::<()>();
@@ -922,7 +1251,10 @@ mod launcher_tests {
                 let _panicking = panicking;
                 panic!("test runner panic");
             });
-            tasks.spawn(async move { wait.await.unwrap() });
+            tasks.spawn(async move {
+                wait.await.unwrap();
+                Ok(TaskAgentRunOutcome::Cancelled)
+            });
         }
         assert!(panicked.await.is_err());
         let mut joining = std::pin::pin!(launcher.shutdown_and_join());

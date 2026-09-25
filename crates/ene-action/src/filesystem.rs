@@ -1,11 +1,561 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::attempt::{ActionCertainty, EffectGrounds, OperationKind, RealTargetRef};
+
+const STAGING_OWNERSHIP_MARKER: &str = ".ene-action-staging-owner";
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceEffectStagingPause {
+    pub entered: PathBuf,
+    pub release: PathBuf,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkspaceEffectOptions {
+    pub staging_directory: Option<PathBuf>,
+    pub staging_ownership_token: Option<String>,
+    pub staging_identity: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub pause_after_staging: Option<WorkspaceEffectStagingPause>,
+}
+
+static STAGING_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+struct BoundStagingTemp {
+    staging: fs::File,
+    file: fs::File,
+    name: std::ffi::OsString,
+    published: bool,
+}
+
+impl BoundStagingTemp {
+    fn create(path: &Path, ownership_token: &str, identity: &str) -> Option<Self> {
+        let staging = open_bound_directory(path)?;
+        if staging_directory_identity_token(&staging).as_deref() != Some(identity) {
+            return None;
+        }
+        if read_bound_staging_marker(&staging).as_deref() != Some(ownership_token) {
+            return None;
+        }
+        for _ in 0..32 {
+            let sequence = STAGING_TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let name = std::ffi::OsString::from(format!(
+                ".ene-action-{}-{sequence}.tmp",
+                std::process::id()
+            ));
+            match create_bound_temp(&staging, &name) {
+                Some(file) => {
+                    return Some(Self {
+                        staging,
+                        file,
+                        name,
+                        published: false,
+                    });
+                }
+                None if bound_entry_exists(&staging, &name) => {}
+                None => return None,
+            }
+        }
+        None
+    }
+
+    fn file_mut(&mut self) -> &mut fs::File {
+        &mut self.file
+    }
+
+    fn publish(&mut self, destination: &Path, replace: bool) -> Result<(), ()> {
+        publish_bound_temp(&self.staging, &self.file, &self.name, destination, replace)?;
+        self.published = true;
+        Ok(())
+    }
+}
+
+impl Drop for BoundStagingTemp {
+    fn drop(&mut self) {
+        if !self.published {
+            discard_bound_temp(&self.staging, &self.file, &self.name);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn open_bound_directory(path: &Path) -> Option<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+        .ok()
+}
+
+#[cfg(windows)]
+fn open_bound_directory(path: &Path) -> Option<fs::File> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::{FromRawHandle as _, RawHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ADD_FILE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_TRAVERSE, OPEN_EXISTING, SYNCHRONIZE,
+    };
+
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.push(0);
+    // SAFETY: wide is NUL-terminated; a successful handle is transferred to File.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES
+                | FILE_LIST_DIRECTORY
+                | FILE_ADD_FILE
+                | FILE_DELETE_CHILD
+                | FILE_TRAVERSE
+                | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    // SAFETY: CreateFileW returned a newly owned handle.
+    let file = unsafe { fs::File::from_raw_handle(handle as RawHandle) };
+    let metadata = file.metadata().ok()?;
+    use std::os::windows::fs::MetadataExt as _;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY == 0
+    {
+        return None;
+    }
+    Some(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_bound_directory(_path: &Path) -> Option<fs::File> {
+    None
+}
+
+#[cfg(unix)]
+fn staging_directory_identity_token(directory: &fs::File) -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = directory.metadata().ok()?;
+    Some(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn staging_directory_identity_token(directory: &fs::File) -> Option<String> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    // SAFETY: information is a writable output buffer and directory owns the handle.
+    let mut information = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    // SAFETY: the handle remains live throughout the call.
+    if unsafe { GetFileInformationByHandle(directory.as_raw_handle() as HANDLE, &mut information) }
+        == 0
+    {
+        return None;
+    }
+    Some(format!(
+        "windows:{}:{}",
+        information.dwVolumeSerialNumber,
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow)
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn staging_directory_identity_token(_directory: &fs::File) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn read_bound_staging_marker(directory: &fs::File) -> Option<String> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+    let name = std::ffi::CString::new(STAGING_OWNERSHIP_MARKER.as_bytes()).ok()?;
+    // SAFETY: directory is a live directory fd and name is NUL-terminated.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: openat returned a newly owned descriptor.
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut token = String::new();
+    file.read_to_string(&mut token).ok()?;
+    (!token.is_empty()).then_some(token)
+}
+
+#[cfg(windows)]
+fn read_bound_staging_marker(directory: &fs::File) -> Option<String> {
+    let mut file = open_windows_relative_file(
+        directory,
+        std::ffi::OsStr::new(STAGING_OWNERSHIP_MARKER),
+        false,
+    )?;
+    let mut token = String::new();
+    file.read_to_string(&mut token).ok()?;
+    (!token.is_empty()).then_some(token)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_bound_staging_marker(_directory: &fs::File) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn create_bound_temp(directory: &fs::File, name: &std::ffi::OsStr) -> Option<fs::File> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name = std::ffi::CString::new(name.as_bytes()).ok()?;
+    // SAFETY: directory is live and name is a NUL-terminated relative filename.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    (fd >= 0).then(|| {
+        // SAFETY: a non-negative openat result is a newly owned descriptor.
+        unsafe { fs::File::from_raw_fd(fd) }
+    })
+}
+
+#[cfg(windows)]
+fn create_bound_temp(directory: &fs::File, name: &std::ffi::OsStr) -> Option<fs::File> {
+    open_windows_relative_file(directory, name, true)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_bound_temp(_directory: &fs::File, _name: &std::ffi::OsStr) -> Option<fs::File> {
+    None
+}
+
+#[cfg(unix)]
+fn bound_entry_exists(directory: &fs::File, name: &std::ffi::OsStr) -> bool {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let Ok(name) = std::ffi::CString::new(name.as_bytes()) else {
+        return false;
+    };
+    // SAFETY: metadata is a writable C struct, directory is live, name is valid.
+    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: directory is a live directory fd, name is NUL-terminated, and
+    // metadata is writable for the duration of the call.
+    (unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            &mut metadata,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    }) == 0
+}
+
+#[cfg(windows)]
+fn bound_entry_exists(directory: &fs::File, name: &std::ffi::OsStr) -> bool {
+    open_windows_relative_file(directory, name, false).is_some()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn bound_entry_exists(_directory: &fs::File, _name: &std::ffi::OsStr) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn discard_bound_temp(directory: &fs::File, _file: &fs::File, name: &std::ffi::OsStr) {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    if let Ok(name) = std::ffi::CString::new(name.as_bytes()) {
+        // SAFETY: directory is live and name is a valid relative filename.
+        let _ = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
+    }
+}
+
+#[cfg(windows)]
+fn discard_bound_temp(_directory: &fs::File, file: &fs::File, _name: &std::ffi::OsStr) {
+    let _ = mark_windows_file_delete(file);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn discard_bound_temp(_directory: &fs::File, _file: &fs::File, _name: &std::ffi::OsStr) {}
+
+#[cfg(unix)]
+fn publish_bound_temp(
+    staging: &fs::File,
+    _file: &fs::File,
+    name: &std::ffi::OsStr,
+    destination: &Path,
+    replace: bool,
+) -> Result<(), ()> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let parent = open_bound_directory(destination.parent().ok_or(())?).ok_or(())?;
+    let source = std::ffi::CString::new(name.as_bytes()).map_err(|_| ())?;
+    let target =
+        std::ffi::CString::new(destination.file_name().ok_or(())?.as_bytes()).map_err(|_| ())?;
+    if replace {
+        // SAFETY: both directory fds are live and both names are NUL-terminated.
+        (unsafe {
+            libc::renameat(
+                staging.as_raw_fd(),
+                source.as_ptr(),
+                parent.as_raw_fd(),
+                target.as_ptr(),
+            )
+        } == 0)
+            .then_some(())
+            .ok_or(())
+    } else {
+        // SAFETY: both directory fds are live and both names are NUL-terminated.
+        if unsafe {
+            libc::linkat(
+                staging.as_raw_fd(),
+                source.as_ptr(),
+                parent.as_raw_fd(),
+                target.as_ptr(),
+                0,
+            )
+        } != 0
+        {
+            return Err(());
+        }
+        // The target hard link is already published. A leftover staging link
+        // remains inside the owned obligation and will be removed by cleanup.
+        // SAFETY: staging is live and source is a valid NUL-terminated filename.
+        let _ = unsafe { libc::unlinkat(staging.as_raw_fd(), source.as_ptr(), 0) };
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn publish_bound_temp(
+    _staging: &fs::File,
+    file: &fs::File,
+    _name: &std::ffi::OsStr,
+    destination: &Path,
+    replace: bool,
+) -> Result<(), ()> {
+    rename_windows_file_by_handle(file, destination, replace)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn publish_bound_temp(
+    _staging: &fs::File,
+    _file: &fs::File,
+    _name: &std::ffi::OsStr,
+    _destination: &Path,
+    _replace: bool,
+) -> Result<(), ()> {
+    Err(())
+}
+
+#[cfg(windows)]
+fn open_windows_relative_file(
+    directory: &fs::File,
+    name: &std::ffi::OsStr,
+    create: bool,
+) -> Option<fs::File> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, RawHandle};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
+        FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile, NtOpenFile,
+    };
+    use windows_sys::Win32::Foundation::{HANDLE, OBJ_DONT_REPARSE, UNICODE_STRING};
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let mut buffer = name.encode_wide().collect::<Vec<_>>();
+    let byte_length = buffer.len().checked_mul(size_of::<u16>())?;
+    let length = u16::try_from(byte_length).ok()?;
+    buffer.push(0);
+    let maximum_length = u16::try_from(byte_length + size_of::<u16>()).ok()?;
+    let unicode = UNICODE_STRING {
+        Length: length,
+        MaximumLength: maximum_length,
+        Buffer: buffer.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: directory.as_raw_handle() as HANDLE,
+        ObjectName: &raw const unicode,
+        Attributes: OBJ_DONT_REPARSE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut status = IO_STATUS_BLOCK::default();
+    let options = FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
+    // SAFETY: all pointer-backed structs and the directory handle remain live for the call.
+    let result = unsafe {
+        if create {
+            NtCreateFile(
+                &mut handle,
+                FILE_GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                &raw const attributes,
+                &mut status,
+                std::ptr::null(),
+                FILE_ATTRIBUTE_NORMAL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_CREATE,
+                options,
+                std::ptr::null(),
+                0,
+            )
+        } else {
+            NtOpenFile(
+                &mut handle,
+                FILE_GENERIC_READ,
+                &raw const attributes,
+                &mut status,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                options,
+            )
+        }
+    };
+    if result < 0 {
+        return None;
+    }
+    // SAFETY: the successful NT call returned a newly owned handle.
+    let file = unsafe { fs::File::from_raw_handle(handle as RawHandle) };
+    let metadata = file.metadata().ok()?;
+    use std::os::windows::fs::MetadataExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0
+    {
+        return None;
+    }
+    Some(file)
+}
+
+#[cfg(windows)]
+fn mark_windows_file_delete(file: &fs::File) -> Result<(), ()> {
+    use std::mem::size_of;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO,
+        FILE_DISPOSITION_INFO_EX, FileDispositionInfo, FileDispositionInfoEx,
+        SetFileInformationByHandle,
+    };
+
+    let information = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    };
+    // SAFETY: file owns a live DELETE-capable handle and information is correctly sized.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            FileDispositionInfoEx,
+            std::ptr::from_ref(&information).cast(),
+            size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    } != 0
+    {
+        return Ok(());
+    }
+    let classic = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: same handle and correctly sized fallback structure.
+    (unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            FileDispositionInfo,
+            std::ptr::from_ref(&classic).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } != 0)
+        .then_some(())
+        .ok_or(())
+}
+
+#[cfg(windows)]
+fn rename_windows_file_by_handle(
+    file: &fs::File,
+    destination: &Path,
+    replace: bool,
+) -> Result<(), ()> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_RENAME_INFORMATION, FileRenameInformation, NtSetInformationFile,
+    };
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let parent = open_bound_directory(destination.parent().ok_or(())?).ok_or(())?;
+    let name = destination
+        .file_name()
+        .ok_or(())?
+        .encode_wide()
+        .collect::<Vec<_>>();
+    let name_bytes = name.len().checked_mul(size_of::<u16>()).ok_or(())?;
+    let header_bytes = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
+    let total_bytes = header_bytes.checked_add(name_bytes).ok_or(())?;
+    let mut buffer = vec![0u64; total_bytes.div_ceil(size_of::<u64>()).max(1)];
+    let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    // SAFETY: the aligned buffer is large enough for the fixed header plus UTF-16 name.
+    unsafe {
+        (*information).Anonymous.ReplaceIfExists = replace;
+        (*information).RootDirectory = parent.as_raw_handle() as HANDLE;
+        (*information).FileNameLength = u32::try_from(name_bytes).map_err(|_| ())?;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            std::ptr::addr_of_mut!((*information).FileName).cast::<u16>(),
+            name.len(),
+        );
+    }
+    let mut status = IO_STATUS_BLOCK::default();
+    // SAFETY: file was opened with DELETE access, parent is a live directory
+    // handle, and all backing buffers remain live for the native call.
+    let result = unsafe {
+        NtSetInformationFile(
+            file.as_raw_handle() as HANDLE,
+            &mut status,
+            information.cast(),
+            u32::try_from(total_bytes).map_err(|_| ())?,
+            FileRenameInformation,
+        )
+    };
+    (result >= 0).then_some(()).ok_or(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WorkspaceRootError {
@@ -153,12 +703,73 @@ impl WorkspaceRoot {
         }
     }
 
+    pub fn validate_staging_directory(&self, path: &Path) -> Result<(), String> {
+        if !path.is_absolute() || !path.starts_with(&self.root) {
+            return Err(String::from("staging path is outside the workspace"));
+        }
+        if staging_path_has_reparse(&self.root, path) {
+            return Err(String::from("staging path contains a reparse point"));
+        }
+        let canonical = fs::canonicalize(path)
+            .map_err(|error| format!("staging directory is unavailable: {error}"))?;
+        if canonical != path || !canonical.starts_with(&self.root) {
+            return Err(String::from(
+                "staging path is not the expected workspace path",
+            ));
+        }
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("staging directory metadata is unavailable: {error}"))?;
+        if metadata_is_reparse(&metadata) || !metadata.is_dir() {
+            return Err(String::from("staging path is not a real directory"));
+        }
+        let target_metadata = fs::metadata(&canonical)
+            .map_err(|error| format!("staging directory target is unavailable: {error}"))?;
+        if !self.boundary_holds(&canonical, &target_metadata) {
+            return Err(String::from(
+                "staging path crosses the workspace filesystem boundary",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_staging_tree(&self, path: &Path) -> Result<(), String> {
+        self.validate_staging_directory(path)?;
+        #[cfg(target_os = "linux")]
+        {
+            let mounts = linux_mount_points()
+                .map_err(|error| format!("staging mount boundary is unavailable: {error}"))?;
+            if mounts.iter().any(|mount| mount.starts_with(path)) {
+                return Err(String::from("staging tree crosses a Linux mount boundary"));
+            }
+        }
+        #[cfg(windows)]
+        if staging_tree_contains_reparse(path)? {
+            return Err(String::from("staging tree contains a reparse point"));
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub(crate) fn execute(
         &self,
         target: &RealTargetRef,
         operation: OperationKind,
         content: Option<&[u8]>,
+    ) -> ObservedEffect {
+        self.execute_with_options(
+            target,
+            operation,
+            content,
+            &WorkspaceEffectOptions::default(),
+        )
+    }
+
+    pub(crate) fn execute_with_options(
+        &self,
+        target: &RealTargetRef,
+        operation: OperationKind,
+        content: Option<&[u8]>,
+        options: &WorkspaceEffectOptions,
     ) -> ObservedEffect {
         match operation {
             OperationKind::List => self.list_directory(target),
@@ -176,13 +787,13 @@ impl WorkspaceRoot {
                 let Some(bytes) = content else {
                     return refused();
                 };
-                self.write_atomically(target, bytes, false)
+                self.write_atomically(target, bytes, false, options)
             }
             OperationKind::Edit => {
                 let Some(bytes) = content else {
                     return refused();
                 };
-                self.write_atomically(target, bytes, true)
+                self.write_atomically(target, bytes, true, options)
             }
         }
     }
@@ -244,6 +855,7 @@ impl WorkspaceRoot {
         target: &RealTargetRef,
         bytes: &[u8],
         replace: bool,
+        options: &WorkspaceEffectOptions,
     ) -> ObservedEffect {
         let destination = Path::new(target.as_path());
         if !self.reverifies_at_effect(destination, replace) {
@@ -252,6 +864,48 @@ impl WorkspaceRoot {
         let Some(parent) = destination.parent() else {
             return refused();
         };
+        if let Some(staging_directory) = options.staging_directory.as_deref() {
+            let (Some(ownership_token), Some(identity)) = (
+                options.staging_ownership_token.as_deref(),
+                options.staging_identity.as_deref(),
+            ) else {
+                return refused();
+            };
+            let Some(mut temporary) =
+                BoundStagingTemp::create(staging_directory, ownership_token, identity)
+            else {
+                return refused();
+            };
+            {
+                let file = temporary.file_mut();
+                if file.write_all(bytes).is_err() || file.sync_all().is_err() {
+                    return refused();
+                }
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(pause) = options.pause_after_staging.as_ref()
+                && pause.wait().is_err()
+            {
+                return refused();
+            }
+            if temporary.publish(destination, replace).is_err() {
+                return refused();
+            }
+            if temporary.file.sync_all().is_err() {
+                return unverified();
+            }
+            return match fs::read(destination) {
+                Ok(read_back) if read_back == bytes => confirmed(if replace {
+                    ActionOutput::Updated
+                } else {
+                    ActionOutput::Created {
+                        target: target.clone(),
+                    }
+                }),
+                _ => unverified(),
+            };
+        }
+
         let mut temporary = match NamedTempFile::new_in(parent) {
             Ok(temporary) => temporary,
             Err(_) => return refused(),
@@ -261,6 +915,12 @@ impl WorkspaceRoot {
             if file.write_all(bytes).is_err() || file.sync_all().is_err() {
                 return refused();
             }
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(pause) = options.pause_after_staging.as_ref()
+            && pause.wait().is_err()
+        {
+            return refused();
         }
         let persisted = if replace {
             temporary.persist(destination)
@@ -384,6 +1044,75 @@ impl WorkspaceRoot {
     }
 }
 
+fn staging_path_has_reparse(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    let mut current = root.to_path_buf();
+    if fs::symlink_metadata(&current)
+        .map(|metadata| metadata_is_reparse(&metadata))
+        .unwrap_or(true)
+    {
+        return true;
+    }
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if fs::symlink_metadata(&current)
+            .map(|metadata| metadata_is_reparse(&metadata))
+            .unwrap_or(true)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+fn staging_identity_token(path: &Path) -> Option<String> {
+    let directory = open_bound_directory(path)?;
+    staging_directory_identity_token(&directory)
+}
+
+#[cfg(windows)]
+fn staging_tree_contains_reparse(path: &Path) -> Result<bool, String> {
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(candidate) = pending.pop() {
+        let metadata = fs::symlink_metadata(&candidate)
+            .map_err(|error| format!("staging tree metadata is unavailable: {error}"))?;
+        if metadata_is_reparse(&metadata) {
+            return Ok(true);
+        }
+        if metadata.is_dir() {
+            let entries = fs::read_dir(&candidate)
+                .map_err(|error| format!("staging tree is unavailable: {error}"))?;
+            for entry in entries {
+                pending.push(
+                    entry
+                        .map_err(|error| format!("staging tree entry is unavailable: {error}"))?
+                        .path(),
+                );
+            }
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(target_os = "linux")]
 fn linux_mount_points() -> Result<Vec<PathBuf>, std::io::Error> {
     let content = fs::read_to_string("/proc/self/mountinfo")?;
@@ -449,6 +1178,17 @@ impl core::fmt::Debug for ObservedEffect {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl WorkspaceEffectStagingPause {
+    fn wait(&self) -> Result<(), ()> {
+        std::fs::write(&self.entered, b"staged").map_err(|_| ())?;
+        while !self.release.exists() {
+            std::thread::yield_now();
+        }
+        Ok(())
+    }
+}
+
 fn refused() -> ObservedEffect {
     ObservedEffect {
         certainty: ActionCertainty::ConfirmedFailure,
@@ -509,7 +1249,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{ActionOutput, ListEntry, ListEntryKind, TargetRejection, WorkspaceRoot};
+    use super::{
+        ActionOutput, ListEntry, ListEntryKind, TargetRejection, WorkspaceEffectOptions,
+        WorkspaceRoot,
+    };
     use crate::attempt::OperationKind;
 
     fn workspace() -> (tempfile::TempDir, WorkspaceRoot) {
@@ -764,6 +1507,99 @@ mod tests {
         assert_eq!(
             fs::read(directory.path().join("report.md")).expect("edited file"),
             b"# edited"
+        );
+    }
+
+    #[test]
+    fn owned_staging_binding_rejects_a_replacement_before_body_write() {
+        let (directory, root) = workspace();
+        let staging_root = directory.path().join(".ene-action-staging");
+        let staging = staging_root.join("attempt");
+        fs::create_dir_all(&staging).expect("owned staging");
+        let token = "owned-staging-token";
+        fs::write(staging.join(super::STAGING_OWNERSHIP_MARKER), token).expect("owned marker");
+        let identity = super::staging_identity_token(&staging).expect("owned identity");
+        let moved = staging_root.join("moved");
+        fs::rename(&staging, &moved).expect("rename owned staging");
+        fs::create_dir(&staging).expect("replacement staging");
+        fs::write(staging.join(super::STAGING_OWNERSHIP_MARKER), token)
+            .expect("replacement marker");
+        let target = root
+            .resolve("bound.md", OperationKind::Create)
+            .expect("create target");
+        let options = WorkspaceEffectOptions {
+            staging_directory: Some(staging.clone()),
+            staging_ownership_token: Some(token.to_owned()),
+            staging_identity: Some(identity),
+            #[cfg(any(test, feature = "test-support"))]
+            pause_after_staging: None,
+        };
+
+        let effect = root.execute_with_options(
+            &target,
+            OperationKind::Create,
+            Some(b"target-bearing content"),
+            &options,
+        );
+
+        assert_eq!(
+            effect.certainty,
+            crate::attempt::ActionCertainty::ConfirmedFailure
+        );
+        assert!(!directory.path().join("bound.md").exists());
+        assert_eq!(
+            fs::read_dir(&staging).expect("replacement staging").count(),
+            1,
+            "replacement receives only its marker, never target-bearing temp content"
+        );
+        assert_eq!(
+            fs::read_dir(&moved).expect("owned staging").count(),
+            1,
+            "the owned object is left for its supervisor cleanup"
+        );
+    }
+
+    #[test]
+    fn bound_staging_temp_and_publish_ignore_replacement_pathname() {
+        let directory = tempdir().expect("temporary directory");
+        let staging = directory.path().join("staging");
+        fs::create_dir(&staging).expect("owned staging");
+        let token = "owned-staging-token";
+        fs::write(staging.join(super::STAGING_OWNERSHIP_MARKER), token).expect("owned marker");
+        let bound = super::open_bound_directory(&staging).expect("bound staging handle");
+        assert_eq!(
+            super::read_bound_staging_marker(&bound).as_deref(),
+            Some(token)
+        );
+
+        let moved = directory.path().join("moved");
+        fs::rename(&staging, &moved).expect("move owned staging");
+        fs::create_dir(&staging).expect("replacement staging");
+        fs::write(staging.join(super::STAGING_OWNERSHIP_MARKER), token)
+            .expect("replacement marker");
+
+        let name = std::ffi::OsString::from("bound.tmp");
+        let mut temporary =
+            super::create_bound_temp(&bound, &name).expect("handle-relative temporary");
+        std::io::Write::write_all(&mut temporary, b"target-bearing content").expect("bound write");
+        temporary.sync_all().expect("bound sync");
+        let destination = directory.path().join("published.txt");
+        super::publish_bound_temp(&bound, &temporary, &name, &destination, false)
+            .expect("handle-relative publish");
+
+        assert_eq!(
+            fs::read(&destination).expect("published content"),
+            b"target-bearing content"
+        );
+        assert_eq!(
+            fs::read_dir(&staging).expect("replacement staging").count(),
+            1,
+            "replacement pathname receives only its marker"
+        );
+        assert_eq!(
+            fs::read_dir(&moved).expect("owned staging").count(),
+            1,
+            "the source temp is moved out of the owned staging object"
         );
     }
 

@@ -15,15 +15,28 @@ use ene_task::{
     TaskInstructionSourceRecord,
 };
 
+use std::sync::Arc;
+
+use crate::task_run::{TaskClaimKind, TaskExecutionRegistry};
+
 pub struct TaskAgentInferenceAdapter<'a, I> {
     executor: &'a I,
+    executions: Arc<TaskExecutionRegistry>,
     abort: &'a DispatchAbort,
 }
 
 impl<'a, I> TaskAgentInferenceAdapter<'a, I> {
     #[must_use]
-    pub fn new(executor: &'a I, abort: &'a DispatchAbort) -> Self {
-        Self { executor, abort }
+    pub fn new(
+        executor: &'a I,
+        executions: Arc<TaskExecutionRegistry>,
+        abort: &'a DispatchAbort,
+    ) -> Self {
+        Self {
+            executor,
+            executions,
+            abort,
+        }
     }
 }
 
@@ -52,9 +65,21 @@ impl<I: InferenceExecutor> TaskAgentInference for TaskAgentInferenceAdapter<'_, 
             Admission::Declined(reason) => return Ok(mirror_not_sent(reason)),
         };
         let mut sink = DiscardSink;
+        let executions = Arc::clone(&self.executions);
         match self
             .executor
-            .dispatch(*authorized, premise.prompt, &mut sink, Some(self.abort))
+            .dispatch_with_claim_scope(
+                *authorized,
+                premise.prompt,
+                &mut sink,
+                Some(self.abort),
+                Box::new(move || {
+                    let executions = Arc::clone(&executions);
+                    Box::pin(
+                        async move { executions.task_claim_scope(TaskClaimKind::Inference).await },
+                    )
+                }),
+            )
             .await
         {
             Ok(InferenceDispatchOutcome::Completed { arrival, adopted }) => {

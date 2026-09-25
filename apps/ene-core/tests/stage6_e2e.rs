@@ -50,6 +50,7 @@ use ene_inference::cost::UsageEstimate;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport, RawUsage};
 use ene_preservation::{ConfirmTargetedDeletionOutcome, DeletionOperationRef};
 use ene_primitive::{RawId, WallClockWithTz};
+use ene_task::{CancelTaskCommand, TaskCancelOutcome, TaskId};
 use rusqlite::OptionalExtension as _;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -70,9 +71,51 @@ const MIRRORED_MAX_PENDING_PAIRINGS: usize = 8;
 
 const DESCRIPTOR: &str = "stage6 e2e";
 const MODEL: &str = "gpt-4o-mini";
+const SHUTDOWN_TASK_OWNER: &str = "create the shutdown task before stopping the Host";
+const SHUTDOWN_TASK_PURPOSE: &str = "write the shutdown report";
 const TARGET: &str = "TS6-DELETION-CANARY-9137";
 const SECRET: &str = "sk-stage6-secret-marker-8821";
 const ROTATED_SECRET: &str = "sk-stage6-rotated-marker-4477";
+
+#[test]
+#[ignore = "subprocess fixture for Task Agent shutdown escalation"]
+fn uncooperative_task_effect_worker_fixture() {
+    if std::env::var_os("ENE_ACTION_STAGING_HELPER").is_some() {
+        ene_core::run_workspace_staging_helper();
+        return;
+    }
+    use std::io::{Read, Write};
+
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .expect("protocol handshake");
+    let handshake = serde_json::from_str::<serde_json::Value>(&input).expect("handshake json");
+    let generation = std::env::var("ENE_TEST_WORKER_GENERATION")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_else(|| handshake["generation"].as_u64().expect("generation"));
+    let response = serde_json::json!({ "generation": generation });
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{response}").expect("handshake response");
+    stdout.flush().expect("handshake flush");
+    if generation != handshake["generation"].as_u64().expect("generation") {
+        return;
+    }
+
+    let entered = std::env::var_os("ENE_TEST_EFFECT_ENTERED").expect("entered path");
+    let release = std::env::var_os("ENE_TEST_EFFECT_RELEASE").expect("release path");
+    let mutation = std::env::var_os("ENE_TEST_EFFECT_MUTATION").expect("mutation path");
+    std::fs::write(entered, b"entered").unwrap();
+    let mut request = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut request)
+        .expect("effect request");
+    while !std::path::Path::new(&release).exists() {
+        std::thread::yield_now();
+    }
+    std::fs::write(mutation, b"late workspace mutation").unwrap();
+}
 
 #[expect(clippy::expect_used, reason = "test fixture helper")]
 fn memory_store_with(secret: &str) -> MemoryCredentialStore {
@@ -678,6 +721,30 @@ impl Served {
     #[expect(clippy::expect_used, reason = "test fixture helper")]
     fn handle_arc(&self) -> Arc<HostHandle> {
         Arc::clone(self.handle.as_ref().expect("a live HostHandle"))
+    }
+
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(
+            dead_code,
+            reason = "used by test-support shutdown accounting regressions"
+        )
+    )]
+    async fn stop_result(&mut self) -> Result<(), CoreError> {
+        self.client = None;
+        tokio::task::yield_now().await;
+        self.request_graceful_stop();
+        let finished = std::mem::replace(
+            &mut self.server,
+            tokio::spawn(async { Ok::<(), CoreError>(()) }),
+        );
+        match finished.await {
+            Ok(result) => result,
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(_) => Err(CoreError::Serving(String::from(
+                "test listener join failed",
+            ))),
+        }
     }
 
     async fn stop(&mut self) {
@@ -6740,6 +6807,1116 @@ fn db_scalar(db: &Path, sql: &str) -> u64 {
     u64::try_from(counted).expect("a row count never goes negative")
 }
 
+async fn prepare_shutdown_task(dir: PathBuf, transport: Arc<ScriptedTransport>) -> Served {
+    let mut served = serve_and_setup(dir.clone(), transport, &[cmds::CAPABILITY_DIALOGUE]).await;
+    let workspace = dir.join("shutdown-task-workspace");
+    std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
+    select_workspace(served.client(), &workspace)
+        .await
+        .expect("workspace must select");
+    served
+}
+
+async fn propose_shutdown_task(served: &mut Served) {
+    let (round, stream, reply) = send_round(served.client(), SHUTDOWN_TASK_OWNER)
+        .await
+        .expect("the proposal round must complete");
+    assert!(reply.contains("Task accepted"), "{reply}");
+    confirm_round(served.client(), &round, stream).await;
+}
+
+async fn serve_and_start_shutdown_task(dir: PathBuf, transport: Arc<ScriptedTransport>) -> Served {
+    let mut served = prepare_shutdown_task(dir, transport).await;
+    propose_shutdown_task(&mut served).await;
+    served
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn supported_host_runtime_action_smoke_uses_the_packaged_worker() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"smoke.md","content":"worker smoke"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::reported(r##"{"tool":"read","path":"smoke.md"}"##, 100, 0, 10),
+            ),
+            (
+                on_task_agent_turn(2),
+                Call::reported(r#"{"final":"worker smoke complete"}"#, 100, 0, 10),
+            ),
+        ],
+        &[],
+    ));
+    transport.block_input(on_task_agent_turn(2));
+    let mut served =
+        serve_and_start_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    transport.wait_parked(1).await;
+    transport.release_blocked();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while served.handle().running_task_executions_for_tests() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the supported Host path must join the completed Task Agent");
+    assert_eq!(
+        std::fs::read(temp.path().join("shutdown-task-workspace/smoke.md"))
+            .expect("the worker must persist the create effect"),
+        b"worker smoke"
+    );
+    assert_eq!(
+        db_scalar(
+            &temp.path().join("app.db"),
+            "SELECT COUNT(*) FROM action_attempt WHERE certainty = 'confirmed_success'",
+        ),
+        2,
+        "create and read must both retain observed certainty",
+    );
+    served.stop().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn missing_worker_fails_closed_before_action_claim() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"missing-worker.md","content":"blocked"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served
+        .handle()
+        .install_uncooperative_task_effect_runtime_for_tests(
+            temp.path().join("missing-ene-action-worker"),
+            Vec::new(),
+            Vec::new(),
+        );
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while served.handle().running_task_executions_for_tests() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the missing worker must fail the Task Agent promptly");
+    assert_eq!(
+        db_scalar(
+            &temp.path().join("app.db"),
+            "SELECT COUNT(*) FROM action_attempt",
+        ),
+        0,
+        "worker preflight must fail before AU5",
+    );
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/missing-worker.md")
+            .exists()
+    );
+    let error = served
+        .stop_result()
+        .await
+        .expect_err("technical failure must reach shutdown");
+    assert!(error.to_string().contains("Task Agent technical failure"));
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn stale_worker_protocol_is_rejected_before_au5_and_staging() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"stale-worker.md","content":"blocked"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served
+        .handle()
+        .install_uncooperative_task_effect_runtime_for_tests(
+            std::env::current_exe().unwrap(),
+            vec![
+                String::from("--ignored"),
+                String::from("--exact"),
+                String::from("uncooperative_task_effect_worker_fixture"),
+                String::from("--nocapture"),
+            ],
+            vec![(
+                String::from("ENE_TEST_WORKER_GENERATION"),
+                String::from("0"),
+            )],
+        );
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while served.handle().running_task_executions_for_tests() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the stale worker must fail before the action claim");
+    assert_eq!(
+        db_scalar(
+            &temp.path().join("app.db"),
+            "SELECT COUNT(*) FROM action_attempt",
+        ),
+        0,
+    );
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/stale-worker.md")
+            .exists()
+    );
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/.ene-action-staging")
+            .exists()
+    );
+    let error = served
+        .stop_result()
+        .await
+        .expect_err("technical failure must reach shutdown");
+    assert!(error.to_string().contains("Task Agent technical failure"));
+}
+
+#[cfg(all(feature = "test-support", windows))]
+#[tokio::test]
+async fn windows_junction_staging_root_is_rejected_without_deleting_its_target() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"junction.md","content":"blocked"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    let workspace = temp.path().join("shutdown-task-workspace");
+    let outside = temp.path().join("junction-target");
+    std::fs::create_dir(&outside).unwrap();
+    let sentinel = outside.join("keep.txt");
+    std::fs::write(&sentinel, b"keep").unwrap();
+    let junction = workspace.join(".ene-action-staging");
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&outside)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the Windows junction fixture must be created"
+    );
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while served.handle().running_task_executions_for_tests() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reparse staging root must fail the Task Agent promptly");
+    assert!(!workspace.join("junction.md").exists());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    assert!(std::fs::symlink_metadata(&junction).is_ok());
+    let error = served
+        .stop_result()
+        .await
+        .expect_err("technical failure must reach shutdown");
+    assert!(error.to_string().contains("Task Agent technical failure"));
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn host_shutdown_reports_staging_cleanup_failure_and_keeps_the_obligation() {
+    const TARGET_BODY: &str = "private staging cleanup sentinel 7193";
+    let temp = tempfile::TempDir::new().unwrap();
+    let entered = temp.path().join("staging-body-written");
+    let release = temp.path().join("never-release-staging-body");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"cleanup-failure.md","content":"private staging cleanup sentinel 7193"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served
+        .handle()
+        .set_task_effect_staging_pause_for_tests(Some(ene_action::WorkspaceEffectStagingPause {
+            entered: entered.clone(),
+            release,
+        }));
+    served
+        .handle()
+        .set_task_effect_cleanup_failure_for_tests(true);
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !entered.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the worker must write target-bearing staging content");
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 2);
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
+
+    let error = served
+        .stop_result()
+        .await
+        .expect_err("unfinished staging cleanup must fail Host shutdown");
+
+    assert!(error.to_string().contains("staging cleanup failed"));
+    assert!(!error.to_string().contains(TARGET_BODY));
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 0);
+    assert_eq!(served.handle().running_task_executions_for_tests(), 0);
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/cleanup-failure.md")
+            .exists()
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn shutdown_during_destructive_staging_cleanup_kills_the_helper_and_reports_obligation() {
+    const TARGET_BODY: &str = "private stalled cleanup canary 7201";
+    let temp = tempfile::TempDir::new().unwrap();
+    let entered = temp.path().join("staging-cleanup-entered");
+    let release = temp.path().join("staging-cleanup-release");
+    let canary = temp.path().join("staging-cleanup-canary");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"stalled-cleanup.md","content":"private stalled cleanup canary 7201"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served
+        .handle()
+        .set_task_effect_staging_helper_pause_for_tests(
+            "cleanup",
+            entered.clone(),
+            release.clone(),
+            Some(canary.clone()),
+        );
+    served
+        .handle()
+        .set_task_agent_quiesce_timeout_for_tests(Duration::from_millis(100));
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !entered.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("destructive cleanup must enter its deterministic barrier");
+    served
+        .handle()
+        .set_task_effect_cleanup_failure_for_tests(true);
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 1);
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
+
+    let shutdown = tokio::time::timeout(Duration::from_secs(10), served.stop_result()).await;
+    assert!(shutdown.is_ok(), "cleanup escalation must be bounded");
+    let error = shutdown
+        .expect("shutdown result must be available")
+        .expect_err("unresolved cleanup must fail Host shutdown");
+    assert!(!error.to_string().contains(TARGET_BODY));
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 0);
+    assert_eq!(served.handle().running_task_executions_for_tests(), 0);
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
+    std::fs::write(&release, b"release").unwrap();
+    assert!(
+        !canary.exists(),
+        "a killed cleanup helper cannot mutate after return"
+    );
+}
+
+#[tokio::test]
+async fn graceful_shutdown_aborts_a_parked_task_agent_preserves_unknown_and_does_not_replay() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"report.md","content":"shutdown report"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
+            ),
+        ],
+        &[],
+    ));
+    transport.block_input(on_task_agent_turn(1));
+    let mut served =
+        serve_and_start_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    transport.wait_parked(1).await;
+    let tasks = list_tasks(served.client())
+        .await
+        .expect("the active task must list");
+    assert_eq!(tasks.tasks.len(), 1);
+    assert_eq!(tasks.tasks[0].progress, "in_progress");
+    assert!(tasks.tasks[0].running);
+
+    served.request_graceful_stop();
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "the Task Agent cooperative abort must bound its parked provider call"
+    );
+    assert_eq!(
+        transport.parked_count(),
+        1,
+        "the provider fixture was never released"
+    );
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+
+    let db = temp.path().join("app.db");
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM inference_attempt WHERE consumer = 'task_agent'",
+        ),
+        2,
+        "the completed action turn and the parked final turn each claimed once"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM usage_fact f JOIN inference_attempt a ON f.ticket = a.ticket \
+             WHERE a.consumer = 'task_agent' AND f.source = 'unknown'",
+        ),
+        1,
+        "the post-claim Host abort records Unknown usage"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM action_attempt WHERE certainty = 'confirmed_success'",
+        ),
+        1,
+        "an effect completed before Host shutdown keeps its confirmed fact"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM task WHERE progress = 'in_progress'",
+        ),
+        1,
+        "Host shutdown is not a durable Task cancellation"
+    );
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM task_result"),
+        0,
+        "the interrupted execution cannot finalize from shutdown"
+    );
+
+    let sends_after_shutdown = transport.sends();
+    let mut client = served.restart().await;
+    let restarted = list_tasks(&mut client)
+        .await
+        .expect("the interrupted task must remain listed after restart");
+    assert_eq!(restarted.tasks.len(), 1);
+    assert_eq!(restarted.tasks[0].progress, "in_progress");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        transport.sends(),
+        sends_after_shutdown,
+        "restart must not replay an already-started Task Agent execution"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM inference_attempt WHERE consumer = 'task_agent'",
+        ),
+        2,
+        "restart must not claim another inference attempt"
+    );
+    drop(client);
+    served.stop().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn host_shutdown_kills_reaps_and_joins_uncooperative_task_effect_before_returning() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let entered = temp.path().join("effect-entered");
+    let release = temp.path().join("effect-release");
+    let mutation = temp.path().join("effect-late-mutation");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"uncooperative.md","content":"late"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    let executable = std::env::current_exe().expect("the integration-test executable path");
+    served
+        .handle()
+        .install_uncooperative_task_effect_runtime_for_tests(
+            executable,
+            vec![
+                String::from("--ignored"),
+                String::from("--exact"),
+                String::from("uncooperative_task_effect_worker_fixture"),
+                String::from("--nocapture"),
+            ],
+            vec![
+                (
+                    String::from("ENE_TEST_EFFECT_ENTERED"),
+                    entered.to_string_lossy().into_owned(),
+                ),
+                (
+                    String::from("ENE_TEST_EFFECT_RELEASE"),
+                    release.to_string_lossy().into_owned(),
+                ),
+                (
+                    String::from("ENE_TEST_EFFECT_MUTATION"),
+                    mutation.to_string_lossy().into_owned(),
+                ),
+            ],
+        );
+    served
+        .handle()
+        .set_task_agent_quiesce_timeout_for_tests(Duration::from_millis(100));
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            () = async {
+                while !entered.exists() {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+            () = async {
+                while served.handle().running_task_executions_for_tests() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            } => {
+                let attempts = db_scalar(
+                    &temp.path().join("app.db"),
+                    "SELECT COUNT(*) FROM action_attempt",
+                );
+                panic!(
+                    "the Task Agent ended before the effect barrier with {attempts} attempt(s)"
+                );
+            }
+        }
+    })
+    .await
+    .expect("the Task Agent must enter uncooperative external-effect work");
+    let db = temp.path().join("app.db");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM action_attempt WHERE certainty = 'unknown'",
+        ) == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the effect barrier must follow the committed AU5 claim");
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM action_attempt WHERE certainty = 'unknown'",
+        ),
+        1
+    );
+    assert_eq!(served.handle().live_task_effect_workers_for_tests(), 1);
+    assert_eq!(served.handle().running_task_executions_for_tests(), 1);
+    let sends_before_shutdown = transport.sends();
+
+    served.request_graceful_stop();
+    let finished = tokio::time::timeout(Duration::from_secs(5), &mut served.server)
+        .await
+        .expect("Host shutdown must remain bounded after the escalation");
+    served.server = tokio::spawn(async { Ok::<(), CoreError>(()) });
+    assert!(matches!(finished, Ok(Ok(()))));
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 0);
+    assert_eq!(served.handle().live_task_effect_workers_for_tests(), 0);
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 0);
+    assert_eq!(served.handle().running_task_executions_for_tests(), 0);
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM action_attempt WHERE certainty = 'unknown'",
+        ),
+        1,
+        "the killed effect keeps AU5 Unknown"
+    );
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM task_agent_observation"),
+        0,
+        "the stopped runner records no later observation mutation"
+    );
+    assert_eq!(transport.sends(), sends_before_shutdown);
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/uncooperative.md")
+            .exists()
+    );
+    std::fs::write(&release, b"released").unwrap();
+    assert!(
+        !mutation.exists(),
+        "the reaped worker cannot mutate after Host shutdown returned"
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn shutdown_before_task_agent_inference_claim_creates_no_attempt_or_provider_io() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served.handle().arm_inference_claim_pause_for_tests();
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        served.handle().wait_task_claim_pause_for_tests(),
+    )
+    .await
+    .expect("the inference claim must reach the pre-claim barrier");
+    let sends_before_shutdown = transport.sends();
+
+    served.request_graceful_stop();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        served.handle().wait_task_host_shutdown_for_tests(),
+    )
+    .await
+    .expect("Host shutdown must linearize while the claim is paused");
+    served.handle().release_task_claim_pause_for_tests();
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "the shutdown-first claim must quiesce"
+    );
+
+    let db = temp.path().join("app.db");
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM inference_attempt WHERE consumer = 'task_agent'",
+        ),
+        0
+    );
+    assert_eq!(transport.sends(), sends_before_shutdown);
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM usage_fact WHERE source = 'unknown'"
+        ),
+        0
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn shutdown_before_task_agent_action_start_creates_no_attempt_or_workspace_effect() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"linearized.md","content":"blocked"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served.handle().arm_action_claim_pause_for_tests();
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        served.handle().wait_task_claim_pause_for_tests(),
+    )
+    .await
+    .expect("the Action start must reach the pre-claim barrier");
+    let sends_before_shutdown = transport.sends();
+
+    served.request_graceful_stop();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        served.handle().wait_task_host_shutdown_for_tests(),
+    )
+    .await
+    .expect("Host shutdown must linearize before AU5");
+    served.handle().release_task_claim_pause_for_tests();
+    assert!(served.join_listener_within(Duration::from_secs(30)).await);
+
+    let db = temp.path().join("app.db");
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM action_attempt"),
+        0,
+        "shutdown-first must not insert AU5"
+    );
+    assert_eq!(transport.sends(), sends_before_shutdown);
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/linearized.md")
+            .exists(),
+        "shutdown-first must not execute the workspace effect"
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn shutdown_during_staging_preparation_is_bounded_and_claims_no_action() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let entered = temp.path().join("staging-prepare-entered");
+    let release = temp.path().join("staging-prepare-release");
+    let canary = temp.path().join("staging-prepare-canary");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"stalled-preparation.md","content":"blocked"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served
+        .handle()
+        .set_task_effect_staging_helper_pause_for_tests(
+            "prepare",
+            entered.clone(),
+            release.clone(),
+            Some(canary.clone()),
+        );
+    served
+        .handle()
+        .set_task_agent_quiesce_timeout_for_tests(Duration::from_millis(100));
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !entered.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("staging preparation must enter its deterministic barrier");
+
+    let shutdown = tokio::time::timeout(Duration::from_secs(10), served.stop_result()).await;
+    assert!(shutdown.is_ok(), "Host shutdown must be bounded");
+    assert!(shutdown.expect("shutdown result").is_err());
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
+    assert_eq!(
+        served.handle().running_task_executions_for_tests(),
+        0,
+        "the Task Agent runner must be joined"
+    );
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 0);
+    assert_eq!(
+        db_scalar(
+            &temp.path().join("app.db"),
+            "SELECT COUNT(*) FROM action_attempt",
+        ),
+        0,
+        "preparation must finish or abort before AU5"
+    );
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/stalled-preparation.md")
+            .exists()
+    );
+    std::fs::write(&release, b"release").unwrap();
+    assert!(
+        !canary.exists(),
+        "a killed preparation helper cannot mutate after return"
+    );
+    if let Ok(entries) = std::fs::read_dir(
+        temp.path()
+            .join("shutdown-task-workspace/.ene-action-staging"),
+    ) {
+        assert_eq!(entries.count(), 1);
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn action_claim_first_keeps_started_fact_and_completed_effect_across_shutdown() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"claimed-first.md","content":"finished"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(1),
+                Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served.handle().arm_action_effect_pause_for_tests();
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        served.handle().wait_task_claim_pause_for_tests(),
+    )
+    .await
+    .expect("the claimed Action must reach the post-effect barrier");
+    let db = temp.path().join("app.db");
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM action_attempt WHERE certainty = 'unknown'",
+        ),
+        1,
+        "AU5 committed before the effect"
+    );
+    assert!(
+        temp.path()
+            .join("shutdown-task-workspace/claimed-first.md")
+            .exists()
+    );
+
+    served.request_graceful_stop();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        served.handle().wait_task_host_shutdown_for_tests(),
+    )
+    .await
+    .expect("shutdown must follow the committed AU5");
+    served.handle().release_task_claim_pause_for_tests();
+    assert!(served.join_listener_within(Duration::from_secs(30)).await);
+
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM action_attempt WHERE certainty = 'confirmed_success'",
+        ),
+        1,
+        "the observed effect must settle its started attempt"
+    );
+    assert_eq!(db_scalar(&db, "SELECT COUNT(*) FROM task_result"), 0);
+}
+
+#[tokio::test]
+async fn task_cancel_racing_host_shutdown_keeps_the_durable_cancel_distinct() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
+            ),
+        ],
+        &[],
+    ));
+    transport.block_input(on_task_agent_turn(0));
+    let mut served =
+        serve_and_start_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    transport.wait_parked(1).await;
+    let tasks = list_tasks(served.client())
+        .await
+        .expect("the active task must list");
+    assert_eq!(tasks.tasks.len(), 1);
+    let db = temp.path().join("app.db");
+    let conn = rusqlite::Connection::open(&db).expect("the state database opens");
+    let stored_task_id: String = conn
+        .query_row("SELECT task_id FROM task", [], |row| row.get(0))
+        .expect("the active task id must exist");
+    drop(conn);
+    let task_id =
+        uuid::Uuid::parse_str(&stored_task_id).expect("the stored task id must be a UUID");
+    let task = TaskId::from_raw(RawId::from_uuid(task_id));
+    let handle = served.handle_arc();
+    let cancel = tokio::spawn(async move { handle.cancel_task(CancelTaskCommand { task }).await });
+
+    served.request_graceful_stop();
+    let cancel_outcome = cancel.await.expect("the cancel task must join");
+    assert_eq!(
+        cancel_outcome,
+        Ok(TaskCancelOutcome::CancelAccepted),
+        "the durable cancel outcome must be reported"
+    );
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "cancel and Host shutdown must both quiesce the parked task"
+    );
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM task WHERE progress = 'cancelled'",
+        ),
+        1,
+        "the durable cancel remains the Task lifecycle outcome"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM usage_fact f JOIN inference_attempt a ON f.ticket = a.ticket \
+             WHERE a.consumer = 'task_agent' AND f.source = 'unknown'",
+        ),
+        1,
+        "the claimed cancelled attempt keeps Unknown usage"
+    );
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM task_result"),
+        0,
+        "neither race path fabricates a final result"
+    );
+}
+
 #[tokio::test]
 async fn graceful_shutdown_aborts_a_parked_dialogue_dispatch_and_keeps_the_unknown_fact() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -7303,8 +8480,11 @@ async fn continuous_business_streaming_keeps_transport_control_and_the_receipt_d
             host_ping_observed = true;
         }
         if checkpoint_at_15s.is_none() && elapsed >= Duration::from_secs(15) {
+            // The later checkpoint proves the stream continues; this first
+            // checkpoint is only a liveness floor because Windows runners
+            // can schedule the 20 ms fixture below its nominal rate.
             assert!(
-                frames >= 100,
+                frames >= 50,
                 "business frames must keep flowing across the window, got {frames}"
             );
             checkpoint_at_15s = Some(frames);

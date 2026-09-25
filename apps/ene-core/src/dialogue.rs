@@ -1074,6 +1074,28 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
         )
         .await
     }
+
+    async fn dispatch_with_claim_scope(
+        &self,
+        authorized: AuthorizedInference,
+        prompt: ScrubbedText,
+        sink: &mut (dyn DeltaSink + Send),
+        abort: Option<&ene_inference::DispatchAbort>,
+        acquire_claim_scope: Box<dyn FnOnce() -> ene_inference::InferenceClaimFuture + Send>,
+    ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
+        ene_inference::dispatch_authorized_with_claim_scope(
+            authorized,
+            prompt,
+            sink,
+            abort,
+            acquire_claim_scope,
+            self.store,
+            self.store,
+            self.store,
+            self.transport,
+        )
+        .await
+    }
 }
 
 struct StreamGate<'a> {

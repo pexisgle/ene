@@ -847,9 +847,9 @@ where
         #[cfg(any(test, feature = "test-support"))]
         handle.pause_shutdown_before_abort_for_tests().await;
         self.abort.abort();
-        let handler_result = self.handlers.join().await;
+        let (handler_result, task_result) =
+            tokio::join!(self.handlers.join(), self.launcher.shutdown_and_join());
         handle.join_confirmation_tasks().await;
-        let task_result = self.launcher.shutdown_and_join().await;
         let driver_result = self.driver.stop_and_join().await;
         result
             .and(handler_result)

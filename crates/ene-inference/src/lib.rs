@@ -444,18 +444,35 @@ pub struct DispatchAbort {
     inner: std::sync::Arc<DispatchAbortInner>,
 }
 
-#[derive(Default)]
 struct DispatchAbortInner {
     aborted: std::sync::atomic::AtomicBool,
-    notify: tokio::sync::Notify,
+    notify: tokio::sync::watch::Sender<bool>,
+    children: std::sync::Mutex<Vec<std::sync::Weak<DispatchAbortInner>>>,
+}
+
+impl Default for DispatchAbortInner {
+    fn default() -> Self {
+        let (notify, _) = tokio::sync::watch::channel(false);
+        Self {
+            aborted: std::sync::atomic::AtomicBool::new(false),
+            notify,
+            children: std::sync::Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl DispatchAbort {
+    /// Returns a child signal that aborts when either source aborts.
+    #[must_use]
+    pub fn linked_to(&self, other: &Self) -> Self {
+        let linked = Self::default();
+        self.inner.link(&linked.inner);
+        other.inner.link(&linked.inner);
+        linked
+    }
+
     pub fn abort(&self) {
-        self.inner
-            .aborted
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.inner.notify.notify_one();
+        DispatchAbortInner::abort(std::sync::Arc::clone(&self.inner));
     }
 
     #[must_use]
@@ -464,11 +481,59 @@ impl DispatchAbort {
     }
 
     pub async fn aborted(&self) {
-        while !self.is_aborted() {
-            self.inner.notify.notified().await;
+        let mut notify = self.inner.notify.subscribe();
+        loop {
+            let observed = *notify.borrow_and_update();
+            if observed || self.is_aborted() {
+                return;
+            }
+            if notify.changed().await.is_err() {
+                return;
+            }
         }
     }
 }
+
+impl DispatchAbortInner {
+    fn link(self: &std::sync::Arc<Self>, child: &std::sync::Arc<Self>) {
+        let abort_child = {
+            let mut children = self
+                .children
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            children.retain(|entry| entry.strong_count() != 0);
+            children.push(std::sync::Arc::downgrade(child));
+            self.aborted.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        if abort_child {
+            Self::abort(std::sync::Arc::clone(child));
+        }
+    }
+
+    fn abort(self: std::sync::Arc<Self>) {
+        if self.aborted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let _previous = self.notify.send_replace(true);
+        let children = {
+            let mut children = self
+                .children
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *children)
+        };
+        for child in children
+            .into_iter()
+            .filter_map(|entry| std::sync::Weak::upgrade(&entry))
+        {
+            Self::abort(child);
+        }
+    }
+}
+
+pub type InferenceClaimFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = tokio::sync::OwnedMutexGuard<()>> + Send + 'static>,
+>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InferenceDispatchOutcome {
@@ -507,6 +572,15 @@ pub trait InferenceExecutor: Send + Sync {
         sink: &mut (dyn DeltaSink + Send),
         abort: Option<&DispatchAbort>,
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
+
+    async fn dispatch_with_claim_scope(
+        &self,
+        authorized: AuthorizedInference,
+        prompt: ScrubbedText,
+        sink: &mut (dyn DeltaSink + Send),
+        abort: Option<&DispatchAbort>,
+        acquire_claim_scope: Box<dyn FnOnce() -> InferenceClaimFuture + Send>,
+    ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
 }
 
 #[expect(
@@ -518,6 +592,56 @@ pub async fn dispatch_authorized(
     prompt: ScrubbedText,
     sink: &mut (dyn DeltaSink + Send),
     abort: Option<&DispatchAbort>,
+    consent: &impl ConsentRepository,
+    attempts: &impl InferenceAttemptRepository,
+    usage: &impl UsageRepository,
+    transport: &impl ProviderTransport,
+) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
+    dispatch_authorized_inner(
+        authorized, prompt, sink, abort, None, consent, attempts, usage, transport,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the owner boundary takes each repository it must sequence in order; a parameter struct would only restate the same wiring"
+)]
+pub async fn dispatch_authorized_with_claim_scope(
+    authorized: AuthorizedInference,
+    prompt: ScrubbedText,
+    sink: &mut (dyn DeltaSink + Send),
+    abort: Option<&DispatchAbort>,
+    acquire_claim_scope: Box<dyn FnOnce() -> InferenceClaimFuture + Send>,
+    consent: &impl ConsentRepository,
+    attempts: &impl InferenceAttemptRepository,
+    usage: &impl UsageRepository,
+    transport: &impl ProviderTransport,
+) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
+    dispatch_authorized_inner(
+        authorized,
+        prompt,
+        sink,
+        abort,
+        Some(acquire_claim_scope),
+        consent,
+        attempts,
+        usage,
+        transport,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the owner boundary takes each repository it must sequence in order; a parameter struct would only restate the same wiring"
+)]
+async fn dispatch_authorized_inner(
+    authorized: AuthorizedInference,
+    prompt: ScrubbedText,
+    sink: &mut (dyn DeltaSink + Send),
+    abort: Option<&DispatchAbort>,
+    acquire_claim_scope: Option<Box<dyn FnOnce() -> InferenceClaimFuture + Send>>,
     consent: &impl ConsentRepository,
     attempts: &impl InferenceAttemptRepository,
     usage: &impl UsageRepository,
@@ -555,6 +679,15 @@ pub async fn dispatch_authorized(
         input: prompt.into_text(),
     };
     let usage_estimate = transport.usage_estimate(&request);
+    let claim_scope = if let Some(acquire) = acquire_claim_scope {
+        let scope = acquire().await;
+        if abort.is_some_and(DispatchAbort::is_aborted) {
+            return Ok(InferenceDispatchOutcome::Aborted);
+        }
+        Some(scope)
+    } else {
+        None
+    };
     match attempts
         .begin_inference_attempt(InferenceAttempt {
             ticket,
@@ -600,6 +733,7 @@ pub async fn dispatch_authorized(
         }
         Err(error) => return Err(error),
     }
+    drop(claim_scope);
     let response = if let Some(abort) = abort {
         tokio::select! {
             biased;
@@ -776,7 +910,7 @@ pub mod fake {
 
 #[cfg(test)]
 mod dispatch_tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::fake::{FakeFailure, FakeProviderTransport};
     use super::{
@@ -1809,14 +1943,62 @@ mod dispatch_tests {
     }
 
     #[tokio::test]
+    async fn one_abort_wakes_every_registered_waiter() {
+        let abort = DispatchAbort::default();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let first = {
+            let abort = abort.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                abort.aborted().await;
+            })
+        };
+        let second = {
+            let abort = abort.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                abort.aborted().await;
+            })
+        };
+        barrier.wait().await;
+        abort.abort();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            first.await.expect("first abort waiter joins");
+            second.await.expect("second abort waiter joins");
+        })
+        .await
+        .expect("both waiters must wake");
+    }
+
+    #[test]
+    fn linked_abort_propagates_without_relabelling_its_source() {
+        let task_cancel = DispatchAbort::default();
+        let host_shutdown = DispatchAbort::default();
+        let dispatch_abort = task_cancel.linked_to(&host_shutdown);
+
+        host_shutdown.abort();
+        assert!(dispatch_abort.is_aborted());
+        assert!(!task_cancel.is_aborted());
+
+        let other_cancel = DispatchAbort::default();
+        let other_dispatch_abort = other_cancel.linked_to(&DispatchAbort::default());
+        other_cancel.abort();
+        assert!(other_dispatch_abort.is_aborted());
+    }
+
+    #[tokio::test]
     async fn abort_before_the_claim_claims_nothing_and_records_nothing() {
         let usage = CapturedUsage(Mutex::new(Vec::new()));
         let consent = FixedConsent(Some(record(1)));
         let attempts = RecordingAttempts(Mutex::new(0));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let transport = CountingTransport(std::sync::Arc::clone(&calls));
-        let abort = DispatchAbort::default();
-        abort.abort();
+        let task_cancel = DispatchAbort::default();
+        let host_shutdown = DispatchAbort::default();
+        let abort = task_cancel.linked_to(&host_shutdown);
+        host_shutdown.abort();
 
         let outcome = dispatch_authorized(
             authorized(),

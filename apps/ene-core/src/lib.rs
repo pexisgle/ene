@@ -10,6 +10,7 @@ mod pairing_delivery;
 pub mod presentation;
 pub mod serve;
 pub mod setup;
+mod staging_cleanup;
 pub mod targeted_deletion;
 pub mod task_agent;
 pub mod task_control;
@@ -19,6 +20,11 @@ pub mod usage;
 #[cfg(windows)]
 mod win_acl;
 pub(crate) mod wss;
+
+#[doc(hidden)]
+pub fn run_workspace_staging_helper() {
+    staging_cleanup::run_workspace_staging_helper();
+}
 
 use std::sync::{Mutex as StdMutex, MutexGuard};
 

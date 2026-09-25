@@ -48,6 +48,10 @@ jobs:
         run: cargo build --locked --workspace --bins
       - name: Run tests
         run: cargo nextest run --locked --workspace --no-fail-fast
+      - name: Run Host test-support regressions
+        run: |
+          cargo test --locked -p ene-core --features test-support --lib action::supervisor_tests
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e
       # nextest does not run doctests.
       - name: Run doctests
         run: cargo test --locked --workspace --doc
@@ -63,3 +67,15 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - name: Run tests
         run: cargo test --locked --workspace --no-fail-fast
+      - name: Run Host test-support regressions
+        run: |
+          cargo test --locked -p ene-core --features test-support --lib action::supervisor_tests
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e windows_junction_staging_root_is_rejected_without_deleting_its_target -- --exact
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e supported_host_runtime_action_smoke_uses_the_packaged_worker -- --exact
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e stale_worker_protocol_is_rejected_before_au5_and_staging -- --exact
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e host_shutdown_kills_reaps_and_joins_uncooperative_task_effect_before_returning -- --exact
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e host_shutdown_reports_staging_cleanup_failure_and_keeps_the_obligation -- --exact
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e shutdown_before_task_agent_action_start_creates_no_attempt_or_workspace_effect -- --exact
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e action_claim_first_keeps_started_fact_and_completed_effect_across_shutdown -- --exact
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e shutdown_during_staging_preparation_is_bounded_and_claims_no_action -- --exact
+          cargo test --locked -p ene-core --features test-support --test stage6_e2e shutdown_during_destructive_staging_cleanup_kills_the_helper_and_reports_obligation -- --exact
