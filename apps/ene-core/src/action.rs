@@ -2638,7 +2638,7 @@ mod supervisor_tests {
 
         let root = WorkspaceRoot::open(&workspace.path().to_string_lossy()).expect("workspace");
         let preparation =
-            runtime.new_staging_preparation(root.clone(), workspace.path().to_path_buf());
+            runtime.new_staging_preparation(root.clone(), root.as_path().to_path_buf());
         let options = StagingLeaseOptions {
             ownership_token: Some(preparation.ownership_token.clone()),
             ..StagingLeaseOptions::default()
