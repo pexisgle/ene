@@ -1086,6 +1086,15 @@ impl TaskEffectRuntime {
         &self,
         obligation: &StagingCleanupObligation,
     ) -> Result<bool, String> {
+        self.cleanup_obligation_by_path_with_timeout(obligation, WORKER_HANDSHAKE_TIMEOUT)
+            .await
+    }
+
+    async fn cleanup_obligation_by_path_with_timeout(
+        &self,
+        obligation: &StagingCleanupObligation,
+        timeout: std::time::Duration,
+    ) -> Result<bool, String> {
         let mut command = self.process_command(true);
         let mut runtime = self.spawn_staging_helper_unregistered(&mut command).await?;
         let request = StagingHelperRequest::CleanupByPath {
@@ -1099,11 +1108,8 @@ impl TaskEffectRuntime {
             ownership_token: obligation.preparation.ownership_token.clone(),
             identity: obligation.identity.clone(),
         };
-        let result = tokio::time::timeout(
-            WORKER_HANDSHAKE_TIMEOUT,
-            send_staging_helper_request(&mut runtime, request),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(timeout, send_staging_helper_request(&mut runtime, request)).await;
         // Always kill and reap the unregistered retry helper before returning,
         // including timeout and protocol/I/O error paths.
         let stopped = hard_stop_staging_control(&runtime.control).await;
@@ -2610,6 +2616,63 @@ mod supervisor_tests {
         );
         assert!(std::fs::symlink_metadata(&staging_root).is_ok());
         assert_eq!(runtime.live_workers_for_tests(), 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_retry_timeout_kills_and_reaps_the_unregistered_helper() {
+        let directory = tempfile::tempdir().expect("test directory");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let markers = directory.path().join("markers");
+        std::fs::create_dir_all(&markers).expect("marker directory");
+        let entered = directory.path().join("retry-cleanup-entered");
+        let release = directory.path().join("retry-cleanup-release");
+        let canary = directory.path().join("retry-cleanup-canary");
+        let mut runtime = fixture_runtime(&markers);
+        runtime.command.staging_executable = None;
+        runtime.set_test_staging_helper_pause(
+            "cleanup",
+            entered.clone(),
+            release.clone(),
+            Some(canary.clone()),
+        );
+
+        let root = WorkspaceRoot::open(&workspace.path().to_string_lossy()).expect("workspace");
+        let preparation =
+            runtime.new_staging_preparation(root.clone(), workspace.path().to_path_buf());
+        let options = StagingLeaseOptions {
+            ownership_token: Some(preparation.ownership_token.clone()),
+            ..StagingLeaseOptions::default()
+        };
+        let lease = prepare_staging_lease(&preparation.path, &root, options)
+            .await
+            .expect("owned staging");
+        drop(lease);
+        let obligation = super::StagingCleanupObligation {
+            preparation: preparation.clone(),
+            identity: None,
+            control: None,
+            prepared: true,
+        };
+
+        let result = runtime
+            .cleanup_obligation_by_path_with_timeout(&obligation, Duration::from_millis(100))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ref reason) if reason.contains("staging obligation cleanup timed out")
+        ));
+        assert!(entered.exists(), "cleanup retry must enter its barrier");
+        assert!(
+            preparation.path.is_dir(),
+            "timed-out cleanup remains an unresolved obligation"
+        );
+        std::fs::write(&release, b"release").expect("release condition");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !canary.exists(),
+            "the killed and reaped retry helper cannot mutate after return"
+        );
     }
 
     #[tokio::test]
