@@ -247,12 +247,13 @@ pub async fn orchestrate_delegation(
 pub async fn orchestrate_result_arrival(
     repository: &impl TaskRepository,
     delegation: DelegationId,
+    result: TaskResultId,
     body: TaskResultScrubPremise,
 ) -> Result<TaskResultArrivalOutcome, TaskTechnicalError> {
     repository
         .record_task_result_arrival(TaskAgentResultArrival {
             delegation,
-            result: TaskResultId::generate(),
+            result,
             body,
         })
         .await
