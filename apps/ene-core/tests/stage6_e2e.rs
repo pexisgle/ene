@@ -80,6 +80,10 @@ const ROTATED_SECRET: &str = "sk-stage6-rotated-marker-4477";
 #[test]
 #[ignore = "subprocess fixture for Task Agent shutdown escalation"]
 fn uncooperative_task_effect_worker_fixture() {
+    if std::env::var_os("ENE_ACTION_STAGING_HELPER").is_some() {
+        ene_core::run_workspace_staging_helper();
+        return;
+    }
     use std::io::{Read, Write};
 
     let mut input = String::new();
@@ -719,6 +723,13 @@ impl Served {
         Arc::clone(self.handle.as_ref().expect("a live HostHandle"))
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(
+            dead_code,
+            reason = "used by test-support shutdown accounting regressions"
+        )
+    )]
     async fn stop_result(&mut self) -> Result<(), CoreError> {
         self.client = None;
         tokio::task::yield_now().await;
@@ -7150,7 +7161,7 @@ async fn host_shutdown_reports_staging_cleanup_failure_and_keeps_the_obligation(
     })
     .await
     .expect("the worker must write target-bearing staging content");
-    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 1);
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 2);
     assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
 
     let error = served
@@ -7168,6 +7179,82 @@ async fn host_shutdown_reports_staging_cleanup_failure_and_keeps_the_obligation(
             .path()
             .join("shutdown-task-workspace/cleanup-failure.md")
             .exists()
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn shutdown_during_destructive_staging_cleanup_kills_the_helper_and_reports_obligation() {
+    const TARGET_BODY: &str = "private stalled cleanup canary 7201";
+    let temp = tempfile::TempDir::new().unwrap();
+    let entered = temp.path().join("staging-cleanup-entered");
+    let release = temp.path().join("staging-cleanup-release");
+    let canary = temp.path().join("staging-cleanup-canary");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"stalled-cleanup.md","content":"private stalled cleanup canary 7201"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served
+        .handle()
+        .set_task_effect_staging_helper_pause_for_tests(
+            "cleanup",
+            entered.clone(),
+            release.clone(),
+            Some(canary.clone()),
+        );
+    served
+        .handle()
+        .set_task_effect_cleanup_failure_for_tests(true);
+    served
+        .handle()
+        .set_task_agent_quiesce_timeout_for_tests(Duration::from_millis(100));
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !entered.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("destructive cleanup must enter its deterministic barrier");
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 1);
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
+
+    let shutdown = tokio::time::timeout(Duration::from_secs(10), served.stop_result()).await;
+    assert!(shutdown.is_ok(), "cleanup escalation must be bounded");
+    let error = shutdown
+        .expect("shutdown result must be available")
+        .expect_err("unresolved cleanup must fail Host shutdown");
+    assert!(!error.to_string().contains(TARGET_BODY));
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 0);
+    assert_eq!(served.handle().running_task_executions_for_tests(), 0);
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
+    std::fs::write(&release, b"release").unwrap();
+    assert!(
+        !canary.exists(),
+        "a killed cleanup helper cannot mutate after return"
     );
 }
 
@@ -7565,6 +7652,95 @@ async fn shutdown_before_task_agent_action_start_creates_no_attempt_or_workspace
             .exists(),
         "shutdown-first must not execute the workspace effect"
     );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn shutdown_during_staging_preparation_is_bounded_and_claims_no_action() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let entered = temp.path().join("staging-prepare-entered");
+    let release = temp.path().join("staging-prepare-release");
+    let canary = temp.path().join("staging-prepare-canary");
+    let transport = Arc::new(ScriptedTransport::new(
+        vec![
+            (
+                on_latest_owner(SHUTDOWN_TASK_OWNER),
+                Call::reported(
+                    task_reply(serde_json::json!({
+                        "kind": "propose_task",
+                        "purpose": SHUTDOWN_TASK_PURPOSE,
+                    })),
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+            (
+                on_task_agent_turn(0),
+                Call::reported(
+                    r##"{"tool":"create","path":"stalled-preparation.md","content":"blocked"}"##,
+                    100,
+                    0,
+                    10,
+                ),
+            ),
+        ],
+        &[],
+    ));
+    let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
+    served
+        .handle()
+        .set_task_effect_staging_helper_pause_for_tests(
+            "prepare",
+            entered.clone(),
+            release.clone(),
+            Some(canary.clone()),
+        );
+    served
+        .handle()
+        .set_task_agent_quiesce_timeout_for_tests(Duration::from_millis(100));
+    propose_shutdown_task(&mut served).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !entered.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("staging preparation must enter its deterministic barrier");
+
+    let shutdown = tokio::time::timeout(Duration::from_secs(10), served.stop_result()).await;
+    assert!(shutdown.is_ok(), "Host shutdown must be bounded");
+    assert_eq!(
+        served.handle().running_task_executions_for_tests(),
+        0,
+        "the Task Agent runner must be joined"
+    );
+    assert_eq!(served.handle().live_task_effect_processes_for_tests(), 0);
+    assert_eq!(
+        db_scalar(
+            &temp.path().join("app.db"),
+            "SELECT COUNT(*) FROM action_attempt",
+        ),
+        0,
+        "preparation must finish or abort before AU5"
+    );
+    assert!(
+        !temp
+            .path()
+            .join("shutdown-task-workspace/stalled-preparation.md")
+            .exists()
+    );
+    std::fs::write(&release, b"release").unwrap();
+    assert!(
+        !canary.exists(),
+        "a killed preparation helper cannot mutate after return"
+    );
+    if let Ok(entries) = std::fs::read_dir(
+        temp.path()
+            .join("shutdown-task-workspace/.ene-action-staging"),
+    ) {
+        assert_eq!(entries.count(), 0);
+    }
 }
 
 #[cfg(feature = "test-support")]

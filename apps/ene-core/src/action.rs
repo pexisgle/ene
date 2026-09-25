@@ -17,10 +17,10 @@ use ene_primitive::RevisionInner;
 use ene_store::Store;
 use ene_task::{DelegationId, TaskId, TaskProgress, TaskRef, TaskRepository, TaskTechnicalError};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use uuid::Uuid;
 
 use crate::staging_cleanup::{
-    StagingCleanupFailure, StagingLease, StagingLeaseOptions, cleanup_staging_lease,
-    prepare_staging_lease,
+    STAGING_HELPER_MODE_ENV, StagingHelperRequest, StagingHelperResponse,
 };
 use crate::task_run::{TaskClaimKind, TaskExecutionRegistry};
 
@@ -79,7 +79,6 @@ pub enum WorkspaceActionHostError {
 #[derive(Clone)]
 pub(crate) struct TaskEffectRuntime {
     command: EffectWorkerCommand,
-    active: Arc<tokio::sync::RwLock<()>>,
     workers: Arc<StdMutex<WorkerRegistry>>,
     #[cfg(feature = "test-support")]
     test_staging_pause: Arc<StdMutex<Option<ene_action::WorkspaceEffectStagingPause>>>,
@@ -87,6 +86,8 @@ pub(crate) struct TaskEffectRuntime {
     test_cleanup_pause: Arc<StdMutex<Option<crate::staging_cleanup::StagingCleanupPause>>>,
     #[cfg(feature = "test-support")]
     test_cleanup_failure: Arc<AtomicBool>,
+    #[cfg(feature = "test-support")]
+    test_staging_helper_pause: Arc<StdMutex<Option<StagingHelperPause>>>,
     #[cfg(feature = "test-support")]
     cooperative_abort: bool,
 }
@@ -97,6 +98,8 @@ struct EffectWorkerCommand {
     args: Vec<String>,
     #[cfg(feature = "test-support")]
     envs: Vec<(String, String)>,
+    #[cfg(feature = "test-support")]
+    staging_executable: Option<PathBuf>,
     #[cfg(feature = "test-support")]
     stdin_write_marker: Option<PathBuf>,
 }
@@ -112,10 +115,56 @@ struct WorkerHandle {
     id: u64,
     pid: u32,
     process: Arc<ProcessHandle>,
-    staging_obligation: StdMutex<Option<Arc<StagingLease>>>,
+    staging_obligation: StdMutex<Option<StagingCleanupObligation>>,
+    staging_reaped: AtomicBool,
+    finalizing: AtomicBool,
     reaped: AtomicBool,
     hard_stopped: AtomicBool,
     hard_stop_signal: tokio::sync::watch::Sender<bool>,
+}
+
+#[derive(Clone)]
+struct StagingPreparation {
+    root: WorkspaceRoot,
+    path: PathBuf,
+    ownership_token: String,
+}
+
+struct StagingProcessIdentity {
+    pid: u32,
+    process: Arc<ProcessHandle>,
+}
+
+struct StagingHelperControl {
+    child: tokio::sync::Mutex<tokio::process::Child>,
+    identity: Arc<StagingProcessIdentity>,
+    reaped: AtomicBool,
+}
+
+struct StagingHelperRuntime {
+    control: Arc<StagingHelperControl>,
+    stdout: BufReader<tokio::process::ChildStdout>,
+}
+
+struct PreparedStaging {
+    preparation: StagingPreparation,
+    runtime: StagingHelperRuntime,
+}
+
+struct StagingCleanupObligation {
+    preparation: StagingPreparation,
+    identity: Option<String>,
+    control: Option<Arc<StagingHelperControl>>,
+    prepared: bool,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone)]
+struct StagingHelperPause {
+    stage: String,
+    entered: PathBuf,
+    release: PathBuf,
+    canary: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -136,6 +185,7 @@ struct PreparedWorker {
     child: tokio::process::Child,
     handle: Arc<WorkerHandle>,
     stdout: BufReader<tokio::process::ChildStdout>,
+    staging: Option<PreparedStaging>,
 }
 
 impl TaskEffectRuntime {
@@ -146,7 +196,6 @@ impl TaskEffectRuntime {
     fn with_command(command: EffectWorkerCommand) -> Self {
         Self {
             command,
-            active: Arc::new(tokio::sync::RwLock::new(())),
             workers: Arc::new(StdMutex::new(WorkerRegistry::default())),
             #[cfg(feature = "test-support")]
             test_staging_pause: Arc::new(StdMutex::new(None)),
@@ -154,6 +203,8 @@ impl TaskEffectRuntime {
             test_cleanup_pause: Arc::new(StdMutex::new(None)),
             #[cfg(feature = "test-support")]
             test_cleanup_failure: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "test-support")]
+            test_staging_helper_pause: Arc::new(StdMutex::new(None)),
             #[cfg(feature = "test-support")]
             cooperative_abort: true,
         }
@@ -174,9 +225,10 @@ impl TaskEffectRuntime {
     async fn prepare_worker(
         &self,
         abort: &DispatchAbort,
+        preparation: Option<StagingPreparation>,
     ) -> Result<Option<PreparedWorker>, WorkspaceActionHostError> {
         self.ensure_available()?;
-        let mut command = self.process_command();
+        let mut command = self.process_command(false);
         let spawned = self
             .spawn_registered(&mut command)
             .await
@@ -206,10 +258,49 @@ impl TaskEffectRuntime {
                 }
             }
         };
+        let Some(preparation) = preparation else {
+            return Ok(Some(PreparedWorker {
+                child,
+                handle,
+                stdout,
+                staging: None,
+            }));
+        };
+        if abort.is_aborted() || self.is_closing() {
+            self.stop_registered_child(&mut child, &handle).await;
+            return self
+                .finish_worker(&handle)
+                .map(|()| None)
+                .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason });
+        }
+        self.register_staging_obligation(&handle, preparation.clone())
+            .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
+        let mut helper_command = self.process_command(true);
+        let runtime = match self
+            .spawn_staging_helper(&mut helper_command, &handle, &preparation)
+            .await
+        {
+            Ok(runtime) => runtime,
+            Err(reason) => {
+                self.stop_registered_child(&mut child, &handle).await;
+                let cleanup = self.settle_worker_obligation(&handle).await;
+                return Err(WorkspaceActionHostError::EffectUnavailable {
+                    reason: [Some(reason), cleanup.err()]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                });
+            }
+        };
         Ok(Some(PreparedWorker {
             child,
             handle,
             stdout,
+            staging: Some(PreparedStaging {
+                preparation,
+                runtime,
+            }),
         }))
     }
 
@@ -223,9 +314,12 @@ impl TaskEffectRuntime {
     }
 
     async fn stop_prepared(&self, mut prepared: PreparedWorker) -> Result<(), String> {
-        self.stop_registered_child(&mut prepared.child, &prepared.handle)
+        let handle = Arc::clone(&prepared.handle);
+        self.stop_registered_child(&mut prepared.child, &handle)
             .await;
-        self.finish_worker(&prepared.handle)
+        let staging_result = self.finish_staging(handle.clone(), prepared.staging).await;
+        let finish_result = self.finish_worker(&handle);
+        staging_result.and(finish_result)
     }
 
     #[cfg(all(test, feature = "test-support"))]
@@ -234,10 +328,31 @@ impl TaskEffectRuntime {
         started: &StartedWorkspaceAction,
         abort: &DispatchAbort,
     ) -> Result<TaskEffectExecution, WorkspaceActionHostError> {
-        let Some(prepared) = self.prepare_worker(abort).await? else {
-            return Ok(TaskEffectExecution::Aborted);
+        self.execute_with_preparation(
+            started,
+            abort,
+            self.staging_preparation_for_started(started),
+        )
+        .await
+    }
+
+    #[cfg(all(test, feature = "test-support"))]
+    async fn execute_with_preparation(
+        &self,
+        started: &StartedWorkspaceAction,
+        abort: &DispatchAbort,
+        preparation: Option<StagingPreparation>,
+    ) -> Result<TaskEffectExecution, WorkspaceActionHostError> {
+        let prepared = match self.prepare_worker(abort, preparation).await {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => return Ok(TaskEffectExecution::Aborted),
+            Err(_error) if self.is_closing() => return Ok(TaskEffectExecution::Aborted),
+            Err(error) => return Err(error),
         };
-        self.execute_prepared(started, abort, prepared).await
+        match self.execute_prepared(started, abort, prepared).await {
+            Err(_error) if self.is_closing() => Ok(TaskEffectExecution::Aborted),
+            result => result,
+        }
     }
 
     async fn execute_prepared(
@@ -250,19 +365,21 @@ impl TaskEffectRuntime {
             mut child,
             handle,
             mut stdout,
+            staging,
         } = prepared;
-        let _active = self.active.read().await;
         if abort.is_aborted() || self.is_closing() {
             self.stop_registered_child(&mut child, &handle).await;
-            self.finish_worker(&handle)
+            let cleanup = self.finish_staging(handle.clone(), staging).await;
+            let finish = self.finish_worker(&handle);
+            cleanup
+                .and(finish)
                 .map_err(|reason| WorkspaceActionHostError::EffectUnavailable { reason })?;
             return Ok(TaskEffectExecution::Aborted);
         }
 
-        let staging_path = match started.operation() {
-            OperationKind::Create | OperationKind::Edit => Some(self.staging_directory(started)),
-            OperationKind::List | OperationKind::Read => None,
-        };
+        let staging_path = staging
+            .as_ref()
+            .map(|staging| staging.preparation.path.clone());
         let request = WorkspaceEffectRequest {
             root: started.root().as_path().to_string_lossy().into_owned(),
             target: started.target().as_path().to_owned(),
@@ -308,55 +425,12 @@ impl TaskEffectRuntime {
                 }
             })?;
         }
-        if let Some(path) = staging_path {
-            match prepare_staging_lease(&path, started.root(), self.staging_lease_options()).await {
-                Ok(lease) => {
-                    if let Err(failure) = self.attach_staging_obligation(&handle, lease) {
-                        self.stop_registered_child(&mut child, &handle).await;
-                        let cleanup = cleanup_staging_lease(failure.lease).await;
-                        return Err(WorkspaceActionHostError::EffectUnavailable {
-                            reason: match cleanup {
-                                Ok(()) => failure.reason,
-                                Err(cleanup) => format!("{}; {}", failure.reason, cleanup.reason),
-                            },
-                        });
-                    }
-                }
-                Err(failure) => {
-                    if let Some(lease) = failure.lease
-                        && let Err(attach) = self.attach_staging_obligation(&handle, lease)
-                    {
-                        return Err(WorkspaceActionHostError::EffectUnavailable {
-                            reason: format!("{}; {}", failure.reason, attach.reason),
-                        });
-                    }
-                    self.stop_registered_child(&mut child, &handle).await;
-                    let cleanup = self.cleanup_worker_staging(&handle).await;
-                    let finish = if cleanup.is_ok() {
-                        self.finish_worker(&handle)
-                    } else {
-                        Err(String::from("staging cleanup failed"))
-                    };
-                    return Err(WorkspaceActionHostError::EffectUnavailable {
-                        reason: [Some(failure.reason), cleanup.err(), finish.err()]
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<_>>()
-                            .join("; "),
-                    });
-                }
-            }
-        }
         let mut stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => {
                 self.stop_registered_child(&mut child, &handle).await;
-                let cleanup = self.cleanup_worker_staging(&handle).await;
-                let finish = if cleanup.is_ok() {
-                    self.finish_worker(&handle)
-                } else {
-                    Err(String::from("staging cleanup failed"))
-                };
+                let cleanup = self.finish_staging(handle.clone(), staging).await;
+                let finish = self.finish_worker(&handle);
                 return Err(WorkspaceActionHostError::EffectUnavailable {
                     reason: [
                         Some(String::from("worker stdin unavailable")),
@@ -383,12 +457,8 @@ impl TaskEffectRuntime {
             self.stop_registered_child(&mut child, &handle).await;
             output.abort();
             drop(output.await);
-            let cleanup = self.cleanup_worker_staging(&handle).await;
-            let finish = if cleanup.is_ok() {
-                self.finish_worker(&handle)
-            } else {
-                Err(String::from("staging cleanup failed"))
-            };
+            let cleanup = self.finish_staging(handle.clone(), staging).await;
+            let finish = self.finish_worker(&handle);
             return Err(WorkspaceActionHostError::EffectUnavailable {
                 reason: [Some(error.to_string()), cleanup.err(), finish.err()]
                     .into_iter()
@@ -444,17 +514,12 @@ impl TaskEffectRuntime {
                 result = &mut output => result,
             }
         };
-        let cleanup = self.cleanup_worker_staging(&handle).await;
-        let finish = if cleanup.is_ok() {
-            self.finish_worker(&handle)
-        } else {
-            Err(String::from("staging cleanup failed"))
-        };
+        let cleanup = self.finish_staging(handle.clone(), staging).await;
+        let finish = self.finish_worker(&handle);
 
         if stop_requested || handle.hard_stopped.load(Ordering::SeqCst) {
-            if let Err(reason) = cleanup.and(finish) {
-                return Err(WorkspaceActionHostError::EffectUnavailable { reason });
-            }
+            drop(cleanup);
+            drop(finish);
             return Ok(TaskEffectExecution::Aborted);
         }
         cleanup
@@ -492,31 +557,108 @@ impl TaskEffectRuntime {
             })
     }
 
-    fn process_command(&self) -> tokio::process::Command {
-        let mut command = tokio::process::Command::new(&self.command.executable);
+    fn process_command(&self, staging_helper: bool) -> tokio::process::Command {
+        #[cfg(feature = "test-support")]
+        let executable = if staging_helper
+            && let Some(staging_executable) = self.command.staging_executable.as_ref()
+        {
+            staging_executable.as_path()
+        } else {
+            self.command.executable.as_path()
+        };
+        #[cfg(not(feature = "test-support"))]
+        let executable = self.command.executable.as_path();
+        #[cfg(feature = "test-support")]
+        let args: &[String] =
+            if staging_helper && self.command.staging_executable.as_ref().is_some() {
+                &[]
+            } else {
+                &self.command.args
+            };
+        #[cfg(not(feature = "test-support"))]
+        let args: &[String] = &self.command.args;
+        let mut command = tokio::process::Command::new(executable);
         command
-            .args(&self.command.args)
+            .args(args)
             .env_clear()
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+        if staging_helper {
+            command.env(STAGING_HELPER_MODE_ENV, "1");
+        }
         #[cfg(feature = "test-support")]
         command.envs(self.command.envs.iter().map(|(key, value)| (key, value)));
+        #[cfg(feature = "test-support")]
+        if staging_helper {
+            command.envs(self.test_helper_envs());
+        }
         command
     }
 
-    fn staging_directory(&self, started: &StartedWorkspaceAction) -> PathBuf {
+    #[cfg(all(test, feature = "test-support"))]
+    fn staging_preparation_for_started(
+        &self,
+        started: &StartedWorkspaceAction,
+    ) -> Option<StagingPreparation> {
+        if !matches!(
+            started.operation(),
+            OperationKind::Create | OperationKind::Edit
+        ) {
+            return None;
+        }
         let target = Path::new(started.target().as_path());
         let parent = target.parent().unwrap_or_else(|| started.root().as_path());
-        parent.join(".ene-action-staging").join(
-            started
-                .attempt()
-                .as_raw()
-                .as_uuid()
-                .as_hyphenated()
-                .to_string(),
-        )
+        Some(self.new_staging_preparation(started.root().clone(), parent.to_path_buf()))
+    }
+
+    fn new_staging_preparation(&self, root: WorkspaceRoot, parent: PathBuf) -> StagingPreparation {
+        let identifier = Uuid::new_v4().as_hyphenated().to_string();
+        StagingPreparation {
+            root,
+            path: parent.join(".ene-action-staging").join(&identifier),
+            ownership_token: identifier,
+        }
+    }
+
+    fn staging_preparation_for_action(
+        &self,
+        root: &WorkspaceRoot,
+        requested_path: &str,
+        operation: OperationKind,
+    ) -> Option<StagingPreparation> {
+        if !matches!(operation, OperationKind::Create | OperationKind::Edit) {
+            return None;
+        }
+        let requested = Path::new(requested_path);
+        if requested.is_absolute() {
+            return None;
+        }
+        let mut normalized = PathBuf::new();
+        for component in requested.components() {
+            match component {
+                std::path::Component::Normal(name) => normalized.push(name),
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    if !normalized.pop() {
+                        return None;
+                    }
+                }
+                std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
+            }
+        }
+        let parent = if normalized.as_os_str().is_empty() {
+            root.as_path().to_path_buf()
+        } else {
+            root.as_path().join(
+                normalized
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| std::path::Path::new("")),
+            )
+        };
+        Some(self.new_staging_preparation(root.clone(), parent))
     }
 
     fn is_closing(&self) -> bool {
@@ -558,6 +700,8 @@ impl TaskEffectRuntime {
                     pid,
                     process: Arc::clone(&process),
                     staging_obligation: StdMutex::new(None),
+                    staging_reaped: AtomicBool::new(true),
+                    finalizing: AtomicBool::new(false),
                     reaped: AtomicBool::new(false),
                     hard_stopped: AtomicBool::new(false),
                     hard_stop_signal,
@@ -573,45 +717,213 @@ impl TaskEffectRuntime {
         Ok(SpawnedWorker::Started { child, handle })
     }
 
-    fn attach_staging_obligation(
+    fn register_staging_obligation(
         &self,
         handle: &Arc<WorkerHandle>,
-        lease: Arc<StagingLease>,
-    ) -> Result<(), StagingCleanupFailure> {
+        preparation: StagingPreparation,
+    ) -> Result<(), String> {
         let mut obligation = crate::lock_unpoison(&handle.staging_obligation);
         if obligation.is_some() {
-            return Err(StagingCleanupFailure {
-                reason: format!("worker {} already owns staging cleanup", handle.id),
-                lease,
-            });
+            return Err(format!("worker {} already owns staging cleanup", handle.id));
         }
-        *obligation = Some(lease);
+        *obligation = Some(StagingCleanupObligation {
+            preparation,
+            identity: None,
+            control: None,
+            prepared: false,
+        });
         Ok(())
     }
 
-    async fn cleanup_worker_staging(&self, handle: &Arc<WorkerHandle>) -> Result<(), String> {
-        let Some(lease) = crate::lock_unpoison(&handle.staging_obligation).take() else {
-            return Ok(());
+    async fn spawn_staging_helper(
+        &self,
+        command: &mut tokio::process::Command,
+        handle: &Arc<WorkerHandle>,
+        preparation: &StagingPreparation,
+    ) -> Result<StagingHelperRuntime, String> {
+        let mut child = {
+            let registry = crate::lock_unpoison(&self.workers);
+            if registry.closing {
+                return Err(String::from("staging helper admission is closing"));
+            }
+            command.spawn().map_err(|error| error.to_string())?
         };
-        match cleanup_staging_lease(lease).await {
-            Ok(()) => Ok(()),
-            Err(failure) => {
-                *crate::lock_unpoison(&handle.staging_obligation) = Some(failure.lease);
-                Err(failure.reason)
+        let Some(pid) = child.id() else {
+            stop_child(&mut child).await;
+            return Err(String::from("staging helper process has no process id"));
+        };
+        let process = match ProcessHandle::open(pid) {
+            Ok(process) => Arc::new(process),
+            Err(error) => {
+                stop_child(&mut child).await;
+                return Err(error);
+            }
+        };
+        let control = Arc::new(StagingHelperControl {
+            child: tokio::sync::Mutex::new(child),
+            identity: Arc::new(StagingProcessIdentity {
+                pid,
+                process: Arc::clone(&process),
+            }),
+            reaped: AtomicBool::new(false),
+        });
+        let obligation_present = {
+            let registry = crate::lock_unpoison(&self.workers);
+            if registry.closing {
+                false
+            } else {
+                let mut obligation = crate::lock_unpoison(&handle.staging_obligation);
+                if let Some(obligation) = obligation.as_mut() {
+                    obligation.control = Some(Arc::clone(&control));
+                    handle.staging_reaped.store(false, Ordering::SeqCst);
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        if !obligation_present {
+            let reason = staging_stop_reason(
+                &control,
+                String::from("staging obligation disappeared during helper start"),
+            )
+            .await;
+            handle.staging_reaped.store(true, Ordering::SeqCst);
+            return Err(reason);
+        }
+        let mut runtime = match negotiate_staging_helper(&control).await {
+            Ok(stdout) => StagingHelperRuntime { control, stdout },
+            Err(reason) => {
+                let reason = staging_stop_reason(&control, reason).await;
+                handle.staging_reaped.store(true, Ordering::SeqCst);
+                return Err(reason);
+            }
+        };
+        let request = StagingHelperRequest::Prepare {
+            root: preparation.root.as_path().to_string_lossy().into_owned(),
+            staging_directory: preparation.path.to_string_lossy().into_owned(),
+            ownership_token: preparation.ownership_token.clone(),
+        };
+        let response = match tokio::time::timeout(
+            WORKER_HANDSHAKE_TIMEOUT,
+            send_staging_helper_request(&mut runtime, request),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(reason)) => {
+                let reason = staging_stop_reason(&runtime.control, reason).await;
+                handle.staging_reaped.store(true, Ordering::SeqCst);
+                return Err(reason);
+            }
+            Err(_) => {
+                let reason = staging_stop_reason(
+                    &runtime.control,
+                    String::from("staging helper preparation timed out"),
+                )
+                .await;
+                handle.staging_reaped.store(true, Ordering::SeqCst);
+                return Err(reason);
+            }
+        };
+        match response {
+            StagingHelperResponse::Prepared { identity } => {
+                let mut obligation = crate::lock_unpoison(&handle.staging_obligation);
+                if let Some(obligation) = obligation.as_mut() {
+                    obligation.identity = Some(identity);
+                    obligation.prepared = true;
+                }
+                Ok(runtime)
+            }
+            StagingHelperResponse::CleanupComplete { .. } => {
+                let reason = String::from("staging helper returned cleanup before prepare");
+                let reason = staging_stop_reason(&runtime.control, reason).await;
+                handle.staging_reaped.store(true, Ordering::SeqCst);
+                Err(reason)
+            }
+            StagingHelperResponse::Failed {
+                reason,
+                obligation_retained,
+            } => {
+                let stopped = hard_stop_staging_control(&runtime.control).await;
+                handle.staging_reaped.store(true, Ordering::SeqCst);
+                if !obligation_retained {
+                    *crate::lock_unpoison(&handle.staging_obligation) = None;
+                }
+                match stopped {
+                    Ok(()) => Err(reason),
+                    Err(stop_reason) => Err(format!("{reason}; {stop_reason}")),
+                }
             }
         }
     }
 
+    async fn cleanup_staging_runtime(
+        &self,
+        runtime: &mut StagingHelperRuntime,
+    ) -> Result<(), String> {
+        if runtime.control.reaped.load(Ordering::SeqCst) {
+            return Err(String::from(
+                "staging helper was hard-stopped before cleanup",
+            ));
+        }
+        let response = tokio::time::timeout(
+            WORKER_HANDSHAKE_TIMEOUT,
+            send_staging_helper_request(runtime, StagingHelperRequest::Cleanup),
+        )
+        .await
+        .map_err(|_| String::from("staging helper cleanup timed out"))??;
+        match response {
+            StagingHelperResponse::CleanupComplete { removed: true } => Ok(()),
+            StagingHelperResponse::CleanupComplete { removed: false } => {
+                Err(String::from("staging helper cleanup found no owned object"))
+            }
+            StagingHelperResponse::Prepared { .. } => Err(String::from(
+                "staging helper returned prepare during cleanup",
+            )),
+            StagingHelperResponse::Failed { reason, .. } => Err(reason),
+        }
+    }
+
+    async fn finish_staging(
+        &self,
+        handle: Arc<WorkerHandle>,
+        staging: Option<PreparedStaging>,
+    ) -> Result<(), String> {
+        let Some(mut staging) = staging else {
+            return Ok(());
+        };
+        let cleanup = self.cleanup_staging_runtime(&mut staging.runtime).await;
+        let stopped = hard_stop_staging_control(&staging.runtime.control).await;
+        handle.staging_reaped.store(true, Ordering::SeqCst);
+        let result = cleanup.and(stopped);
+        if result.is_ok() {
+            let mut obligation = crate::lock_unpoison(&handle.staging_obligation);
+            *obligation = None;
+        }
+        result
+    }
+
     fn finish_worker(&self, handle: &Arc<WorkerHandle>) -> Result<(), String> {
+        if handle.finalizing.load(Ordering::SeqCst) {
+            return Err(format!("worker {} finalization is in progress", handle.id));
+        }
         if crate::lock_unpoison(&handle.staging_obligation).is_some() {
             return Err(format!(
                 "worker {} cannot finish before staging cleanup",
                 handle.id
             ));
         }
+        if !handle.reaped.load(Ordering::SeqCst) || !handle.staging_reaped.load(Ordering::SeqCst) {
+            return Err(format!("worker {} has a live process", handle.id));
+        }
         let mut registry = crate::lock_unpoison(&self.workers);
         registry.workers.remove(&handle.id);
         Ok(())
+    }
+
+    pub(crate) fn close_admission(&self) {
+        crate::lock_unpoison(&self.workers).closing = true;
     }
 
     pub(crate) async fn terminate_and_join(&self) -> Result<(), String> {
@@ -625,23 +937,197 @@ impl TaskEffectRuntime {
             if let Err(error) = hard_kill_worker(worker) {
                 failure.get_or_insert(error);
             }
-        }
-        let _active = self.active.write().await;
-        for worker in &workers {
-            if let Err(error) = self.cleanup_worker_staging(worker).await {
-                failure.get_or_insert(error);
-                continue;
+            let control = crate::lock_unpoison(&worker.staging_obligation)
+                .as_ref()
+                .and_then(|obligation| obligation.control.as_ref())
+                .cloned();
+            if let Some(control) = control {
+                if let Err(error) = hard_stop_staging_control(&control).await {
+                    failure.get_or_insert(error);
+                }
+                worker.staging_reaped.store(true, Ordering::SeqCst);
             }
-            if let Err(error) = self.finish_worker(worker) {
-                failure.get_or_insert(error);
-            }
         }
-        let remaining = crate::lock_unpoison(&self.workers).workers.len();
-        if remaining != 0 {
-            let error = format!("{remaining} worker cleanup obligation(s) remained");
+        let settle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !crate::lock_unpoison(&self.workers).workers.is_empty()
+            && tokio::time::Instant::now() < settle_deadline
+        {
+            tokio::task::yield_now().await;
+        }
+        if let Err(error) = self.finalize_shutdown_inner().await {
             failure.get_or_insert(error);
         }
         failure.map_or(Ok(()), Err)
+    }
+
+    pub(crate) fn verify_shutdown(&self) -> Result<(), String> {
+        let workers = crate::lock_unpoison(&self.workers);
+        let remaining = workers.workers.len();
+        if remaining == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "{remaining} worker process or cleanup obligation(s) remained"
+            ))
+        }
+    }
+
+    async fn settle_worker_obligation(&self, worker: &Arc<WorkerHandle>) -> Result<(), String> {
+        if worker
+            .finalizing
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Ok(());
+        }
+        let obligation = crate::lock_unpoison(&worker.staging_obligation).take();
+        let mut failure = None;
+        if let Some(obligation) = obligation {
+            match self.cleanup_obligation_by_path(&obligation).await {
+                Ok(true) => {}
+                Ok(false) if !obligation.prepared => {}
+                Ok(false) => {
+                    failure = Some(String::from(
+                        "prepared staging object disappeared before cleanup",
+                    ));
+                    *crate::lock_unpoison(&worker.staging_obligation) = Some(obligation);
+                }
+                Err(reason) => {
+                    failure = Some(reason);
+                    *crate::lock_unpoison(&worker.staging_obligation) = Some(obligation);
+                }
+            }
+        }
+        worker.finalizing.store(false, Ordering::SeqCst);
+        if let Some(reason) = failure {
+            return Err(reason);
+        }
+        if let Err(reason) = self.finish_worker(worker)
+            && reason != format!("worker {} has a live process", worker.id)
+        {
+            return Err(reason);
+        }
+        Ok(())
+    }
+
+    async fn finalize_shutdown_inner(&self) -> Result<(), String> {
+        let workers = {
+            let registry = crate::lock_unpoison(&self.workers);
+            registry.workers.values().cloned().collect::<Vec<_>>()
+        };
+        let mut failure = None;
+        for worker in workers {
+            if worker
+                .finalizing
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                continue;
+            }
+            let obligation = crate::lock_unpoison(&worker.staging_obligation).take();
+            let mut unresolved = None;
+            if let Some(obligation) = obligation {
+                match self.cleanup_obligation_by_path(&obligation).await {
+                    Ok(true) => {}
+                    Ok(false) if !obligation.prepared => {}
+                    Ok(false) => {
+                        unresolved = Some(String::from(
+                            "prepared staging object disappeared before cleanup",
+                        ));
+                        *crate::lock_unpoison(&worker.staging_obligation) = Some(obligation);
+                    }
+                    Err(reason) => {
+                        unresolved = Some(reason);
+                        *crate::lock_unpoison(&worker.staging_obligation) = Some(obligation);
+                    }
+                }
+            }
+            if let Some(reason) = unresolved {
+                worker.finalizing.store(false, Ordering::SeqCst);
+                failure.get_or_insert(reason);
+                continue;
+            }
+            worker.finalizing.store(false, Ordering::SeqCst);
+            if let Err(reason) = self.finish_worker(&worker)
+                && reason != format!("worker {} has a live process", worker.id)
+            {
+                failure.get_or_insert(reason);
+            }
+        }
+        let remaining = crate::lock_unpoison(&self.workers)
+            .workers
+            .values()
+            .filter(|worker| crate::lock_unpoison(&worker.staging_obligation).is_some())
+            .count();
+        if remaining != 0 {
+            failure.get_or_insert(format!("{remaining} worker cleanup obligation(s) remained"));
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    async fn cleanup_obligation_by_path(
+        &self,
+        obligation: &StagingCleanupObligation,
+    ) -> Result<bool, String> {
+        let mut command = self.process_command(true);
+        let mut runtime = self.spawn_staging_helper_unregistered(&mut command).await?;
+        let request = StagingHelperRequest::CleanupByPath {
+            root: obligation
+                .preparation
+                .root
+                .as_path()
+                .to_string_lossy()
+                .into_owned(),
+            staging_directory: obligation.preparation.path.to_string_lossy().into_owned(),
+            ownership_token: obligation.preparation.ownership_token.clone(),
+            identity: obligation.identity.clone(),
+        };
+        let result = tokio::time::timeout(
+            WORKER_HANDSHAKE_TIMEOUT,
+            send_staging_helper_request(&mut runtime, request),
+        )
+        .await
+        .map_err(|_| String::from("staging obligation cleanup timed out"))?;
+        let stopped = hard_stop_staging_control(&runtime.control).await;
+        let response = result?;
+        stopped?;
+        match response {
+            StagingHelperResponse::CleanupComplete { removed } => Ok(removed),
+            StagingHelperResponse::Prepared { .. } => Err(String::from(
+                "staging helper returned prepare during path cleanup",
+            )),
+            StagingHelperResponse::Failed { reason, .. } => Err(reason),
+        }
+    }
+
+    async fn spawn_staging_helper_unregistered(
+        &self,
+        command: &mut tokio::process::Command,
+    ) -> Result<StagingHelperRuntime, String> {
+        let mut child = command.spawn().map_err(|error| error.to_string())?;
+        let Some(pid) = child.id() else {
+            stop_child(&mut child).await;
+            return Err(String::from("staging helper process has no process id"));
+        };
+        let process = match ProcessHandle::open(pid) {
+            Ok(process) => Arc::new(process),
+            Err(error) => {
+                stop_child(&mut child).await;
+                return Err(error);
+            }
+        };
+        let control = Arc::new(StagingHelperControl {
+            child: tokio::sync::Mutex::new(child),
+            identity: Arc::new(StagingProcessIdentity {
+                pid,
+                process: Arc::clone(&process),
+            }),
+            reaped: AtomicBool::new(false),
+        });
+        match negotiate_staging_helper(&control).await {
+            Ok(stdout) => Ok(StagingHelperRuntime { control, stdout }),
+            Err(reason) => Err(staging_stop_reason(&control, reason).await),
+        }
     }
 
     #[cfg(feature = "test-support")]
@@ -654,8 +1140,16 @@ impl TaskEffectRuntime {
         crate::lock_unpoison(&self.workers)
             .workers
             .values()
-            .filter(|worker| !worker.reaped.load(Ordering::SeqCst))
-            .count()
+            .map(|worker| {
+                usize::from(!worker.reaped.load(Ordering::SeqCst))
+                    + usize::from(
+                        crate::lock_unpoison(&worker.staging_obligation)
+                            .as_ref()
+                            .and_then(|obligation| obligation.control.as_ref())
+                            .is_some_and(|control| !control.reaped.load(Ordering::SeqCst)),
+                    )
+            })
+            .sum()
     }
 
     #[cfg(feature = "test-support")]
@@ -673,10 +1167,20 @@ impl TaskEffectRuntime {
         args: Vec<String>,
         envs: Vec<(String, String)>,
     ) -> Self {
+        let staging_executable = std::env::current_exe()
+            .ok()
+            .and_then(|current| {
+                current.parent().and_then(Path::parent).map(|parent| {
+                    parent.join(format!("ene-action-worker{}", std::env::consts::EXE_SUFFIX))
+                })
+            })
+            .filter(|path| path.is_file());
         let mut runtime = Self::with_command(EffectWorkerCommand {
             executable,
             args,
             envs,
+            #[cfg(feature = "test-support")]
+            staging_executable,
             #[cfg(feature = "test-support")]
             stdin_write_marker: None,
         });
@@ -726,17 +1230,77 @@ impl TaskEffectRuntime {
     }
 
     #[cfg(feature = "test-support")]
+    pub(crate) fn set_test_staging_helper_pause(
+        &self,
+        stage: &str,
+        entered: PathBuf,
+        release: PathBuf,
+        canary: Option<PathBuf>,
+    ) {
+        *crate::lock_unpoison(&self.test_staging_helper_pause) = Some(StagingHelperPause {
+            stage: stage.to_owned(),
+            entered,
+            release,
+            canary,
+        });
+    }
+
+    #[cfg(feature = "test-support")]
     fn test_staging_pause(&self) -> Option<ene_action::WorkspaceEffectStagingPause> {
         crate::lock_unpoison(&self.test_staging_pause).clone()
     }
 
-    fn staging_lease_options(&self) -> StagingLeaseOptions {
-        StagingLeaseOptions {
+    #[cfg(all(test, feature = "test-support"))]
+    fn staging_lease_options(&self) -> crate::staging_cleanup::StagingLeaseOptions {
+        crate::staging_cleanup::StagingLeaseOptions {
             #[cfg(feature = "test-support")]
             pause: crate::lock_unpoison(&self.test_cleanup_pause).clone(),
             #[cfg(feature = "test-support")]
             fail_cleanup: self.test_cleanup_failure.load(Ordering::SeqCst),
+            ..crate::staging_cleanup::StagingLeaseOptions::default()
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn test_helper_envs(&self) -> Vec<(String, String)> {
+        let mut envs = Vec::new();
+        if let Some(pause) = crate::lock_unpoison(&self.test_cleanup_pause).as_ref() {
+            envs.push((
+                String::from("ENE_TEST_STAGING_CLEANUP_ENTERED"),
+                pause.entered.to_string_lossy().into_owned(),
+            ));
+            envs.push((
+                String::from("ENE_TEST_STAGING_CLEANUP_RELEASE"),
+                pause.release.to_string_lossy().into_owned(),
+            ));
+        }
+        if self.test_cleanup_failure.load(Ordering::SeqCst) {
+            envs.push((
+                String::from("ENE_TEST_STAGING_CLEANUP_FAILURE"),
+                String::from("1"),
+            ));
+        }
+        if let Some(pause) = crate::lock_unpoison(&self.test_staging_helper_pause).as_ref() {
+            envs.push((
+                String::from("ENE_TEST_STAGING_HELPER_PAUSE"),
+                format!("stall-{}", pause.stage),
+            ));
+            envs.push((
+                String::from("ENE_TEST_STAGING_HELPER_ENTERED"),
+                pause.entered.to_string_lossy().into_owned(),
+            ));
+            envs.push((
+                String::from("ENE_TEST_STAGING_HELPER_RELEASE"),
+                pause.release.to_string_lossy().into_owned(),
+            ));
+            if let Some(canary) = pause.canary.as_ref() {
+                envs.push((
+                    String::from("ENE_TEST_STAGING_HELPER_CANARY"),
+                    canary.to_string_lossy().into_owned(),
+                ));
+            }
+        }
+        envs
     }
 }
 
@@ -847,6 +1411,101 @@ async fn negotiate_worker(
     Ok(stdout)
 }
 
+async fn negotiate_staging_helper(
+    control: &StagingHelperControl,
+) -> Result<BufReader<tokio::process::ChildStdout>, String> {
+    let handshake = serde_json::to_vec(&WorkspaceEffectHandshake {
+        generation: WORKSPACE_EFFECT_PROTOCOL_GENERATION,
+    })
+    .map_err(|error| error.to_string())?;
+    let stdout = {
+        let mut child = control.child.lock().await;
+        let Some(stdin) = child.stdin.as_mut() else {
+            return Err(String::from(
+                "staging helper stdin unavailable during handshake",
+            ));
+        };
+        stdin
+            .write_all(&handshake)
+            .await
+            .map_err(|error| error.to_string())?;
+        stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|error| error.to_string())?;
+        stdin.flush().await.map_err(|error| error.to_string())?;
+        child
+            .stdout
+            .take()
+            .ok_or_else(|| String::from("staging helper stdout unavailable during handshake"))?
+    };
+    let mut stdout = BufReader::new(stdout);
+    let response = tokio::time::timeout(
+        WORKER_HANDSHAKE_TIMEOUT,
+        read_handshake_response(&mut stdout),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "staging helper {} did not answer the protocol handshake",
+            control.identity.pid
+        )
+    })?
+    .map_err(|error| format!("staging helper {} handshake: {error}", control.identity.pid))?;
+    if response.generation != WORKSPACE_EFFECT_PROTOCOL_GENERATION {
+        return Err(format!(
+            "staging helper protocol generation mismatch: {}",
+            response.generation
+        ));
+    }
+    Ok(stdout)
+}
+
+async fn send_staging_helper_request(
+    runtime: &mut StagingHelperRuntime,
+    request: StagingHelperRequest,
+) -> Result<StagingHelperResponse, String> {
+    let encoded = serde_json::to_string(&request).map_err(|error| error.to_string())?;
+    {
+        let mut child = runtime.control.child.lock().await;
+        let Some(stdin) = child.stdin.as_mut() else {
+            return Err(String::from("staging helper stdin unavailable"));
+        };
+        stdin
+            .write_all(encoded.as_bytes())
+            .await
+            .map_err(|error| error.to_string())?;
+        stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|error| error.to_string())?;
+        stdin.flush().await.map_err(|error| error.to_string())?;
+    }
+    let line = read_bounded_handshake_line(&mut runtime.stdout)
+        .await
+        .map_err(|error| format!("staging helper response unavailable: {error}"))?;
+    serde_json::from_str(line.trim())
+        .map_err(|error| format!("staging helper response malformed: {error}"))
+}
+
+async fn staging_stop_reason(control: &StagingHelperControl, reason: String) -> String {
+    match hard_stop_staging_control(control).await {
+        Ok(()) => reason,
+        Err(stop_reason) => format!("{reason}; {stop_reason}"),
+    }
+}
+
+async fn hard_stop_staging_control(control: &StagingHelperControl) -> Result<(), String> {
+    if control.reaped.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let kill_result = control.identity.process.hard_kill(control.identity.pid);
+    let mut child = control.child.lock().await;
+    stop_child(&mut child).await;
+    control.reaped.store(true, Ordering::SeqCst);
+    kill_result
+}
+
 async fn stop_child(child: &mut tokio::process::Child) {
     drop(child.kill().await);
     drop(child.wait().await);
@@ -879,6 +1538,8 @@ fn effect_worker_command() -> EffectWorkerCommand {
             #[cfg(feature = "test-support")]
             envs: Vec::new(),
             #[cfg(feature = "test-support")]
+            staging_executable: None,
+            #[cfg(feature = "test-support")]
             stdin_write_marker: None,
         };
     };
@@ -902,6 +1563,8 @@ fn effect_worker_command_at(
             #[cfg(feature = "test-support")]
             envs: Vec::new(),
             #[cfg(feature = "test-support")]
+            staging_executable: None,
+            #[cfg(feature = "test-support")]
             stdin_write_marker: None,
         };
     }
@@ -913,6 +1576,8 @@ fn effect_worker_command_at(
                 args: Vec::new(),
                 #[cfg(feature = "test-support")]
                 envs: Vec::new(),
+                #[cfg(feature = "test-support")]
+                staging_executable: None,
                 #[cfg(feature = "test-support")]
                 stdin_write_marker: None,
             };
@@ -929,6 +1594,8 @@ fn effect_worker_command_at(
             #[cfg(feature = "test-support")]
             envs: Vec::new(),
             #[cfg(feature = "test-support")]
+            staging_executable: None,
+            #[cfg(feature = "test-support")]
             stdin_write_marker: None,
         };
     }
@@ -937,6 +1604,8 @@ fn effect_worker_command_at(
         args: vec![String::from("workspace-effect-worker")],
         #[cfg(feature = "test-support")]
         envs: Vec::new(),
+        #[cfg(feature = "test-support")]
+        staging_executable: None,
         #[cfg(feature = "test-support")]
         stdin_write_marker: None,
     }
@@ -1158,6 +1827,8 @@ pub(crate) async fn run_workspace_action(
             return Ok(WorkspaceActionHostOutcome::WorkspaceUnavailable { task });
         }
     };
+    let staging_preparation =
+        effect_runtime.staging_preparation_for_action(&root, &requested_path, operation);
     let command = WorkspaceActionCommand {
         delegation: delegation.as_raw(),
         task: task.as_raw(),
@@ -1171,8 +1842,16 @@ pub(crate) async fn run_workspace_action(
     if abort.is_aborted() {
         return Ok(WorkspaceActionHostOutcome::Stopped);
     }
-    let Some(prepared) = effect_runtime.prepare_worker(abort).await? else {
-        return Ok(WorkspaceActionHostOutcome::Stopped);
+    let prepared = match effect_runtime
+        .prepare_worker(abort, staging_preparation)
+        .await
+    {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => return Ok(WorkspaceActionHostOutcome::Stopped),
+        Err(_error) if effect_runtime.is_closing() => {
+            return Ok(WorkspaceActionHostOutcome::Stopped);
+        }
+        Err(error) => return Err(error),
     };
     let mut tracker = ActionEvaluationTracker::new();
     let claim_scope = executions.task_claim_scope(TaskClaimKind::Action).await;
@@ -1226,10 +1905,14 @@ pub(crate) async fn run_workspace_action(
     let attempt = started.attempt();
     let effect = match effect_runtime
         .execute_prepared(&started, abort, prepared)
-        .await?
+        .await
     {
-        TaskEffectExecution::Completed(effect) => effect,
-        TaskEffectExecution::Aborted => return Ok(WorkspaceActionHostOutcome::Stopped),
+        Ok(TaskEffectExecution::Completed(effect)) => effect,
+        Ok(TaskEffectExecution::Aborted) => return Ok(WorkspaceActionHostOutcome::Stopped),
+        Err(_error) if effect_runtime.is_closing() => {
+            return Ok(WorkspaceActionHostOutcome::Stopped);
+        }
+        Err(error) => return Err(error),
     };
     #[cfg(feature = "test-support")]
     executions.pause_after_task_effect_for_tests().await;
@@ -1307,7 +1990,9 @@ mod supervisor_tests {
                 ),
             ],
         );
-        let result = runtime.prepare_worker(&DispatchAbort::default()).await;
+        let result = runtime
+            .prepare_worker(&DispatchAbort::default(), None)
+            .await;
         assert!(matches!(
             result,
             Err(WorkspaceActionHostError::WorkerProtocolMismatch {
@@ -1347,7 +2032,9 @@ mod supervisor_tests {
                 ),
             ],
         );
-        let result = runtime.prepare_worker(&DispatchAbort::default()).await;
+        let result = runtime
+            .prepare_worker(&DispatchAbort::default(), None)
+            .await;
         assert!(matches!(
             result,
             Err(WorkspaceActionHostError::WorkerHandshakeFailed { .. })
@@ -1358,6 +2045,10 @@ mod supervisor_tests {
     #[test]
     #[ignore = "subprocess fixture for worker supervisor tests"]
     fn parked_worker_fixture() {
+        if std::env::var_os(crate::staging_cleanup::STAGING_HELPER_MODE_ENV).is_some() {
+            crate::run_workspace_staging_helper();
+            return;
+        }
         use std::io::{Read, Write};
 
         let mut input = String::new();
@@ -1594,6 +2285,108 @@ mod supervisor_tests {
     }
 
     #[tokio::test]
+    async fn stalled_staging_preparation_is_hard_stopped_without_late_mutation() {
+        let directory = tempfile::tempdir().expect("test directory");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let markers = directory.path().join("markers");
+        std::fs::create_dir_all(&markers).expect("marker directory");
+        let entered = directory.path().join("prepare-entered");
+        let release = directory.path().join("prepare-release");
+        let canary = directory.path().join("prepare-canary");
+        let runtime = fixture_runtime(&markers);
+        runtime.set_test_staging_helper_pause(
+            "prepare",
+            entered.clone(),
+            release.clone(),
+            Some(canary.clone()),
+        );
+        let root = WorkspaceRoot::open(&workspace.path().to_string_lossy()).expect("workspace");
+        let started = started(&root, "stalled-prepare.txt", Some(b"blocked".to_vec()));
+        let abort = DispatchAbort::default();
+        let execution = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.execute(&started, &abort).await }
+        });
+        let execution = execution;
+        timeout(Duration::from_secs(10), async {
+            while !entered.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("staging preparation must enter its barrier");
+        let stopped = timeout(Duration::from_secs(10), async {
+            let (stop, result) = tokio::join!(runtime.terminate_and_join(), execution);
+            (stop, result)
+        })
+        .await
+        .expect("hard stop must remain bounded");
+        assert!(stopped.0.is_ok());
+        assert!(matches!(
+            stopped.1.expect("runner joins"),
+            Ok(TaskEffectExecution::Aborted)
+        ));
+        assert_eq!(runtime.live_worker_processes_for_tests(), 0);
+        assert_eq!(runtime.pending_staging_obligations_for_tests(), 0);
+        std::fs::write(&release, b"release").expect("release condition");
+        assert!(
+            !canary.exists(),
+            "a killed helper must not resume after return"
+        );
+        if let Ok(entries) = std::fs::read_dir(workspace.path().join(".ene-action-staging")) {
+            assert_eq!(entries.count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_cleanup_is_killed_reaped_and_keeps_an_unresolved_obligation() {
+        let directory = tempfile::tempdir().expect("test directory");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let entered = directory.path().join("cleanup-entered");
+        let release = directory.path().join("cleanup-release");
+        let canary = directory.path().join("cleanup-canary");
+        let runtime = TaskEffectRuntime::new();
+        runtime.set_test_staging_helper_pause(
+            "cleanup",
+            entered.clone(),
+            release.clone(),
+            Some(canary.clone()),
+        );
+        runtime.set_test_cleanup_failure(true);
+        let root = WorkspaceRoot::open(&workspace.path().to_string_lossy()).expect("workspace");
+        let started = started(&root, "stalled-cleanup.txt", Some(b"private body".to_vec()));
+        let abort = DispatchAbort::default();
+        let execution = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.execute(&started, &abort).await }
+        });
+        let execution = execution;
+        timeout(Duration::from_secs(10), async {
+            while !entered.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cleanup must enter its barrier");
+        let stopped = timeout(Duration::from_secs(10), async {
+            let (stop, result) = tokio::join!(runtime.terminate_and_join(), execution);
+            (stop, result)
+        })
+        .await
+        .expect("hard stop must remain bounded");
+        assert!(stopped.0.is_err());
+        assert!(matches!(
+            stopped.1.expect("runner joins"),
+            Ok(TaskEffectExecution::Aborted)
+        ));
+        assert_eq!(runtime.live_worker_processes_for_tests(), 0);
+        assert_eq!(runtime.pending_staging_obligations_for_tests(), 1);
+        std::fs::write(&release, b"release").expect("release condition");
+        assert!(!canary.exists(), "a killed cleanup helper must not resume");
+        assert!(workspace.path().join("stalled-cleanup.txt").exists());
+    }
+
+    #[tokio::test]
     async fn staging_collision_never_deletes_unowned_content() {
         let workspace = tempfile::tempdir().expect("workspace");
         let root = workspace.path().join(".ene-action-staging");
@@ -1619,12 +2412,17 @@ mod supervisor_tests {
             WorkspaceRoot::open(&workspace.path().to_string_lossy()).expect("workspace root");
         let started = started(&root, "collision.txt", Some(b"blocked".to_vec()));
         let runtime = TaskEffectRuntime::new();
-        let collision = runtime.staging_directory(&started);
+        let preparation = runtime
+            .staging_preparation_for_started(&started)
+            .expect("staging preparation");
+        let collision = preparation.path.clone();
         std::fs::create_dir_all(&collision).expect("staging collision");
         let sentinel = collision.join("sentinel");
         std::fs::write(&sentinel, b"keep").expect("sentinel write");
 
-        let result = runtime.execute(&started, &DispatchAbort::default()).await;
+        let result = runtime
+            .execute_with_preparation(&started, &DispatchAbort::default(), Some(preparation))
+            .await;
 
         assert!(matches!(
             result,

@@ -21,6 +21,11 @@ pub mod usage;
 mod win_acl;
 pub(crate) mod wss;
 
+#[doc(hidden)]
+pub fn run_workspace_staging_helper() {
+    staging_cleanup::run_workspace_staging_helper();
+}
+
 use std::sync::{Mutex as StdMutex, MutexGuard};
 
 pub(crate) fn lock_unpoison<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {

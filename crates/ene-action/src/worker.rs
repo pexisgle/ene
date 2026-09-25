@@ -177,6 +177,14 @@ pub fn run_workspace_effect_worker() {
     }
 }
 
+#[doc(hidden)]
+pub fn negotiate_workspace_effect_handshake(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> bool {
+    negotiate_handshake(input, output).is_some()
+}
+
 fn negotiate_handshake(input: &mut impl BufRead, output: &mut impl Write) -> Option<u32> {
     let mut line = String::new();
     if input.read_line(&mut line).is_err() {

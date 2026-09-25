@@ -660,11 +660,21 @@ impl HostHandle {
         self.task_executions.abort_for_host_shutdown().await;
     }
 
+    pub(crate) fn close_task_effect_admission(&self) {
+        crate::lock_unpoison(&self.task_effect_runtime).close_admission();
+    }
+
     pub(crate) async fn terminate_and_join_task_effects(&self) -> Result<(), CoreError> {
         let runtime = crate::lock_unpoison(&self.task_effect_runtime).clone();
         runtime
             .terminate_and_join()
             .await
+            .map_err(CoreError::Serving)
+    }
+
+    pub(crate) fn verify_task_effect_shutdown(&self) -> Result<(), CoreError> {
+        crate::lock_unpoison(&self.task_effect_runtime)
+            .verify_shutdown()
             .map_err(CoreError::Serving)
     }
 
@@ -701,6 +711,18 @@ impl HostHandle {
     #[cfg(feature = "test-support")]
     pub fn set_task_effect_cleanup_failure_for_tests(&self, fail: bool) {
         crate::lock_unpoison(&self.task_effect_runtime).set_test_cleanup_failure(fail);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn set_task_effect_staging_helper_pause_for_tests(
+        &self,
+        stage: &str,
+        entered: std::path::PathBuf,
+        release: std::path::PathBuf,
+        canary: Option<std::path::PathBuf>,
+    ) {
+        crate::lock_unpoison(&self.task_effect_runtime)
+            .set_test_staging_helper_pause(stage, entered, release, canary);
     }
 
     #[cfg(feature = "test-support")]

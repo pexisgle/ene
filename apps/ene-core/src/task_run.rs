@@ -827,18 +827,22 @@ impl<T> BackgroundTaskAgent<T> {
     pub(crate) async fn shutdown_and_join(&self) -> Result<(), CoreError> {
         let _shutdown = self.shutdown.lock().await;
         let tasks = crate::lock_unpoison(&self.tasks).take();
-        self.signal_host_shutdown().await;
         let handle = self.handle.upgrade();
-        let effect_result = if let Some(handle) = &handle {
-            handle.terminate_and_join_task_effects().await
-        } else {
-            Ok(())
-        };
+        if let Some(handle) = &handle {
+            handle.close_task_effect_admission();
+        }
+        self.signal_host_shutdown().await;
         let Some(mut tasks) = tasks else {
-            effect_result?;
-            return crate::lock_unpoison(&self.failure)
-                .take()
-                .map_or(Ok(()), Err);
+            let mut failure = crate::lock_unpoison(&self.failure).take();
+            if let Some(handle) = &handle {
+                if let Err(error) = handle.terminate_and_join_task_effects().await {
+                    record_core_failure(&mut failure, error);
+                }
+                if let Err(error) = handle.verify_task_effect_shutdown() {
+                    record_core_failure(&mut failure, error);
+                }
+            }
+            return failure.map_or(Ok(()), Err);
         };
         let mut failure = crate::lock_unpoison(&self.failure).take();
         let quiesce_timeout = handle.as_ref().map_or_else(
@@ -851,24 +855,32 @@ impl<T> BackgroundTaskAgent<T> {
             }
         })
         .await;
-        let timed_out = joined.is_err();
-        if timed_out {
+        if joined.is_err() {
+            if let Some(handle) = &handle
+                && let Err(error) = handle.terminate_and_join_task_effects().await
+            {
+                record_core_failure(&mut failure, error);
+            }
+            tasks.abort_all();
             while let Some(result) = tasks.join_next().await {
                 record_task_agent_result(&mut failure, result);
             }
-            let mut error = task_agent_quiesce_timeout(quiesce_timeout);
-            if let Some(task_failure) = failure {
-                error = CoreError::Serving(format!("{error}; {task_failure}"));
+            if let Some(handle) = &handle
+                && let Err(error) = handle.verify_task_effect_shutdown()
+            {
+                record_core_failure(&mut failure, error);
             }
-            if let Err(effect_error) = effect_result {
-                error = CoreError::Serving(format!(
-                    "{}; effect hard-stop cleanup failed: {effect_error}",
-                    error
-                ));
-            }
-            return Err(error);
+            return failure.map_or(Ok(()), Err);
         }
-        effect_result.and(failure.map_or(Ok(()), Err))
+        if let Some(handle) = &handle {
+            if let Err(error) = handle.terminate_and_join_task_effects().await {
+                record_core_failure(&mut failure, error);
+            }
+            if let Err(error) = handle.verify_task_effect_shutdown() {
+                record_core_failure(&mut failure, error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     async fn signal_host_shutdown(&self) {
@@ -876,6 +888,10 @@ impl<T> BackgroundTaskAgent<T> {
             handle.abort_task_agents_for_host_shutdown().await;
         }
     }
+}
+
+fn record_core_failure(failure: &mut Option<CoreError>, error: CoreError) {
+    failure.get_or_insert(error);
 }
 
 fn record_task_agent_result(
@@ -897,13 +913,6 @@ fn record_task_agent_result(
 
 fn task_agent_join_failure() -> CoreError {
     CoreError::Serving(String::from("Task Agent runner panicked or was cancelled"))
-}
-
-fn task_agent_quiesce_timeout(timeout: std::time::Duration) -> CoreError {
-    CoreError::Serving(format!(
-        "Task Agent shutdown quiesce exceeded {} ms",
-        timeout.as_millis()
-    ))
 }
 
 impl<T> BackgroundTaskAgent<T>

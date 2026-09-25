@@ -203,6 +203,10 @@ fn cli_from_matches(matches: clap::ArgMatches) -> Result<CliCommand, CliError> {
 }
 
 fn main() -> Result<(), CliError> {
+    if std::env::var_os("ENE_ACTION_STAGING_HELPER").is_some() {
+        ene_core::run_workspace_staging_helper();
+        return Ok(());
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let matches = match ene_core_command()
         .try_get_matches_from(std::iter::once(String::from("ene-core")).chain(args))

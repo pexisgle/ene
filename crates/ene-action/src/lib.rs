@@ -22,5 +22,5 @@ pub use run::{
 pub use worker::{
     WORKSPACE_EFFECT_PROTOCOL_GENERATION, WorkspaceEffectHandshake, WorkspaceEffectRequest,
     WorkspaceEffectResponse, WorkspaceEffectWorkerError, execute_workspace_effect,
-    run_workspace_effect_worker,
+    negotiate_workspace_effect_handshake, run_workspace_effect_worker,
 };

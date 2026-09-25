@@ -1,7 +1,43 @@
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ene_action::WorkspaceRoot;
+use ene_action::{WorkspaceRoot, negotiate_workspace_effect_handshake};
+
+pub(crate) const STAGING_HELPER_MODE_ENV: &str = "ENE_ACTION_STAGING_HELPER";
+#[cfg(feature = "test-support")]
+pub(crate) const TEST_STAGING_HELPER_PAUSE_ENV: &str = "ENE_TEST_STAGING_HELPER_PAUSE";
+const STAGING_OWNERSHIP_MARKER: &str = ".ene-action-staging-owner";
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum StagingHelperRequest {
+    Prepare {
+        root: String,
+        staging_directory: String,
+        ownership_token: String,
+    },
+    Cleanup,
+    CleanupByPath {
+        root: String,
+        staging_directory: String,
+        ownership_token: String,
+        identity: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum StagingHelperResponse {
+    Prepared {
+        identity: String,
+    },
+    CleanupComplete {
+        removed: bool,
+    },
+    Failed {
+        reason: String,
+        obligation_retained: bool,
+    },
+}
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::HANDLE;
 
@@ -14,6 +50,7 @@ pub(crate) struct StagingCleanupPause {
 
 #[derive(Default)]
 pub(crate) struct StagingLeaseOptions {
+    pub ownership_token: Option<String>,
     #[cfg(feature = "test-support")]
     pub pause: Option<StagingCleanupPause>,
     #[cfg(feature = "test-support")]
@@ -27,7 +64,6 @@ pub(crate) struct StagingPreparationFailure {
 
 pub(crate) struct StagingCleanupFailure {
     pub reason: String,
-    pub lease: Arc<StagingLease>,
 }
 
 impl core::fmt::Debug for StagingPreparationFailure {
@@ -49,11 +85,244 @@ impl core::fmt::Debug for StagingCleanupFailure {
     }
 }
 
+#[doc(hidden)]
+pub fn run_workspace_staging_helper() {
+    let stdin = std::io::stdin();
+    let mut input = BufReader::new(stdin.lock());
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    if !negotiate_workspace_effect_handshake(&mut input, &mut output) {
+        std::process::exit(6);
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => std::process::exit(7),
+    };
+    let result = runtime.block_on(run_workspace_staging_helper_async(&mut input, &mut output));
+    if result.is_err() {
+        std::process::exit(8);
+    }
+}
+
+async fn run_workspace_staging_helper_async(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<(), String> {
+    let request = read_staging_helper_request(input)?;
+    let lease = match request {
+        StagingHelperRequest::Prepare {
+            root,
+            staging_directory,
+            ownership_token,
+        } => {
+            pause_staging_helper_for_tests("prepare")?;
+            let root =
+                WorkspaceRoot::open(&root).map_err(|_| String::from("workspace unavailable"))?;
+            match prepare_staging_lease(
+                Path::new(&staging_directory),
+                &root,
+                helper_lease_options(ownership_token),
+            )
+            .await
+            {
+                Ok(lease) => lease,
+                Err(failure) => {
+                    let mut obligation_retained = failure.lease.is_some();
+                    if let Some(lease) = failure.lease {
+                        cleanup_staging_lease(lease)
+                            .await
+                            .map_err(|cleanup| cleanup.reason)?;
+                        obligation_retained = false;
+                    }
+                    write_staging_helper_response(
+                        output,
+                        &StagingHelperResponse::Failed {
+                            reason: failure.reason,
+                            obligation_retained,
+                        },
+                    )?;
+                    return Err(String::from("staging preparation failed"));
+                }
+            }
+        }
+        StagingHelperRequest::Cleanup => {
+            return Err(String::from("cleanup requested before prepare"));
+        }
+        StagingHelperRequest::CleanupByPath {
+            root,
+            staging_directory,
+            ownership_token,
+            identity,
+        } => {
+            pause_staging_helper_for_tests("cleanup")?;
+            let root =
+                WorkspaceRoot::open(&root).map_err(|_| String::from("workspace unavailable"))?;
+            let removed = match cleanup_staging_directory_by_path(
+                Path::new(&staging_directory),
+                &root,
+                ownership_token,
+                identity,
+            )
+            .await
+            {
+                Ok(removed) => removed,
+                Err(reason) => {
+                    write_staging_helper_response(
+                        output,
+                        &StagingHelperResponse::Failed {
+                            reason,
+                            obligation_retained: true,
+                        },
+                    )?;
+                    return Err(String::from("staging path cleanup failed"));
+                }
+            };
+            write_staging_helper_response(
+                output,
+                &StagingHelperResponse::CleanupComplete { removed },
+            )?;
+            return Ok(());
+        }
+    };
+    let identity = lease.identity_token()?;
+    write_staging_helper_response(output, &StagingHelperResponse::Prepared { identity })?;
+    let request = read_staging_helper_request(input)?;
+    match request {
+        StagingHelperRequest::Cleanup => {
+            pause_staging_helper_for_tests("cleanup")?;
+            cleanup_staging_lease(lease)
+                .await
+                .map_err(|failure| failure.reason)?;
+            write_staging_helper_response(
+                output,
+                &StagingHelperResponse::CleanupComplete { removed: true },
+            )?;
+            Ok(())
+        }
+        _ => Err(String::from("invalid staging helper request sequence")),
+    }
+}
+
+fn read_staging_helper_request(input: &mut impl BufRead) -> Result<StagingHelperRequest, String> {
+    let mut line = String::new();
+    input
+        .read_line(&mut line)
+        .map_err(|_| String::from("staging helper request unavailable"))?;
+    serde_json::from_str(line.trim()).map_err(|_| String::from("staging helper request malformed"))
+}
+
+fn write_staging_helper_response(
+    output: &mut impl Write,
+    response: &StagingHelperResponse,
+) -> Result<(), String> {
+    let encoded = serde_json::to_string(response)
+        .map_err(|_| String::from("staging helper response unavailable"))?;
+    output
+        .write_all(encoded.as_bytes())
+        .and_then(|()| output.write_all(b"\n"))
+        .and_then(|()| output.flush())
+        .map_err(|_| String::from("staging helper response unavailable"))
+}
+
+#[cfg(feature = "test-support")]
+fn pause_staging_helper_for_tests(stage: &str) -> Result<(), String> {
+    let expected = format!("stall-{stage}");
+    if std::env::var(TEST_STAGING_HELPER_PAUSE_ENV).ok().as_deref() != Some(expected.as_str()) {
+        return Ok(());
+    }
+    let entered = std::env::var_os("ENE_TEST_STAGING_HELPER_ENTERED")
+        .ok_or_else(|| String::from("staging helper barrier unavailable"))?;
+    let release = std::env::var_os("ENE_TEST_STAGING_HELPER_RELEASE")
+        .ok_or_else(|| String::from("staging helper release unavailable"))?;
+    let mut entered_file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&entered)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(_) => return Err(String::from("staging helper barrier unavailable")),
+    };
+    entered_file
+        .write_all(stage.as_bytes())
+        .map_err(|_| String::from("staging helper barrier unavailable"))?;
+    while !Path::new(&release).exists() {
+        std::thread::yield_now();
+    }
+    if let Some(canary) = std::env::var_os("ENE_TEST_STAGING_HELPER_CANARY") {
+        std::fs::write(canary, stage.as_bytes())
+            .map_err(|_| String::from("staging helper canary unavailable"))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "test-support"))]
+fn pause_staging_helper_for_tests(_stage: &str) -> Result<(), String> {
+    Ok(())
+}
+
+fn ownership_marker_path(path: &Path) -> PathBuf {
+    path.join(STAGING_OWNERSHIP_MARKER)
+}
+
+fn marker_open_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options
+}
+
+fn write_ownership_marker(path: &Path, token: &str) -> Result<(), String> {
+    if token.is_empty() {
+        return Err(String::from("staging ownership token is empty"));
+    }
+    let mut file = marker_open_options()
+        .write(true)
+        .create_new(true)
+        .open(ownership_marker_path(path))
+        .map_err(|error| format!("staging ownership marker could not be created: {error}"))?;
+    file.write_all(token.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("staging ownership marker could not be written: {error}"))
+}
+
+fn read_ownership_marker(path: &Path) -> Result<String, String> {
+    let mut token = String::new();
+    let mut file = marker_open_options()
+        .read(true)
+        .open(ownership_marker_path(path))
+        .map_err(|error| format!("staging ownership marker is unavailable: {error}"))?;
+    std::io::Read::read_to_string(&mut file, &mut token)
+        .map_err(|error| format!("staging ownership marker could not be read: {error}"))?;
+    if token.is_empty() {
+        return Err(String::from("staging ownership marker is empty"));
+    }
+    Ok(token)
+}
+
 pub(crate) struct StagingLease {
     object: StagingObject,
     workspace_root: WorkspaceRoot,
     original_path: PathBuf,
+    ownership_token: Option<String>,
     options: StagingLeaseOptions,
+}
+
+impl StagingLease {
+    fn identity_token(&self) -> Result<String, String> {
+        self.object.identity_token()
+    }
 }
 
 pub(crate) async fn prepare_staging_lease(
@@ -118,6 +387,7 @@ pub(crate) async fn prepare_staging_lease(
             object,
             workspace_root,
             original_path: path.clone(),
+            ownership_token: options.ownership_token.clone(),
             options,
         });
         if let Err(reason) = lease.object.set_private_directory_permissions() {
@@ -129,6 +399,14 @@ pub(crate) async fn prepare_staging_lease(
         if let Err(reason) = lease
             .object
             .validate_current_path(&lease.workspace_root, &lease.original_path)
+        {
+            return Err(StagingPreparationFailure {
+                reason,
+                lease: Some(lease),
+            });
+        }
+        if let Some(token) = lease.ownership_token.as_deref()
+            && let Err(reason) = write_ownership_marker(&lease.original_path, token)
         {
             return Err(StagingPreparationFailure {
                 reason,
@@ -148,68 +426,159 @@ pub(crate) async fn cleanup_staging_lease(
     lease: Arc<StagingLease>,
 ) -> Result<(), StagingCleanupFailure> {
     let cleanup_lease = Arc::clone(&lease);
+    tokio::task::spawn_blocking(move || cleanup_staging_lease_blocking(cleanup_lease))
+        .await
+        .map_err(|error| StagingCleanupFailure {
+            reason: format!("staging cleanup task failed: {error}"),
+        })?
+}
+
+fn cleanup_staging_lease_blocking(
+    cleanup_lease: Arc<StagingLease>,
+) -> Result<(), StagingCleanupFailure> {
+    if cleanup_lease.options.test_cleanup_failure() {
+        return Err(StagingCleanupFailure {
+            reason: String::from("staging cleanup failed"),
+        });
+    }
+    if let Err(reason) = cleanup_lease
+        .object
+        .validate_current_path(&cleanup_lease.workspace_root, &cleanup_lease.original_path)
+    {
+        return Err(StagingCleanupFailure { reason });
+    }
+    if let Some(token) = cleanup_lease.ownership_token.as_deref()
+        && let Err(reason) =
+            read_ownership_marker(&cleanup_lease.original_path).and_then(|actual| {
+                if actual == token {
+                    Ok(())
+                } else {
+                    Err(String::from("staging ownership marker does not match"))
+                }
+            })
+    {
+        return Err(StagingCleanupFailure { reason });
+    }
+    if let Err(reason) = cleanup_lease.options.pause_cleanup() {
+        return Err(StagingCleanupFailure { reason });
+    }
+    if let Err(reason) = cleanup_lease
+        .object
+        .validate_current_path(&cleanup_lease.workspace_root, &cleanup_lease.original_path)
+    {
+        return Err(StagingCleanupFailure { reason });
+    }
+    if let Err(reason) = cleanup_lease.object.remove_contents() {
+        return Err(StagingCleanupFailure { reason });
+    }
+    if let Err(reason) = cleanup_lease
+        .object
+        .validate_current_path(&cleanup_lease.workspace_root, &cleanup_lease.original_path)
+    {
+        return Err(StagingCleanupFailure { reason });
+    }
+    if let Err(reason) = cleanup_lease
+        .object
+        .remove_directory_entry(&cleanup_lease.original_path)
+    {
+        return Err(StagingCleanupFailure { reason });
+    }
+    Ok(())
+}
+
+pub(crate) async fn cleanup_staging_directory_by_path(
+    path: &Path,
+    workspace_root: &WorkspaceRoot,
+    ownership_token: String,
+    identity: Option<String>,
+) -> Result<bool, String> {
+    let path = path.to_path_buf();
+    let workspace_root = workspace_root.clone();
     tokio::task::spawn_blocking(move || {
-        if cleanup_lease.options.test_cleanup_failure() {
-            return Err(StagingCleanupFailure {
-                reason: String::from("staging cleanup failed"),
-                lease: cleanup_lease,
-            });
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if staging_path_contains_reparse(&path) {
+                    return Err(String::from("staging path contains a reparse point"));
+                }
+                return Ok(false);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "staging directory metadata is unavailable: {error}"
+                ));
+            }
         }
-        if let Err(reason) = cleanup_lease
-            .object
-            .validate_current_path(&cleanup_lease.workspace_root, &cleanup_lease.original_path)
+        let parent = path
+            .parent()
+            .ok_or_else(|| String::from("staging directory has no parent"))?;
+        if staging_path_contains_reparse(&path) {
+            return Err(String::from("staging path contains a reparse point"));
+        }
+        workspace_root
+            .validate_staging_directory(parent)
+            .map_err(|error| format!("staging parent is outside the workspace: {error}"))?;
+        let object = match StagingObject::open(&path) {
+            Ok(object) => object,
+            Err(reason) => {
+                if std::fs::symlink_metadata(&path).ok().is_none() {
+                    return Ok(false);
+                }
+                return Err(reason);
+            }
+        };
+        if let Some(expected_identity) = identity.as_deref()
+            && object.identity_token()? != expected_identity
         {
-            return Err(StagingCleanupFailure {
-                reason,
-                lease: cleanup_lease,
-            });
+            return Err(String::from("staging object identity does not match"));
         }
-        if let Err(reason) = cleanup_lease.options.pause_cleanup() {
-            return Err(StagingCleanupFailure {
-                reason,
-                lease: cleanup_lease,
-            });
+        if read_ownership_marker(&path)? != ownership_token {
+            return Err(String::from("staging ownership marker does not match"));
         }
-        if let Err(reason) = cleanup_lease
+        let lease = Arc::new(StagingLease {
+            object,
+            workspace_root,
+            original_path: path,
+            ownership_token: Some(ownership_token.clone()),
+            options: helper_lease_options(ownership_token),
+        });
+        lease
             .object
-            .validate_current_path(&cleanup_lease.workspace_root, &cleanup_lease.original_path)
-        {
-            return Err(StagingCleanupFailure {
-                reason,
-                lease: cleanup_lease,
-            });
-        }
-        if let Err(reason) = cleanup_lease.object.remove_contents() {
-            return Err(StagingCleanupFailure {
-                reason,
-                lease: cleanup_lease,
-            });
-        }
-        if let Err(reason) = cleanup_lease
-            .object
-            .validate_current_path(&cleanup_lease.workspace_root, &cleanup_lease.original_path)
-        {
-            return Err(StagingCleanupFailure {
-                reason,
-                lease: cleanup_lease,
-            });
-        }
-        if let Err(reason) = cleanup_lease
-            .object
-            .remove_directory_entry(&cleanup_lease.original_path)
-        {
-            return Err(StagingCleanupFailure {
-                reason,
-                lease: cleanup_lease,
-            });
-        }
-        Ok(())
+            .validate_current_path(&lease.workspace_root, &lease.original_path)
+            .map_err(|error| error.to_string())?;
+        cleanup_staging_lease_blocking(lease)
+            .map(|()| true)
+            .map_err(|failure| failure.reason)
     })
     .await
-    .map_err(|error| StagingCleanupFailure {
-        reason: format!("staging cleanup task failed: {error}"),
-        lease,
-    })?
+    .map_err(|error| format!("staging cleanup task failed: {error}"))?
+}
+
+fn helper_lease_options(ownership_token: String) -> StagingLeaseOptions {
+    #[cfg(feature = "test-support")]
+    let mut options = StagingLeaseOptions {
+        ownership_token: Some(ownership_token),
+        pause: None,
+        fail_cleanup: false,
+    };
+    #[cfg(not(feature = "test-support"))]
+    let options = StagingLeaseOptions {
+        ownership_token: Some(ownership_token),
+    };
+    #[cfg(feature = "test-support")]
+    {
+        if let (Some(entered), Some(release)) = (
+            std::env::var_os("ENE_TEST_STAGING_CLEANUP_ENTERED"),
+            std::env::var_os("ENE_TEST_STAGING_CLEANUP_RELEASE"),
+        ) {
+            options.pause = Some(StagingCleanupPause {
+                entered: entered.into(),
+                release: release.into(),
+            });
+        }
+        options.fail_cleanup = std::env::var_os("ENE_TEST_STAGING_CLEANUP_FAILURE").is_some();
+    }
+    options
 }
 
 impl StagingLeaseOptions {
@@ -298,6 +667,13 @@ impl StagingObject {
             directory,
             identity,
         })
+    }
+
+    fn identity_token(&self) -> Result<String, String> {
+        Ok(format!(
+            "unix:{}:{}",
+            self.identity.device, self.identity.inode
+        ))
     }
 
     fn set_private_directory_permissions(&self) -> Result<(), String> {
@@ -684,6 +1060,13 @@ impl StagingObject {
                     | u64::from(information.nFileIndexLow),
             },
         })
+    }
+
+    fn identity_token(&self) -> Result<String, String> {
+        Ok(format!(
+            "windows:{}:{}",
+            self.identity.volume, self.identity.index
+        ))
     }
 
     fn set_private_directory_permissions(&self) -> Result<(), String> {
