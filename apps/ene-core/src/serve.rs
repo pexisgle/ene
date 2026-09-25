@@ -346,36 +346,10 @@ pub struct HostHandle {
     pub(crate) targeted_deletion_drive: AsyncMutex<()>,
     deletion_drivers: std::sync::atomic::AtomicUsize,
     pub(crate) deletion_driver_wake: tokio::sync::Notify,
-    #[cfg(test)]
-    pub(crate) host_control_confirm_gate: StdMutex<Option<Arc<TestGate>>>,
-    pub(crate) transient_fence: Arc<crate::transient_erasure::TransientErasureFence>,
-    pub(crate) client_transients: Arc<crate::transient_erasure::ClientTransientRegistry>,
-    #[cfg(test)]
-    pub(crate) task_control_gate:
-        StdMutex<Option<std::sync::Arc<crate::task_control::TestTaskControlGate>>>,
-    #[cfg(test)]
-    pub(crate) close_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
-    #[cfg(test)]
-    pub(crate) submit_accept_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
-    #[cfg(test)]
-    pub(crate) submit_open_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) submit_publish_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
-    #[cfg(test)]
-    pub(crate) confirm_commit_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
-    #[cfg(test)]
-    pub(crate) delivery_evidence_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
-    #[cfg(test)]
-    pub(crate) ref_mint_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
-    #[cfg(test)]
-    pub(crate) fetch_gate: StdMutex<Option<std::sync::Arc<TestGate>>>,
-    #[cfg(test)]
-    pub(crate) resume_gate: StdMutex<Option<std::sync::Arc<crate::task_control::TestResumeGate>>>,
-    #[cfg(test)]
-    pub(crate) presentation_commit_gate:
-        StdMutex<Option<std::sync::Arc<crate::presentation::TestPresentationCommitGate>>>,
-    #[cfg(all(test, unix))]
-    pub(crate) receipt_expiry_runs: std::sync::atomic::AtomicUsize,
+    pub(crate) transient_fence: Arc<crate::transient_erasure::TransientErasureFence>,
+    pub(crate) client_transients: Arc<crate::transient_erasure::ClientTransientRegistry>,
 }
 
 fn installation_namespace(data_dir: &Path) -> String {
@@ -391,11 +365,6 @@ fn installation_namespace(data_dir: &Path) -> String {
 }
 
 impl HostHandle {
-    #[cfg(test)]
-    pub(crate) fn host_control_confirm_gate(&self) -> Option<Arc<TestGate>> {
-        crate::lock_unpoison(&self.host_control_confirm_gate).clone()
-    }
-
     pub async fn open(data_dir: &Path) -> Result<Self, CoreError> {
         let store = if std::env::var(ene_credential::ENV_API_KEY).is_ok() {
             CredStore::Env(EnvCredentialStore::new())
@@ -511,34 +480,10 @@ impl HostHandle {
             targeted_deletion_drive: AsyncMutex::new(()),
             deletion_drivers: std::sync::atomic::AtomicUsize::new(0),
             deletion_driver_wake: tokio::sync::Notify::new(),
-            #[cfg(test)]
-            host_control_confirm_gate: StdMutex::new(None),
-            transient_fence: Arc::clone(&transient_fence),
-            client_transients,
-            #[cfg(test)]
-            task_control_gate: StdMutex::new(None),
-            #[cfg(test)]
-            close_gate: StdMutex::new(None),
-            #[cfg(test)]
-            submit_accept_gate: StdMutex::new(None),
-            #[cfg(test)]
-            submit_open_gate: StdMutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
             submit_publish_gate: StdMutex::new(None),
-            #[cfg(test)]
-            confirm_commit_gate: StdMutex::new(None),
-            #[cfg(test)]
-            delivery_evidence_gate: StdMutex::new(None),
-            #[cfg(test)]
-            ref_mint_gate: StdMutex::new(None),
-            #[cfg(test)]
-            fetch_gate: StdMutex::new(None),
-            #[cfg(test)]
-            resume_gate: StdMutex::new(None),
-            #[cfg(test)]
-            presentation_commit_gate: StdMutex::new(None),
-            #[cfg(all(test, unix))]
-            receipt_expiry_runs: std::sync::atomic::AtomicUsize::new(0),
+            transient_fence: Arc::clone(&transient_fence),
+            client_transients,
         };
         handle.install_local_erasure_participants()?;
         Ok(handle)
@@ -706,17 +651,6 @@ impl HostHandle {
         pause: Option<ene_action::WorkspaceEffectStagingPause>,
     ) {
         crate::lock_unpoison(&self.task_effect_runtime).set_test_staging_pause(pause);
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn set_task_effect_cleanup_pause_for_tests(
-        &self,
-        pause: Option<(std::path::PathBuf, std::path::PathBuf)>,
-    ) {
-        let pause = pause.map(
-            |(entered, release)| crate::staging_cleanup::StagingCleanupPause { entered, release },
-        );
-        crate::lock_unpoison(&self.task_effect_runtime).set_test_cleanup_pause(pause);
     }
 
     #[cfg(feature = "test-support")]
@@ -892,13 +826,6 @@ impl HostHandle {
     #[cfg(any(test, feature = "test-support"))]
     pub fn running_task_executions_for_tests(&self) -> usize {
         self.task_executions.running_task_executions_for_tests()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_task_control_gate(
-        &self,
-    ) -> Option<std::sync::Arc<crate::task_control::TestTaskControlGate>> {
-        crate::lock_unpoison(&self.task_control_gate).clone()
     }
 
     pub async fn run_task_agent<T: ProviderTransport + Send + Sync>(
@@ -1540,12 +1467,6 @@ impl HostHandle {
         table: &std::sync::Arc<ConnectionTable>,
         connection: ConnectionWireId,
     ) {
-        #[cfg(test)]
-        let close_gate = crate::lock_unpoison(&self.close_gate).clone();
-        #[cfg(test)]
-        if let Some(gate) = close_gate {
-            gate.pause().await;
-        }
         let companion = self.store.ensure_running_companion().await.ok();
         let store = self.store.clone();
         let table = std::sync::Arc::clone(table);
@@ -1584,36 +1505,11 @@ impl HostHandle {
         self.client_transients.note_connection_ended(connection);
     }
 
-    #[cfg(test)]
-    pub(crate) fn confirm_commit_gate(&self) -> Option<std::sync::Arc<TestGate>> {
-        crate::lock_unpoison(&self.confirm_commit_gate).clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn delivery_evidence_gate(&self) -> Option<std::sync::Arc<TestGate>> {
-        crate::lock_unpoison(&self.delivery_evidence_gate).clone()
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     pub fn arm_submit_publish_gate_for_tests(&self) -> std::sync::Arc<TestGate> {
         let gate = std::sync::Arc::new(TestGate::default());
         *crate::lock_unpoison(&self.submit_publish_gate) = Some(std::sync::Arc::clone(&gate));
         gate
-    }
-
-    #[cfg(test)]
-    pub(crate) fn submit_accept_gate(&self) -> Option<std::sync::Arc<TestGate>> {
-        crate::lock_unpoison(&self.submit_accept_gate).clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn ref_mint_gate(&self) -> Option<std::sync::Arc<TestGate>> {
-        crate::lock_unpoison(&self.ref_mint_gate).clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fetch_gate(&self) -> Option<std::sync::Arc<TestGate>> {
-        crate::lock_unpoison(&self.fetch_gate).clone()
     }
 }
 

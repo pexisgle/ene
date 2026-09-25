@@ -1536,7 +1536,6 @@ dependencies = [
  "ene-store",
  "ene-task",
  "futures-util",
- "hmac",
  "libc",
  "rcgen",
  "rmp-serde",
