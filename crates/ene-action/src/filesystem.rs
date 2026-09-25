@@ -1052,7 +1052,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn owned_staging_binding_rejects_a_replacement_before_body_write() {
         let (directory, root) = workspace();
@@ -1060,8 +1059,7 @@ mod tests {
         let staging = staging_root.join("attempt");
         fs::create_dir_all(&staging).expect("owned staging");
         let token = "owned-staging-token";
-        fs::write(staging.join(super::STAGING_OWNERSHIP_MARKER), token)
-            .expect("owned marker");
+        fs::write(staging.join(super::STAGING_OWNERSHIP_MARKER), token).expect("owned marker");
         let identity = super::staging_identity_token(&staging).expect("owned identity");
         let moved = staging_root.join("moved");
         fs::rename(&staging, &moved).expect("rename owned staging");
@@ -1086,7 +1084,10 @@ mod tests {
             &options,
         );
 
-        assert_eq!(effect.certainty, crate::attempt::ActionCertainty::ConfirmedFailure);
+        assert_eq!(
+            effect.certainty,
+            crate::attempt::ActionCertainty::ConfirmedFailure
+        );
         assert!(!directory.path().join("bound.md").exists());
         assert_eq!(
             fs::read_dir(&staging).expect("replacement staging").count(),
