@@ -526,13 +526,11 @@ fn rename_windows_file_by_handle(
         .encode_wide()
         .collect::<Vec<_>>();
     let name_bytes = name.len().checked_mul(size_of::<u16>()).ok_or(())?;
-    // FILE_RENAME_INFO has a trailing FileName[1], but Windows expects the
-    // full fixed structure size plus FileNameLength bytes in the supplied buffer.
-    // Over-allocating the placeholder WCHAR is intentional and matches the Win32
-    // variable-length structure convention.
-    let total_bytes = size_of::<FILE_RENAME_INFO>()
-        .checked_add(name_bytes)
-        .ok_or(())?;
+    // Windows expects the buffer to end after the variable-length FileName.
+    // Use the actual field offset instead of size_of::<FILE_RENAME_INFO>(), which
+    // includes tail padding after FileName[1] on 64-bit targets.
+    let header_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let total_bytes = header_bytes.checked_add(name_bytes).ok_or(())?;
     let mut buffer = vec![0u64; total_bytes.div_ceil(size_of::<u64>()).max(1)];
     let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     // SAFETY: the aligned buffer is large enough for the fixed header plus UTF-16 name.
