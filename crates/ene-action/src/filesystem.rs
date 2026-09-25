@@ -362,10 +362,10 @@ impl WorkspaceRoot {
             Ok(temporary) => temporary,
             Err(_) => return refused(),
         };
-        // Revalidate after creation and before writing any target-bearing bytes.
-        // If the pathname was replaced, the replacement can receive at most an
-        // empty temporary file; sensitive content only enters the prepared object.
-        if uses_owned_staging && !binding_matches() {
+        // Bind the pathname used for temp creation to the actual open file
+        // before any target-bearing bytes are written. This also catches a
+        // directory replacement that is swapped back immediately after create.
+        if uses_owned_staging && (!binding_matches() || !temporary_path_matches_file(&temporary)) {
             return refused();
         }
         {
@@ -374,7 +374,7 @@ impl WorkspaceRoot {
                 return refused();
             }
         }
-        if uses_owned_staging && !binding_matches() {
+        if uses_owned_staging && (!binding_matches() || !temporary_path_matches_file(&temporary)) {
             return refused();
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -629,6 +629,108 @@ fn staging_identity_token(path: &Path) -> Option<String> {
 #[cfg(not(any(unix, windows)))]
 fn staging_identity_token(_path: &Path) -> Option<String> {
     None
+}
+
+#[cfg(unix)]
+fn file_identity_token(file: &fs::File) -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = file.metadata().ok()?;
+    Some(format!("unix-file:{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(unix)]
+fn path_file_identity_token(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if metadata_is_reparse(&metadata) || !metadata.is_file() {
+        return None;
+    }
+    Some(format!("unix-file:{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn windows_file_identity(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION;
+    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
+
+    // SAFETY: information is a writable output buffer for the live handle.
+    let mut information = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    // SAFETY: handle remains valid for the duration of the query.
+    if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
+        return None;
+    }
+    Some(format!(
+        "windows-file:{}:{}",
+        information.dwVolumeSerialNumber,
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow)
+    ))
+}
+
+#[cfg(windows)]
+fn file_identity_token(file: &fs::File) -> Option<String> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::HANDLE;
+
+    windows_file_identity(file.as_raw_handle() as HANDLE)
+}
+
+#[cfg(windows)]
+fn path_file_identity_token(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.push(0);
+    // SAFETY: wide is NUL-terminated and the returned handle is closed below.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let metadata = fs::symlink_metadata(path).ok();
+    let identity = if metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata_is_reparse(metadata) || metadata.is_dir())
+    {
+        None
+    } else {
+        windows_file_identity(handle)
+    };
+    // SAFETY: handle is owned and is closed exactly once here.
+    unsafe { CloseHandle(handle) };
+    identity
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity_token(_file: &fs::File) -> Option<String> {
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
+fn path_file_identity_token(_path: &Path) -> Option<String> {
+    None
+}
+
+fn temporary_path_matches_file(temporary: &NamedTempFile) -> bool {
+    let Some(open_identity) = file_identity_token(temporary.as_file()) else {
+        return false;
+    };
+    path_file_identity_token(temporary.path()).as_deref() == Some(open_identity.as_str())
 }
 
 #[cfg(windows)]
@@ -1098,6 +1200,27 @@ mod tests {
             fs::read_dir(&moved).expect("owned staging").count(),
             1,
             "the owned object is left for its supervisor cleanup"
+        );
+    }
+
+    #[test]
+    fn temp_identity_rejects_a_replacement_that_is_swapped_back_after_create() {
+        let directory = tempdir().expect("temporary directory");
+        let staging = directory.path().join("staging");
+        fs::create_dir(&staging).expect("owned staging");
+        let owned_away = directory.path().join("owned-away");
+        fs::rename(&staging, &owned_away).expect("move owned staging");
+        fs::create_dir(&staging).expect("replacement staging");
+
+        let temporary =
+            tempfile::NamedTempFile::new_in(&staging).expect("replacement temporary file");
+        let replacement_away = directory.path().join("replacement-away");
+        fs::rename(&staging, &replacement_away).expect("move replacement staging");
+        fs::rename(&owned_away, &staging).expect("restore owned staging");
+
+        assert!(
+            !super::temporary_path_matches_file(&temporary),
+            "restoring the expected directory cannot rebind an already-open replacement temp file"
         );
     }
 
