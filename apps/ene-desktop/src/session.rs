@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -9,16 +10,18 @@ use ene_api::v1::management::{
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::{
     BaseViewMark, ClientLocalId, CommandWireId, CompanionWireRef, ManagementTargetWire,
-    StreamWireId, TextLangWire,
+    RevalidationReasonWire, StreamWireId, TextLangWire,
 };
 use ene_api::v1::round::{
     ConfirmPresentationWire, HistoryItem, HistoryRequest, HistoryResponse, PresentationStatus,
     RoundIntakeOutcomeWire, StreamClose, SubmitTextInput, TextBodyWire,
 };
-use ene_client::error::ClientError;
+use ene_client::error::{ClientError, EnqueueFailure, RequestFailure, ResponseWaitFailure};
 use ene_client::{Client, ConnectProgress, DEFAULT_COMPANION_REF, PendingPairingClient};
 
-use crate::ui::{DesktopError, request_with_timeout};
+use crate::ui::{
+    DesktopError, DesktopErrorKind, request_classified_with_timeout, request_with_timeout,
+};
 
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
@@ -35,6 +38,145 @@ pub struct ChatTurn {
     pub round: String,
     pub stream: Option<StreamWireId>,
     pub reply: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatIntakeRefusal {
+    StaleRound,
+    HeldForTransition,
+    NeedsRevalidation { reason: RevalidationReasonWire },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatStreamEnd {
+    Interrupted,
+    Cancelled,
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatDeliveryPhase {
+    NotSent,
+    OutcomeUnknown,
+    Accepted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatOperation {
+    SubmitText,
+    Stream,
+    HistoryRefresh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatDiagnostic {
+    pub operation: ChatOperation,
+    pub phase: ChatDeliveryPhase,
+    pub error_kind: DesktopErrorKind,
+}
+
+pub struct ChatTechnicalFailure {
+    pub operation: ChatOperation,
+    pub phase: ChatDeliveryPhase,
+    pub error: DesktopError,
+}
+
+impl fmt::Debug for ChatTechnicalFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChatTechnicalFailure")
+            .field("operation", &self.operation)
+            .field("phase", &self.phase)
+            .field("error", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ChatTechnicalFailure {
+    fn from_request(failure: RequestFailure) -> Self {
+        match failure {
+            RequestFailure::NotSent(error) => Self {
+                operation: ChatOperation::SubmitText,
+                phase: ChatDeliveryPhase::NotSent,
+                error: match error {
+                    EnqueueFailure::Encode(error) => {
+                        DesktopError::Client(ClientError::Codec(error.to_string()))
+                    }
+                    EnqueueFailure::QueueWaitTimedOut => DesktopError::Transport(String::from(
+                        "the outbound request queue timed out",
+                    )),
+                    EnqueueFailure::WriterClosed => {
+                        DesktopError::Transport(String::from("the connection to the Host ended"))
+                    }
+                },
+            },
+            RequestFailure::OutcomeUnknown(error) => Self {
+                operation: ChatOperation::SubmitText,
+                phase: ChatDeliveryPhase::OutcomeUnknown,
+                error: match error {
+                    ResponseWaitFailure::TimedOut => {
+                        DesktopError::Transport(String::from("the Host response timed out"))
+                    }
+                    ResponseWaitFailure::Client(error) => DesktopError::Client(error),
+                },
+            },
+        }
+    }
+
+    fn accepted(operation: ChatOperation, error: DesktopError) -> Self {
+        Self {
+            operation,
+            phase: ChatDeliveryPhase::Accepted,
+            error,
+        }
+    }
+
+    #[must_use]
+    pub fn diagnostic(&self) -> ChatDiagnostic {
+        ChatDiagnostic {
+            operation: self.operation,
+            phase: self.phase,
+            error_kind: self.error.kind(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ChatSessionOutcome {
+    Completed(ChatTurn),
+    Refused(ChatIntakeRefusal),
+    NotSent(ChatTechnicalFailure),
+    OutcomeUnknown(ChatTechnicalFailure),
+    AcceptedFailure {
+        round: String,
+        failure: ChatTechnicalFailure,
+    },
+    StreamEnded {
+        round: String,
+        end: ChatStreamEnd,
+    },
+}
+
+#[derive(Debug)]
+pub enum ChatSendReport {
+    NoDraft,
+    NotSent {
+        failure: Option<ChatTechnicalFailure>,
+    },
+    Refused(ChatIntakeRefusal),
+    OutcomeUnknown(ChatTechnicalFailure),
+    Completed,
+    AcceptedFailure {
+        round: String,
+        failure: ChatTechnicalFailure,
+    },
+    StreamEnded {
+        round: String,
+        end: ChatStreamEnd,
+    },
+    ReplyShownHistoryRefreshFailed {
+        failure: ChatTechnicalFailure,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,14 +316,19 @@ pub async fn fetch_setup_view(client: &mut Client) -> Result<ManagementView, Des
     }
 }
 
-pub async fn submit_and_collect(
+pub async fn submit_and_collect(client: &mut Client, text: &str, lang: &str) -> ChatSessionOutcome {
+    submit_and_collect_with_timeout(client, text, lang, Duration::from_secs(15)).await
+}
+
+pub async fn submit_and_collect_with_timeout(
     client: &mut Client,
     text: &str,
     lang: &str,
-) -> Result<ChatTurn, DesktopError> {
+    timeout: Duration,
+) -> ChatSessionOutcome {
     let companion = client.companion_ref();
     let target = client.round_target();
-    let send = request_with_timeout(
+    let send = match request_classified_with_timeout(
         client,
         WirePayload::SubmitTextInput(SubmitTextInput {
             companion: CompanionWireRef(companion),
@@ -192,36 +339,61 @@ pub async fn submit_and_collect(
                 lang: TextLangWire(lang.to_string()),
             },
         }),
-        Duration::from_secs(15),
+        timeout,
     )
-    .await?;
+    .await
+    {
+        Ok(payload) => payload,
+        Err(failure) => return request_failure_outcome(failure),
+    };
     let round = match send {
         WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) => {
             round
         }
         WirePayload::RoundIntakeOutcome(refusal) => {
-            return Err(DesktopError::Unavailable(describe_intake_refusal(
-                lang, &refusal,
-            )));
+            let Some(refusal) = intake_refusal(refusal) else {
+                return ChatSessionOutcome::OutcomeUnknown(ChatTechnicalFailure {
+                    operation: ChatOperation::SubmitText,
+                    phase: ChatDeliveryPhase::OutcomeUnknown,
+                    error: DesktopError::Protocol(String::from(
+                        "accepted intake reached the refusal path",
+                    )),
+                });
+            };
+            return ChatSessionOutcome::Refused(refusal);
         }
         other => {
-            return Err(DesktopError::Protocol(format!(
-                "expected RoundIntakeOutcome, got {}",
-                other.message_type()
-            )));
+            return ChatSessionOutcome::OutcomeUnknown(ChatTechnicalFailure {
+                operation: ChatOperation::SubmitText,
+                phase: ChatDeliveryPhase::OutcomeUnknown,
+                error: DesktopError::Protocol(format!(
+                    "expected RoundIntakeOutcome, got {}",
+                    other.message_type()
+                )),
+            });
         }
     };
     let mut reply = String::new();
     let mut stream_id = None;
     loop {
-        match ask_stream(client).await? {
+        let next = match ask_stream(client).await {
+            Ok(next) => next,
+            Err(error) => {
+                return ChatSessionOutcome::AcceptedFailure {
+                    round: round.0.clone(),
+                    failure: ChatTechnicalFailure::accepted(ChatOperation::Stream, error),
+                };
+            }
+        };
+        match next {
             WirePayload::TextStreamOpen(open) => stream_id = Some(open.stream),
             WirePayload::TextStreamFrame(frame) => reply.push_str(&frame.delta),
             WirePayload::TextStreamClose(close) => {
-                if close.status != StreamClose::Completed {
-                    return Err(DesktopError::Protocol(String::from(
-                        "stream closed without completion",
-                    )));
+                if let Some(end) = stream_end(close.status) {
+                    return ChatSessionOutcome::StreamEnded {
+                        round: round.0.clone(),
+                        end,
+                    };
                 }
                 break;
             }
@@ -229,58 +401,67 @@ pub async fn submit_and_collect(
             | WirePayload::UndeliveredResponse(_)
             | WirePayload::BodyStateHint(_) => {}
             other => {
-                return Err(DesktopError::Protocol(format!(
-                    "unexpected stream {}",
-                    other.message_type()
-                )));
+                return ChatSessionOutcome::AcceptedFailure {
+                    round: round.0.clone(),
+                    failure: ChatTechnicalFailure::accepted(
+                        ChatOperation::Stream,
+                        DesktopError::Protocol(format!(
+                            "unexpected stream {}",
+                            other.message_type()
+                        )),
+                    ),
+                };
             }
         }
     }
-    Ok(ChatTurn {
+    ChatSessionOutcome::Completed(ChatTurn {
         round: round.0,
         stream: stream_id,
         reply,
     })
 }
 
-fn describe_intake_refusal(lang: &str, outcome: &RoundIntakeOutcomeWire) -> String {
-    let ja = lang.eq_ignore_ascii_case("ja");
-    let text = |japanese: &str, english: &str| {
-        if ja {
-            String::from(japanese)
-        } else {
-            String::from(english)
+fn request_failure_outcome(failure: RequestFailure) -> ChatSessionOutcome {
+    let failure = ChatTechnicalFailure::from_request(failure);
+    match failure.phase {
+        ChatDeliveryPhase::NotSent => ChatSessionOutcome::NotSent(failure),
+        ChatDeliveryPhase::OutcomeUnknown | ChatDeliveryPhase::Accepted => {
+            ChatSessionOutcome::OutcomeUnknown(failure)
         }
-    };
+    }
+}
+
+fn intake_refusal(outcome: RoundIntakeOutcomeWire) -> Option<ChatIntakeRefusal> {
     match outcome {
-        RoundIntakeOutcomeWire::StaleRound { .. } => text(
-            "前回の状態が古くなっています。最新の状態を確認して、もう一度お送りください。",
-            "The previous state is stale. Review the current state and send again.",
-        ),
-        RoundIntakeOutcomeWire::HeldForTransition => text(
-            "パートナーの状態が切り替わっています。落ち着いてからもう一度お試しください。",
-            "A presence change is in progress; try again once it settles.",
-        ),
-        RoundIntakeOutcomeWire::NeedsRevalidation { .. } => text(
-            "送信前に最新の状態を確認してください。",
-            "Refresh the current state before sending.",
-        ),
-        RoundIntakeOutcomeWire::AcceptedForRound { .. } => text(
-            "送信は受け付けられませんでした。",
-            "The message was not accepted.",
-        ),
+        RoundIntakeOutcomeWire::StaleRound { .. } => Some(ChatIntakeRefusal::StaleRound),
+        RoundIntakeOutcomeWire::HeldForTransition => Some(ChatIntakeRefusal::HeldForTransition),
+        RoundIntakeOutcomeWire::NeedsRevalidation { reason } => {
+            Some(ChatIntakeRefusal::NeedsRevalidation { reason })
+        }
+        RoundIntakeOutcomeWire::AcceptedForRound { .. } => None,
+    }
+}
+
+#[must_use]
+fn stream_end(status: StreamClose) -> Option<ChatStreamEnd> {
+    match status {
+        StreamClose::Completed => None,
+        StreamClose::Interrupted => Some(ChatStreamEnd::Interrupted),
+        StreamClose::Cancelled => Some(ChatStreamEnd::Cancelled),
+        StreamClose::Stale => Some(ChatStreamEnd::Stale),
     }
 }
 
 pub async fn confirm_chat_presentation(
     client: &mut Client,
-    turn: &ChatTurn,
+    round: &str,
+    stream: Option<StreamWireId>,
     status: PresentationStatus,
 ) -> Result<(), DesktopError> {
     client
         .notify(WirePayload::ConfirmPresentation(ConfirmPresentationWire {
-            round: ene_api::v1::refs::RoundWireId(turn.round.clone()),
-            stream: turn.stream,
+            round: ene_api::v1::refs::RoundWireId(round.to_owned()),
+            stream,
             status,
             detail: None,
         }))
@@ -328,4 +509,69 @@ async fn ask_stream(client: &mut Client) -> Result<WirePayload, DesktopError> {
         .await
         .map_err(|_| DesktopError::Transport(String::from("stream timed out")))?
         .map_err(DesktopError::Client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ChatDeliveryPhase, ChatIntakeRefusal, ChatSessionOutcome, ChatStreamEnd, intake_refusal,
+        request_failure_outcome, stream_end,
+    };
+    use ene_api::v1::refs::RevalidationReasonWire;
+    use ene_api::v1::round::{RoundIntakeOutcomeWire, StreamClose};
+    use ene_client::{ClientError, EnqueueFailure, RequestFailure, ResponseWaitFailure};
+
+    #[test]
+    fn non_completed_stream_statuses_remain_distinct() {
+        assert_eq!(stream_end(StreamClose::Completed), None);
+        assert_eq!(
+            stream_end(StreamClose::Interrupted),
+            Some(ChatStreamEnd::Interrupted)
+        );
+        assert_eq!(
+            stream_end(StreamClose::Cancelled),
+            Some(ChatStreamEnd::Cancelled)
+        );
+        assert_eq!(stream_end(StreamClose::Stale), Some(ChatStreamEnd::Stale));
+    }
+
+    #[test]
+    fn request_failures_keep_the_delivery_phase() {
+        let not_sent =
+            request_failure_outcome(RequestFailure::NotSent(EnqueueFailure::WriterClosed));
+        assert!(matches!(not_sent, ChatSessionOutcome::NotSent(_)));
+        let outcome_unknown = request_failure_outcome(RequestFailure::OutcomeUnknown(
+            ResponseWaitFailure::Client(ClientError::Transport(String::from("closed"))),
+        ));
+        let ChatSessionOutcome::OutcomeUnknown(failure) = outcome_unknown else {
+            panic!("the response wait failure must remain outcome-unknown");
+        };
+        assert_eq!(
+            failure.diagnostic().phase,
+            ChatDeliveryPhase::OutcomeUnknown
+        );
+    }
+
+    #[test]
+    fn intake_refusal_preserves_the_revalidation_reason() {
+        let reason = RevalidationReasonWire(String::from("input-over-limit"));
+        let mapped = intake_refusal(RoundIntakeOutcomeWire::NeedsRevalidation {
+            reason: reason.clone(),
+        });
+        assert_eq!(
+            mapped,
+            Some(ChatIntakeRefusal::NeedsRevalidation { reason })
+        );
+        assert_eq!(
+            intake_refusal(RoundIntakeOutcomeWire::StaleRound {
+                current_round: None,
+                current_generation: 1,
+            }),
+            Some(ChatIntakeRefusal::StaleRound)
+        );
+        assert_eq!(
+            intake_refusal(RoundIntakeOutcomeWire::HeldForTransition),
+            Some(ChatIntakeRefusal::HeldForTransition)
+        );
+    }
 }

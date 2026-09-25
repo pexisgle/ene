@@ -9,6 +9,9 @@ use ene_api::v1::management::ManagementOutcome;
 use ene_config::{Config, resolve_data_dir};
 use ene_desktop::i18n::Locale;
 use ene_desktop::measure::{InteractionSample, InteractionTraceLine, monotonic_ns};
+use ene_desktop::session::{
+    ChatDeliveryPhase, ChatIntakeRefusal, ChatSendReport, ChatStreamEnd, ChatTechnicalFailure,
+};
 use ene_desktop::ui::presentation::{SurfaceSnapshot, parse_cap};
 use ene_desktop::ui::{DesktopError, DesktopRuntime};
 use ene_desktop_ui::{ChatWindow, Item, ManagementWindow, Message};
@@ -17,13 +20,21 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use tokio::sync::{Notify, oneshot};
 use zeroize::Zeroizing;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DraftEditToken(u64);
+
+struct SendCommand {
+    text: String,
+    submitted_edit: DraftEditToken,
+}
+
 enum Command {
     Startup,
     Refresh(i32),
     History,
     Tasks,
     SelectTask(String),
-    Send(String),
+    Send(SendCommand),
     Workspace(String),
     Resume(String, String),
     CancelTask(String),
@@ -70,6 +81,34 @@ impl Command {
         }
     }
 }
+
+struct CommandOutput {
+    notice: String,
+    failed: bool,
+    consume_sent_draft: bool,
+    diagnostic: Option<ChatTechnicalFailure>,
+}
+
+impl CommandOutput {
+    fn info(notice: impl Into<String>) -> Self {
+        Self {
+            notice: notice.into(),
+            failed: false,
+            consume_sent_draft: false,
+            diagnostic: None,
+        }
+    }
+
+    fn consumed_info(notice: impl Into<String>) -> Self {
+        Self {
+            notice: notice.into(),
+            failed: false,
+            consume_sent_draft: true,
+            diagnostic: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct InteractionStart {
     operation: &'static str,
@@ -93,6 +132,7 @@ struct Mailbox {
     wake: Notify,
     epoch: AtomicU64,
     generation: AtomicU64,
+    draft_edit: AtomicU64,
     pending: [AtomicUsize; 4],
 }
 impl Mailbox {
@@ -122,6 +162,18 @@ impl Mailbox {
         self.wake.notify_one();
         true
     }
+    fn draft_token(&self) -> DraftEditToken {
+        DraftEditToken(self.draft_edit.load(Ordering::SeqCst))
+    }
+
+    fn note_draft_edit(&self) {
+        self.draft_edit.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn draft_is_current(&self, token: DraftEditToken) -> bool {
+        self.draft_token() == token
+    }
+
     fn pop(&self) -> Option<Request> {
         self.queue
             .lock()
@@ -144,6 +196,7 @@ impl Mailbox {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.epoch.fetch_add(1, Ordering::SeqCst);
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.draft_edit.fetch_add(1, Ordering::SeqCst);
         queue.clear();
         for pending in &self.pending {
             pending.store(0, Ordering::SeqCst);
@@ -493,12 +546,16 @@ fn bind(s: &Surfaces, c: &ChatWindow, m: &ManagementWindow) {
     c.on_send({
         let s = s.clone();
         move |text| {
-            if s.submit(Command::Send(text.to_string()), 1)
-                && let Some(c) = s.chat.upgrade()
-            {
-                c.set_draft("".into());
-            }
+            let command = SendCommand {
+                text: text.to_string(),
+                submitted_edit: s.mailbox.draft_token(),
+            };
+            s.submit(Command::Send(command), 1);
         }
+    });
+    c.on_draft_invalidated({
+        let s = s.clone();
+        move || s.mailbox.note_draft_edit()
     });
     c.on_workspace({
         let s = s.clone();
@@ -725,6 +782,11 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
             s.mailbox.complete(request.lane, request.epoch);
             continue;
         }
+        let submitted_edit = match &request.command {
+            Command::Send(command) => Some(command.submitted_edit),
+            _ => None,
+        };
+        let is_send = submitted_edit.is_some();
         let result = execute(&mut desktop, request.command).await;
         let measured = if s.interaction_paint_evidence && result.is_ok() {
             request.interaction.map(|start| PendingPaint {
@@ -751,7 +813,39 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
                 c.set_task_busy(surfaces.mailbox.pending[2].load(Ordering::SeqCst) > 0);
                 m.set_busy(surfaces.mailbox.pending[3].load(Ordering::SeqCst) > 0);
                 let ja = m.get_japanese();
-                let (notice, failed) = result_notice(ja, result);
+                let (notice, failed, consume_sent_draft) = match result {
+                    Ok(CommandOutput {
+                        notice,
+                        failed,
+                        consume_sent_draft,
+                        diagnostic,
+                    }) => {
+                        if let Some(failure) = diagnostic {
+                            record_chat_diagnostic(&failure);
+                        }
+                        (notice, failed, consume_sent_draft)
+                    }
+                    Err(error) => {
+                        let (notice, failed) = if is_send {
+                            let failure = ChatTechnicalFailure {
+                                operation: ene_desktop::session::ChatOperation::SubmitText,
+                                phase: ChatDeliveryPhase::OutcomeUnknown,
+                                error,
+                            };
+                            record_chat_diagnostic(&failure);
+                            chat_failure_notice(ja, ChatDeliveryPhase::OutcomeUnknown)
+                        } else {
+                            result_notice(ja, Err(error))
+                        };
+                        (notice, failed, is_send)
+                    }
+                };
+                if let Some(submitted_edit) = submitted_edit
+                    && consume_sent_draft
+                    && surfaces.mailbox.draft_is_current(submitted_edit)
+                {
+                    c.invoke_clear_draft();
+                }
                 match request.lane {
                     1 => {
                         c.set_notice_error(failed);
@@ -807,7 +901,7 @@ async fn worker(mut desktop: DesktopRuntime, s: Surfaces) {
         }
     }
 }
-async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, DesktopError> {
+async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<CommandOutput, DesktopError> {
     let ja = d.surface_snapshot().japanese;
     let outcome = match command {
         Command::Startup => {
@@ -838,10 +932,10 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
             d.select_task_key(&key).await?;
             None
         }
-        Command::Send(text) => {
-            d.composer_mut().set_draft(text);
-            d.send_text().await?;
-            None
+        Command::Send(command) => {
+            d.composer_mut().set_draft(command.text);
+            let report = d.send_text().await?;
+            return Ok(chat_output(ja, report));
         }
         Command::Workspace(path) => Some(
             d.select_workspace_folder(std::path::Path::new(&path))
@@ -850,7 +944,7 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         Command::Resume(key, text) => {
             d.check_task_key(&key)?;
             let result = d.resume_displayed_task(text).await?;
-            return Ok(resume_notice(ja, &result));
+            return Ok(CommandOutput::info(resume_notice(ja, &result)));
         }
         Command::CancelTask(key) => {
             d.check_task_key(&key)?;
@@ -923,7 +1017,7 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
         Command::ResumeDeletion(key) => {
             d.select_deletion_key(&key)?;
             let result = d.resume_deletion().await?;
-            return Ok(control_notice(ja, &result));
+            return Ok(CommandOutput::info(control_notice(ja, &result)));
         }
         Command::Confirm(key) => {
             let result = d.confirm_key(&key).await?;
@@ -935,7 +1029,7 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
             ) {
                 d.wizard_next();
             }
-            return Ok(control_notice(ja, &result));
+            return Ok(CommandOutput::info(control_notice(ja, &result)));
         }
         Command::Dismiss => {
             d.reject_pending_challenge().await;
@@ -943,10 +1037,188 @@ async fn execute(d: &mut DesktopRuntime, command: Command) -> Result<String, Des
             None
         }
     };
-    Ok(outcome.map(|v| outcome_notice(ja, &v)).unwrap_or_default())
+    Ok(CommandOutput::info(
+        outcome.map(|v| outcome_notice(ja, &v)).unwrap_or_default(),
+    ))
 }
 fn local<'a>(ja: bool, japanese: &'a str, english: &'a str) -> &'a str {
     if ja { japanese } else { english }
+}
+
+fn intake_notice(ja: bool, refusal: &ChatIntakeRefusal) -> (String, bool) {
+    let (japanese, english) = match refusal {
+        ChatIntakeRefusal::StaleRound => (
+            "前回の状態が古くなっています。最新の状態を確認して、もう一度お送りください。",
+            "The previous state is stale. Review the current state and send again.",
+        ),
+        ChatIntakeRefusal::HeldForTransition => (
+            "パートナーの状態が切り替わっています。落ち着いてからもう一度お試しください。",
+            "A presence change is in progress; try again once it settles.",
+        ),
+        ChatIntakeRefusal::NeedsRevalidation { reason } => match reason.0.as_str() {
+            "input-over-limit" => (
+                "入力が長すぎます。入力内容を短くしてから、もう一度送信してください。",
+                "The message is too long to send. Shorten it and send it again.",
+            ),
+            "stopped-companion" => (
+                "パートナーの状態を確認して、実行できる状態に戻してから、もう一度送信してください。",
+                "Check the Companion state, restore it to a running state, then send the message again.",
+            ),
+            "unknown-companion" | "missing-generation-view" => (
+                "送信前の接続状態を確認できませんでした。接続を更新してから、もう一度送信してください。",
+                "The connection state could not be verified. Refresh the connection, then send the message again.",
+            ),
+            _ => (
+                "送信前の条件を確認できませんでした。現在の状態と設定を確認してから、もう一度送信してください。",
+                "The sending conditions could not be verified. Review the current state and settings, then send the message again.",
+            ),
+        },
+    };
+    (local(ja, japanese, english).to_string(), true)
+}
+
+fn stream_notice(ja: bool, end: ChatStreamEnd) -> (String, bool) {
+    match end {
+        ChatStreamEnd::Interrupted => (
+            local(
+                ja,
+                "返答は完了前に中断されました。メッセージは既に受け付けられている可能性があるため、会話履歴を更新して現在の状態を確認してください。このメッセージは再送しないでください。",
+                "The reply stopped before it was complete. Your message may already have been accepted, so refresh the conversation and check the current state. Do not send this message again.",
+            )
+            .to_string(),
+            true,
+        ),
+        ChatStreamEnd::Cancelled => (
+            local(
+                ja,
+                "会話が中止されたため、返答を完了できませんでした。メッセージは既に受け付けられているため、会話履歴を確認してください。このメッセージは再送しないでください。",
+                "The reply was cancelled after your message was accepted. Review the conversation history. Do not send this message again.",
+            )
+            .to_string(),
+            false,
+        ),
+        ChatStreamEnd::Stale => (
+            local(
+                ja,
+                "この返答は古い会話の状態に属しており、続行しません。履歴を更新して現在の会話を確認してください。このメッセージは再送しないでください。",
+                "This reply belongs to an older conversation state and will not continue. Refresh the history and check the current conversation. Do not send this message again.",
+            )
+            .to_string(),
+            true,
+        ),
+    }
+}
+
+fn chat_failure_notice(ja: bool, phase: ChatDeliveryPhase) -> (String, bool) {
+    match phase {
+        ChatDeliveryPhase::NotSent => (
+            local(
+                ja,
+                "メッセージは送信されていません。接続が回復したことを確認してから、もう一度試してください。",
+                "The message was not sent. Confirm the connection is back, then try again.",
+            )
+            .to_string(),
+            true,
+        ),
+        ChatDeliveryPhase::OutcomeUnknown => (
+            local(
+                ja,
+                "メッセージの結果を確認できませんでした。既に受け付けられている可能性があるため、再送せず接続と履歴を確認してください。",
+                "The message result could not be confirmed. It may already have been accepted, so do not resend it; check the connection and conversation history.",
+            )
+            .to_string(),
+            true,
+        ),
+        ChatDeliveryPhase::Accepted => (
+            local(
+                ja,
+                "返答を完了できませんでした。メッセージは既に受け付けられているため、再送せず履歴を確認してください。",
+                "The reply could not be completed. Your message was already accepted, so do not resend it; review the conversation history.",
+            )
+            .to_string(),
+            true,
+        ),
+    }
+}
+
+fn chat_diagnostic_line(failure: &ChatTechnicalFailure) -> String {
+    let diagnostic = failure.diagnostic();
+    format!(
+        "chat_diagnostic operation={:?} delivery_phase={:?} error_kind={:?}",
+        diagnostic.operation, diagnostic.phase, diagnostic.error_kind
+    )
+}
+
+fn record_chat_diagnostic(failure: &ChatTechnicalFailure) {
+    eprintln!("{}", chat_diagnostic_line(failure));
+}
+
+fn chat_output(ja: bool, report: ChatSendReport) -> CommandOutput {
+    match report {
+        ChatSendReport::NoDraft => CommandOutput::info(""),
+        ChatSendReport::NotSent { failure } => {
+            let (notice, failed) = chat_failure_notice(
+                ja,
+                failure
+                    .as_ref()
+                    .map_or(ChatDeliveryPhase::NotSent, |failure| failure.phase),
+            );
+            CommandOutput {
+                notice,
+                failed,
+                consume_sent_draft: false,
+                diagnostic: failure,
+            }
+        }
+        ChatSendReport::Refused(refusal) => {
+            let (notice, failed) = intake_notice(ja, &refusal);
+            CommandOutput {
+                notice,
+                failed,
+                consume_sent_draft: false,
+                diagnostic: None,
+            }
+        }
+        ChatSendReport::OutcomeUnknown(failure) => {
+            let (notice, failed) = chat_failure_notice(ja, ChatDeliveryPhase::OutcomeUnknown);
+            CommandOutput {
+                notice,
+                failed,
+                consume_sent_draft: true,
+                diagnostic: Some(failure),
+            }
+        }
+        ChatSendReport::Completed => CommandOutput::consumed_info(""),
+        ChatSendReport::AcceptedFailure { round: _, failure } => {
+            let (notice, failed) = chat_failure_notice(ja, ChatDeliveryPhase::Accepted);
+            CommandOutput {
+                notice,
+                failed,
+                consume_sent_draft: true,
+                diagnostic: Some(failure),
+            }
+        }
+        ChatSendReport::StreamEnded { round: _, end } => {
+            let (notice, failed) = stream_notice(ja, end);
+            CommandOutput {
+                notice,
+                failed,
+                consume_sent_draft: true,
+                diagnostic: None,
+            }
+        }
+        ChatSendReport::ReplyShownHistoryRefreshFailed { failure } => CommandOutput {
+            notice: local(
+                ja,
+                "返答は表示されています。ただし、会話履歴を更新できませんでした。「履歴を更新」で確認してください。このメッセージを送信し直さないでください。",
+                "The reply is shown, but the conversation history could not be refreshed. Use \"Refresh history\" to check it. Do not send the message again.",
+            )
+            .to_string(),
+            failed: false,
+            consume_sent_draft: true,
+            diagnostic: Some(failure),
+        },
+    }
 }
 
 fn result_notice(ja: bool, result: Result<String, DesktopError>) -> (String, bool) {
@@ -1144,10 +1416,19 @@ fn apply(c: &ChatWindow, m: &ManagementWindow, s: &SurfaceSnapshot, reset_step: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_api::v1::refs::RevalidationReasonWire;
+    fn send_command(text: &str, submitted_edit: DraftEditToken) -> Command {
+        Command::Send(SendCommand {
+            text: text.to_owned(),
+            submitted_edit,
+        })
+    }
+
     #[test]
     fn queued_body_copies_are_discarded_and_old_generations_invalidated() {
         let mailbox = Mailbox::default();
-        assert!(mailbox.push(Command::Send("private draft".into()), 1));
+        let token = mailbox.draft_token();
+        assert!(mailbox.push(send_command("private draft", token), 1));
         assert!(mailbox.push(Command::Secret(Zeroizing::new("private key".into())), 3));
         let epoch = mailbox.epoch.load(Ordering::SeqCst);
         let generation = mailbox.generation.load(Ordering::SeqCst);
@@ -1159,12 +1440,30 @@ mod tests {
     #[test]
     fn erased_inflight_operation_cannot_clear_new_busy_state() {
         let mailbox = Mailbox::default();
-        mailbox.push(Command::Send("old".into()), 1);
+        let old_token = mailbox.draft_token();
+        mailbox.push(send_command("old", old_token), 1);
         let old = mailbox.pop().expect("inflight");
         mailbox.erase();
-        mailbox.push(Command::Send("new".into()), 1);
+        let new_token = mailbox.draft_token();
+        mailbox.push(send_command("new", new_token), 1);
         mailbox.complete(old.lane, old.epoch);
         assert_eq!(mailbox.pending[1].load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn inflight_input_demand_wipe_invalidates_the_submitted_draft_disposition() {
+        let mailbox = Mailbox::default();
+        let submitted = mailbox.draft_token();
+        assert!(mailbox.push(send_command("same body", submitted), 1));
+        let inflight = mailbox.pop().expect("send is in flight");
+        assert!(matches!(
+            &inflight.command,
+            Command::Send(command) if command.submitted_edit == submitted
+        ));
+        drop(inflight);
+        mailbox.erase();
+        mailbox.note_draft_edit();
+        assert!(!mailbox.draft_is_current(submitted));
+        assert!(mailbox.draft_is_current(mailbox.draft_token()));
     }
     #[test]
     fn communication_backlog_is_bounded() {
@@ -1172,7 +1471,8 @@ mod tests {
         for _ in 0..16 {
             assert!(mailbox.push(Command::History, 1));
         }
-        assert!(!mailbox.push(Command::Send("not accepted".into()), 1));
+        let token = mailbox.draft_token();
+        assert!(!mailbox.push(send_command("not accepted", token), 1));
     }
 
     #[test]
@@ -1211,6 +1511,125 @@ mod tests {
         let (notice, failed) = result_notice(false, Ok(String::from("accepted")));
         assert_eq!(notice, "accepted");
         assert!(!failed);
+    }
+
+    fn technical_failure(phase: ChatDeliveryPhase) -> ChatTechnicalFailure {
+        ChatTechnicalFailure {
+            operation: ene_desktop::session::ChatOperation::SubmitText,
+            phase,
+            error: DesktopError::Transport(String::from("provider response lost")),
+        }
+    }
+
+    fn report(kind: u8) -> ChatSendReport {
+        match kind {
+            0 => ChatSendReport::NotSent {
+                failure: Some(technical_failure(ChatDeliveryPhase::NotSent)),
+            },
+            1 => ChatSendReport::Refused(ChatIntakeRefusal::StaleRound),
+            2 => ChatSendReport::Refused(ChatIntakeRefusal::HeldForTransition),
+            3 => ChatSendReport::Refused(ChatIntakeRefusal::NeedsRevalidation {
+                reason: RevalidationReasonWire(String::from("input-over-limit")),
+            }),
+            4 => {
+                ChatSendReport::OutcomeUnknown(technical_failure(ChatDeliveryPhase::OutcomeUnknown))
+            }
+            5 => ChatSendReport::AcceptedFailure {
+                round: String::from("round-accepted"),
+                failure: technical_failure(ChatDeliveryPhase::Accepted),
+            },
+            6 => ChatSendReport::StreamEnded {
+                round: String::from("round-interrupted"),
+                end: ChatStreamEnd::Interrupted,
+            },
+            7 => ChatSendReport::StreamEnded {
+                round: String::from("round-cancelled"),
+                end: ChatStreamEnd::Cancelled,
+            },
+            _ => ChatSendReport::StreamEnded {
+                round: String::from("round-stale"),
+                end: ChatStreamEnd::Stale,
+            },
+        }
+    }
+
+    #[test]
+    fn chat_reports_are_localized_without_exposing_wire_reasons() {
+        for kind in 0..9 {
+            let ja = chat_output(true, report(kind));
+            let en = chat_output(false, report(kind));
+            assert_ne!(ja.notice, en.notice);
+            assert!(!ja.notice.contains("input-over-limit"));
+            assert!(!en.notice.contains("input-over-limit"));
+            assert!(!ja.notice.contains("provider response lost"));
+            assert!(!en.notice.contains("provider response lost"));
+        }
+    }
+
+    #[test]
+    fn a_technical_chat_failure_does_not_advise_an_immediate_resend() {
+        let (ja, ja_failed) = chat_failure_notice(true, ChatDeliveryPhase::OutcomeUnknown);
+        let (en, en_failed) = chat_failure_notice(false, ChatDeliveryPhase::OutcomeUnknown);
+        assert!(ja_failed && en_failed);
+        assert!(ja.contains("再送せず"));
+        assert!(en.contains("do not resend"));
+    }
+
+    #[test]
+    fn a_history_refresh_failure_is_a_nonfatal_no_resend_notice() {
+        let output = chat_output(
+            true,
+            ChatSendReport::ReplyShownHistoryRefreshFailed {
+                failure: technical_failure(ChatDeliveryPhase::Accepted),
+            },
+        );
+        assert!(!output.failed);
+        assert!(output.consume_sent_draft);
+        assert!(output.notice.contains("表示されています"));
+        assert!(output.notice.contains("送信し直さないでください"));
+        let english = chat_output(
+            false,
+            ChatSendReport::ReplyShownHistoryRefreshFailed {
+                failure: technical_failure(ChatDeliveryPhase::Accepted),
+            },
+        );
+        assert!(english.notice.contains("reply is shown"));
+        assert!(english.notice.contains("Do not send the message again"));
+    }
+
+    #[test]
+    fn chat_draft_disposition_distinguishes_pre_submit_and_consumed_outcomes() {
+        assert!(!chat_output(true, report(0)).consume_sent_draft);
+        assert!(!chat_output(true, report(1)).consume_sent_draft);
+        assert!(chat_output(true, report(4)).consume_sent_draft);
+        assert!(chat_output(true, ChatSendReport::Completed).consume_sent_draft);
+        assert!(chat_output(true, report(6)).consume_sent_draft);
+    }
+
+    #[test]
+    fn cancelled_stream_is_not_styled_as_a_failure() {
+        let output = chat_output(false, report(7));
+        assert!(!output.failed);
+    }
+
+    #[test]
+    fn diagnostic_metadata_never_contains_the_technical_error_text() {
+        let failure = technical_failure(ChatDeliveryPhase::OutcomeUnknown);
+        let diagnostic = failure.diagnostic();
+        assert_eq!(diagnostic.phase, ChatDeliveryPhase::OutcomeUnknown);
+        assert_eq!(
+            diagnostic.operation,
+            ene_desktop::session::ChatOperation::SubmitText
+        );
+        assert_eq!(
+            diagnostic.error_kind,
+            ene_desktop::ui::DesktopErrorKind::Transport
+        );
+        let rendered = format!("{diagnostic:?}");
+        let line = chat_diagnostic_line(&failure);
+        assert!(!rendered.contains("provider response lost"));
+        assert!(!format!("{failure:?}").contains("provider response lost"));
+        assert!(!line.contains("provider response lost"));
     }
 
     #[test]

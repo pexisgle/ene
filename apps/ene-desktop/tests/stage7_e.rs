@@ -5,16 +5,27 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
+use tokio::sync::Notify;
 
+use ene_api::v1::deletion::{
+    ClientTempClass, DeletionDemand, DeletionDemandWireId, DeletionTargetWire,
+};
 use ene_api::v1::management::ManagementOutcome;
+use ene_api::v1::refs::DeletionOperationWireRef;
 use ene_api::v1::round::PresentationStatus;
-use ene_companion::{CompanionRepository as _, UNDELIVERED_PAGE_MAX, UndeliveredRepository as _};
+use ene_client::PendingErasureInjector;
+use ene_companion::{
+    CompanionRepository as _, HistoryRepository as _, UNDELIVERED_PAGE_MAX,
+    UndeliveredRepository as _,
+};
 use ene_core::host_control;
 use ene_core::serve::HostHandle;
 use ene_desktop::body_supervise::BodySupervisor;
-use ene_desktop::session;
+use ene_desktop::session::{
+    self, ChatDeliveryPhase, ChatSendReport, ChatSessionOutcome, ChatStreamEnd,
+};
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 use ene_local_control::{ControlOutcome, DeletionOutcome, FromConfirmation};
@@ -30,6 +41,12 @@ const TARGET: &str = "stage7-e-keyword-omega";
 struct GateTransport {
     replies: Mutex<VecDeque<String>>,
     sends: AtomicUsize,
+    fail_after_next_delta: AtomicBool,
+    accepted_deltas: AtomicUsize,
+    hold_after_delta: AtomicBool,
+    reply_frame_seen: Arc<Notify>,
+    release_reply: Arc<Notify>,
+    deletion_injection: Mutex<Option<(PendingErasureInjector, DeletionDemand)>>,
 }
 
 impl GateTransport {
@@ -37,11 +54,44 @@ impl GateTransport {
         Arc::new(Self {
             replies: Mutex::new(replies.iter().map(|text| (*text).to_string()).collect()),
             sends: AtomicUsize::new(0),
+            fail_after_next_delta: AtomicBool::new(false),
+            accepted_deltas: AtomicUsize::new(0),
+            hold_after_delta: AtomicBool::new(false),
+            reply_frame_seen: Arc::new(Notify::new()),
+            release_reply: Arc::new(Notify::new()),
+            deletion_injection: Mutex::new(None),
         })
     }
 
     fn sends(&self) -> usize {
         self.sends.load(Ordering::SeqCst)
+    }
+
+    fn fail_after_next_delta(&self) {
+        self.fail_after_next_delta.store(true, Ordering::SeqCst);
+    }
+
+    fn accepted_deltas(&self) -> usize {
+        self.accepted_deltas.load(Ordering::SeqCst)
+    }
+
+    fn hold_after_delta(&self) -> (Arc<Notify>, Arc<Notify>) {
+        self.hold_after_delta.store(true, Ordering::SeqCst);
+        (
+            Arc::clone(&self.reply_frame_seen),
+            Arc::clone(&self.release_reply),
+        )
+    }
+
+    fn inject_deletion_after_delta(
+        &self,
+        injector: PendingErasureInjector,
+        demand: DeletionDemand,
+    ) {
+        *self
+            .deletion_injection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((injector, demand));
     }
 }
 
@@ -71,7 +121,25 @@ impl ProviderTransport for GateTransport {
                 usage: None,
             };
             match sink.push_delta(&response.text).await {
-                ene_inference::DeltaFlow::Continue => Ok(response),
+                ene_inference::DeltaFlow::Continue => {
+                    self.accepted_deltas.fetch_add(1, Ordering::SeqCst);
+                    if let Some((injector, demand)) = self
+                        .deletion_injection
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take()
+                    {
+                        injector.inject(demand);
+                    }
+                    if self.hold_after_delta.swap(false, Ordering::SeqCst) {
+                        self.reply_frame_seen.notify_one();
+                        self.release_reply.notified().await;
+                    }
+                    if self.fail_after_next_delta.swap(false, Ordering::SeqCst) {
+                        return Err(ene_inference::InferenceTechnicalError::ResponseLost);
+                    }
+                    Ok(response)
+                }
                 ene_inference::DeltaFlow::Abort(reason) => {
                     Err(ene_inference::InferenceTechnicalError::StreamAborted {
                         reason: reason.to_owned(),
@@ -126,7 +194,8 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
     desktop
         .composer_mut()
         .set_draft(format!("please remember {TARGET}"));
-    desktop.send_text().await.expect("plant the target");
+    let report = desktop.send_text().await.expect("plant the target");
+    assert!(matches!(report, ChatSendReport::Completed));
     desktop.composer_mut().set_draft(format!("draft {TARGET}"));
     desktop.composer_mut().begin_composition();
     match desktop.refresh_memory().await {
@@ -230,6 +299,85 @@ async fn targeted_deletion_wipes_gui_copies_and_reports_wiped_after_erase() {
 }
 
 #[tokio::test]
+async fn completed_reply_is_wiped_when_presentation_deletion_is_pending() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target_reply = format!("reply contains {TARGET}");
+    let transport = GateTransport::with_replies(&["seed reply", &target_reply]);
+    let handle = open_host(dir.path()).await;
+    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
+    assert!(wait_for_control(dir.path()).await);
+    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    pair_and_setup(&mut desktop, &handle).await;
+
+    desktop
+        .composer_mut()
+        .set_draft(String::from("seed client evidence"));
+    let seed_report = desktop.send_text().await.expect("seed client evidence");
+    assert!(matches!(seed_report, ChatSendReport::Completed));
+    let (reply_frame_seen, release_reply) = transport.hold_after_delta();
+
+    let surfaces = Arc::new(Mutex::new(vec![desktop.surface_snapshot(); 3]));
+    let erased = Arc::new(AtomicUsize::new(0));
+    desktop.attach_surface_erasure({
+        let surfaces = Arc::clone(&surfaces);
+        let erased = Arc::clone(&erased);
+        Arc::new(move || {
+            let surfaces = Arc::clone(&surfaces);
+            let erased = Arc::clone(&erased);
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                surfaces.lock().unwrap().clear();
+                erased.fetch_add(1, Ordering::SeqCst);
+                true
+            })
+        })
+    });
+
+    let client = desktop.take_client().expect("paired client");
+    let injector = client.pending_erasure_injector_for_tests();
+    let probe = client.transport_probe_for_tests();
+    desktop.restore_client(client);
+    let demand = DeletionDemand {
+        demand: DeletionDemandWireId(String::from("completed-reply-presentation-demand")),
+        operation: DeletionOperationWireRef(String::from("completed-reply-operation")),
+        sweep: 1,
+        targets: vec![DeletionTargetWire::WipeClass {
+            class: ClientTempClass::PresentationBuffer,
+        }],
+    };
+    transport.inject_deletion_after_delta(injector, demand);
+    desktop
+        .composer_mut()
+        .set_draft(format!("owner contains {TARGET}"));
+
+    let report = {
+        let send = desktop.send_text();
+        tokio::pin!(send);
+        tokio::select! {
+            _ = reply_frame_seen.notified() => {}
+            result = &mut send => panic!("send completed before the partial reply barrier: {result:?}"),
+        }
+        release_reply.notify_one();
+        send.as_mut().await
+    };
+    assert!(matches!(report, Ok(ChatSendReport::Completed)));
+    assert_eq!(probe.local_erasure_results(), 1);
+    assert_eq!(probe.presentation_wiped_results(), 1);
+    assert_eq!(transport.accepted_deltas(), 2);
+    assert!(erased.load(Ordering::SeqCst) > 0);
+    assert!(surfaces.lock().unwrap().is_empty());
+    assert!(!desktop.has_chat_receipt());
+    let after_send = desktop.snapshot();
+    assert!(
+        !snapshot_has_target(&desktop),
+        "the completed reply must be wiped before the local result is reported: {after_send:?}"
+    );
+    assert!(after_send.history.is_empty());
+    assert_eq!(unpresented_count(&handle).await, 0);
+    server.shutdown_and_join().await;
+}
+
+#[tokio::test]
 async fn receive_without_present_is_not_presented_ack() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transport = GateTransport::with_replies(&["companion reply body"]);
@@ -246,9 +394,10 @@ async fn receive_without_present_is_not_presented_ack() {
         panic!("draft must send");
     };
     let mut client = desktop.take_client().expect("paired client");
-    let turn = session::submit_and_collect(&mut client, &text, "en")
-        .await
-        .expect("receive stream");
+    let outcome = session::submit_and_collect(&mut client, &text, "en").await;
+    let ChatSessionOutcome::Completed(turn) = outcome else {
+        panic!("the fixture stream must complete: {outcome:?}");
+    };
     desktop.restore_client(client);
     assert!(
         !desktop
@@ -264,9 +413,14 @@ async fn receive_without_present_is_not_presented_ack() {
     );
 
     let mut client = desktop.take_client().expect("client");
-    session::confirm_chat_presentation(&mut client, &turn, PresentationStatus::Presented)
-        .await
-        .expect("ACK after present");
+    session::confirm_chat_presentation(
+        &mut client,
+        &turn.round,
+        turn.stream,
+        PresentationStatus::Presented,
+    )
+    .await
+    .expect("ACK after present");
     desktop.restore_client(client);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -353,7 +507,8 @@ async fn killing_body_leaves_chat_settings_and_cancel_alive() {
     desktop
         .composer_mut()
         .set_draft(String::from("chat without body"));
-    desktop.send_text().await.expect("chat survives Body kill");
+    let report = desktop.send_text().await.expect("chat survives Body kill");
+    assert!(matches!(report, ChatSendReport::Completed));
     desktop
         .refresh_setup()
         .await
@@ -383,7 +538,8 @@ async fn send_text_presents_its_collected_turn() {
     pair_and_setup(&mut desktop, &handle).await;
 
     desktop.composer_mut().set_draft(String::from("ack me"));
-    desktop.send_text().await.expect("send_text");
+    let report = desktop.send_text().await.expect("send_text");
+    assert!(matches!(report, ChatSendReport::Completed));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         if unpresented_count(&handle).await == 0 {
@@ -395,6 +551,139 @@ async fn send_text_presents_its_collected_turn() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    server.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn closed_writer_is_not_sent_and_keeps_the_draft() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transport = GateTransport::with_replies(&["unused"]);
+    let handle = open_host(dir.path()).await;
+    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
+    assert!(wait_for_control(dir.path()).await);
+    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    pair_and_setup(&mut desktop, &handle).await;
+
+    let mut client = desktop.take_client().expect("paired client");
+    client.abort_writer_for_tests().await;
+    desktop.restore_client(client);
+    desktop
+        .composer_mut()
+        .set_draft(String::from("keep this unsent draft"));
+    let report = desktop.send_text().await.expect("not-sent report");
+    assert!(
+        matches!(
+            &report,
+            ChatSendReport::NotSent {
+                failure: Some(failure),
+            } if failure.diagnostic().phase == ChatDeliveryPhase::NotSent
+        ),
+        "a closed writer must be a typed not-sent outcome: {report:?}"
+    );
+    let snapshot = desktop.snapshot();
+    assert_eq!(snapshot.draft, "keep this unsent draft");
+    assert!(snapshot.timeline.is_empty());
+    assert_eq!(transport.sends(), 0);
+    server.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn durable_owner_commit_before_acceptance_is_outcome_unknown() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transport = GateTransport::with_replies(&["unused"]);
+    let handle = open_host(dir.path()).await;
+    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
+    assert!(wait_for_control(dir.path()).await);
+    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    pair_and_setup(&mut desktop, &handle).await;
+    let publish_gate = handle.arm_submit_publish_gate_for_tests();
+    let text = String::from("durable before acceptance");
+    let mut client = desktop.take_client().expect("paired client");
+    {
+        let request = session::submit_and_collect_with_timeout(
+            &mut client,
+            &text,
+            "en",
+            Duration::from_secs(5),
+        );
+        tokio::pin!(request);
+        tokio::select! {
+            _ = publish_gate.wait_until_entered_for_tests() => {}
+            outcome = &mut request => panic!("the request completed before the publication barrier: {outcome:?}"),
+        }
+        let companion = handle
+            .store_for_tests()
+            .ensure_running_companion()
+            .await
+            .expect("companion");
+        let history = handle
+            .store_for_tests()
+            .load_recent_timeline(companion, 50)
+            .await
+            .expect("durable history");
+        assert!(history.iter().any(|item| item.text == text));
+        assert_eq!(transport.sends(), 0);
+        let outcome = request.as_mut().await;
+        assert!(
+            matches!(
+                &outcome,
+                ChatSessionOutcome::OutcomeUnknown(failure)
+                    if failure.diagnostic().phase == ChatDeliveryPhase::OutcomeUnknown
+            ),
+            "a durable commit before acceptance publication must remain unknown: {outcome:?}"
+        );
+    }
+    publish_gate.release_for_tests();
+    desktop.restore_client(client);
+    server.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn interrupted_provider_stream_discards_received_partial_frame() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transport = GateTransport::with_replies(&["partial reply"]);
+    transport.fail_after_next_delta();
+    let handle = open_host(dir.path()).await;
+    let server = ServingTask::start(dir.path(), Arc::clone(&handle), Arc::clone(&transport));
+    assert!(wait_for_control(dir.path()).await);
+    let mut desktop = DesktopRuntime::new(dir.path().to_path_buf());
+    pair_and_setup(&mut desktop, &handle).await;
+
+    desktop
+        .composer_mut()
+        .set_draft(String::from("do not lose this input"));
+    let result = desktop.send_text().await;
+    let (round, end) = match result {
+        Ok(ChatSendReport::StreamEnded { round, end }) => (round, end),
+        other => panic!("an accepted stream must retain its round and close reason: {other:?}"),
+    };
+    assert_eq!(end, ChatStreamEnd::Interrupted);
+    assert!(
+        !round.is_empty(),
+        "accepted round identity must be retained"
+    );
+    let snapshot = desktop.snapshot();
+    assert!(
+        snapshot
+            .timeline
+            .iter()
+            .any(|line| line == "[owner] do not lose this input")
+    );
+    assert_eq!(transport.accepted_deltas(), 1);
+    assert_eq!(transport.sends(), 1);
+    assert!(!desktop.has_chat_receipt());
+    desktop
+        .refresh_history()
+        .await
+        .expect("history after partial");
+    assert!(
+        !desktop
+            .snapshot()
+            .history
+            .iter()
+            .any(|line| line.contains("partial reply"))
+    );
+    assert_eq!(unpresented_count(&handle).await, 0);
     server.shutdown_and_join().await;
 }
 

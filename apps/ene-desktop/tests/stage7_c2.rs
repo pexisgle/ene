@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ene_api::v1::management::ManagementOutcome;
+use ene_desktop::session::ChatSendReport;
 use ene_desktop::ui::{DesktopRuntime, Page};
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport};
 
@@ -131,7 +132,8 @@ async fn complete_setup(desktop: &mut DesktopRuntime) {
 #[expect(clippy::expect_used, reason = "test fixture helper")]
 async fn say(desktop: &mut DesktopRuntime, text: &str) {
     desktop.composer_mut().set_draft(text.to_owned());
-    desktop.send_text().await.expect("chat turn must complete");
+    let report = desktop.send_text().await.expect("chat turn must complete");
+    assert!(matches!(report, ChatSendReport::Completed));
 }
 
 #[expect(clippy::expect_used, reason = "test fixture helper")]
