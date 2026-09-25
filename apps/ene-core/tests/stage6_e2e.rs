@@ -7227,9 +7227,6 @@ async fn shutdown_during_destructive_staging_cleanup_kills_the_helper_and_report
         );
     served
         .handle()
-        .set_task_effect_cleanup_failure_for_tests(true);
-    served
-        .handle()
         .set_task_agent_quiesce_timeout_for_tests(Duration::from_millis(100));
     propose_shutdown_task(&mut served).await;
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -7239,6 +7236,9 @@ async fn shutdown_during_destructive_staging_cleanup_kills_the_helper_and_report
     })
     .await
     .expect("destructive cleanup must enter its deterministic barrier");
+    served
+        .handle()
+        .set_task_effect_cleanup_failure_for_tests(true);
     assert_eq!(served.handle().live_task_effect_processes_for_tests(), 1);
     assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
 
@@ -7469,6 +7469,17 @@ async fn host_shutdown_kills_reaps_and_joins_uncooperative_task_effect_before_re
     .await
     .expect("the Task Agent must enter uncooperative external-effect work");
     let db = temp.path().join("app.db");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM action_attempt WHERE certainty = 'unknown'",
+        ) == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the effect barrier must follow the committed AU5 claim");
     assert_eq!(
         db_scalar(
             &db,
@@ -7710,6 +7721,8 @@ async fn shutdown_during_staging_preparation_is_bounded_and_claims_no_action() {
 
     let shutdown = tokio::time::timeout(Duration::from_secs(10), served.stop_result()).await;
     assert!(shutdown.is_ok(), "Host shutdown must be bounded");
+    assert!(shutdown.expect("shutdown result").is_err());
+    assert_eq!(served.handle().pending_task_effect_staging_for_tests(), 1);
     assert_eq!(
         served.handle().running_task_executions_for_tests(),
         0,
@@ -7739,7 +7752,7 @@ async fn shutdown_during_staging_preparation_is_bounded_and_claims_no_action() {
         temp.path()
             .join("shutdown-task-workspace/.ene-action-staging"),
     ) {
-        assert_eq!(entries.count(), 0);
+        assert_eq!(entries.count(), 1);
     }
 }
 

@@ -1293,6 +1293,16 @@ impl TaskEffectRuntime {
                 String::from("ENE_TEST_STAGING_HELPER_RELEASE"),
                 pause.release.to_string_lossy().into_owned(),
             ));
+            if pause.stage == "cleanup" {
+                envs.push((
+                    String::from("ENE_TEST_STAGING_CLEANUP_ENTERED"),
+                    pause.entered.to_string_lossy().into_owned(),
+                ));
+                envs.push((
+                    String::from("ENE_TEST_STAGING_CLEANUP_RELEASE"),
+                    pause.release.to_string_lossy().into_owned(),
+                ));
+            }
             if let Some(canary) = pause.canary.as_ref() {
                 envs.push((
                     String::from("ENE_TEST_STAGING_HELPER_CANARY"),
@@ -2302,10 +2312,18 @@ mod supervisor_tests {
         );
         let root = WorkspaceRoot::open(&workspace.path().to_string_lossy()).expect("workspace");
         let started = started(&root, "stalled-prepare.txt", Some(b"blocked".to_vec()));
+        let preparation = runtime
+            .staging_preparation_for_started(&started)
+            .expect("staging preparation");
+        let staging_path = preparation.path.clone();
         let abort = DispatchAbort::default();
         let execution = tokio::spawn({
             let runtime = runtime.clone();
-            async move { runtime.execute(&started, &abort).await }
+            async move {
+                runtime
+                    .execute_with_preparation(&started, &abort, Some(preparation))
+                    .await
+            }
         });
         let execution = execution;
         timeout(Duration::from_secs(10), async {
@@ -2321,21 +2339,26 @@ mod supervisor_tests {
         })
         .await
         .expect("hard stop must remain bounded");
-        assert!(stopped.0.is_ok());
+        assert!(stopped.0.is_err());
         assert!(matches!(
             stopped.1.expect("runner joins"),
             Ok(TaskEffectExecution::Aborted)
         ));
         assert_eq!(runtime.live_worker_processes_for_tests(), 0);
-        assert_eq!(runtime.pending_staging_obligations_for_tests(), 0);
+        assert_eq!(runtime.pending_staging_obligations_for_tests(), 1);
+        assert!(staging_path.is_dir());
         std::fs::write(&release, b"release").expect("release condition");
         assert!(
             !canary.exists(),
             "a killed helper must not resume after return"
         );
-        if let Ok(entries) = std::fs::read_dir(workspace.path().join(".ene-action-staging")) {
-            assert_eq!(entries.count(), 0);
-        }
+        assert!(staging_path.is_dir());
+        assert_eq!(
+            std::fs::read_dir(workspace.path().join(".ene-action-staging"))
+                .expect("staging root")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2352,7 +2375,6 @@ mod supervisor_tests {
             release.clone(),
             Some(canary.clone()),
         );
-        runtime.set_test_cleanup_failure(true);
         let root = WorkspaceRoot::open(&workspace.path().to_string_lossy()).expect("workspace");
         let started = started(&root, "stalled-cleanup.txt", Some(b"private body".to_vec()));
         let abort = DispatchAbort::default();
@@ -2368,6 +2390,7 @@ mod supervisor_tests {
         })
         .await
         .expect("cleanup must enter its barrier");
+        runtime.set_test_cleanup_failure(true);
         let stopped = timeout(Duration::from_secs(10), async {
             let (stop, result) = tokio::join!(runtime.terminate_and_join(), execution);
             (stop, result)

@@ -54,6 +54,8 @@ pub(crate) struct StagingLeaseOptions {
     #[cfg(feature = "test-support")]
     pub pause: Option<StagingCleanupPause>,
     #[cfg(feature = "test-support")]
+    pub prepare_pause: Option<StagingCleanupPause>,
+    #[cfg(feature = "test-support")]
     pub fail_cleanup: bool,
 }
 
@@ -118,7 +120,6 @@ async fn run_workspace_staging_helper_async(
             staging_directory,
             ownership_token,
         } => {
-            pause_staging_helper_for_tests("prepare")?;
             let root =
                 WorkspaceRoot::open(&root).map_err(|_| String::from("workspace unavailable"))?;
             match prepare_staging_lease(
@@ -157,7 +158,6 @@ async fn run_workspace_staging_helper_async(
             ownership_token,
             identity,
         } => {
-            pause_staging_helper_for_tests("cleanup")?;
             let root =
                 WorkspaceRoot::open(&root).map_err(|_| String::from("workspace unavailable"))?;
             let removed = match cleanup_staging_directory_by_path(
@@ -192,7 +192,6 @@ async fn run_workspace_staging_helper_async(
     let request = read_staging_helper_request(input)?;
     match request {
         StagingHelperRequest::Cleanup => {
-            pause_staging_helper_for_tests("cleanup")?;
             cleanup_staging_lease(lease)
                 .await
                 .map_err(|failure| failure.reason)?;
@@ -225,43 +224,6 @@ fn write_staging_helper_response(
         .and_then(|()| output.write_all(b"\n"))
         .and_then(|()| output.flush())
         .map_err(|_| String::from("staging helper response unavailable"))
-}
-
-#[cfg(feature = "test-support")]
-fn pause_staging_helper_for_tests(stage: &str) -> Result<(), String> {
-    let expected = format!("stall-{stage}");
-    if std::env::var(TEST_STAGING_HELPER_PAUSE_ENV).ok().as_deref() != Some(expected.as_str()) {
-        return Ok(());
-    }
-    let entered = std::env::var_os("ENE_TEST_STAGING_HELPER_ENTERED")
-        .ok_or_else(|| String::from("staging helper barrier unavailable"))?;
-    let release = std::env::var_os("ENE_TEST_STAGING_HELPER_RELEASE")
-        .ok_or_else(|| String::from("staging helper release unavailable"))?;
-    let mut entered_file = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&entered)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
-        Err(_) => return Err(String::from("staging helper barrier unavailable")),
-    };
-    entered_file
-        .write_all(stage.as_bytes())
-        .map_err(|_| String::from("staging helper barrier unavailable"))?;
-    while !Path::new(&release).exists() {
-        std::thread::yield_now();
-    }
-    if let Some(canary) = std::env::var_os("ENE_TEST_STAGING_HELPER_CANARY") {
-        std::fs::write(canary, stage.as_bytes())
-            .map_err(|_| String::from("staging helper canary unavailable"))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "test-support"))]
-fn pause_staging_helper_for_tests(_stage: &str) -> Result<(), String> {
-    Ok(())
 }
 
 fn ownership_marker_path(path: &Path) -> PathBuf {
@@ -405,6 +367,12 @@ pub(crate) async fn prepare_staging_lease(
                 lease: Some(lease),
             });
         }
+        if let Err(reason) = lease.options.pause_prepare() {
+            return Err(StagingPreparationFailure {
+                reason,
+                lease: Some(lease),
+            });
+        }
         if let Some(token) = lease.ownership_token.as_deref()
             && let Err(reason) = write_ownership_marker(&lease.original_path, token)
         {
@@ -532,14 +500,28 @@ pub(crate) async fn cleanup_staging_directory_by_path(
         {
             return Err(String::from("staging object identity does not match"));
         }
-        if read_ownership_marker(&path)? != ownership_token {
-            return Err(String::from("staging ownership marker does not match"));
-        }
+        let lease_token = match std::fs::symlink_metadata(ownership_marker_path(&path)) {
+            Ok(_) => {
+                if read_ownership_marker(&path)? != ownership_token {
+                    return Err(String::from("staging ownership marker does not match"));
+                }
+                Some(ownership_token.clone())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && identity.is_some() => {
+                None
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(String::from("staging ownership marker is unavailable"));
+            }
+            Err(error) => {
+                return Err(format!("staging ownership marker is unavailable: {error}"));
+            }
+        };
         let lease = Arc::new(StagingLease {
             object,
             workspace_root,
             original_path: path,
-            ownership_token: Some(ownership_token.clone()),
+            ownership_token: lease_token,
             options: helper_lease_options(ownership_token),
         });
         lease
@@ -559,6 +541,7 @@ fn helper_lease_options(ownership_token: String) -> StagingLeaseOptions {
     let mut options = StagingLeaseOptions {
         ownership_token: Some(ownership_token),
         pause: None,
+        prepare_pause: None,
         fail_cleanup: false,
     };
     #[cfg(not(feature = "test-support"))]
@@ -576,9 +559,41 @@ fn helper_lease_options(ownership_token: String) -> StagingLeaseOptions {
                 release: release.into(),
             });
         }
+        if let (Some(entered), Some(release)) = (
+            std::env::var_os("ENE_TEST_STAGING_HELPER_ENTERED"),
+            std::env::var_os("ENE_TEST_STAGING_HELPER_RELEASE"),
+        ) && std::env::var(TEST_STAGING_HELPER_PAUSE_ENV).ok().as_deref()
+            == Some("stall-prepare")
+        {
+            options.prepare_pause = Some(StagingCleanupPause {
+                entered: entered.into(),
+                release: release.into(),
+            });
+        }
         options.fail_cleanup = std::env::var_os("ENE_TEST_STAGING_CLEANUP_FAILURE").is_some();
     }
     options
+}
+
+#[cfg(feature = "test-support")]
+fn pause_at_barrier(pause: &StagingCleanupPause, label: &[u8]) -> Result<(), std::io::Error> {
+    let mut entered = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pause.entered)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    entered.write_all(label)?;
+    while !pause.release.exists() {
+        std::thread::yield_now();
+    }
+    if let Some(canary) = std::env::var_os("ENE_TEST_STAGING_HELPER_CANARY") {
+        std::fs::write(canary, label).map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+    Ok(())
 }
 
 impl StagingLeaseOptions {
@@ -599,11 +614,20 @@ impl StagingLeaseOptions {
             let Some(pause) = self.pause.as_ref() else {
                 return Ok(());
             };
-            std::fs::write(&pause.entered, b"cleanup-validated")
+            pause_at_barrier(pause, b"cleanup-validated")
                 .map_err(|error| format!("staging cleanup barrier is unavailable: {error}"))?;
-            while !pause.release.exists() {
-                std::thread::yield_now();
-            }
+        }
+        Ok(())
+    }
+
+    fn pause_prepare(&self) -> Result<(), String> {
+        #[cfg(feature = "test-support")]
+        {
+            let Some(pause) = self.prepare_pause.as_ref() else {
+                return Ok(());
+            };
+            pause_at_barrier(pause, b"prepared-object")
+                .map_err(|error| format!("staging preparation barrier is unavailable: {error}"))?;
         }
         Ok(())
     }
