@@ -1,9 +1,12 @@
 use std::collections::VecDeque;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use ene_body::ipc::{
     BodyToParent, IpcError, LocalUiFact, ParentToBody, PresentationFeedback, decode_body,
@@ -11,6 +14,11 @@ use ene_body::ipc::{
 };
 
 const EVENT_QUEUE_CAPACITY: usize = 64;
+const COMMAND_QUEUE_CAPACITY: usize = 16;
+const EVENT_DRAIN_BATCH: usize = 64;
+const LOCAL_UI_QUEUE_CAPACITY: usize = 64;
+const PRESENTATION_QUEUE_CAPACITY: usize = 64;
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyStatus {
@@ -22,9 +30,12 @@ pub enum BodyStatus {
 #[derive(Default)]
 pub struct BodySupervisor {
     child: Option<Child>,
-    stdin: Option<ChildStdin>,
+    command_tx: Option<SyncSender<Vec<u8>>>,
+    writer: Option<JoinHandle<()>>,
     reader: Option<JoinHandle<()>>,
     events: Option<Receiver<BodyToParent>>,
+    event_overflow: Arc<AtomicBool>,
+    writer_failed: Arc<AtomicBool>,
     local_ui: VecDeque<LocalUiFact>,
     presentations: VecDeque<PresentationFeedback>,
     native_ready: bool,
@@ -76,16 +87,40 @@ impl BodySupervisor {
             return BodyStatus::Absent;
         }
         self.shutdown();
-        match Command::new(exe)
+        let mut command = Command::new(exe);
+        command
             .arg("--ipc-stdio")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
+            .stderr(Stdio::inherit());
+        #[cfg(unix)]
         {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        match command.spawn() {
             Ok(mut child) => {
                 let stdin = child.stdin.take();
                 let stdout = child.stdout.take();
+                let (command_tx, writer, writer_failed) = match stdin.map(|mut stdin| {
+                    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(COMMAND_QUEUE_CAPACITY);
+                    let writer_failed = Arc::new(AtomicBool::new(false));
+                    let thread_failed = Arc::clone(&writer_failed);
+                    let writer = thread::spawn(move || {
+                        while let Ok(bytes) = rx.recv() {
+                            if stdin.write_all(&bytes).is_err() || stdin.flush().is_err() {
+                                thread_failed.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                        }
+                    });
+                    (tx, writer, writer_failed)
+                }) {
+                    Some((tx, writer, failed)) => (Some(tx), Some(writer), failed),
+                    None => (None, None, Arc::new(AtomicBool::new(false))),
+                };
+                let event_overflow = Arc::new(AtomicBool::new(false));
+                let reader_overflow = Arc::clone(&event_overflow);
                 let (tx, rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
                 let reader = stdout.map(|mut stdout| {
                     thread::spawn(move || {
@@ -100,8 +135,16 @@ impl BodySupervisor {
                                         match decode_body(&buf) {
                                             Ok((message, used)) => {
                                                 buf.drain(..used);
-                                                if tx.send(message).is_err() {
-                                                    return;
+                                                match tx.try_send(message) {
+                                                    Ok(()) => {}
+                                                    Err(mpsc::TrySendError::Full(_)) => {
+                                                        reader_overflow
+                                                            .store(true, Ordering::SeqCst);
+                                                        return;
+                                                    }
+                                                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                                                        return;
+                                                    }
                                                 }
                                             }
                                             Err(IpcError::Truncated { .. }) => break,
@@ -120,9 +163,12 @@ impl BodySupervisor {
                     })
                 });
                 self.child = Some(child);
-                self.stdin = stdin;
+                self.command_tx = command_tx;
+                self.writer = writer;
                 self.reader = reader;
                 self.events = Some(rx);
+                self.event_overflow = event_overflow;
+                self.writer_failed = writer_failed;
                 self.local_ui.clear();
                 self.presentations.clear();
                 self.native_ready = false;
@@ -135,16 +181,30 @@ impl BodySupervisor {
     }
 
     pub fn send_projection(&mut self, message: &ParentToBody) -> Result<(), BodySuperviseError> {
-        let stdin = self.stdin.as_mut().ok_or(BodySuperviseError::NotRunning)?;
+        if self.writer_failed.load(Ordering::SeqCst) {
+            return Err(BodySuperviseError::Write);
+        }
         let bytes = encode_parent(message).map_err(|_| BodySuperviseError::Encode)?;
-        stdin
-            .write_all(&bytes)
-            .map_err(|_| BodySuperviseError::Write)?;
-        stdin.flush().map_err(|_| BodySuperviseError::Write)
+        let sender = self
+            .command_tx
+            .clone()
+            .ok_or(BodySuperviseError::NotRunning)?;
+        match sender.try_send(bytes) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => Err(BodySuperviseError::Backpressure),
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.writer_failed.store(true, Ordering::SeqCst);
+                Err(BodySuperviseError::NotRunning)
+            }
+        }
     }
 
     pub fn poll(&mut self) -> BodyStatus {
         self.drain_events();
+        if self.event_overflow.load(Ordering::SeqCst) || self.writer_failed.load(Ordering::SeqCst) {
+            self.shutdown();
+            return BodyStatus::Exited;
+        }
         match self.child.as_mut() {
             None => BodyStatus::Absent,
             Some(child) => match child.try_wait() {
@@ -164,12 +224,10 @@ impl BodySupervisor {
     }
 
     pub fn take_local_ui(&mut self) -> Option<LocalUiFact> {
-        self.drain_events();
         self.local_ui.pop_front()
     }
 
     pub fn take_presentation(&mut self) -> Option<PresentationFeedback> {
-        self.drain_events();
         self.presentations.pop_front()
     }
 
@@ -185,31 +243,32 @@ impl BodySupervisor {
     }
 
     pub fn shutdown(&mut self) {
-        if self.stdin.is_some() {
-            match self.send_projection(&ParentToBody::Shutdown) {
-                Ok(()) | Err(_) => {}
-            }
-        }
-        self.drop_io();
+        self.command_tx.take();
         if let Some(mut child) = self.child.take() {
-            match child.kill() {
-                Ok(()) | Err(_) => {}
-            }
-            match child.wait() {
-                Ok(_) | Err(_) => {}
-            }
-        }
-        if let Some(reader) = self.reader.take() {
-            match reader.join() {
-                Ok(()) | Err(_) => {}
+            terminate_child(&mut child);
+            if !reap_child_bounded(&mut child) {
+                thread::spawn(move || {
+                    drop(child.wait());
+                });
             }
         }
+        join_if_finished(self.writer.take());
+        self.events = None;
+        join_if_finished(self.reader.take());
+        self.event_overflow.store(false, Ordering::SeqCst);
+        self.writer_failed.store(false, Ordering::SeqCst);
+        self.local_ui.clear();
+        self.presentations.clear();
+        self.native_ready = false;
+        self.asset_ready = false;
+        self.motion_ready = false;
     }
 
     fn drain_events(&mut self) {
         let mut disconnected = false;
+        let mut overflowed = false;
         if let Some(events) = self.events.as_mut() {
-            loop {
+            for _ in 0..EVENT_DRAIN_BATCH {
                 match events.try_recv() {
                     Ok(message) => match message {
                         BodyToParent::Ready(info) => {
@@ -226,8 +285,18 @@ impl BodySupervisor {
                             self.motion_ready =
                                 tick.motion == ene_body::ipc::FeatureSupport::Available;
                         }
-                        BodyToParent::LocalUi(fact) => self.local_ui.push_back(fact),
+                        BodyToParent::LocalUi(fact) => {
+                            if self.local_ui.len() >= LOCAL_UI_QUEUE_CAPACITY {
+                                overflowed = true;
+                                break;
+                            }
+                            self.local_ui.push_back(fact);
+                        }
                         BodyToParent::Presentation(feedback) => {
+                            if self.presentations.len() >= PRESENTATION_QUEUE_CAPACITY {
+                                overflowed = true;
+                                break;
+                            }
                             self.presentations.push_back(feedback);
                         }
                         _ => {}
@@ -240,18 +309,58 @@ impl BodySupervisor {
                 }
             }
         }
+        if overflowed {
+            self.event_overflow.store(true, Ordering::SeqCst);
+        }
         if disconnected {
             self.events = None;
         }
     }
 
     fn drop_io(&mut self) {
-        self.stdin = None;
+        self.command_tx.take();
         self.events = None;
+        self.local_ui.clear();
+        self.presentations.clear();
         self.native_ready = false;
         self.asset_ready = false;
         self.motion_ready = false;
     }
+}
+
+fn reap_child_bounded(child: &mut Child) -> bool {
+    let deadline = Instant::now() + SHUTDOWN_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => return false,
+        }
+    }
+}
+
+fn join_if_finished(handle: Option<JoinHandle<()>>) {
+    if let Some(handle) = handle
+        && handle.is_finished()
+    {
+        drop(handle.join());
+    }
+}
+
+#[cfg(unix)]
+fn terminate_child(child: &mut Child) {
+    let pid = i32::try_from(child.id()).unwrap_or(i32::MAX);
+    // SAFETY: the child is spawned as the leader of its own process group, so
+    // the negative pid targets only that Body process tree.
+    let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    drop(child.kill());
+}
+
+#[cfg(not(unix))]
+fn terminate_child(child: &mut Child) {
+    drop(child.kill());
 }
 
 fn body_binary_name() -> &'static str {
@@ -270,4 +379,6 @@ pub enum BodySuperviseError {
     Encode,
     #[error("projection write failed")]
     Write,
+    #[error("body projection queue is full")]
+    Backpressure,
 }
