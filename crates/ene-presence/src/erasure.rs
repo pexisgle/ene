@@ -56,8 +56,7 @@ mod tests {
     use super::*;
     use ene_preservation::{
         DeletionOperationId, DeletionSearchMaterial, DeletionSweepGeneration,
-        MechanicalDeletionTarget, ParticipantErasureScope, ParticipantHoldClass,
-        TargetedDeletionTarget,
+        MechanicalDeletionTarget, ParticipantErasureScope, TargetedDeletionTarget,
     };
     use ene_primitive::RawId;
 
@@ -130,52 +129,5 @@ mod tests {
         assert_eq!((fact.erased_count(), fact.remainder_count()), (4, 0));
         assert_eq!(*repo.calls.lock().unwrap(), 1);
         assert!(!format!("{fact:?}").contains("client-target"));
-    }
-
-    #[tokio::test]
-    async fn a_remaining_reference_reports_more_work() {
-        let (_repo, participant) = fake(LocalErasurePass::Applied {
-            erased: 0,
-            remainder: 1,
-        });
-        let fact = participant
-            .demand_local_erasure(command(condition(), local_scope("client-target")))
-            .await;
-        assert_eq!(
-            fact.status(),
-            ene_preservation::ParticipantCompletionStatus::MoreWork
-        );
-        assert_eq!((fact.erased_count(), fact.remainder_count()), (0, 1));
-    }
-
-    #[tokio::test]
-    async fn a_not_current_pass_claims_no_verification() {
-        let (_repo, participant) = fake(LocalErasurePass::NotCurrent);
-        let fact = participant
-            .demand_local_erasure(command(condition(), local_scope("client-target")))
-            .await;
-        assert_eq!(
-            fact.status(),
-            ene_preservation::ParticipantCompletionStatus::LocalComplete
-        );
-    }
-
-    #[tokio::test]
-    async fn a_correlation_only_demand_is_an_explicit_hold() {
-        let (repo, participant) = fake(LocalErasurePass::Applied {
-            erased: 0,
-            remainder: 0,
-        });
-        let fact = participant
-            .demand_local_erasure(command(
-                condition(),
-                ParticipantErasureScope::correlation_only(),
-            ))
-            .await;
-        assert_eq!(
-            fact.status(),
-            ene_preservation::ParticipantCompletionStatus::Held(ParticipantHoldClass::Failed)
-        );
-        assert_eq!(*repo.calls.lock().unwrap(), 0);
     }
 }

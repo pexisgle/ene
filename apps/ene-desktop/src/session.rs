@@ -522,7 +522,7 @@ mod tests {
     use ene_client::{ClientError, EnqueueFailure, RequestFailure, ResponseWaitFailure};
 
     #[test]
-    fn non_completed_stream_statuses_remain_distinct() {
+    fn wire_outcomes_preserve_delivery_phase_and_revalidation_reason() {
         assert_eq!(stream_end(StreamClose::Completed), None);
         assert_eq!(
             stream_end(StreamClose::Interrupted),
@@ -533,10 +533,7 @@ mod tests {
             Some(ChatStreamEnd::Cancelled)
         );
         assert_eq!(stream_end(StreamClose::Stale), Some(ChatStreamEnd::Stale));
-    }
 
-    #[test]
-    fn request_failures_keep_the_delivery_phase() {
         let not_sent =
             request_failure_outcome(RequestFailure::NotSent(EnqueueFailure::WriterClosed));
         assert!(matches!(not_sent, ChatSessionOutcome::NotSent(_)));
@@ -550,16 +547,12 @@ mod tests {
             failure.diagnostic().phase,
             ChatDeliveryPhase::OutcomeUnknown
         );
-    }
 
-    #[test]
-    fn intake_refusal_preserves_the_revalidation_reason() {
         let reason = RevalidationReasonWire(String::from("input-over-limit"));
-        let mapped = intake_refusal(RoundIntakeOutcomeWire::NeedsRevalidation {
-            reason: reason.clone(),
-        });
         assert_eq!(
-            mapped,
+            intake_refusal(RoundIntakeOutcomeWire::NeedsRevalidation {
+                reason: reason.clone(),
+            }),
             Some(ChatIntakeRefusal::NeedsRevalidation { reason })
         );
         assert_eq!(

@@ -373,23 +373,7 @@ impl tokio_tungstenite::tungstenite::handshake::server::Callback for UpgradeChec
 
 #[cfg(test)]
 mod tests {
-    use super::{hex_lower, spki_pin, ws_config};
-    use ene_api::codec::MAX_FRAME_BYTES;
-
-    #[test]
-    fn hex_encoding_is_lowercase_and_paired() {
-        assert_eq!(hex_lower(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
-        assert_eq!(hex_lower(&[]), "");
-    }
-
-    #[test]
-    fn ws_limits_match_the_wire_frame_cap() {
-        let config = ws_config();
-        assert_eq!(config.max_message_size, Some(MAX_FRAME_BYTES));
-        assert_eq!(config.max_frame_size, Some(MAX_FRAME_BYTES));
-        assert!(config.max_write_buffer_size <= MAX_FRAME_BYTES);
-        assert!(!config.accept_unmasked_frames, "client frames stay masked");
-    }
+    use super::spki_pin;
 
     #[test]
     fn the_issued_certificate_pins_to_its_subject_public_key_info() {

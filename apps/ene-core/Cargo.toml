@@ -60,15 +60,10 @@ libc.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
-ene-client = { path = "../../crates/ene-client", features = ["test-support"] }
-ene-preservation = { path = "../../crates/ene-preservation", features = ["test-support"] }
-hmac.workspace = true
 rmp-serde.workspace = true
 rusqlite.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-uuid.workspace = true
 ene-ctl = { path = "../ene-ctl" }
 ene-store = { path = "../../crates/ene-store", features = ["test-support"] }
 

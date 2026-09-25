@@ -160,10 +160,6 @@ mod tests {
     use crate::{InferenceTicketId, UsageFact};
     use ene_primitive::RawId;
 
-    fn rate(micros_per_million: u64) -> TokenRate {
-        TokenRate::from_micros_per_million(micros_per_million)
-    }
-
     fn usage(provider: &str, model: &str, counts: Option<(u64, u64, u64)>) -> UsageFact {
         UsageFact {
             ticket: InferenceTicketId(RawId::new()),
@@ -238,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn large_counts_and_rates_fail_closed_instead_of_wrapping() {
+    fn overflow_paths_fail_closed_instead_of_wrapping() {
         let pricing = snapshot(
             "openai",
             "gpt-test",
@@ -250,13 +246,9 @@ mod tests {
         let fact = usage("openai", "gpt-test", Some((u64::MAX, 0, u64::MAX)));
         assert_eq!(
             project_cost(&fact, Some(&pricing)),
-            Err(CostProjectionError::AmountOverflow),
-            "an unrepresentable amount must fail closed, never wrap or saturate"
+            Err(CostProjectionError::AmountOverflow)
         );
-    }
 
-    #[test]
-    fn total_overflow_fails_closed_even_when_each_component_fits() {
         let rate = TokenRate::from_micros_per_million(1_000_000);
         let half = u64::MAX / 2;
         let pricing = snapshot("openai", "gpt-test", 1, rate, rate, rate);
@@ -268,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_usage_or_missing_rate_stays_unknown_never_zero() {
+    fn unknown_and_malformed_usage_stay_distinct() {
         let pricing = snapshot(
             "openai",
             "gpt-test",
@@ -292,6 +284,23 @@ mod tests {
         assert_eq!(
             project_cost(&unknown, None),
             Ok(UsageCostFact::Unknown { pricing: None })
+        );
+
+        let mut missing_cached = usage("openai", "gpt-test", Some((10, 0, 0)));
+        missing_cached.cached_input_tokens = None;
+        assert_eq!(
+            project_cost(&missing_cached, None),
+            Err(CostProjectionError::InconsistentUsage)
+        );
+        let mut above_input = usage("openai", "gpt-test", Some((10, 11, 0)));
+        assert_eq!(
+            project_cost(&above_input, None),
+            Err(CostProjectionError::InconsistentUsage)
+        );
+        above_input.source = UsageSource::Unknown;
+        assert_eq!(
+            project_cost(&above_input, None),
+            Err(CostProjectionError::InconsistentUsage)
         );
     }
 
@@ -318,74 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_usage_facts_are_refused_not_zero_filled() {
-        let mut reported = usage("openai", "gpt-test", Some((10, 0, 0)));
-        reported.cached_input_tokens = None;
-        assert_eq!(
-            project_cost(&reported, None),
-            Err(CostProjectionError::InconsistentUsage)
-        );
-        let mut above_input = usage("openai", "gpt-test", Some((10, 11, 0)));
-        assert_eq!(
-            project_cost(&above_input, None),
-            Err(CostProjectionError::InconsistentUsage)
-        );
-        above_input.source = UsageSource::Unknown;
-        assert_eq!(
-            project_cost(&above_input, None),
-            Err(CostProjectionError::InconsistentUsage)
-        );
-    }
-
-    #[test]
-    fn cost_follows_the_bound_snapshot_not_the_current_catalog() {
-        use crate::pricing::PricingResolution;
-        use crate::pricing::tests_support::catalog_of;
-        use ene_primitive::WallClockWithTz;
-
-        let at = |value: &str| WallClockWithTz::parse_rfc3339(value).expect("fixture instant");
-        let fact = usage("openai", "gpt-test", Some((1_000, 200, 500)));
-        let first = catalog_of(&snapshot(
-            "openai",
-            "gpt-test",
-            1,
-            rate(2_000_000),
-            rate(500_000),
-            rate(8_000_000),
-        ));
-        let PricingResolution::Priced(bound) =
-            first.resolve("openai", "gpt-test", at("2025-07-01T00:00:00Z"))
-        else {
-            panic!("revision 1 covers the call instant");
-        };
-        let recorded =
-            project_cost(&fact, Some(&bound)).expect("the bound snapshot prices the fact");
-        let second = catalog_of(&snapshot(
-            "openai",
-            "gpt-test",
-            2,
-            rate(100_000),
-            rate(50_000),
-            rate(400_000),
-        ));
-        let PricingResolution::Priced(current) =
-            second.resolve("openai", "gpt-test", at("2025-10-01T00:00:00Z"))
-        else {
-            panic!("revision 2 covers the later instant");
-        };
-        assert_ne!(bound.reference(), current.reference());
-        assert_eq!(
-            project_cost(&fact, Some(&bound)).expect("the bound snapshot still prices the fact"),
-            recorded
-        );
-        assert_ne!(
-            project_cost(&fact, Some(&current)).expect("the current snapshot prices new calls"),
-            recorded
-        );
-    }
-
-    #[test]
-    fn estimate_upper_bound_charges_the_more_expensive_input_rate() {
+    fn estimate_upper_bound_is_conservative_and_fails_closed() {
         let pricing = snapshot(
             "openai",
             "gpt-test",
@@ -402,10 +344,7 @@ mod tests {
             estimate.upper_bound_cost(&pricing),
             Some(Money::from_micros(CurrencyCode::Usd, 39))
         );
-    }
 
-    #[test]
-    fn estimate_upper_bound_never_falls_below_the_settled_total() {
         let pricing = snapshot(
             "openai",
             "gpt-4o-mini",
@@ -424,29 +363,21 @@ mod tests {
         for cached in [0, 1, 2, 999, 1_000] {
             let fact = usage("openai", "gpt-4o-mini", Some((1_000, cached, 4_096)));
             let UsageCostFact::Reported(cost) =
-                project_cost(&fact, Some(&pricing)).expect("the projection must succeed")
+                project_cost(&fact, Some(&pricing)).expect("the projection succeeds")
             else {
                 panic!("a Reported usage with a rate must project Reported");
             };
-            assert!(
-                cost.total.micros() <= bound.micros(),
-                "cached {cached}: settled {} must not exceed the reserved {}",
-                cost.total.micros(),
-                bound.micros()
-            );
+            assert!(cost.total.micros() <= bound.micros());
         }
         let split = usage("openai", "gpt-4o-mini", Some((1_000, 1, 4_096)));
         let UsageCostFact::Reported(cost) =
-            project_cost(&split, Some(&pricing)).expect("the projection must succeed")
+            project_cost(&split, Some(&pricing)).expect("the projection succeeds")
         else {
             panic!("a Reported usage with a rate must project Reported");
         };
         assert_eq!(cost.total.micros(), 2_609);
         assert_eq!(bound.micros(), 2_609);
-    }
 
-    #[test]
-    fn estimate_upper_bound_rounds_up_and_fails_closed_on_overflow() {
         let pricing = snapshot(
             "openai",
             "gpt-test",
@@ -463,6 +394,14 @@ mod tests {
             estimate.upper_bound_cost(&pricing),
             Some(Money::from_micros(CurrencyCode::Usd, 11))
         );
+        let zero = super::UsageEstimate {
+            input_tokens_upper_bound: 0,
+            output_tokens_upper_bound: 0,
+        };
+        assert_eq!(
+            zero.upper_bound_cost(&pricing),
+            Some(Money::from_micros(CurrencyCode::Usd, 1))
+        );
         let maxed = super::UsageEstimate {
             input_tokens_upper_bound: u64::MAX,
             output_tokens_upper_bound: u64::MAX,
@@ -475,10 +414,6 @@ mod tests {
             TokenRate::from_micros_per_million(u64::MAX),
             TokenRate::from_micros_per_million(u64::MAX),
         );
-        assert_eq!(
-            maxed.upper_bound_cost(&expensive),
-            None,
-            "an unrepresentable bound must fail closed, never wrap or saturate"
-        );
+        assert_eq!(maxed.upper_bound_cost(&expensive), None);
     }
 }

@@ -1448,10 +1448,7 @@ mod tests {
         mailbox.push(send_command("new", new_token), 1);
         mailbox.complete(old.lane, old.epoch);
         assert_eq!(mailbox.pending[1].load(Ordering::SeqCst), 1);
-    }
-    #[test]
-    fn inflight_input_demand_wipe_invalidates_the_submitted_draft_disposition() {
-        let mailbox = Mailbox::default();
+
         let submitted = mailbox.draft_token();
         assert!(mailbox.push(send_command("same body", submitted), 1));
         let inflight = mailbox.pop().expect("send is in flight");
@@ -1564,19 +1561,13 @@ mod tests {
             assert!(!ja.notice.contains("provider response lost"));
             assert!(!en.notice.contains("provider response lost"));
         }
-    }
 
-    #[test]
-    fn a_technical_chat_failure_does_not_advise_an_immediate_resend() {
         let (ja, ja_failed) = chat_failure_notice(true, ChatDeliveryPhase::OutcomeUnknown);
         let (en, en_failed) = chat_failure_notice(false, ChatDeliveryPhase::OutcomeUnknown);
         assert!(ja_failed && en_failed);
         assert!(ja.contains("再送せず"));
         assert!(en.contains("do not resend"));
-    }
 
-    #[test]
-    fn a_history_refresh_failure_is_a_nonfatal_no_resend_notice() {
         let output = chat_output(
             true,
             ChatSendReport::ReplyShownHistoryRefreshFailed {
@@ -1595,21 +1586,13 @@ mod tests {
         );
         assert!(english.notice.contains("reply is shown"));
         assert!(english.notice.contains("Do not send the message again"));
-    }
 
-    #[test]
-    fn chat_draft_disposition_distinguishes_pre_submit_and_consumed_outcomes() {
         assert!(!chat_output(true, report(0)).consume_sent_draft);
         assert!(!chat_output(true, report(1)).consume_sent_draft);
         assert!(chat_output(true, report(4)).consume_sent_draft);
         assert!(chat_output(true, ChatSendReport::Completed).consume_sent_draft);
         assert!(chat_output(true, report(6)).consume_sent_draft);
-    }
-
-    #[test]
-    fn cancelled_stream_is_not_styled_as_a_failure() {
-        let output = chat_output(false, report(7));
-        assert!(!output.failed);
+        assert!(!chat_output(false, report(7)).failed);
     }
 
     #[test]

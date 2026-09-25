@@ -569,13 +569,9 @@ impl CredentialErasureRepository for Store {
     ) -> impl std::future::Future<
         Output = Result<CredentialErasureOutcome, CredentialTechnicalError>,
     > + Send {
-        #[cfg(any(test, feature = "test-support"))]
-        let parks = Arc::clone(&self.test_parks);
         let conn = Arc::clone(&self.conn);
         let target = target.to_owned();
         async move {
-            #[cfg(any(test, feature = "test-support"))]
-            parks.erasure_mutation.pause_if_armed().await;
             run_blocking(move || {
                 let mut guard = lock_shared(&conn);
                 let tx = guard
@@ -644,14 +640,6 @@ impl CredentialErasureRepository for Store {
     }
 
     fn before_device_auth_file_erase(&self) -> impl std::future::Future<Output = ()> + Send {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let parks = Arc::clone(&self.test_parks);
-            async move {
-                parks.device_auth_file.pause_if_armed().await;
-            }
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
         std::future::ready(())
     }
 }

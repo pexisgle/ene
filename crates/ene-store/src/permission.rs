@@ -262,13 +262,9 @@ impl PermissionErasureRepository for Store {
         target: &str,
     ) -> impl std::future::Future<Output = Result<LocalErasurePass, PermissionTechnicalError>> + Send
     {
-        #[cfg(any(test, feature = "test-support"))]
-        let parks = Arc::clone(&self.test_parks);
         let conn = Arc::clone(&self.conn);
         let target = target.to_owned();
         async move {
-            #[cfg(any(test, feature = "test-support"))]
-            parks.erasure_mutation.pause_if_armed().await;
             run_blocking(move || {
                 let mut guard = lock_shared(&conn);
                 let tx = guard

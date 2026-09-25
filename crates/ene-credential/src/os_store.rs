@@ -148,41 +148,27 @@ impl CredentialStore for OsCredentialStore {
 
 #[cfg(test)]
 mod tests {
-    use super::service_name;
+    use super::{OsCredentialStore, service_name};
     use crate::registry::CredentialRef;
+    use crate::secret::CredentialStore as _;
 
     #[test]
-    fn the_item_name_carries_the_version() {
+    fn item_names_and_activation_are_scoped() {
         let cred = CredentialRef::new("openai", "main").expect("valid ref");
         assert_eq!(service_name("ene", &cred, 1), "ene/openai/main/v1");
         assert_ne!(service_name("ene", &cred, 1), service_name("ene", &cred, 2));
-    }
-
-    #[test]
-    fn the_namespace_separates_installations() {
-        let cred = CredentialRef::new("openai", "main").expect("valid ref");
         assert_ne!(
             service_name("ene", &cred, 1),
             service_name("ene-other", &cred, 1)
         );
-    }
-
-    #[test]
-    fn a_read_without_an_active_version_is_unavailable() {
-        use super::OsCredentialStore;
-        use crate::secret::CredentialStore as _;
 
         let store = OsCredentialStore::new("ene-test-never-written");
-        let cred = CredentialRef::new("openai", "main").expect("valid ref");
         let read = store.with_bearer(&cred, |bearer| bearer.to_string());
         assert!(read.is_err(), "no active version means no bearer");
     }
 
     #[test]
     fn the_real_os_store_round_trips_when_available() {
-        use super::OsCredentialStore;
-        use crate::secret::CredentialStore as _;
-
         let namespace = format!("ene-probe-{}", ene_primitive::RawId::new().as_uuid());
         let store = OsCredentialStore::new(namespace);
         let cred = CredentialRef::new("probe", "round-trip").expect("valid ref");

@@ -1471,19 +1471,6 @@ impl Store {
         &self,
         operations: Vec<DeletionOperationId>,
     ) -> Result<HostTransientArrivalOutcome, PreservationTechnicalError> {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            self.test_parks
-                .host_transient_arrival_attempts
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let sticky = self
-                .test_parks
-                .fail_host_transient_arrival_sticky
-                .load(std::sync::atomic::Ordering::SeqCst);
-            if sticky {
-                return Err(PreservationTechnicalError::StorageUnavailable);
-            }
-        }
         if operations.len() as u32 > HOST_TRANSIENT_ARRIVAL_PAGE {
             return Err(PreservationTechnicalError::InvalidLimit);
         }
@@ -3067,96 +3054,6 @@ impl PreservationRepository for Store {
             validate(&tx, &id)?;
             tx.commit().map_err(storage)?;
             Ok(DeletionFinalizationOutcome::Completed)
-        })
-        .await
-    }
-}
-
-#[cfg(feature = "test-support")]
-impl Store {
-    #[doc(hidden)]
-    pub async fn wipe_protected_material_for_tests(
-        &self,
-        operation: DeletionOperationId,
-    ) -> Result<(), PreservationTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(storage)?;
-            let id = encode_id(operation.as_raw());
-            validate(&tx, &id)?;
-            tx.execute(
-                "UPDATE deletion_operation SET phase='finalizing' WHERE operation_id=?1",
-                [&id],
-            )
-            .map_err(storage)?;
-            tx.execute(
-                "UPDATE deletion_participant SET state='verified',hold_class=NULL,remainder_count=0,reported_at=?2 WHERE operation_id=?1",
-                params![id, WallClockWithTz::now().to_rfc3339()],
-            )
-            .map_err(storage)?;
-            tx.execute(
-                "DELETE FROM deletion_search_material WHERE operation_id=?1",
-                [&id],
-            )
-            .map_err(storage)?;
-            validate(&tx, &id)?;
-            tx.commit().map_err(storage)?;
-            Ok(())
-        })
-        .await
-    }
-
-    #[doc(hidden)]
-    pub async fn hold_generation_exhausted_for_tests(
-        &self,
-        operation: DeletionOperationId,
-    ) -> Result<(), PreservationTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(storage)?;
-            let id = encode_id(operation.as_raw());
-            validate(&tx, &id)?;
-            let sweep: i64 = tx
-                .query_row(
-                    "SELECT sweep FROM deletion_operation WHERE operation_id=?1",
-                    [&id],
-                    |row| row.get(0),
-                )
-                .map_err(storage)?;
-            tx.execute(
-                "UPDATE erasure_condition SET sweep=?2 WHERE operation_id=?1 AND sweep=?3",
-                params![id, i64::MAX, sweep],
-            )
-            .map_err(storage)?;
-            tx.execute(
-                "UPDATE erasure_condition_source SET sweep=?2 WHERE operation_id=?1 AND sweep=?3",
-                params![id, i64::MAX, sweep],
-            )
-            .map_err(storage)?;
-            tx.execute(
-                "UPDATE deletion_participant SET sweep=?2 WHERE operation_id=?1 AND sweep=?3",
-                params![id, i64::MAX, sweep],
-            )
-            .map_err(storage)?;
-            tx.execute(
-                "UPDATE deletion_reconciliation SET sweep=?2 WHERE operation_id=?1 AND sweep=?3",
-                params![id, i64::MAX, sweep],
-            )
-            .map_err(storage)?;
-            tx.execute(
-                "UPDATE deletion_operation SET sweep=?2,phase='held',hold_reason='generation_exhausted' WHERE operation_id=?1",
-                params![id, i64::MAX],
-            )
-            .map_err(storage)?;
-            validate(&tx, &id)?;
-            tx.commit().map_err(storage)?;
-            Ok(())
         })
         .await
     }

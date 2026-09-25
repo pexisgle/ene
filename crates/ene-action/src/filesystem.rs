@@ -1660,30 +1660,31 @@ mod tests {
     }
 
     #[test]
-    fn debug_redacts_read_output() {
-        let effect = super::ObservedEffect {
-            certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
-            grounds: crate::attempt::EffectGrounds::ObservedAtTarget,
-            output: Some(ActionOutput::Bytes(b"secret file body".to_vec())),
-        };
-        let rendered = format!("{effect:?}");
-        assert!(!rendered.contains("secret file body"));
-        assert!(rendered.contains("bytes redacted"));
-    }
-
-    #[test]
-    fn debug_redacts_listing_names() {
-        let effect = super::ObservedEffect {
-            certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
-            grounds: crate::attempt::EffectGrounds::ObservedAtTarget,
-            output: Some(ActionOutput::Listing(vec![ListEntry {
-                name: String::from("private-notes.md"),
-                kind: ListEntryKind::File,
-            }])),
-        };
-        let rendered = format!("{effect:?}");
-        assert!(!rendered.contains("private-notes.md"));
-        assert!(rendered.contains("entries redacted"));
+    fn debug_redacts_output_values() {
+        for (output, secret, marker) in [
+            (
+                ActionOutput::Bytes(b"secret file body".to_vec()),
+                "secret file body",
+                "bytes redacted",
+            ),
+            (
+                ActionOutput::Listing(vec![ListEntry {
+                    name: String::from("private-notes.md"),
+                    kind: ListEntryKind::File,
+                }]),
+                "private-notes.md",
+                "entries redacted",
+            ),
+        ] {
+            let effect = super::ObservedEffect {
+                certainty: crate::attempt::ActionCertainty::ConfirmedSuccess,
+                grounds: crate::attempt::EffectGrounds::ObservedAtTarget,
+                output: Some(output),
+            };
+            let rendered = format!("{effect:?}");
+            assert!(!rendered.contains(secret));
+            assert!(rendered.contains(marker));
+        }
     }
 
     #[test]

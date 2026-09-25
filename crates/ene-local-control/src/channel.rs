@@ -310,30 +310,46 @@ pub use platform::{ChildHandles, GuiChannel, HostChannel};
 
 #[cfg(test)]
 mod tests {
+    use core::fmt::Debug;
+
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+
     use super::{MAX_CONTROL_FRAME_BYTES, encode_frame, read_frame, write_frame};
-    use crate::ToConfirmation;
+    use crate::{ControlOp, FromConfirmation, RedactedSecret, ToConfirmation};
 
-    #[test]
-    fn an_oversize_frame_is_refused() {
-        let huge = "x".repeat(MAX_CONTROL_FRAME_BYTES as usize + 1);
-        assert!(encode_frame(&huge).is_err());
-    }
-
-    #[test]
-    fn frames_round_trip() {
+    fn assert_round_trip<T>(frame: T)
+    where
+        T: Serialize + DeserializeOwned + PartialEq + Debug,
+    {
         let mut buffer = Vec::new();
-        let frame = ToConfirmation::SessionComplete {
-            session_id: uuid::Uuid::nil(),
-            nonce: crate::RedactedSecret::new("n"),
-        };
         write_frame(&mut buffer, &frame).expect("encode");
         let mut cursor = std::io::Cursor::new(buffer);
-        let decoded: Option<ToConfirmation> = read_frame(&mut cursor).expect("decode");
+        let decoded: Option<T> = read_frame(&mut cursor).expect("decode");
         assert_eq!(decoded, Some(frame));
     }
 
     #[test]
-    fn a_truncated_frame_ends_the_channel() {
+    fn frames_round_trip_and_reject_oversize_or_truncated_input() {
+        assert_round_trip(FromConfirmation::ConfirmationChallenge {
+            session_id: uuid::Uuid::nil(),
+            op: ControlOp::DeviceApprove,
+            target: String::from("device-1"),
+            premise_generation: 7,
+            nonce: RedactedSecret::new("challenge-nonce"),
+        });
+        assert_round_trip(ToConfirmation::SessionComplete {
+            session_id: uuid::Uuid::nil(),
+            nonce: RedactedSecret::new("completion-nonce"),
+        });
+
+        let huge = "x".repeat(MAX_CONTROL_FRAME_BYTES as usize + 1);
+        assert!(encode_frame(&huge).is_err());
+        let oversize_prefix = (MAX_CONTROL_FRAME_BYTES + 1).to_be_bytes().to_vec();
+        let mut oversize_cursor = std::io::Cursor::new(oversize_prefix);
+        let decoded: Result<Option<ToConfirmation>, _> = read_frame(&mut oversize_cursor);
+        assert!(matches!(decoded, Ok(None)));
+
         let mut cursor = std::io::Cursor::new(vec![0_u8, 0, 0, 8, b'x']);
         let decoded: Result<Option<ToConfirmation>, _> = read_frame(&mut cursor);
         assert!(

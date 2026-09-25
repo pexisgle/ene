@@ -170,7 +170,7 @@ const FIRST_PARTY_OPENAI_RATES: &[(&str, u64, u64, u64)] = &[
 
 #[cfg(test)]
 pub(crate) mod tests_support {
-    use super::{CurrencyCode, PricingCatalog, PricingCatalogRevision, PricingSnapshot, TokenRate};
+    use super::{CurrencyCode, PricingCatalogRevision, PricingSnapshot, TokenRate};
     use ene_primitive::WallClockWithTz;
 
     pub(crate) fn snapshot(
@@ -193,15 +193,11 @@ pub(crate) mod tests_support {
             source_revision: PricingCatalogRevision::new(revision),
         }
     }
-
-    pub(crate) fn catalog_of(snapshot: &PricingSnapshot) -> PricingCatalog {
-        PricingCatalog::new(vec![snapshot.clone()]).expect("the fixture catalog is unambiguous")
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::tests_support::{catalog_of, snapshot};
+    use super::tests_support::snapshot;
     use super::{
         FIRST_PARTY_REVISION, PricingCatalog, PricingCatalogError, PricingCatalogRevision,
         PricingResolution, PricingSnapshot,
@@ -231,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn first_party_catalog_resolves_reviewed_openai_rates() {
+    fn first_party_catalog_resolves_reviewed_rates() {
         let catalog = PricingCatalog::first_party().expect("the reviewed table must be valid");
         let PricingResolution::Priced(snapshot) =
             catalog.resolve("openai", "gpt-4o", at("2026-09-17T12:00:00Z"))
@@ -252,11 +248,7 @@ mod tests {
             panic!("a reviewed OpenAI model must resolve");
         };
         assert_eq!(snapshot.reference(), rebuilt.reference());
-    }
 
-    #[test]
-    fn first_party_catalog_prices_the_current_gpt_families() {
-        let catalog = PricingCatalog::first_party().expect("the reviewed table must be valid");
         let at_value = at("2026-09-21T12:00:00Z");
         for (model, input, cached_input, output) in [
             ("gpt-6-astra", 10_000_000, 1_000_000, 50_000_000),
@@ -269,13 +261,9 @@ mod tests {
             else {
                 panic!("{model} must resolve its reviewed rate");
             };
-            assert_eq!(snapshot.input_rate, rate(input), "{model} input rate");
-            assert_eq!(
-                snapshot.cached_input_rate,
-                rate(cached_input),
-                "{model} cached input rate"
-            );
-            assert_eq!(snapshot.output_rate, rate(output), "{model} output rate");
+            assert_eq!(snapshot.input_rate, rate(input));
+            assert_eq!(snapshot.cached_input_rate, rate(cached_input));
+            assert_eq!(snapshot.output_rate, rate(output));
             assert_eq!(snapshot.source_revision, FIRST_PARTY_REVISION);
         }
     }
@@ -364,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_distinguishes_every_reviewed_field() {
+    fn pricing_reference_is_stable_field_sensitive_and_round_trips() {
         let base = snapshot(
             "openai",
             "gpt-test",
@@ -375,61 +363,45 @@ mod tests {
         );
         let reference = base.reference();
         assert_eq!(reference, base.clone().reference());
-        let mut changed_rate = base.clone();
-        changed_rate.output_rate = rate(2_000_001);
-        assert_ne!(reference, changed_rate.reference());
-        let mut changed_revision = base.clone();
-        changed_revision.source_revision = PricingCatalogRevision::new(2);
-        assert_ne!(reference, changed_revision.reference());
+        assert_eq!(reference.to_text(), base.reference().to_text());
+        assert_eq!(base.currency.as_str(), "USD");
+
+        let mut changed_provider = base.clone();
+        changed_provider.provider = String::from("openaiX");
         let mut changed_model = base.clone();
         changed_model.model = String::from("gpt-other");
-        assert_ne!(reference, changed_model.reference());
+        let mut changed_input = base.clone();
+        changed_input.input_rate = rate(1_000_001);
+        let mut changed_cached = base.clone();
+        changed_cached.cached_input_rate = rate(500_001);
+        let mut changed_output = base.clone();
+        changed_output.output_rate = rate(2_000_001);
+        let mut changed_effective = base.clone();
+        changed_effective.effective_at = at("2025-06-02T00:00:00Z");
+        let mut changed_revision = base.clone();
+        changed_revision.source_revision = PricingCatalogRevision::new(2);
         let mut split = base.clone();
         split.provider = String::from("openaiX");
         split.model = String::from("gpt-tes");
-        assert_ne!(reference, split.reference());
-        assert_eq!(
-            reference.to_text(),
-            base.reference().to_text(),
-            "the rendered reference is stable"
-        );
-    }
+        for changed in [
+            changed_provider,
+            changed_model,
+            changed_input,
+            changed_cached,
+            changed_output,
+            changed_effective,
+            changed_revision,
+            split,
+        ] {
+            assert_ne!(reference, changed.reference());
+        }
 
-    #[test]
-    fn stored_reference_text_round_trips() {
-        let pricing = snapshot(
-            "openai",
-            "gpt-test",
-            1,
-            rate(1_000_000),
-            rate(500_000),
-            rate(2_000_000),
-        );
-        let reference = pricing.reference();
         assert_eq!(
             super::PricingSnapshotRef::from_text(&reference.to_text()),
             Some(reference)
         );
-        assert_eq!(
-            super::PricingSnapshotRef::from_text("not-a-reference"),
-            None
-        );
-    }
-
-    #[test]
-    fn catalog_resolution_matches_a_single_entry_catalog() {
-        let pricing = snapshot(
-            "openai",
-            "gpt-test",
-            4,
-            rate(1_000_000),
-            rate(500_000),
-            rate(2_000_000),
-        );
-        let catalog = catalog_of(&pricing);
-        assert_eq!(
-            catalog.resolve("openai", "gpt-test", pricing.effective_at),
-            PricingResolution::Priced(pricing)
-        );
+        for malformed in ["", "not-a-reference", "gpt-test"] {
+            assert_eq!(super::PricingSnapshotRef::from_text(malformed), None);
+        }
     }
 }

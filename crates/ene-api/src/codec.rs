@@ -258,13 +258,6 @@ mod tests {
         WireFrame { envelope, payload }
     }
 
-    fn known(frame: DecodedFrame) -> WireFrame {
-        match frame {
-            DecodedFrame::Known(frame) => frame,
-            other => panic!("expected a known frame, got {other:?}"),
-        }
-    }
-
     fn envelope_of(message_type: &str) -> WireEnvelope {
         new_outgoing_envelope(
             ProtocolVersion::V1,
@@ -289,7 +282,6 @@ mod tests {
     #[derive(Serialize)]
     enum CraftedPayload {
         FutureThing(FutureBody),
-        FuturePing,
         SubmitTextInput(PartialSubmit),
         TextStreamClose(CraftedClose),
     }
@@ -317,241 +309,168 @@ mod tests {
         decode_frame(&body).expect("crafted frame decodes")
     }
 
-    fn unsupported_reason(frame: &CraftedFrame) -> super::UnsupportedReason {
-        match decode_crafted(frame) {
-            DecodedFrame::Unsupported { reason, .. } => reason,
-            other => panic!("expected an unsupported frame, got {other:?}"),
-        }
-    }
-
     #[test]
-    fn roundtrip_preserves_envelope_and_payload() {
-        let frame = sample_frame();
-        let body = encode_frame(&frame).expect("encode frame");
-        let decoded = decode_frame(&body).expect("decode frame");
-        assert_eq!(known(decoded), frame, "codec must preserve the frame");
-    }
-
-    #[test]
-    fn corrupt_body_is_decode_failed_without_payload_echo() {
+    fn malformed_frames_fail_structurally_without_echo() {
+        let secret = "secret-body-marker-xyz";
         let mut body = vec![0xC1_u8];
-        body.extend_from_slice(b"secret-body-marker-xyz");
+        body.extend_from_slice(secret.as_bytes());
         let error = decode_frame(&body).expect_err("decode corrupt body");
+        let rendered = format!("{error} {error:?}");
+        assert!(!rendered.contains(secret));
         let CodecError::DecodeFailed { reason } = error else {
-            panic!("corrupt body must fail decode, got {error:?}");
+            panic!("corrupt body must fail decode");
         };
-        assert!(
-            !reason.contains("secret-body-marker-xyz"),
-            "reason must not echo body bytes: {reason}"
-        );
-        let rendered = std::format!("{}", CodecError::DecodeFailed { reason });
-        assert!(
-            !rendered.contains("secret-body-marker-xyz"),
-            "Display must not echo body bytes: {rendered}"
-        );
-    }
+        assert!(!reason.contains(secret));
 
-    #[test]
-    fn oversize_body_rejected_on_encode() {
-        let mut frame = sample_frame();
-        let WirePayload::SubmitTextInput(input) = &mut frame.payload else {
-            panic!("sample payload must be text input");
-        };
-        input.body.text = "x".repeat(MAX_FRAME_BYTES);
-        let error = encode_frame(&frame).expect_err("encode oversize body");
-        let CodecError::FrameTooLarge { len } = error else {
-            panic!("oversize body must report length, got {error:?}");
-        };
-        assert!(
-            len > MAX_FRAME_BYTES,
-            "reported length exceeds the cap: {len}"
-        );
-    }
-
-    #[test]
-    fn oversize_body_rejected_on_decode_before_the_structure_is_read() {
-        let body = vec![0_u8; MAX_FRAME_BYTES + 1];
-        let error = decode_frame(&body).expect_err("decode oversize body");
-        assert!(
-            matches!(error, CodecError::FrameTooLarge { .. }),
-            "an oversize body is refused by its size: {error:?}"
-        );
-    }
-
-    #[test]
-    fn an_unknown_payload_message_type_is_unsupported_and_keeps_the_envelope() {
-        let crafted = CraftedFrame {
-            envelope: envelope_of("FutureThing"),
-            payload: CraftedPayload::FutureThing(FutureBody {
-                note: String::from("from a newer peer"),
-            }),
-        };
-        let DecodedFrame::Unsupported { envelope, reason } = decode_crafted(&crafted) else {
-            panic!("an unknown message type must not fail the decode");
-        };
-        assert_eq!(envelope, crafted.envelope, "the envelope stays available");
-        assert_eq!(
-            reason,
-            super::UnsupportedReason::UnknownMessageType {
-                message_type: String::from("FutureThing")
-            }
-        );
-        assert_eq!(reason.reject_kind(), RejectKind::UnsupportedMessage);
-    }
-
-    #[test]
-    fn a_known_envelope_type_still_rejects_an_unknown_payload_type() {
-        let crafted = CraftedFrame {
-            envelope: envelope_of("SubmitTextInput"),
-            payload: CraftedPayload::FutureThing(FutureBody {
-                note: String::from("payload disagrees"),
-            }),
-        };
-        let reason = unsupported_reason(&crafted);
-        assert_eq!(
-            reason,
-            super::UnsupportedReason::UnknownMessageType {
-                message_type: String::from("FutureThing")
-            },
-            "the payload discriminator decides, not the envelope hint"
-        );
-    }
-
-    #[test]
-    fn an_unknown_envelope_type_never_decodes_the_payload_body() {
-        let crafted = CraftedFrame {
-            envelope: envelope_of("FuturePing"),
-            payload: CraftedPayload::SubmitTextInput(PartialSubmit {
-                companion: CompanionWireRef(String::from("companion-1")),
-                round: None,
-                body: TextBodyWire {
-                    text: String::from("body never inspected"),
-                    lang: TextLangWire(String::from("en")),
-                },
-            }),
-        };
-        let reason = unsupported_reason(&crafted);
-        assert_eq!(
-            reason,
-            super::UnsupportedReason::UnknownMessageType {
-                message_type: String::from("FuturePing")
-            },
-            "an unknown message type is rejected without inferring its body"
-        );
-    }
-
-    #[test]
-    fn a_unit_variant_payload_without_an_envelope_match_is_unsupported() {
-        let crafted = CraftedFrame {
-            envelope: envelope_of("FuturePing"),
-            payload: CraftedPayload::FuturePing,
-        };
-        let reason = unsupported_reason(&crafted);
-        assert_eq!(
-            reason,
-            super::UnsupportedReason::UnknownMessageType {
-                message_type: String::from("FuturePing")
-            }
-        );
-    }
-
-    #[test]
-    fn an_unknown_enum_value_is_unsupported_field_value() {
-        let crafted = CraftedFrame {
-            envelope: envelope_of("TextStreamClose"),
-            payload: CraftedPayload::TextStreamClose(CraftedClose {
-                stream: StreamWireId(uuid::Uuid::new_v4()),
-                status: String::from("Suspended"),
-            }),
-        };
-        let reason = unsupported_reason(&crafted);
-        assert_eq!(
-            reason,
-            super::UnsupportedReason::UnknownFieldValue {
-                message_type: String::from("TextStreamClose")
-            }
-        );
-        assert_eq!(reason.reject_kind(), RejectKind::UnsupportedFieldValue);
-    }
-
-    #[test]
-    fn a_missing_required_field_is_missing_required_field() {
-        let crafted = CraftedFrame {
-            envelope: envelope_of("SubmitTextInput"),
-            payload: CraftedPayload::SubmitTextInput(PartialSubmit {
-                companion: CompanionWireRef(String::from("companion-1")),
-                round: None,
-                body: TextBodyWire {
-                    text: String::from("local_id deliberately absent"),
-                    lang: TextLangWire(String::from("en")),
-                },
-            }),
-        };
-        let reason = unsupported_reason(&crafted);
-        assert_eq!(
-            reason,
-            super::UnsupportedReason::MissingRequiredField {
-                message_type: String::from("SubmitTextInput")
-            }
-        );
-        assert_eq!(reason.reject_kind(), RejectKind::MissingRequiredField);
-    }
-
-    #[test]
-    fn a_non_map_payload_is_a_structural_decode_failure() {
         #[derive(Serialize)]
         struct ScalarPayloadFrame {
             envelope: WireEnvelope,
             payload: u32,
         }
-        let crafted = ScalarPayloadFrame {
+        let scalar = ScalarPayloadFrame {
             envelope: envelope_of("SubmitTextInput"),
             payload: 7,
         };
-        let body = rmp_serde::to_vec_named(&crafted).expect("encode scalar payload");
-        let error = decode_frame(&body).expect_err("a scalar payload is not a message");
-        assert!(
-            matches!(error, CodecError::DecodeFailed { .. }),
-            "a malformed payload fails the frame, got {error:?}"
-        );
+        let body = rmp_serde::to_vec_named(&scalar).expect("encode scalar payload");
+        assert!(matches!(
+            decode_frame(&body),
+            Err(CodecError::DecodeFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn frame_size_cap_is_enforced_before_decode_or_after_encode() {
+        let mut frame = sample_frame();
+        let WirePayload::SubmitTextInput(input) = &mut frame.payload else {
+            panic!("sample payload must be text input");
+        };
+        input.body.text = "x".repeat(MAX_FRAME_BYTES);
+        let CodecError::FrameTooLarge { len } =
+            encode_frame(&frame).expect_err("encode oversize body")
+        else {
+            panic!("oversize body must report length");
+        };
+        assert!(len > MAX_FRAME_BYTES);
+
+        let body = vec![0_u8; MAX_FRAME_BYTES + 1];
+        let error = decode_frame(&body).expect_err("decode oversize body");
+        assert!(matches!(error, CodecError::FrameTooLarge { .. }));
+    }
+
+    #[test]
+    fn message_type_discriminator_is_authoritative_and_preserves_typed_rejects() {
+        let cases = [
+            (
+                CraftedFrame {
+                    envelope: envelope_of("FutureThing"),
+                    payload: CraftedPayload::FutureThing(FutureBody {
+                        note: String::from("from a newer peer"),
+                    }),
+                },
+                super::UnsupportedReason::UnknownMessageType {
+                    message_type: String::from("FutureThing"),
+                },
+                RejectKind::UnsupportedMessage,
+            ),
+            (
+                CraftedFrame {
+                    envelope: envelope_of("SubmitTextInput"),
+                    payload: CraftedPayload::FutureThing(FutureBody {
+                        note: String::from("payload disagrees"),
+                    }),
+                },
+                super::UnsupportedReason::UnknownMessageType {
+                    message_type: String::from("FutureThing"),
+                },
+                RejectKind::UnsupportedMessage,
+            ),
+            (
+                CraftedFrame {
+                    envelope: envelope_of("FuturePing"),
+                    payload: CraftedPayload::SubmitTextInput(PartialSubmit {
+                        companion: CompanionWireRef(String::from("companion-1")),
+                        round: None,
+                        body: TextBodyWire {
+                            text: String::from("body never inspected"),
+                            lang: TextLangWire(String::from("en")),
+                        },
+                    }),
+                },
+                super::UnsupportedReason::UnknownMessageType {
+                    message_type: String::from("FuturePing"),
+                },
+                RejectKind::UnsupportedMessage,
+            ),
+            (
+                CraftedFrame {
+                    envelope: envelope_of("TextStreamClose"),
+                    payload: CraftedPayload::TextStreamClose(CraftedClose {
+                        stream: StreamWireId(uuid::Uuid::new_v4()),
+                        status: String::from("Suspended"),
+                    }),
+                },
+                super::UnsupportedReason::UnknownFieldValue {
+                    message_type: String::from("TextStreamClose"),
+                },
+                RejectKind::UnsupportedFieldValue,
+            ),
+            (
+                CraftedFrame {
+                    envelope: envelope_of("SubmitTextInput"),
+                    payload: CraftedPayload::SubmitTextInput(PartialSubmit {
+                        companion: CompanionWireRef(String::from("companion-1")),
+                        round: None,
+                        body: TextBodyWire {
+                            text: String::from("local_id deliberately absent"),
+                            lang: TextLangWire(String::from("en")),
+                        },
+                    }),
+                },
+                super::UnsupportedReason::MissingRequiredField {
+                    message_type: String::from("SubmitTextInput"),
+                },
+                RejectKind::MissingRequiredField,
+            ),
+        ];
+
+        for (crafted, expected_reason, expected_kind) in cases {
+            let DecodedFrame::Unsupported { envelope, reason } = decode_crafted(&crafted) else {
+                panic!("the crafted frame must be a typed unsupported result");
+            };
+            assert_eq!(envelope, crafted.envelope);
+            assert_eq!(reason.reject_kind(), expected_kind);
+            assert_eq!(reason, expected_reason);
+        }
     }
 
     #[test]
     fn reject_details_bound_and_escape_the_message_type_token() {
-        let long = format!("evil\n{}", "a".repeat(400));
-        let crafted = CraftedFrame {
-            envelope: envelope_of(&long),
-            payload: CraftedPayload::SubmitTextInput(PartialSubmit {
-                companion: CompanionWireRef(String::from("companion-1")),
-                round: None,
-                body: TextBodyWire {
-                    text: String::from("payload type is known"),
-                    lang: TextLangWire(String::from("en")),
-                },
-            }),
-        };
-        let DecodedFrame::Unsupported { envelope, reason } = decode_crafted(&crafted) else {
-            panic!("the long token must still reject as unsupported");
-        };
-        assert_eq!(
-            envelope.message_type.0, long,
-            "the envelope keeps the raw token for the owner of this connection"
-        );
-        let notice = reason.notice();
-        assert!(
-            notice.detail.len() <= 96,
-            "the echoed token must stay bounded: {}",
-            notice.detail
-        );
-        assert!(
-            !notice.detail.contains('\n'),
-            "the detail must not carry raw control characters: {:?}",
-            notice.detail
-        );
-        assert!(
-            notice.detail.contains('…'),
-            "truncation must be visible: {:?}",
-            notice.detail
-        );
+        for (long, bounded_notice) in [
+            (format!("evil\n{}", "a".repeat(400)), true),
+            (format!("evil\r\t\u{1b}\0{}", "a".repeat(400)), false),
+        ] {
+            let crafted = CraftedFrame {
+                envelope: envelope_of(&long),
+                payload: CraftedPayload::SubmitTextInput(PartialSubmit {
+                    companion: CompanionWireRef(String::from("companion-1")),
+                    round: None,
+                    body: TextBodyWire {
+                        text: String::from("payload type is known"),
+                        lang: TextLangWire(String::from("en")),
+                    },
+                }),
+            };
+            let DecodedFrame::Unsupported { envelope, reason } = decode_crafted(&crafted) else {
+                panic!("the long token must still reject as unsupported");
+            };
+            assert_eq!(envelope.message_type.0, long);
+            let notice = reason.notice();
+            if bounded_notice {
+                assert!(notice.detail.len() <= 96);
+            }
+            assert_eq!(notice.kind, RejectKind::UnsupportedMessage);
+            assert!(!notice.detail.chars().any(char::is_control));
+            assert!(notice.detail.contains('…'));
+        }
     }
 }

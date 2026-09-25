@@ -208,14 +208,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_verified_pass_erases_the_protected_descriptor_copy() {
-        let (_dir, file, _path) = device_file();
+    async fn verified_not_current_and_correlation_passes_are_distinct() {
+        let (_verified_dir, file, _path) = device_file();
         let device = DeviceId(RawId::new());
         file.save_secret(&device, "phone target-label", "device-secret")
             .unwrap();
         let other = DeviceId(RawId::new());
         file.save_secret(&other, "laptop", "other-secret").unwrap();
-
         let repo = Arc::new(FakeRepo {
             outcome: Mutex::new(CredentialErasureOutcome::Applied {
                 erased: 2,
@@ -223,27 +222,19 @@ mod tests {
             }),
         });
         let participant = CredentialErasureParticipant::new(repo, Arc::new(file.clone()));
-        let condition = condition();
         let fact = participant
-            .demand_local_erasure(command(condition, local_scope("target-label")))
+            .demand_local_erasure(command(condition(), local_scope("target-label")))
             .await;
         assert_eq!(
             fact.status(),
             ene_preservation::ParticipantCompletionStatus::Verified
         );
-        assert_eq!(
-            fact.erased_count(),
-            3,
-            "two metadata rows plus one file entry"
-        );
+        assert_eq!(fact.erased_count(), 3);
         assert!(file.load_secret(&device).unwrap().is_none());
         assert!(file.load_secret(&other).unwrap().is_some());
         assert!(!format!("{fact:?}").contains("target-label"));
-    }
 
-    #[tokio::test]
-    async fn a_not_current_pass_never_touches_the_protected_file() {
-        let (_dir, file, _path) = device_file();
+        let (_not_current_dir, file, _path) = device_file();
         let device = DeviceId(RawId::new());
         file.save_secret(&device, "phone target-label", "device-secret")
             .unwrap();
@@ -259,11 +250,8 @@ mod tests {
             ene_preservation::ParticipantCompletionStatus::LocalComplete
         );
         assert!(file.load_secret(&device).unwrap().is_some());
-    }
 
-    #[tokio::test]
-    async fn a_correlation_only_demand_is_an_explicit_hold() {
-        let (_dir, file, _path) = device_file();
+        let (_correlation_dir, file, _path) = device_file();
         let repo = Arc::new(FakeRepo {
             outcome: Mutex::new(CredentialErasureOutcome::Applied {
                 erased: 0,

@@ -2895,8 +2895,6 @@ impl TaskRepository for Store {
         &self,
         premise: TaskAgentObservationPremise,
     ) -> Result<TaskAgentObservationId, TaskTechnicalError> {
-        #[cfg(any(test, feature = "test-support"))]
-        self.test_parks.observation_write.pause_if_armed().await;
         let conn = Arc::clone(&self.conn);
         run_blocking(move || record_task_agent_observation_sync(&conn, premise)).await
     }

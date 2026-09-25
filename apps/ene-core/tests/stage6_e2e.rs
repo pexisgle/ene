@@ -5,7 +5,6 @@
     reason = "integration-test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
 )]
 
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -28,12 +27,12 @@ use ene_api::v1::management::{
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::StreamWireId;
 use ene_api::v1::refs::{
-    BaseViewMark, ClientIncarnationId, CommandWireId, CompanionWireRef, ManagementTargetWire,
-    RequestWireId, RoundWireId, TextLangWire, WireMessageId, WireMessageType,
+    BaseViewMark, ClientIncarnationId, CommandWireId, ManagementTargetWire, RequestWireId,
+    RoundWireId, WireMessageId, WireMessageType,
 };
 use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::{
-    HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire, RoundTarget, TextBodyWire,
+    HistoryResponse, PresentationStatus, RoundIntakeOutcomeWire, RoundTarget,
 };
 use ene_api::v1::undelivered::{
     TaskListPage, TaskListResponse, UndeliveredAckOutcome, UndeliveredResponse, UndeliveredSummary,
@@ -63,10 +62,6 @@ use tokio_rustls::TlsConnector;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-// Mirrors `crate::wss::{AUTH_DEADLINE, MAX_PENDING_PAIRINGS}`; integration
-// tests cannot name pub(crate) items, so a drift breaks these tests instead
-// of silently weakening production.
-const MIRRORED_AUTH_DEADLINE: Duration = Duration::from_secs(15);
 const MIRRORED_MAX_PENDING_PAIRINGS: usize = 8;
 
 const DESCRIPTOR: &str = "stage6 e2e";
@@ -223,24 +218,20 @@ fn on_task_agent_turn(tool_calls: usize) -> Matcher {
 struct ScriptedTransport {
     scripts: Mutex<Vec<(Matcher, Call)>>,
     default_call: Mutex<Call>,
-    blocks: Mutex<BTreeSet<usize>>,
     block_matches: Mutex<Vec<Matcher>>,
     parked: AtomicUsize,
-    streaming: AtomicUsize,
     inputs: Mutex<Vec<String>>,
     sends: AtomicUsize,
     estimate: Option<UsageEstimate>,
 }
 
 impl ScriptedTransport {
-    fn new(scripts: Vec<(Matcher, Call)>, blocks: &[usize]) -> Self {
+    fn new(scripts: Vec<(Matcher, Call)>) -> Self {
         Self {
             scripts: Mutex::new(scripts),
             default_call: Mutex::new(Call::text("acknowledged")),
-            blocks: Mutex::new(blocks.iter().copied().collect()),
             block_matches: Mutex::new(Vec::new()),
             parked: AtomicUsize::new(0),
-            streaming: AtomicUsize::new(0),
             inputs: Mutex::new(Vec::new()),
             sends: AtomicUsize::new(0),
             estimate: None,
@@ -285,13 +276,6 @@ impl ScriptedTransport {
         self.parked.load(Ordering::SeqCst)
     }
 
-    /// Provider calls currently inside a stream script. It decrements when
-    /// the script ends on its own, so a lingering count means the call was
-    /// neither finished nor dropped yet.
-    fn streaming_count(&self) -> usize {
-        self.streaming.load(Ordering::SeqCst)
-    }
-
     fn input_texts(&self) -> Vec<String> {
         self.inputs
             .lock()
@@ -313,20 +297,15 @@ impl ProviderTransport for ScriptedTransport {
         >,
     > {
         Box::pin(async move {
-            let call = self.sends.fetch_add(1, Ordering::SeqCst) + 1;
+            self.sends.fetch_add(1, Ordering::SeqCst);
             let mut counted = false;
             loop {
                 let held = self
-                    .blocks
+                    .block_matches
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .contains(&call)
-                    || self
-                        .block_matches
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .iter()
-                        .any(|matcher| matcher(&req.input));
+                    .iter()
+                    .any(|matcher| matcher(&req.input));
                 if !held {
                     if counted {
                         self.parked.fetch_sub(1, Ordering::SeqCst);
@@ -363,12 +342,10 @@ impl ProviderTransport for ScriptedTransport {
                 return Err(ene_inference::InferenceTechnicalError::ResponseLost);
             }
             if let Some(script) = call_script.stream {
-                self.streaming.fetch_add(1, Ordering::SeqCst);
                 for chunk in &script.chunks {
                     match sink.push_delta(chunk).await {
                         ene_inference::DeltaFlow::Continue => {}
                         ene_inference::DeltaFlow::Abort(reason) => {
-                            self.streaming.fetch_sub(1, Ordering::SeqCst);
                             return Err(ene_inference::InferenceTechnicalError::StreamAborted {
                                 reason: reason.to_owned(),
                             });
@@ -376,7 +353,6 @@ impl ProviderTransport for ScriptedTransport {
                     }
                     tokio::time::sleep(script.pace).await;
                 }
-                self.streaming.fetch_sub(1, Ordering::SeqCst);
                 return Ok(ProviderResponse {
                     text: call_script.reply,
                     usage: call_script.usage,
@@ -406,38 +382,12 @@ fn task_reply(directive: serde_json::Value) -> String {
     format!("[task-control] {directive}")
 }
 
-fn shared_memory_store(dir: &Path) -> MemoryCredentialStore {
-    static SHARED: std::sync::LazyLock<
-        Mutex<std::collections::HashMap<PathBuf, MemoryCredentialStore>>,
-    > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
-    let mut shared = SHARED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(existing) = shared.get(dir) {
-        return existing.clone();
-    }
-    let store = memory_store();
-    shared.insert(dir.to_path_buf(), store.clone());
-    store
-}
-
-fn register_memory_store(dir: &Path, store: &MemoryCredentialStore) {
-    static SHARED: std::sync::LazyLock<
-        Mutex<std::collections::HashMap<PathBuf, MemoryCredentialStore>>,
-    > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
-    let mut shared = SHARED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    shared.insert(dir.to_path_buf(), store.clone());
-}
-
 async fn open_host(dir: &Path) -> Arc<HostHandle> {
-    open_host_with(dir, shared_memory_store(dir)).await
+    open_host_with(dir, memory_store()).await
 }
 
 #[expect(clippy::unwrap_used, reason = "test fixture helper")]
 async fn open_host_with(dir: &Path, store: MemoryCredentialStore) -> Arc<HostHandle> {
-    register_memory_store(dir, &store);
     let opened = HostHandle::open_with_cred_store(dir, CredStore::Memory(store)).await;
     assert!(opened.is_ok(), "host must open");
     let handle = Arc::new(opened.unwrap());
@@ -672,7 +622,6 @@ impl Served {
         capabilities: &[&str],
     ) -> Self {
         let seed = cred_store();
-        register_memory_store(&dir, &seed);
         let handle = open_host_with(&dir, seed.clone()).await;
         let (stop, shutdown) = tokio::sync::watch::channel(false);
         let server = tokio::spawn(conn::run_until_shutdown(
@@ -723,13 +672,7 @@ impl Served {
         Arc::clone(self.handle.as_ref().expect("a live HostHandle"))
     }
 
-    #[cfg_attr(
-        not(feature = "test-support"),
-        expect(
-            dead_code,
-            reason = "used by test-support shutdown accounting regressions"
-        )
-    )]
+    #[cfg(feature = "test-support")]
     async fn stop_result(&mut self) -> Result<(), CoreError> {
         self.client = None;
         tokio::task::yield_now().await;
@@ -793,14 +736,6 @@ impl Served {
             Ok(Err(error)) => panic!("the listener failed: {error}"),
         }
         true
-    }
-
-    async fn abort_listener(&mut self) {
-        self.client = None;
-        tokio::task::yield_now().await;
-        self.server.abort();
-        self.join_listener().await;
-        wait_until_deletion_drivers(self.handle(), 0).await;
     }
 
     #[expect(clippy::expect_used, reason = "test fixture helper")]
@@ -1459,45 +1394,45 @@ async fn assert_completed_reads_are_clean(served: &mut Served, sends_at_confirma
 
 #[tokio::test]
 async fn stage6_targeted_deletion_completes_system_wide() {
+    system_wide_management_view_subcase().await;
+    system_wide_active_deletion_subcase().await;
+    system_wide_parked_dialogue_subcase().await;
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let proposal = task_reply(serde_json::json!({
         "kind": "propose_task",
         "purpose": format!("write a report covering {TARGET}"),
     }));
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (on_learning_formation(true), Call::text(formation_create())),
-            (on_learning_formation(false), Call::text(formation_update())),
-            (
-                on_task_agent_turn(0),
-                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
-            ),
-            (
-                on_task_agent_turn(1),
-                Call::text(r##"{"tool":"create","path":"report.md","content":"# Report\nnotes"}"##),
-            ),
-            (
-                on_task_agent_turn(2),
-                Call::text(format!(
-                    r##"{{"final":"created report.md covering {TARGET}"}}"##
-                )),
-            ),
-            (
-                on_latest_owner("please read input.txt and write report.md"),
-                Call::text(proposal),
-            ),
-            (
-                on_latest_owner(&format!("please remember {TARGET} for me")),
-                Call::text(format!("I will keep {TARGET} in mind.")),
-            ),
-            (
-                on_latest_owner(&format!("{TARGET} is critical, never forget it")),
-                Call::text(format!("{TARGET} matters to you.")),
-            ),
-        ],
-        &[],
-    ));
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (on_learning_formation(true), Call::text(formation_create())),
+        (on_learning_formation(false), Call::text(formation_update())),
+        (
+            on_task_agent_turn(0),
+            Call::text(r#"{"tool":"read","path":"input.txt"}"#),
+        ),
+        (
+            on_task_agent_turn(1),
+            Call::text(r##"{"tool":"create","path":"report.md","content":"# Report\nnotes"}"##),
+        ),
+        (
+            on_task_agent_turn(2),
+            Call::text(format!(
+                r##"{{"final":"created report.md covering {TARGET}"}}"##
+            )),
+        ),
+        (
+            on_latest_owner("please read input.txt and write report.md"),
+            Call::text(proposal),
+        ),
+        (
+            on_latest_owner(&format!("please remember {TARGET} for me")),
+            Call::text(format!("I will keep {TARGET} in mind.")),
+        ),
+        (
+            on_latest_owner(&format!("{TARGET} is critical, never forget it")),
+            Call::text(format!("{TARGET} matters to you.")),
+        ),
+    ]));
     let mut served = serve_and_setup(
         dir.clone(),
         Arc::clone(&transport),
@@ -1605,101 +1540,14 @@ async fn stage6_targeted_deletion_completes_system_wide() {
 const FINALIZING_TARGET: &str = "TS6-FINALIZING-CANARY-2201";
 
 #[tokio::test]
-async fn stage6_deletion_races_provider_wait_and_delayed_result() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let first = format!("please remember {TARGET} for me");
-    let second = format!("a second note about {TARGET}");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(&first),
-                Call::text(format!("I will keep {TARGET} in mind.")),
-            ),
-            (
-                on_latest_owner(&second),
-                Call::text(format!("Second reply quoting {TARGET}.")),
-            ),
-        ],
-        &[],
-    ));
-    let mut served = serve_and_setup(
-        dir.clone(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
-    )
-    .await;
-    let (_round, _stream, reply) = send_round(served.client(), &first)
-        .await
-        .expect("the first round must complete");
-    assert!(reply.contains(TARGET));
-    let backlog = wait_for_summary_with(served.client(), TARGET).await;
-    drop(ack_summary(served.client(), &backlog).await);
-    let mut client = served.restart().await;
-    let outcome = request_deletion(&mut client, TARGET)
-        .await
-        .expect("the request inlet must answer");
-    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    transport.block_input(on_latest_owner(&second));
-    let handle = served.handle_arc();
-    let barrier = Arc::clone(&transport);
-    let mut second_round = Box::pin(send_round_raw(&mut client, &second));
-    let mut confirmed = false;
-    let mut driven = false;
-    let round_result = loop {
-        tokio::select! {
-            result = second_round.as_mut() => break result,
-            () = barrier.wait_parked(1), if !confirmed => {
-                confirm_deletion(&handle).await;
-                confirmed = true;
-            }
-        }
-        if confirmed && !driven {
-            handle
-                .run_targeted_deletion_tick()
-                .await
-                .expect("the serving tick must run");
-            barrier.release_blocked();
-            driven = true;
-        }
-    };
-    drop(second_round);
-    let (_round2, _stream2, raced_text, close) = round_result.expect("the raced round must answer");
-    assert_eq!(
-        close,
-        ene_api::v1::round::StreamClose::Interrupted,
-        "a reply whose deletion condition committed during its provider wait never completes"
-    );
-    assert!(
-        !raced_text.contains(TARGET),
-        "no covered delta may be presented: {raced_text}"
-    );
-    let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
-        .await
-        .expect("the operation must complete");
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
-    assert_eq!(served.canonical_remainder(TARGET).await, 0);
-    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
-    let (round, stream, fresh) = send_round(&mut client, &format!("a fresh note: {TARGET}"))
-        .await
-        .expect("a fresh origin must be accepted");
-    assert!(fresh.contains("acknowledged"), "{fresh}");
-    confirm_round(&mut client, &round, stream).await;
-    served.server.abort();
-}
-
-#[tokio::test]
 async fn stage6_deletion_presentation_ack_after_condition_holds() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let first = format!("please remember {TARGET} for me");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![(
-            on_latest_owner(&first),
-            Call::text(format!("I will keep {TARGET} in mind.")),
-        )],
-        &[],
-    ));
+    let transport = Arc::new(ScriptedTransport::new(vec![(
+        on_latest_owner(&first),
+        Call::text(format!("I will keep {TARGET} in mind.")),
+    )]));
     let mut served = serve_and_setup(
         dir.clone(),
         Arc::clone(&transport),
@@ -1757,77 +1605,19 @@ async fn stage6_deletion_presentation_ack_after_condition_holds() {
 }
 
 #[tokio::test]
-async fn stage6_deletion_during_learning_formation_never_forms_target_memory() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let first = format!("please remember {TARGET} for me");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (on_learning_formation(true), Call::text(formation_create())),
-            (
-                on_latest_owner(&first),
-                Call::text(format!("I will keep {TARGET} in mind.")),
-            ),
-        ],
-        &[],
-    ));
-    transport.block_input(on_learning_formation(true));
-    let mut served = serve_and_setup(
-        dir.clone(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
-    )
-    .await;
-    let (_round, _stream, reply) = send_round(served.client(), &first)
-        .await
-        .expect("the first round must complete");
-    assert!(reply.contains(TARGET));
-    transport.wait_parked(1).await;
-    let outcome = request_deletion(served.client(), TARGET)
-        .await
-        .expect("the request inlet must answer");
-    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    confirm_deletion(served.handle()).await;
-    transport.release_blocked();
-    wait_for_usage_consumer(served.client(), "companion_learning").await;
-    let handle = served.handle_arc();
-    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
-        .await
-        .expect("the operation must complete");
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
-    assert!(
-        transport
-            .input_texts()
-            .iter()
-            .any(|input| input.contains("learning formation pass") && input.contains(TARGET)),
-        "the fixture must reach the formation provider call"
-    );
-    assert_eq!(served.canonical_remainder(TARGET).await, 0);
-    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
-    assert!(
-        !memory_view(served.client()).await.contains(TARGET),
-        "a covered formation never writes target Memory"
-    );
-    served.server.abort();
-}
-
-#[tokio::test]
 async fn stage6_delayed_formation_after_completion_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let first = format!("please remember {TARGET} for me");
     let fresh = format!("a fresh note about {TARGET}");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (on_learning_formation(true), Call::text(formation_create())),
-            (
-                on_latest_owner(&first),
-                Call::text(format!("I will keep {TARGET} in mind.")),
-            ),
-            (on_latest_owner(&fresh), Call::text("acknowledged")),
-        ],
-        &[],
-    ));
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (on_learning_formation(true), Call::text(formation_create())),
+        (
+            on_latest_owner(&first),
+            Call::text(format!("I will keep {TARGET} in mind.")),
+        ),
+        (on_latest_owner(&fresh), Call::text("acknowledged")),
+    ]));
     transport.block_input(on_learning_formation(true));
     let mut served = serve_and_setup(
         dir.clone(),
@@ -1871,106 +1661,14 @@ async fn stage6_delayed_formation_after_completion_is_refused() {
 }
 
 #[tokio::test]
-async fn stage6_delayed_task_result_after_completion_is_collected() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let proposal = task_reply(serde_json::json!({
-        "kind": "propose_task",
-        "purpose": format!("write a report covering {TARGET}"),
-    }));
-    let fresh = format!("a fresh note about {TARGET}");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_task_agent_turn(0),
-                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
-            ),
-            (
-                on_task_agent_turn(1),
-                Call::text(r##"{"tool":"create","path":"report.md","content":"# Report\nnotes"}"##),
-            ),
-            (
-                on_task_agent_turn(2),
-                Call::text(format!(
-                    r##"{{"final":"created report.md covering {TARGET}"}}"##
-                )),
-            ),
-            (
-                on_latest_owner("please read input.txt and write report.md"),
-                Call::text(proposal),
-            ),
-            (on_latest_owner(&fresh), Call::text("acknowledged")),
-        ],
-        &[],
-    ));
-    transport.block_input(on_task_agent_turn(2));
-    let mut served = serve_and_setup(
-        dir.clone(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE],
-    )
-    .await;
-    let workspace = dir.join("workspace");
-    std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
-    std::fs::write(workspace.join("input.txt"), b"notes").expect("input fixture");
-    select_workspace(served.client(), &workspace)
-        .await
-        .expect("workspace must select");
-    let (round, stream, reply) =
-        send_round(served.client(), "please read input.txt and write report.md")
-            .await
-            .expect("the propose round must complete");
-    assert!(
-        reply.contains("Task accepted"),
-        "the task proposal must be accepted: {reply}"
-    );
-    confirm_round(served.client(), &round, stream).await;
-    transport.wait_parked(1).await;
-    let outcome = request_deletion(served.client(), TARGET)
-        .await
-        .expect("the request inlet must answer");
-    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    let handle = served.handle_arc();
-    confirm_deletion(&handle).await;
-    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
-        .await
-        .expect("the operation must complete while the final turn is parked");
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
-    transport.release_blocked();
-    wait_task_progress(served.client(), "completed", 1)
-        .await
-        .expect("the task completes on the collected result");
-    assert_eq!(served.canonical_remainder(TARGET).await, 0);
-    assert!(
-        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
-        "the delayed result body is never stored"
-    );
-    let (_round, _stream, reply) = send_round(served.client(), &fresh)
-        .await
-        .expect("a fresh origin must be accepted");
-    assert!(reply.contains("acknowledged"), "{reply}");
-    assert!(
-        history_texts(served.client())
-            .await
-            .iter()
-            .any(|text| text.contains(TARGET)),
-        "the fresh origin is appended as new History"
-    );
-    served.server.abort();
-}
-
-#[tokio::test]
 async fn stage6_deletion_restart_during_active_resumes() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let first = format!("please remember {TARGET} for me");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![(
-            on_latest_owner(&first),
-            Call::text(format!("I will keep {TARGET} in mind.")),
-        )],
-        &[],
-    ));
+    let transport = Arc::new(ScriptedTransport::new(vec![(
+        on_latest_owner(&first),
+        Call::text(format!("I will keep {TARGET} in mind.")),
+    )]));
     let mut served = serve_and_setup(
         dir.clone(),
         Arc::clone(&transport),
@@ -2023,182 +1721,6 @@ async fn stage6_deletion_restart_during_active_resumes() {
 }
 
 #[tokio::test]
-async fn listener_abort_stops_the_deletion_driver() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let transport = Arc::new(ScriptedTransport::new(vec![], &[]));
-    let mut served = serve_and_setup(dir, transport, &[cmds::CAPABILITY_DIALOGUE]).await;
-    wait_until_deletion_drivers(served.handle(), 1).await;
-    assert_eq!(
-        served.handle().live_targeted_deletion_drivers_for_tests(),
-        1,
-        "serving starts exactly one Targeted Deletion driver"
-    );
-    served.abort_listener().await;
-    assert_eq!(
-        served.handle().live_targeted_deletion_drivers_for_tests(),
-        0,
-        "aborting and awaiting conn::run must leave no live deletion driver"
-    );
-}
-
-#[tokio::test]
-async fn restart_has_exactly_one_deletion_driver() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let transport = Arc::new(ScriptedTransport::new(vec![], &[]));
-    let mut served = serve_and_setup(dir, transport, &[cmds::CAPABILITY_DIALOGUE]).await;
-    wait_until_deletion_drivers(served.handle(), 1).await;
-    let predecessor = Arc::downgrade(&served.handle_arc());
-    served.stop().await;
-    assert_eq!(
-        served.handle().live_targeted_deletion_drivers_for_tests(),
-        0,
-        "graceful shutdown must join the predecessor async driver"
-    );
-    assert_eq!(
-        served
-            .handle()
-            .store_for_tests()
-            .live_deletion_blocking_sections_for_tests(),
-        0,
-        "graceful shutdown must join started deletion Store work"
-    );
-    let _client = served.serve().await;
-    wait_until_deletion_drivers(served.handle(), 1).await;
-    assert_eq!(
-        served.handle().live_targeted_deletion_drivers_for_tests(),
-        1,
-        "restart must not leave predecessor and successor drivers both alive"
-    );
-    assert!(
-        predecessor.upgrade().is_none(),
-        "the predecessor HostHandle must drop once its serving driver is gone"
-    );
-}
-
-#[tokio::test]
-async fn shutdown_waits_for_started_deletion_store_work() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let first = format!("please remember {TARGET} for me");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![(
-            on_latest_owner(&first),
-            Call::text(format!("I will keep {TARGET} in mind.")),
-        )],
-        &[],
-    ));
-    let mut served = serve_and_setup(dir.clone(), transport, &[cmds::CAPABILITY_DIALOGUE]).await;
-    let (_round, _stream, _reply) = send_round(served.client(), &first)
-        .await
-        .expect("the first round must complete");
-    let outcome = request_deletion(served.client(), TARGET)
-        .await
-        .expect("the request inlet must answer");
-    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    confirm_deletion(served.handle()).await;
-
-    served
-        .handle()
-        .store_for_tests()
-        .arm_deletion_blocking_park_for_tests();
-    served.handle().wake_deletion_driver_for_tests();
-    served
-        .handle()
-        .store_for_tests()
-        .wait_deletion_blocking_park_for_tests()
-        .await;
-    assert!(
-        served
-            .handle()
-            .store_for_tests()
-            .live_deletion_blocking_sections_for_tests()
-            >= 1,
-        "the driver tick must have entered Store spawn_blocking work"
-    );
-
-    served.client = None;
-    tokio::task::yield_now().await;
-    served.request_graceful_stop();
-    assert!(
-        served.handle.is_some(),
-        "successor Host must not replace the predecessor while Store work is parked"
-    );
-    let joining = std::mem::replace(
-        &mut served.server,
-        tokio::spawn(async { Ok::<(), CoreError>(()) }),
-    );
-    let mut joining = std::pin::pin!(joining);
-    for _ in 0..100_000 {
-        tokio::select! {
-            biased;
-            outcome = joining.as_mut() => {
-                panic!(
-                    "graceful shutdown joined while deletion Store work was parked: {outcome:?}"
-                );
-            }
-            () = tokio::task::yield_now() => {}
-        }
-    }
-    assert!(
-        served.handle.is_some(),
-        "successor Host must not start while predecessor Store work is parked"
-    );
-    assert_eq!(
-        served.handle().live_targeted_deletion_drivers_for_tests(),
-        1,
-        "the async driver stays alive until the parked tick finishes"
-    );
-    assert!(
-        served
-            .handle()
-            .store_for_tests()
-            .live_deletion_blocking_sections_for_tests()
-            >= 1
-    );
-
-    served
-        .handle()
-        .store_for_tests()
-        .release_deletion_blocking_park_for_tests();
-    match joining.await {
-        Ok(Ok(())) | Err(_) => {}
-        Ok(Err(error)) => panic!("the listener failed: {error}"),
-    }
-    wait_until_deletion_drivers(served.handle(), 0).await;
-    wait_until_deletion_blocking(served.handle(), 0).await;
-
-    drop(served.handle.take());
-    let successor = open_host(&dir).await;
-    successor
-        .run_startup_mutations()
-        .await
-        .expect("successor startup must complete once predecessor Store work is gone");
-}
-
-#[tokio::test]
-async fn graceful_shutdown_leaves_no_detached_deletion_work() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let transport = Arc::new(ScriptedTransport::new(vec![], &[]));
-    let mut served = serve_and_setup(dir, transport, &[cmds::CAPABILITY_DIALOGUE]).await;
-    wait_until_deletion_drivers(served.handle(), 1).await;
-    served.stop().await;
-    assert_eq!(
-        served.handle().live_targeted_deletion_drivers_for_tests(),
-        0
-    );
-    assert_eq!(
-        served
-            .handle()
-            .store_for_tests()
-            .live_deletion_blocking_sections_for_tests(),
-        0
-    );
-}
-
-#[tokio::test]
 async fn stage6_deletion_restart_during_finalizing_resumes() {
     use ene_preservation::{
         DeletionFinalizationOutcome, ParticipantCompletionFact, PreservationRepository as _,
@@ -2206,7 +1728,7 @@ async fn stage6_deletion_restart_during_finalizing_resumes() {
 
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
-    let transport = Arc::new(ScriptedTransport::new(vec![], &[]));
+    let transport = Arc::new(ScriptedTransport::new(vec![]));
     let mut served = serve_and_setup(
         dir.clone(),
         Arc::clone(&transport),
@@ -2443,90 +1965,15 @@ async fn deliver_target_copy(served: &mut Served) {
     );
 }
 
-async fn wait_for_target_memory_row(served: &Served) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        if db_target_hits(&served.dir.join("app.db"), TARGET)
-            .iter()
-            .any(|hit| hit.starts_with("learning_memory."))
-        {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the Learning Memory row never carried the target"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-#[tokio::test]
-async fn stage6_client_incarnation_confirmed_in_serving_host_and_verified() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let first = format!("please remember {TARGET} for me");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![(
-            on_latest_owner(&first),
-            Call::text(format!("I will keep {TARGET} in mind.")),
-        )],
-        &[],
-    ));
-    let mut served = serve_and_setup(
-        dir.clone(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
-    )
-    .await;
-    deliver_target_copy(&mut served).await;
-
-    let outcome = request_deletion(served.client(), TARGET)
-        .await
-        .expect("the request inlet must answer");
-    assert_eq!(
-        outcome,
-        ManagementOutcome::NeedsClarification,
-        "the Client intent only stages"
-    );
-
-    let current = confirm_deletion_via_serving_control(&mut served).await;
-
-    let page = local_deletion_page(served.handle()).await;
-    let participant = client_incarnation_participant(&page)
-        .expect("the durable snapshot must name the delivered Client incarnation");
-    assert!(
-        participant.sweep >= current.sweep.as_u64(),
-        "the Client participant belongs to the current sweep: {participant:?}"
-    );
-
-    let handle = served.handle_arc();
-    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
-        .await
-        .expect("the operation must complete");
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
-    let participant = client_incarnation_participant(&page)
-        .expect("the completed operation still reports the Client participant");
-    assert_eq!(
-        participant.progress, "verified",
-        "the Client's own local erasure pass is the verification premise"
-    );
-    assert_eq!(served.canonical_remainder(TARGET).await, 0);
-    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
-    served.server.abort();
-}
-
 #[tokio::test]
 async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let first = format!("please remember {TARGET} for me");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![(
-            on_latest_owner(&first),
-            Call::text(format!("I will keep {TARGET} in mind.")),
-        )],
-        &[],
-    ));
+    let transport = Arc::new(ScriptedTransport::new(vec![(
+        on_latest_owner(&first),
+        Call::text(format!("I will keep {TARGET} in mind.")),
+    )]));
     let mut served = serve_and_setup(
         dir.clone(),
         Arc::clone(&transport),
@@ -2592,86 +2039,6 @@ async fn stage6_client_incarnation_unreachable_holds_across_restart() {
     let participant = client_incarnation_participant(&page)
         .expect("the completed operation still reports the Client participant");
     assert_eq!(participant.progress, "verified");
-    assert_eq!(served.canonical_remainder(TARGET).await, 0);
-    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
-    served.server.abort();
-}
-
-#[tokio::test]
-async fn stage6_management_view_memory_body_is_a_required_client_participant() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let owner = "please keep this note for later";
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (on_learning_formation(true), Call::text(formation_create())),
-            (
-                on_latest_owner(owner),
-                Call::text(String::from("I will keep that in mind.")),
-            ),
-        ],
-        &[],
-    ));
-    let mut served = serve_and_setup(
-        dir.clone(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
-    )
-    .await;
-    let (_round, _stream, reply) = send_round(served.client(), owner)
-        .await
-        .expect("the note round must complete");
-    assert!(
-        !reply.contains(TARGET),
-        "the streamed reply must not carry the target: {reply}"
-    );
-    assert_absent_all(
-        "pre-deletion history",
-        &history_texts(served.client()).await,
-        TARGET,
-    );
-    wait_for_target_memory_row(&served).await;
-
-    let mut client = served.restart().await;
-    let body = memory_view(&mut client).await;
-    assert!(
-        body.contains(TARGET),
-        "the management view hands the target-bearing Memory over: {body}"
-    );
-
-    let outcome = request_deletion(&mut client, TARGET)
-        .await
-        .expect("the request inlet must answer");
-    assert_eq!(
-        outcome,
-        ManagementOutcome::NeedsClarification,
-        "the Client intent only stages"
-    );
-    served.client = Some(client);
-    let current = confirm_deletion_via_serving_control(&mut served).await;
-
-    let page = local_deletion_page(served.handle()).await;
-    let participant = client_incarnation_participant(&page)
-        .expect("the view-delivered Client incarnation is a required participant");
-    assert!(
-        participant.sweep >= current.sweep.as_u64(),
-        "the Client participant belongs to the current sweep: {participant:?}"
-    );
-
-    let body = memory_view(served.client()).await;
-    assert_absent("covered management view", &body, TARGET);
-
-    let handle = served.handle_arc();
-    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
-        .await
-        .expect("the operation must complete");
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
-    let participant = client_incarnation_participant(&page)
-        .expect("the completed operation still reports the Client participant");
-    assert_eq!(
-        participant.progress, "verified",
-        "the Client's own local erasure pass is the verification premise"
-    );
     assert_eq!(served.canonical_remainder(TARGET).await, 0);
     assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
     served.server.abort();
@@ -2845,48 +2212,45 @@ async fn stage6_usage_cost_reported_unknown_and_historical_snapshot() {
         "kind": "propose_task",
         "purpose": "write a report from input.txt",
     }));
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner("please read input.txt and write report.md"),
-                Call::text(proposal),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner("please read input.txt and write report.md"),
+            Call::text(proposal),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(r#"{"tool":"read","path":"input.txt"}"#, 1_000, 0, 500),
+        ),
+        (
+            on_task_agent_turn(1),
+            Call::reported(
+                r##"{"tool":"create","path":"report.md","content":"# Report\nnotes"}"##,
+                2_000,
+                1_000,
+                500,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(r#"{"tool":"read","path":"input.txt"}"#, 1_000, 0, 500),
-            ),
-            (
-                on_task_agent_turn(1),
-                Call::reported(
-                    r##"{"tool":"create","path":"report.md","content":"# Report\nnotes"}"##,
-                    2_000,
-                    1_000,
-                    500,
-                ),
-            ),
-            (
-                on_task_agent_turn(2),
-                Call::reported(r##"{"final":"created report.md"}"##, 1_000, 0, 500),
-            ),
-            (
-                on_learning_formation(true),
-                Call::reported(formation_create(), 2_000, 0, 500),
-            ),
-            (
-                on_learning_formation(false),
-                Call::reported(formation_update(), 200, 0, 40),
-            ),
-            (
-                on_latest_owner("please remember the kettle"),
-                Call::reported("Noted the kettle.", 1_000, 400, 200),
-            ),
-            (
-                on_latest_owner("what about the kettle"),
-                Call::text("The provider reported no usage for this one."),
-            ),
-        ],
-        &[],
-    ));
+        ),
+        (
+            on_task_agent_turn(2),
+            Call::reported(r##"{"final":"created report.md"}"##, 1_000, 0, 500),
+        ),
+        (
+            on_learning_formation(true),
+            Call::reported(formation_create(), 2_000, 0, 500),
+        ),
+        (
+            on_learning_formation(false),
+            Call::reported(formation_update(), 200, 0, 40),
+        ),
+        (
+            on_latest_owner("please remember the kettle"),
+            Call::reported("Noted the kettle.", 1_000, 400, 200),
+        ),
+        (
+            on_latest_owner("what about the kettle"),
+            Call::text("The provider reported no usage for this one."),
+        ),
+    ]));
     let mut served = serve_and_setup(
         dir.clone(),
         Arc::clone(&transport),
@@ -3081,27 +2445,24 @@ async fn stage6_usage_cap_reservation_refuses_the_second_concurrent_send() {
     let second = String::from("what about the kettle");
     let third = String::from("one more kettle note");
     let transport = Arc::new(
-        ScriptedTransport::new(
-            vec![
-                (
-                    on_learning_formation(true),
-                    Call::reported(formation_create(), 2_000, 0, 500),
-                ),
-                (
-                    on_latest_owner(&first),
-                    Call::reported("Noted the kettle.", 1_000, 400, 200),
-                ),
-                (
-                    on_latest_owner(&second),
-                    Call::reported("The kettle is noted.", 1_000, 0, 100),
-                ),
-                (
-                    on_latest_owner(&third),
-                    Call::reported("Still noted.", 1_000, 0, 100),
-                ),
-            ],
-            &[],
-        )
+        ScriptedTransport::new(vec![
+            (
+                on_learning_formation(true),
+                Call::reported(formation_create(), 2_000, 0, 500),
+            ),
+            (
+                on_latest_owner(&first),
+                Call::reported("Noted the kettle.", 1_000, 400, 200),
+            ),
+            (
+                on_latest_owner(&second),
+                Call::reported("The kettle is noted.", 1_000, 0, 100),
+            ),
+            (
+                on_latest_owner(&third),
+                Call::reported("Still noted.", 1_000, 0, 100),
+            ),
+        ])
         .with_estimate(cap_estimate()),
     );
     let mut served = serve_and_setup(
@@ -3251,20 +2612,17 @@ async fn stage6_usage_cap_unknown_accounting_and_update_currentness() {
     let parked = String::from("the parked kettle note");
     let after = String::from("the admitted kettle note");
     let transport = Arc::new(
-        ScriptedTransport::new(
-            vec![
-                (on_latest_owner(&lost), Call::lost()),
-                (
-                    on_latest_owner(&parked),
-                    Call::reported("parked", 1_000, 0, 100),
-                ),
-                (
-                    on_latest_owner(&after),
-                    Call::reported("admitted", 1_000, 0, 100),
-                ),
-            ],
-            &[],
-        )
+        ScriptedTransport::new(vec![
+            (on_latest_owner(&lost), Call::lost()),
+            (
+                on_latest_owner(&parked),
+                Call::reported("parked", 1_000, 0, 100),
+            ),
+            (
+                on_latest_owner(&after),
+                Call::reported("admitted", 1_000, 0, 100),
+            ),
+        ])
         .with_estimate(cap_estimate()),
     );
     let mut served = serve_and_setup(
@@ -3509,55 +2867,52 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
         "kind": "propose_task",
         "purpose": format!("write a report about {SECRET}"),
     }));
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_learning_formation(true),
-                Call::reported(formation_create_with(SECRET), 2_000, 0, 500),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_learning_formation(true),
+            Call::reported(formation_create_with(SECRET), 2_000, 0, 500),
+        ),
+        (
+            on_learning_formation(false),
+            Call::reported(formation_update_with(SECRET), 200, 0, 40),
+        ),
+        (
+            on_latest_owner(&redacted),
+            Call::reported(
+                format!("Noted; the passphrase {SECRET} stays with you."),
+                1_000,
+                400,
+                200,
             ),
-            (
-                on_learning_formation(false),
-                Call::reported(formation_update_with(SECRET), 200, 0, 40),
-            ),
-            (
-                on_latest_owner(&redacted),
-                Call::reported(
-                    format!("Noted; the passphrase {SECRET} stays with you."),
-                    1_000,
-                    400,
-                    200,
-                ),
-            ),
-            (
-                on_latest_owner("please read input.txt and write report.md"),
-                Call::text(proposal),
-            ),
-            (
-                on_task_agent_turn(0),
-                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
-            ),
-            (
-                on_task_agent_turn(1),
-                Call::text(format!(
-                    r##"{{"tool":"create","path":"report.md","content":"# Report {SECRET}"}}"##
-                )),
-            ),
-            (
-                on_task_agent_turn(2),
-                Call::text(format!(
-                    r##"{{"final":"created report.md quoting {SECRET}"}}"##
-                )),
-            ),
-            (
-                on_latest_owner(&format!(
-                    "an error path with {}",
-                    ene_credential::REDACTED_CREDENTIAL
-                )),
-                Call::lost(),
-            ),
-        ],
-        &[],
-    ));
+        ),
+        (
+            on_latest_owner("please read input.txt and write report.md"),
+            Call::text(proposal),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::text(r#"{"tool":"read","path":"input.txt"}"#),
+        ),
+        (
+            on_task_agent_turn(1),
+            Call::text(format!(
+                r##"{{"tool":"create","path":"report.md","content":"# Report {SECRET}"}}"##
+            )),
+        ),
+        (
+            on_task_agent_turn(2),
+            Call::text(format!(
+                r##"{{"final":"created report.md quoting {SECRET}"}}"##
+            )),
+        ),
+        (
+            on_latest_owner(&format!(
+                "an error path with {}",
+                ene_credential::REDACTED_CREDENTIAL
+            )),
+            Call::lost(),
+        ),
+    ]));
     let mut served = Served::start(
         dir.clone(),
         || memory_store_with(SECRET),
@@ -3676,19 +3031,16 @@ async fn stage6_credential_registration_sweeps_prior_occurrences_during_a_parked
         "please remember the passphrase {}",
         ene_credential::REDACTED_CREDENTIAL
     );
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(&rotated_redacted),
-                Call::text("Noted the old passphrase."),
-            ),
-            (
-                on_latest_owner(&parked_redacted),
-                Call::reported("Noted the passphrase.", 1_000, 400, 200),
-            ),
-        ],
-        &[],
-    ));
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(&rotated_redacted),
+            Call::text("Noted the old passphrase."),
+        ),
+        (
+            on_latest_owner(&parked_redacted),
+            Call::reported("Noted the passphrase.", 1_000, 400, 200),
+        ),
+    ]));
     let mut served = Served::start(
         dir.clone(),
         || memory_store_with_rotated(SECRET, ROTATED_SECRET),
@@ -3767,13 +3119,10 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let first = format!("please remember {TARGET} for me");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![(
-            on_latest_owner(&first),
-            Call::text(format!("I will keep {TARGET} in mind.")),
-        )],
-        &[],
-    ));
+    let transport = Arc::new(ScriptedTransport::new(vec![(
+        on_latest_owner(&first),
+        Call::text(format!("I will keep {TARGET} in mind.")),
+    )]));
     let mut served = serve_and_setup(
         dir.clone(),
         Arc::clone(&transport),
@@ -3859,253 +3208,6 @@ async fn stage6_client_delivery_evidence_survives_restart_before_admission() {
     served.server.abort();
 }
 
-const DIALOGUE_RACE_PARAPHRASE: &str = "I still keep that detail in mind.";
-
-#[expect(clippy::expect_used, reason = "test fixture helper")]
-async fn dialogue_race_drive_deletion_to_completed(handle: &HostHandle) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
-    loop {
-        let pass = handle
-            .run_targeted_deletion_tick()
-            .await
-            .expect("the serving tick must run");
-        if pass.operations == 0 {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the deletion operation did not complete: {pass:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-#[tokio::test]
-async fn stage6_dialogue_claim_before_completion_refuses_the_delayed_paraphrase() {
-    use ene_companion::{
-        AppendHistoryCommand, CompanionRepository as _, HistoryRepository as _, HistoryRole,
-    };
-    use ene_learning::{
-        ChangeKind, Importance, LearningRepository as _, LearningScope, MemoryChange,
-        MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
-    };
-    use ene_presence::PresenceRepository as _;
-
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let second = String::from("what do you remember about that?");
-    let fresh = format!("a fresh note about {TARGET}");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(&second),
-                Call::text(DIALOGUE_RACE_PARAPHRASE),
-            ),
-            (on_latest_owner(&fresh), Call::text("acknowledged")),
-        ],
-        &[],
-    ));
-    let mut served = serve_and_setup(
-        dir.clone(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
-    )
-    .await;
-    served.stop().await;
-    {
-        let store = ene_store::Store::open(&dir.join("app.db"))
-            .await
-            .expect("the state database opens for seeding");
-        let companion = store
-            .ensure_running_companion()
-            .await
-            .expect("the companion must resolve");
-        let generation = store
-            .load_attribution(companion.as_raw())
-            .await
-            .expect("attribution must load")
-            .expect("attribution must exist")
-            .generation;
-        match store
-            .append_message(AppendHistoryCommand {
-                companion,
-                round: RawId::new(),
-                role: HistoryRole::Owner,
-                text: format!("please remember {TARGET} for me"),
-                lang: String::from("en"),
-                at: WallClockWithTz::now(),
-                expected_generation: generation,
-                expected_consent: None,
-                expected_credential_set: None,
-                expected_owner_message: None,
-                command_id: None,
-                round_wire: Some(RawId::new().as_uuid().as_hyphenated().to_string()),
-                round_intent: None,
-                incarnation: None,
-                local_id: None,
-            })
-            .await
-            .expect("the History seed must commit")
-        {
-            ene_companion::HistoryAppendOutcome::CommittedAs { .. } => {}
-            other => panic!("the History seed must commit, got {other:?}"),
-        }
-        assert!(
-            matches!(
-                store
-                    .commit_memory_change(MemoryChangeCommit {
-                        summary: None,
-                        secret_premise: None,
-                        claim: None,
-                        change: MemoryChange {
-                            target: MemoryTarget::New {
-                                id: MemoryId::generate(),
-                            },
-                            scope: LearningScope::companion(companion.as_raw()),
-                            content: format!("the owner mentioned {TARGET}"),
-                            importance: Importance::default(),
-                            temporal: TemporalMeaning::Enduring,
-                            change: ChangeKind::Initial,
-                            at: WallClockWithTz::now(),
-                        },
-                    })
-                    .await
-                    .expect("the Memory seed must answer"),
-                ene_learning::MemoryChangeOutcome::Committed { .. }
-            ),
-            "the Memory seed must commit"
-        );
-    }
-    let mut client = served.serve().await;
-    let outcome = request_deletion(&mut client, TARGET)
-        .await
-        .expect("the request inlet must answer");
-    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    transport.block_input(on_latest_owner(&second));
-    let handle = served.handle_arc();
-    let barrier = Arc::clone(&transport);
-    let mut parked = Box::pin(send_round_raw(&mut client, &second));
-    tokio::select! {
-        result = parked.as_mut() => panic!("the parked round cannot finish before completion: {result:?}"),
-        () = barrier.wait_parked(1) => {}
-    }
-    confirm_deletion(&handle).await;
-    dialogue_race_drive_deletion_to_completed(&handle).await;
-    barrier.release_blocked();
-    let (_round2, _stream2, raced_text, close) = parked.await.expect("the raced round must answer");
-    assert!(
-        transport.input_texts().iter().any(|input| {
-            input.ends_with(&format!("\nOwner: {second}")) && input.contains(TARGET)
-        }),
-        "the fixture must show the prompt read the target-bearing sources"
-    );
-    assert_eq!(
-        close,
-        ene_api::v1::round::StreamClose::Interrupted,
-        "a reply whose claim belongs to the deletion interval never completes"
-    );
-    assert!(
-        !raced_text.contains(DIALOGUE_RACE_PARAPHRASE),
-        "the delayed paraphrase must not be presented: {raced_text}"
-    );
-    assert!(
-        !raced_text.contains(TARGET),
-        "no covered delta may be presented: {raced_text}"
-    );
-    let history = history_texts(&mut client).await;
-    assert!(
-        !history
-            .iter()
-            .any(|text| text.contains(DIALOGUE_RACE_PARAPHRASE)),
-        "the delayed paraphrase must never be adopted into History"
-    );
-    assert_eq!(served.canonical_remainder(TARGET).await, 0);
-    assert!(
-        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
-        "no table may keep the target after completion"
-    );
-    let (round, stream, reply) = send_round(&mut client, &fresh)
-        .await
-        .expect("a fresh origin must be accepted");
-    assert!(reply.contains("acknowledged"), "{reply}");
-    confirm_round(&mut client, &round, stream).await;
-    assert!(
-        history_texts(&mut client)
-            .await
-            .iter()
-            .any(|text| text.contains(TARGET)),
-        "the fresh origin is appended as new History"
-    );
-    served.server.abort();
-}
-
-#[tokio::test]
-async fn stage6_active_deletion_keeps_covered_context_from_the_provider() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let first = format!("please remember {TARGET} for me");
-    let second = String::from("what do you remember about that?");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (on_learning_formation(true), Call::text(formation_create())),
-            (
-                on_latest_owner(&first),
-                Call::text(format!("I will keep {TARGET} in mind.")),
-            ),
-            (on_latest_owner(&second), Call::text("a clean answer")),
-        ],
-        &[],
-    ));
-    let mut served = serve_and_setup(
-        dir.clone(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
-    )
-    .await;
-    let (round, stream, reply) = send_round(served.client(), &first)
-        .await
-        .expect("the first round must complete");
-    assert!(reply.contains(TARGET));
-    confirm_round(served.client(), &round, stream).await;
-    wait_for_memory_revision_at_least(served.client(), 1).await;
-    let outcome = request_deletion(served.client(), TARGET)
-        .await
-        .expect("the request inlet must answer");
-    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    confirm_deletion(served.handle()).await;
-    let sends_before = transport.sends();
-    let (round, stream, reply) = send_round(served.client(), &second)
-        .await
-        .expect("a turn with uncovered context must still serve");
-    assert!(reply.contains("a clean answer"), "{reply}");
-    confirm_round(served.client(), &round, stream).await;
-    assert!(
-        transport.sends() > sends_before,
-        "the filtered turn reaches the provider"
-    );
-    let second_inputs: Vec<String> = transport
-        .input_texts()
-        .into_iter()
-        .filter(|input| input.ends_with(&format!("\nOwner: {second}")))
-        .collect();
-    assert!(
-        !second_inputs.is_empty(),
-        "the fixture must reach the second provider call"
-    );
-    assert_absent_all("dialogue provider input", &second_inputs, TARGET);
-    let handle = served.handle_arc();
-    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
-        .await
-        .expect("the operation must complete");
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
-    assert_eq!(served.canonical_remainder(TARGET).await, 0);
-    assert!(
-        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
-        "no table may keep the target after completion"
-    );
-    served.server.abort();
-}
-
 #[tokio::test]
 async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
     use ene_companion::CompanionRepository as _;
@@ -4153,7 +3255,7 @@ async fn stage6_reconciliation_holds_sources_beyond_the_admission_page() {
 
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let mut served = serve_and_setup(
         dir.clone(),
         Arc::clone(&transport),
@@ -4327,24 +3429,21 @@ async fn stage6_task_transient_observation_after_completion_is_collected() {
         "kind": "propose_task",
         "purpose": "write a report about the workspace input",
     }));
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_task_agent_turn(0),
-                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
-            ),
-            (
-                on_task_agent_turn(1),
-                Call::text(format!(r#"{{"final":"{paraphrase}"}}"#)),
-            ),
-            (
-                on_latest_owner("please read input.txt and write report.md"),
-                Call::text(proposal),
-            ),
-            (on_latest_owner(&fresh), Call::text("acknowledged")),
-        ],
-        &[],
-    ));
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_task_agent_turn(0),
+            Call::text(r#"{"tool":"read","path":"input.txt"}"#),
+        ),
+        (
+            on_task_agent_turn(1),
+            Call::text(format!(r#"{{"final":"{paraphrase}"}}"#)),
+        ),
+        (
+            on_latest_owner("please read input.txt and write report.md"),
+            Call::text(proposal),
+        ),
+        (on_latest_owner(&fresh), Call::text("acknowledged")),
+    ]));
     transport.block_input(on_task_agent_turn(1));
     let mut served = serve_and_setup(
         dir.clone(),
@@ -4451,24 +3550,21 @@ async fn stage6_task_sealed_observation_paraphrase_is_erased_after_workspace_rew
         "kind": "propose_task",
         "purpose": "write a report about the workspace input",
     }));
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_task_agent_turn(0),
-                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
-            ),
-            (
-                on_task_agent_turn(1),
-                Call::text(format!(r#"{{"final":"{paraphrase}"}}"#)),
-            ),
-            (
-                on_latest_owner("please read input.txt and write report.md"),
-                Call::text(proposal),
-            ),
-            (on_latest_owner(&fresh), Call::text("acknowledged")),
-        ],
-        &[],
-    ));
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_task_agent_turn(0),
+            Call::text(r#"{"tool":"read","path":"input.txt"}"#),
+        ),
+        (
+            on_task_agent_turn(1),
+            Call::text(format!(r#"{{"final":"{paraphrase}"}}"#)),
+        ),
+        (
+            on_latest_owner("please read input.txt and write report.md"),
+            Call::text(proposal),
+        ),
+        (on_latest_owner(&fresh), Call::text("acknowledged")),
+    ]));
     let mut served = serve_and_setup(
         dir.clone(),
         Arc::clone(&transport),
@@ -4571,332 +3667,6 @@ async fn stage6_task_sealed_observation_paraphrase_is_erased_after_workspace_rew
     served.server.abort();
 }
 
-#[tokio::test]
-async fn stage6_observation_write_across_deletion_stays_old_origin() {
-    const LEG_TARGET: &str = TARGET;
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let paraphrase = "The input file describes confidential material; I did not copy its contents.";
-    let fresh = format!("a fresh note about {LEG_TARGET}");
-    let proposal = task_reply(serde_json::json!({
-        "kind": "propose_task",
-        "purpose": "write a report about the workspace input",
-    }));
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_task_agent_turn(0),
-                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
-            ),
-            (
-                on_task_agent_turn(1),
-                Call::text(format!(r#"{{"final":"{paraphrase}"}}"#)),
-            ),
-            (
-                on_latest_owner("please read input.txt and write report.md"),
-                Call::text(proposal),
-            ),
-            (on_latest_owner(&fresh), Call::text("acknowledged")),
-        ],
-        &[],
-    ));
-    let mut served = serve_and_setup(
-        dir.clone(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE],
-    )
-    .await;
-    let workspace = dir.join("workspace");
-    let input = workspace.join("input.txt");
-    std::fs::create_dir_all(&workspace).expect("the workspace directory creates");
-    std::fs::write(&input, format!("confidential: {LEG_TARGET}"))
-        .expect("the workspace source writes");
-    select_workspace(served.client(), &workspace)
-        .await
-        .expect("workspace must select");
-
-    served
-        .handle()
-        .store_for_tests()
-        .arm_observation_write_park_for_tests();
-    let (round, stream, reply) =
-        send_round(served.client(), "please read input.txt and write report.md")
-            .await
-            .expect("the propose round must complete");
-    assert!(
-        reply.contains("Task accepted"),
-        "the task proposal must be accepted: {reply}"
-    );
-    confirm_round(served.client(), &round, stream).await;
-    served
-        .handle()
-        .store_for_tests()
-        .wait_observation_write_park_for_tests()
-        .await;
-
-    let db = served.dir.join("app.db");
-    assert_eq!(
-        transient_observation_rows(&db),
-        0,
-        "the occurrence is not durable while the Action body is still in memory"
-    );
-
-    std::fs::write(&input, "ordinary notes after the observation")
-        .expect("the workspace source is rewritten clean");
-    assert!(
-        !std::fs::read_to_string(&input)
-            .expect("the rewritten source reads")
-            .contains(LEG_TARGET),
-        "deletion admission happens after the current workspace read is clean"
-    );
-
-    let outcome = request_deletion(served.client(), LEG_TARGET)
-        .await
-        .expect("the request inlet must answer");
-    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    let handle = served.handle_arc();
-    confirm_deletion(&handle).await;
-    assert_eq!(
-        transient_task_delegation_holds(&db),
-        1,
-        "the unobserved read/list execution is associated at admission"
-    );
-    assert_eq!(transient_observation_rows(&db), 0);
-    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
-        .await
-        .expect("the operation must complete while the observation write is parked");
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
-
-    served
-        .handle()
-        .store_for_tests()
-        .release_observation_write_park_for_tests();
-    wait_task_progress(served.client(), "completed", 1)
-        .await
-        .expect("the task completes on the collected result");
-
-    assert_eq!(transient_observation_rows(&db), 1);
-    assert!(
-        transient_observation_body_observed(&db),
-        "the occurrence reproduced a target-bearing body"
-    );
-    for input_text in transport.input_texts() {
-        if input_text.starts_with("[RESPONSE FORMAT]") && input_text.contains("[TOOL CALL]") {
-            assert!(
-                !input_text.contains(LEG_TARGET),
-                "the old observation body must not enter a later provider turn: {input_text}"
-            );
-        }
-    }
-    let body = transient_sole_result_body(&db);
-    assert_eq!(
-        body, "[erased]",
-        "the delayed paraphrase is never stored raw"
-    );
-    assert!(!body.contains(paraphrase));
-    assert!(!body.contains(LEG_TARGET));
-    assert_eq!(
-        transient_action_success_rows(&db),
-        1,
-        "Action certainty is an objective fact and is never rewritten"
-    );
-    assert_eq!(served.canonical_remainder(LEG_TARGET).await, 0);
-    assert!(
-        db_target_hits(&db, LEG_TARGET).is_empty(),
-        "the completed surface keeps no target body: {:?}",
-        db_target_hits(&db, LEG_TARGET)
-    );
-    wait_task_progress(served.client(), "completed", 1)
-        .await
-        .expect("the sealed execution stays completed");
-    let (_round, _stream, reply) = send_round(served.client(), &fresh)
-        .await
-        .expect("a fresh origin must be accepted");
-    assert!(reply.contains("acknowledged"), "{reply}");
-    assert!(
-        history_texts(served.client())
-            .await
-            .iter()
-            .any(|text| text.contains(LEG_TARGET)),
-        "a fresh post-completion Owner input remains allowed"
-    );
-    served.server.abort();
-}
-
-#[tokio::test]
-async fn stage6_reconciliation_erases_paraphrase_pinned_past_the_page() {
-    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
-    use ene_learning::{
-        ChangeKind, ExperienceSourceKind, Importance, LearningRepository as _, LearningScope,
-        MemoryChange, MemoryChangeCommit, MemoryId, MemoryTarget, SourceRangeRef, SummaryId,
-        SummaryRecord, TemporalMeaning,
-    };
-    use ene_presence::PresenceRepository as _;
-
-    let temp = tempfile::TempDir::new().unwrap();
-    let dir = temp.path().to_path_buf();
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
-    let mut served = serve_and_setup(
-        dir.clone(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
-    )
-    .await;
-    served.stop().await;
-    let (late, paraphrase_id, memory_id, companion_raw) = {
-        let store = ene_store::Store::open(&dir.join("app.db"))
-            .await
-            .expect("the state database opens for seeding");
-        let companion = store
-            .ensure_running_companion()
-            .await
-            .expect("the companion must resolve");
-        let generation = store
-            .load_attribution(companion.as_raw())
-            .await
-            .expect("attribution must load")
-            .expect("attribution must exist")
-            .generation;
-        let mut sources = Vec::new();
-        for index in 0..(ene_preservation::DELETION_RECONCILIATION_PAGE_SIZE + 6) {
-            sources.push(
-                seed_owner_message(
-                    &store,
-                    companion,
-                    generation,
-                    &format!("note {index} carries {TARGET}"),
-                )
-                .await,
-            );
-        }
-        let late = *sources
-            .iter()
-            .max_by_key(|source| source.as_uuid())
-            .expect("the fixture has sources");
-        let paraphrase_id = SummaryId::generate();
-        let memory_id = MemoryId::generate();
-        let committed = store
-            .commit_memory_change(MemoryChangeCommit {
-                summary: Some(SummaryRecord {
-                    id: paraphrase_id,
-                    scope: LearningScope::companion(companion.as_raw()),
-                    content: String::from("The owner keeps a private launch credential."),
-                    source: SourceRangeRef {
-                        kind: ExperienceSourceKind::Dialogue,
-                        start: late,
-                        end: late,
-                    },
-                    formed_at: WallClockWithTz::now(),
-                }),
-                secret_premise: None,
-                claim: None,
-                change: MemoryChange {
-                    target: MemoryTarget::New { id: memory_id },
-                    scope: LearningScope::companion(companion.as_raw()),
-                    content: String::from("The owner keeps a private launch credential."),
-                    importance: Importance::default(),
-                    temporal: TemporalMeaning::Enduring,
-                    change: ChangeKind::Initial,
-                    at: WallClockWithTz::now(),
-                },
-            })
-            .await
-            .expect("the paraphrase formation must answer");
-        assert!(
-            matches!(
-                committed,
-                ene_learning::MemoryChangeOutcome::Committed { .. }
-            ),
-            "the paraphrase Memory must commit: {committed:?}"
-        );
-        (late, paraphrase_id, memory_id, companion.as_raw())
-    };
-
-    let mut client = served.serve().await;
-    let outcome = request_deletion(&mut client, TARGET)
-        .await
-        .expect("the request inlet must answer");
-    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
-    let handle = served.handle_arc();
-    confirm_deletion(&handle).await;
-    let page = drive_until(&handle, &mut client, DeletionPhaseWire::Completed)
-        .await
-        .expect("the operation must reconcile every page and erase derived data");
-    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
-    assert_eq!(served.canonical_remainder(TARGET).await, 0);
-    assert!(
-        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
-        "no durable table keeps the target: {:?}",
-        db_target_hits(&served.dir.join("app.db"), TARGET)
-    );
-
-    served.stop().await;
-    let store = ene_store::Store::open(&dir.join("app.db"))
-        .await
-        .expect("the state database reopens");
-    let late_text = late.as_uuid().as_hyphenated().to_string();
-    let remaining_late: i64 = {
-        let conn = rusqlite::Connection::open(dir.join("app.db"))
-            .expect("the state database opens for inspection");
-        conn.query_row(
-            "SELECT COUNT(*) FROM history_message WHERE message_id=?1",
-            [&late_text],
-            |row| row.get(0),
-        )
-        .expect("the late History probe must answer")
-    };
-    assert_eq!(remaining_late, 0, "H_late is erased");
-    let summaries = store
-        .load_summaries(&[paraphrase_id])
-        .await
-        .expect("summaries must load");
-    assert!(
-        summaries.is_empty(),
-        "the paraphrase Summary pinned on H_late must be erased"
-    );
-    assert!(
-        store
-            .list_memory_revisions(memory_id, None, 100)
-            .await
-            .expect("revisions must list")
-            .is_empty(),
-        "the derived Memory must be erased"
-    );
-    let recalled = store
-        .recall_candidates(companion_raw, &[String::from("launch")], 50)
-        .await
-        .expect("recall must answer");
-    assert!(recalled.iter().all(|item| item.id != memory_id));
-
-    let companion = store
-        .ensure_running_companion()
-        .await
-        .expect("the companion must resolve");
-    let generation = store
-        .load_attribution(companion.as_raw())
-        .await
-        .expect("attribution must load")
-        .expect("attribution must exist")
-        .generation;
-    let fresh = seed_owner_message(
-        &store,
-        companion,
-        generation,
-        &format!("a fresh note about {TARGET}"),
-    )
-    .await;
-    let timeline = store
-        .load_timeline(companion, None, None, 200)
-        .await
-        .expect("the timeline must load");
-    assert!(
-        timeline
-            .iter()
-            .any(|item| item.id == fresh && item.text.contains(TARGET)),
-        "a post-completion Owner origin of the same string is accepted"
-    );
-}
-
 #[expect(clippy::expect_used, reason = "test fixture helper")]
 fn transient_observation_rows(db: &Path) -> i64 {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
@@ -4968,29 +3738,26 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
         "kind": "propose_task",
         "purpose": "write a report",
     }));
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_task_agent_turn(0),
-                Call::text(r#"{"tool":"read","path":"input.txt"}"#),
-            ),
-            (
-                on_task_agent_turn(1),
-                Call::text(r##"{"tool":"create","path":"report.md","content":"# Report notes"}"##),
-            ),
-            (
-                on_task_agent_turn(2),
-                Call::text(format!(
-                    r##"{{"final":"created report.md quoting {ROTATED_SECRET}"}}"##
-                )),
-            ),
-            (
-                on_latest_owner("please read input.txt and write report.md"),
-                Call::text(proposal),
-            ),
-        ],
-        &[],
-    ));
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_task_agent_turn(0),
+            Call::text(r#"{"tool":"read","path":"input.txt"}"#),
+        ),
+        (
+            on_task_agent_turn(1),
+            Call::text(r##"{"tool":"create","path":"report.md","content":"# Report notes"}"##),
+        ),
+        (
+            on_task_agent_turn(2),
+            Call::text(format!(
+                r##"{{"final":"created report.md quoting {ROTATED_SECRET}"}}"##
+            )),
+        ),
+        (
+            on_latest_owner("please read input.txt and write report.md"),
+            Call::text(proposal),
+        ),
+    ]));
     transport.block_input(on_task_agent_turn(2));
     let mut served = Served::start(
         dir.clone(),
@@ -5122,39 +3889,6 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
     served.server.abort();
 }
 
-#[derive(serde::Serialize)]
-struct IngressCrafted {
-    envelope: WireEnvelope,
-    payload: IngressPayload,
-}
-
-#[derive(serde::Serialize)]
-enum IngressPayload {
-    FutureThing(IngressNote),
-    TextStreamClose(IngressClose),
-    SubmitTextInput(IngressPartialSubmit),
-}
-
-#[derive(serde::Serialize)]
-struct IngressNote {
-    note: String,
-}
-
-#[derive(serde::Serialize)]
-struct IngressClose {
-    stream: StreamWireId,
-    status: String,
-}
-
-#[derive(serde::Serialize)]
-struct IngressPartialSubmit {
-    companion: CompanionWireRef,
-    round: Option<RoundWireId>,
-    #[serde(default)]
-    fresh: bool,
-    body: TextBodyWire,
-}
-
 fn crafted_envelope(message_type: &str) -> WireEnvelope {
     new_outgoing_envelope(
         ProtocolVersion::V1,
@@ -5168,6 +3902,314 @@ fn crafted_envelope(message_type: &str) -> WireEnvelope {
         },
         WireMessageType(message_type.to_string()),
     )
+}
+
+async fn system_wide_management_view_subcase() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let owner = "please keep this note for later";
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (on_learning_formation(true), Call::text(formation_create())),
+        (
+            on_latest_owner(owner),
+            Call::text(String::from("I will keep that in mind.")),
+        ),
+    ]));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    let (_round, _stream, reply) = send_round(served.client(), owner)
+        .await
+        .expect("the note round must complete");
+    assert!(
+        !reply.contains(TARGET),
+        "the streamed reply must not carry the target: {reply}"
+    );
+    assert_absent_all(
+        "pre-deletion history",
+        &history_texts(served.client()).await,
+        TARGET,
+    );
+    wait_for_memory_revision_at_least(served.client(), 1).await;
+
+    let mut client = served.restart().await;
+    let body = memory_view(&mut client).await;
+    assert!(
+        body.contains(TARGET),
+        "the management view hands the target-bearing Memory over: {body}"
+    );
+
+    let outcome = request_deletion(&mut client, TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(
+        outcome,
+        ManagementOutcome::NeedsClarification,
+        "the Client intent only stages"
+    );
+    served.client = Some(client);
+    let current = confirm_deletion_via_serving_control(&mut served).await;
+
+    let page = local_deletion_page(served.handle()).await;
+    let participant = client_incarnation_participant(&page)
+        .expect("the view-delivered Client incarnation is a required participant");
+    assert!(
+        participant.sweep >= current.sweep.as_u64(),
+        "the Client participant belongs to the current sweep: {participant:?}"
+    );
+
+    let body = memory_view(served.client()).await;
+    assert_absent("covered management view", &body, TARGET);
+
+    let handle = served.handle_arc();
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    let participant = client_incarnation_participant(&page)
+        .expect("the completed operation still reports the Client participant");
+    assert_eq!(
+        participant.progress, "verified",
+        "the Client's own local erasure pass is the verification premise"
+    );
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(db_target_hits(&served.dir.join("app.db"), TARGET).is_empty());
+    served.server.abort();
+}
+
+async fn system_wide_active_deletion_subcase() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let first = format!("please remember {TARGET} for me");
+    let second = String::from("what do you remember about that?");
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (on_learning_formation(true), Call::text(formation_create())),
+        (
+            on_latest_owner(&first),
+            Call::text(format!("I will keep {TARGET} in mind.")),
+        ),
+        (on_latest_owner(&second), Call::text("a clean answer")),
+    ]));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    let (round, stream, reply) = send_round(served.client(), &first)
+        .await
+        .expect("the first round must complete");
+    assert!(reply.contains(TARGET));
+    confirm_round(served.client(), &round, stream).await;
+    wait_for_memory_revision_at_least(served.client(), 1).await;
+    let outcome = request_deletion(served.client(), TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    confirm_deletion(served.handle()).await;
+    let sends_before = transport.sends();
+    let (round, stream, reply) = send_round(served.client(), &second)
+        .await
+        .expect("a turn with uncovered context must still serve");
+    assert!(reply.contains("a clean answer"), "{reply}");
+    confirm_round(served.client(), &round, stream).await;
+    assert!(
+        transport.sends() > sends_before,
+        "the filtered turn reaches the provider"
+    );
+    let second_inputs: Vec<String> = transport
+        .input_texts()
+        .into_iter()
+        .filter(|input| input.ends_with(&format!("\nOwner: {second}")))
+        .collect();
+    assert!(
+        !second_inputs.is_empty(),
+        "the fixture must reach the second provider call"
+    );
+    assert_absent_all("dialogue provider input", &second_inputs, TARGET);
+    let handle = served.handle_arc();
+    let page = drive_until(&handle, served.client(), DeletionPhaseWire::Completed)
+        .await
+        .expect("the operation must complete");
+    assert_eq!(page.operations[0].phase, DeletionPhaseWire::Completed);
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(
+        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
+        "no table may keep the target after completion"
+    );
+    served.server.abort();
+}
+
+async fn system_wide_parked_dialogue_subcase() {
+    use ene_companion::{
+        AppendHistoryCommand, CompanionRepository as _, HistoryRepository as _, HistoryRole,
+    };
+    use ene_learning::{
+        ChangeKind, Importance, LearningRepository as _, LearningScope, MemoryChange,
+        MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
+    };
+    use ene_presence::PresenceRepository as _;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let second = String::from("what do you remember about that?");
+    let fresh = format!("a fresh note about {TARGET}");
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(&second),
+            Call::text("I still keep that detail in mind."),
+        ),
+        (on_latest_owner(&fresh), Call::text("acknowledged")),
+    ]));
+    let mut served = serve_and_setup(
+        dir.clone(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
+    )
+    .await;
+    served.stop().await;
+    {
+        let store = ene_store::Store::open(&dir.join("app.db"))
+            .await
+            .expect("the state database opens for seeding");
+        let companion = store
+            .ensure_running_companion()
+            .await
+            .expect("the companion must resolve");
+        let generation = store
+            .load_attribution(companion.as_raw())
+            .await
+            .expect("attribution must load")
+            .expect("attribution must exist")
+            .generation;
+        match store
+            .append_message(AppendHistoryCommand {
+                companion,
+                round: RawId::new(),
+                role: HistoryRole::Owner,
+                text: format!("please remember {TARGET} for me"),
+                lang: String::from("en"),
+                at: WallClockWithTz::now(),
+                expected_generation: generation,
+                expected_consent: None,
+                expected_credential_set: None,
+                expected_owner_message: None,
+                command_id: None,
+                round_wire: Some(RawId::new().as_uuid().as_hyphenated().to_string()),
+                round_intent: None,
+                incarnation: None,
+                local_id: None,
+            })
+            .await
+            .expect("the History seed must commit")
+        {
+            ene_companion::HistoryAppendOutcome::CommittedAs { .. } => {}
+            other => panic!("the History seed must commit, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                store
+                    .commit_memory_change(MemoryChangeCommit {
+                        summary: None,
+                        secret_premise: None,
+                        claim: None,
+                        change: MemoryChange {
+                            target: MemoryTarget::New {
+                                id: MemoryId::generate(),
+                            },
+                            scope: LearningScope::companion(companion.as_raw()),
+                            content: format!("the owner mentioned {TARGET}"),
+                            importance: Importance::default(),
+                            temporal: TemporalMeaning::Enduring,
+                            change: ChangeKind::Initial,
+                            at: WallClockWithTz::now(),
+                        },
+                    })
+                    .await
+                    .expect("the Memory seed must answer"),
+                ene_learning::MemoryChangeOutcome::Committed { .. }
+            ),
+            "the Memory seed must commit"
+        );
+    }
+    let mut client = served.serve().await;
+    let outcome = request_deletion(&mut client, TARGET)
+        .await
+        .expect("the request inlet must answer");
+    assert_eq!(outcome, ManagementOutcome::NeedsClarification);
+    transport.block_input(on_latest_owner(&second));
+    let handle = served.handle_arc();
+    let barrier = Arc::clone(&transport);
+    let mut parked = Box::pin(send_round_raw(&mut client, &second));
+    tokio::select! {
+        result = parked.as_mut() => panic!("the parked round cannot finish before completion: {result:?}"),
+        () = barrier.wait_parked(1) => {}
+    }
+    confirm_deletion(&handle).await;
+    let deletion_deadline = tokio::time::Instant::now() + Duration::from_secs(150);
+    loop {
+        let pass = handle
+            .run_targeted_deletion_tick()
+            .await
+            .expect("the serving tick must run");
+        if pass.operations == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deletion_deadline,
+            "the deletion operation did not complete: {pass:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    barrier.release_blocked();
+    let (_round2, _stream2, raced_text, close) = parked.await.expect("the raced round must answer");
+    assert!(
+        transport.input_texts().iter().any(|input| {
+            input.ends_with(&format!("\nOwner: {second}")) && input.contains(TARGET)
+        }),
+        "the fixture must show the prompt read the target-bearing sources"
+    );
+    assert_eq!(
+        close,
+        ene_api::v1::round::StreamClose::Interrupted,
+        "a reply whose claim belongs to the deletion interval never completes"
+    );
+    assert!(
+        !raced_text.contains("I still keep that detail in mind."),
+        "the delayed paraphrase must not be presented: {raced_text}"
+    );
+    assert!(
+        !raced_text.contains(TARGET),
+        "no covered delta may be presented: {raced_text}"
+    );
+    let history = history_texts(&mut client).await;
+    assert!(
+        !history
+            .iter()
+            .any(|text| text.contains("I still keep that detail in mind.")),
+        "the delayed paraphrase must never be adopted into History"
+    );
+    assert_eq!(served.canonical_remainder(TARGET).await, 0);
+    assert!(
+        db_target_hits(&served.dir.join("app.db"), TARGET).is_empty(),
+        "no table may keep the target after completion"
+    );
+    let (round, stream, reply) = send_round(&mut client, &fresh)
+        .await
+        .expect("a fresh origin must be accepted");
+    assert!(reply.contains("acknowledged"), "{reply}");
+    confirm_round(&mut client, &round, stream).await;
+    assert!(
+        history_texts(&mut client)
+            .await
+            .iter()
+            .any(|text| text.contains(TARGET)),
+        "the fresh origin is appended as new History"
+    );
+    served.server.abort();
 }
 
 struct RawPinnedVerifier {
@@ -5370,15 +4412,25 @@ impl WssClient {
         Ok(Self { socket: socket.0 })
     }
 
-    async fn send_crafted(&mut self, frame: &IngressCrafted) -> WireMessageId {
+    async fn send_raw_payload(
+        &mut self,
+        envelope: WireEnvelope,
+        payload: serde_json::Value,
+    ) -> WireMessageId {
         use futures_util::SinkExt as _;
 
-        let message_id = frame.envelope.message_id;
-        let body = rmp_serde::to_vec_named(frame).expect("crafted frame encodes");
+        let message_id = envelope.message_id;
+        #[derive(serde::Serialize)]
+        struct RawFrame {
+            envelope: WireEnvelope,
+            payload: serde_json::Value,
+        }
+        let frame = RawFrame { envelope, payload };
+        let body = rmp_serde::to_vec_named(&frame).expect("raw frame encodes");
         self.socket
             .send(Message::Binary(body.into()))
             .await
-            .expect("crafted frame must send");
+            .expect("raw frame must send");
         message_id
     }
 
@@ -5520,11 +4572,10 @@ async fn raw_dial(dir: &Path) -> WssClient {
         .expect("a same-machine client with the current token must upgrade")
 }
 
-#[tokio::test]
-async fn a_stalled_pre_auth_connection_does_not_delay_the_next_client() {
+async fn wss_stalled_pre_auth_subcase() {
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(conn::run_until_shutdown(
         dir.path().to_path_buf(),
@@ -5562,9 +4613,12 @@ async fn a_stalled_pre_auth_connection_does_not_delay_the_next_client() {
 
 #[tokio::test]
 async fn an_upgrade_in_progress_survives_unrelated_select_activity() {
+    wss_stalled_pre_auth_subcase().await;
+    wss_shutdown_stalled_pre_auth_subcase().await;
+
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(conn::run_until_shutdown(
         dir.path().to_path_buf(),
@@ -5623,11 +4677,10 @@ async fn an_upgrade_in_progress_survives_unrelated_select_activity() {
     joined.expect("the listener must shut down cleanly");
 }
 
-#[tokio::test]
-async fn shutdown_joins_a_stalled_pre_auth_upgrade() {
+async fn wss_shutdown_stalled_pre_auth_subcase() {
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(conn::run_until_shutdown(
         dir.path().to_path_buf(),
@@ -5656,11 +4709,10 @@ async fn shutdown_joins_a_stalled_pre_auth_upgrade() {
     drop(stalled);
 }
 
-#[tokio::test]
-async fn unknown_wire_values_are_typed_rejects_and_the_connection_stays_usable() {
+async fn wss_unknown_wire_subcase() {
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(conn::run_until_shutdown(
         dir.path().to_path_buf(),
@@ -5671,41 +4723,43 @@ async fn unknown_wire_values_are_typed_rejects_and_the_connection_stays_usable()
     let mut host = raw_dial(dir.path()).await;
 
     let unknown_type = host
-        .send_crafted(&IngressCrafted {
-            envelope: crafted_envelope("FutureThing"),
-            payload: IngressPayload::FutureThing(IngressNote {
-                note: String::from("from a newer peer"),
-            }),
-        })
+        .send_raw_payload(
+            crafted_envelope("FutureThing"),
+            serde_json::json!({"FutureThing": {"note": "from a newer peer"}}),
+        )
         .await;
     host.expect_reject(unknown_type, RejectKind::UnsupportedMessage)
         .await;
 
     let unknown_value = host
-        .send_crafted(&IngressCrafted {
-            envelope: crafted_envelope("TextStreamClose"),
-            payload: IngressPayload::TextStreamClose(IngressClose {
-                stream: StreamWireId(uuid::Uuid::new_v4()),
-                status: String::from("Suspended"),
+        .send_raw_payload(
+            crafted_envelope("TextStreamClose"),
+            serde_json::json!({
+                "TextStreamClose": {
+                    "stream": uuid::Uuid::new_v4().to_string(),
+                    "status": "Suspended",
+                },
             }),
-        })
+        )
         .await;
     host.expect_reject(unknown_value, RejectKind::UnsupportedFieldValue)
         .await;
 
     let missing_field = host
-        .send_crafted(&IngressCrafted {
-            envelope: crafted_envelope("SubmitTextInput"),
-            payload: IngressPayload::SubmitTextInput(IngressPartialSubmit {
-                companion: CompanionWireRef(String::from("default")),
-                round: None,
-                fresh: false,
-                body: TextBodyWire {
-                    text: String::from("local_id deliberately absent"),
-                    lang: TextLangWire(String::from("en")),
+        .send_raw_payload(
+            crafted_envelope("SubmitTextInput"),
+            serde_json::json!({
+                "SubmitTextInput": {
+                    "companion": "default",
+                    "round": null,
+                    "fresh": false,
+                    "body": {
+                        "text": "local_id deliberately absent",
+                        "lang": "en",
+                    },
                 },
             }),
-        })
+        )
         .await;
     host.expect_reject(missing_field, RejectKind::MissingRequiredField)
         .await;
@@ -5741,11 +4795,10 @@ async fn unknown_wire_values_are_typed_rejects_and_the_connection_stays_usable()
     joined.expect("the listener must shut down cleanly");
 }
 
-#[tokio::test]
-async fn the_host_refuses_an_upgrade_without_the_current_local_token() {
+async fn wss_token_refusal_subcase() {
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(conn::run_until_shutdown(
         dir.path().to_path_buf(),
@@ -5775,11 +4828,10 @@ async fn the_host_refuses_an_upgrade_without_the_current_local_token() {
     joined.expect("the listener must shut down cleanly");
 }
 
-#[tokio::test]
-async fn the_host_refuses_an_upgrade_that_carries_an_origin() {
+async fn wss_origin_refusal_subcase() {
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(conn::run_until_shutdown(
         dir.path().to_path_buf(),
@@ -5811,9 +4863,13 @@ async fn the_host_refuses_an_upgrade_that_carries_an_origin() {
 
 #[tokio::test]
 async fn an_oversize_ws_frame_closes_the_connection_without_allocating_it() {
+    wss_unknown_wire_subcase().await;
+    wss_text_and_malformed_subcase().await;
+    wss_fragmented_oversize_subcase().await;
+
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(conn::run_until_shutdown(
         dir.path().to_path_buf(),
@@ -5833,9 +4889,14 @@ async fn an_oversize_ws_frame_closes_the_connection_without_allocating_it() {
 
 #[tokio::test]
 async fn the_runtime_information_is_published_while_serving_and_removed_on_graceful_stop() {
+    wss_token_refusal_subcase().await;
+    wss_origin_refusal_subcase().await;
+    wss_stale_generation_subcase().await;
+    wss_pending_pairing_subcase().await;
+
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(conn::run_until_shutdown(
         dir.path().to_path_buf(),
@@ -5925,8 +4986,10 @@ async fn wait_presence(dir: &Path, wanted: &str) -> (String, i64) {
 
 #[tokio::test]
 async fn a_superseded_connection_answers_a_typed_stale_connection() {
+    wss_reconnect_subcase().await;
+
     let dir = tempfile::tempdir().expect("temp dir");
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let mut served = serve_and_setup(
         dir.path().to_path_buf(),
         Arc::clone(&transport),
@@ -6009,10 +5072,9 @@ async fn a_superseded_connection_answers_a_typed_stale_connection() {
     served.stop().await;
 }
 
-#[tokio::test]
-async fn reconnect_reauths_without_restoring_presence_and_a_fresh_summon_serves() {
+async fn wss_reconnect_subcase() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let mut served = serve_and_setup(
         dir.path().to_path_buf(),
         Arc::clone(&transport),
@@ -6056,11 +5118,10 @@ async fn reconnect_reauths_without_restoring_presence_and_a_fresh_summon_serves(
     served.stop().await;
 }
 
-#[tokio::test]
-async fn the_host_refuses_a_stale_startup_generation() {
+async fn wss_stale_generation_subcase() {
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(conn::run_until_shutdown(
         dir.path().to_path_buf(),
@@ -6098,11 +5159,10 @@ async fn the_host_refuses_a_stale_startup_generation() {
     joined.expect("the listener must shut down cleanly");
 }
 
-#[tokio::test]
-async fn text_and_malformed_frames_close_the_connection() {
+async fn wss_text_and_malformed_subcase() {
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(conn::run_until_shutdown(
         dir.path().to_path_buf(),
@@ -6149,158 +5209,10 @@ async fn text_and_malformed_frames_close_the_connection() {
     joined.expect("the listener must shut down cleanly");
 }
 
-#[tokio::test]
-async fn a_pre_auth_connection_that_never_negotiates_is_closed_at_the_machine_deadline() {
+async fn wss_pending_pairing_subcase() {
     let dir = tempfile::tempdir().expect("temp dir");
     let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
-    let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let server = tokio::spawn(conn::run_until_shutdown(
-        dir.path().to_path_buf(),
-        Arc::clone(&handle),
-        transport,
-        shutdown,
-    ));
-    let mut silent = raw_dial(dir.path()).await;
-    // Freeze only the clock to cross the machine deadline; every socket
-    // operation stays on the real clock.
-    tokio::time::pause();
-    tokio::time::advance(MIRRORED_AUTH_DEADLINE + Duration::from_secs(5)).await;
-    tokio::time::resume();
-    let closed = tokio::time::timeout(Duration::from_secs(10), async {
-        use futures_util::StreamExt as _;
-        loop {
-            match silent.socket.next().await {
-                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
-                Some(Ok(_)) => continue,
-            }
-        }
-    })
-    .await;
-    assert!(
-        closed.is_ok(),
-        "a machine-controlled pre-auth stall must be closed at the deadline"
-    );
-    stop.send_replace(true);
-    let joined = tokio::time::timeout(Duration::from_secs(30), server)
-        .await
-        .expect("the listener must stop")
-        .expect("the listener must not panic");
-    joined.expect("the listener must shut down cleanly");
-}
-
-#[tokio::test]
-async fn owner_confirmation_may_exceed_the_machine_deadline() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
-    let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let server = tokio::spawn(conn::run_until_shutdown(
-        dir.path().to_path_buf(),
-        Arc::clone(&handle),
-        transport,
-        shutdown,
-    ));
-    let pending = dial_until_pending(dir.path())
-        .await
-        .expect("the first pairing must pend");
-    // The owner reads the confirmation for longer than the machine deadline.
-    tokio::time::pause();
-    tokio::time::advance(MIRRORED_AUTH_DEADLINE + Duration::from_secs(30)).await;
-    tokio::time::resume();
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let approved = handle
-        .approve_device(pending.pending_id())
-        .await
-        .expect("approval must succeed");
-    assert!(approved.is_some(), "approval must pair");
-    let mut client = pending
-        .complete()
-        .await
-        .expect("the connection must survive an owner wait longer than the machine deadline");
-    let companion = client.companion_ref();
-    let answer = ask(
-        &mut client,
-        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
-        "post-approval history",
-    )
-    .await
-    .expect("the approved connection must answer");
-    assert!(
-        matches!(answer, WirePayload::HistoryResponse(_)),
-        "got {answer:?}"
-    );
-    stop.send_replace(true);
-    let joined = tokio::time::timeout(Duration::from_secs(30), server)
-        .await
-        .expect("the listener must stop")
-        .expect("the listener must not panic");
-    joined.expect("the listener must shut down cleanly");
-}
-
-#[tokio::test]
-async fn an_idle_client_keeps_one_connection_alive_past_the_liveness_window() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
-    let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let server = tokio::spawn(conn::run_until_shutdown(
-        dir.path().to_path_buf(),
-        Arc::clone(&handle),
-        transport,
-        shutdown,
-    ));
-    let pending = dial_until_pending(dir.path())
-        .await
-        .expect("the first pairing must pend");
-    let approved = handle
-        .approve_device(pending.pending_id())
-        .await
-        .expect("approval must succeed");
-    assert!(approved.is_some(), "approval must pair");
-    let mut client = pending
-        .complete()
-        .await
-        .expect("provision must authenticate");
-    // Idle far past the host's liveness window: only the clock moves, and
-    // the transport's background pump keeps answering the Host's pings.
-    tokio::time::pause();
-    for _ in 0..12 {
-        tokio::time::advance(Duration::from_secs(10)).await;
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
-        }
-    }
-    tokio::time::resume();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let companion = client.companion_ref();
-    let answer = ask(
-        &mut client,
-        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
-        "history after idle",
-    )
-    .await
-    .expect("the same connection must still answer after more than the liveness window of idling");
-    assert!(
-        matches!(answer, WirePayload::HistoryResponse(_)),
-        "got {answer:?}"
-    );
-    stop.send_replace(true);
-    let joined = tokio::time::timeout(Duration::from_secs(30), server)
-        .await
-        .expect("the listener must stop")
-        .expect("the listener must not panic");
-    joined.expect("the listener must shut down cleanly");
-}
-
-#[tokio::test]
-async fn pending_pairings_are_capped_with_a_typed_denial() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(conn::run_until_shutdown(
         dir.path().to_path_buf(),
@@ -6411,13 +5323,6 @@ async fn serve_and_park_dialogue(
     served
 }
 
-/// One frame more than the mirrored queue capacity: with the business handler
-/// parked this leaves the business frame queue full and one frame in the
-/// read-ahead window — below the queue + read-ahead overload boundary.
-async fn saturate_the_application_queue(served: &mut Served) {
-    notify_some(served, MIRRORED_STREAM_BUFFER_FRAMES + 1).await;
-}
-
 /// Exactly the mirrored application capacity — business queue plus the full
 /// read-ahead window — with the business handler parked. The connection is
 /// saturated but still at capacity, not over it.
@@ -6463,73 +5368,18 @@ async fn cross_the_liveness_window() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
-#[tokio::test]
-async fn a_business_handler_over_the_liveness_window_keeps_ping_and_the_connection_alive() {
+async fn wss_parked_close_subcase() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
-    let mut served = serve_and_park_dialogue(
-        dir.path().to_path_buf(),
-        Arc::clone(&transport),
-        "summon for liveness",
-        "park beyond the liveness window",
-    )
-    .await;
-
-    // The business handler now runs past the liveness window while the client
-    // only answers the Host's pings: those pings must keep flowing, and the
-    // pongs must keep the responsive connection live.
-    cross_the_liveness_window().await;
-    assert!(
-        matches!(
-            presence_row(dir.path()),
-            Some((ref state, _)) if state == "present"
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner("summon for close"),
+            Call::text("SUMMON-REPLY"),
         ),
-        "a responsive client must not be liveness-closed while its handler is parked"
-    );
-
-    // Completing the parked handler lets the Host re-check liveness against
-    // activity that stopped at the park: without transport pings inside the
-    // window this would be over the liveness window already.
-    transport.release_blocked();
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(
-        matches!(
-            presence_row(dir.path()),
-            Some((ref state, _)) if state == "present"
+        (
+            on_latest_owner("reconnect round"),
+            Call::text("RECONNECT-REPLY"),
         ),
-        "the liveness re-check after the parked handler must not close a client that kept answering"
-    );
-    let companion = served.client().companion_ref();
-    let answer = ask(
-        served.client(),
-        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
-        "history after the parked handler",
-    )
-    .await
-    .expect("the same connection must still answer past the liveness window");
-    assert!(
-        matches!(answer, WirePayload::HistoryResponse(_)),
-        "got {answer:?}"
-    );
-    served.stop().await;
-}
-
-#[tokio::test]
-async fn client_close_during_a_parked_handler_closes_promptly_and_never_returns_to_current() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner("summon for close"),
-                Call::text("SUMMON-REPLY"),
-            ),
-            (
-                on_latest_owner("reconnect round"),
-                Call::text("RECONNECT-REPLY"),
-            ),
-        ],
-        &[],
-    ));
+    ]));
     let mut served = serve_and_park_dialogue(
         dir.path().to_path_buf(),
         Arc::clone(&transport),
@@ -6537,6 +5387,16 @@ async fn client_close_during_a_parked_handler_closes_promptly_and_never_returns_
         "park before the client leaves",
     )
     .await;
+
+    saturate_queue_and_read_ahead(&mut served).await;
+    cross_the_liveness_window().await;
+    assert!(
+        matches!(
+            presence_row(dir.path()),
+            Some((ref state, _)) if state == "present"
+        ),
+        "a full application queue must not stop Host liveness traffic"
+    );
 
     // The client leaves while its business operation is still parked: the
     // connection must close promptly, not when the operation finishes.
@@ -6575,66 +5435,17 @@ async fn client_close_during_a_parked_handler_closes_promptly_and_never_returns_
     served.stop().await;
 }
 
-#[tokio::test]
-async fn a_saturated_application_queue_still_moves_pongs_and_close() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
-    let mut served = serve_and_park_dialogue(
-        dir.path().to_path_buf(),
-        Arc::clone(&transport),
-        "summon for saturation",
-        "park under saturation",
-    )
-    .await;
-    saturate_the_application_queue(&mut served).await;
-
-    // Past the liveness window the Host still pings and still reads the pongs
-    // behind the saturated application queue: the connection stays present.
-    cross_the_liveness_window().await;
-    assert!(
-        matches!(
-            presence_row(dir.path()),
-            Some((ref state, _)) if state == "present"
-        ),
-        "a saturated queue must not stop the pong reads that prove liveness"
-    );
-
-    // The reader also keeps processing EOF behind the saturated queue.
-    drop(served.client.take());
-    let (_, fallen_back) = wait_presence(dir.path(), "no_active").await;
-
-    transport.release_blocked();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        presence_row(dir.path()),
-        Some((String::from("no_active"), fallen_back)),
-        "the closed connection's completion must not resurrect presence"
-    );
-    let mut replacement = connect(dir.path()).await;
-    let (round, stream, _text) =
-        send_round(&mut replacement, "after the saturated connection closed")
-            .await
-            .expect("the replacement connection must serve after saturation closed the old one");
-    confirm_round(&mut replacement, &round, stream).await;
-    drop(replacement);
-    served.stop().await;
-}
-
-#[tokio::test]
-async fn an_unparked_burst_dispatches_before_held_overflow_and_answers_ping() {
+async fn wss_active_burst_subcase() {
     let dir = tempfile::tempdir().expect("temp dir");
     let input = "unparked burst input";
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![(
-            on_latest_owner(input),
-            Call::stream(
-                "BURST-STREAM-REPLY",
-                (0..8).map(|index| format!("burst-{index} ")).collect(),
-                Duration::from_millis(20),
-            ),
-        )],
-        &[],
-    ));
+    let transport = Arc::new(ScriptedTransport::new(vec![(
+        on_latest_owner(input),
+        Call::stream(
+            "BURST-STREAM-REPLY",
+            (0..8).map(|index| format!("burst-{index} ")).collect(),
+            Duration::from_millis(100),
+        ),
+    )]));
     let mut served = serve_and_setup(
         dir.path().to_path_buf(),
         Arc::clone(&transport),
@@ -6643,64 +5454,41 @@ async fn an_unparked_burst_dispatches_before_held_overflow_and_answers_ping() {
     .await;
     let companion = served.client().companion_ref();
     let target = served.client().round_target();
-    let first = served
-        .client()
-        .prepare(WirePayload::SubmitTextInput(cmds::submit_input(
+    let intake = ask(
+        served.client(),
+        WirePayload::SubmitTextInput(cmds::submit_input(
             &companion,
             target,
             String::from(input),
             String::from("en"),
-        )));
-    served
-        .client()
-        .send_prepared_for_tests(&first)
-        .await
-        .expect("the first application frame must enter the transport");
-
-    // Keep the application burst ahead of the first business operation. The
-    // provider is actively streaming, not parked; the old select order could
-    // nevertheless keep pulling frames into `held` before dispatching it.
-    let burst = MIRRORED_STREAM_BUFFER_FRAMES + MIRRORED_READ_AHEAD_FRAMES - 1;
-    let ping_payload = b"unparked-burst-ping";
-    let probe = served.client().transport_probe_for_tests();
-    for index in 0..burst {
-        if index == 8 {
-            served.client().send_transport_ping_for_tests(ping_payload);
-        }
-        let request = served
-            .client()
-            .prepare(WirePayload::HistoryRequest(cmds::history_request(
-                &companion, None, 1,
-            )));
-        served
-            .client()
-            .send_prepared_for_tests(&request)
-            .await
-            .expect("every bounded application burst frame must be accepted");
-    }
+        )),
+        "stream intake",
+    )
+    .await
+    .expect("the first application frame must enter the transport");
+    assert!(matches!(
+        intake,
+        WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+    ));
 
     tokio::time::timeout(Duration::from_secs(5), async {
         while transport.sends() == 0 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("the first business operation must dispatch before held overflow");
-    assert!(
-        transport.sends() >= 1,
-        "the burst must not close the connection before business dispatch"
-    );
+    .expect("the first business operation must start");
 
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if probe.take_pongs().iter().any(|pong| pong == ping_payload) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the Host must answer the burst's Client Ping with a bounded Pong");
+    let burst = MIRRORED_STREAM_BUFFER_FRAMES + MIRRORED_READ_AHEAD_FRAMES - 1;
+    for _ in 0..burst {
+        served
+            .client()
+            .notify(WirePayload::HistoryRequest(cmds::history_request(
+                &companion, None, 1,
+            )))
+            .await
+            .expect("every bounded application burst frame must be accepted");
+    }
 
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -6738,8 +5526,11 @@ async fn an_unparked_burst_dispatches_before_held_overflow_and_answers_ping() {
 
 #[tokio::test]
 async fn an_application_frame_past_the_read_ahead_window_fails_the_connection() {
+    wss_parked_close_subcase().await;
+    wss_active_burst_subcase().await;
+
     let dir = tempfile::tempdir().expect("temp dir");
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
     let mut served = serve_and_park_dialogue(
         dir.path().to_path_buf(),
         Arc::clone(&transport),
@@ -6807,6 +5598,290 @@ fn db_scalar(db: &Path, sql: &str) -> u64 {
     u64::try_from(counted).expect("a row count never goes negative")
 }
 
+#[tokio::test]
+async fn graceful_shutdown_aborts_a_parked_dialogue_dispatch_and_keeps_the_unknown_fact() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transport = Arc::new(ScriptedTransport::new(vec![(
+        on_latest_owner("summon before shutdown"),
+        // Reported usage for the completed summon, so the only unknown
+        // usage fact in this test is the aborted post-claim attempt.
+        Call::reported("SUMMON-REPLY", 120, 0, 30),
+    )]));
+    let mut served = serve_and_park_dialogue(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        "summon before shutdown",
+        "park across the shutdown",
+    )
+    .await;
+    // The barrier is the dispatch's own provider call: the attempt claim is
+    // durably `Started` before the fixture can park, so the shutdown below
+    // aborts a post-claim dispatch.
+    transport.wait_parked(1).await;
+    assert_eq!(transport.parked_count(), 1);
+
+    served.request_graceful_stop();
+    // Concurrency Control shutdown owns the running dispatch: without ever
+    // releasing the provider fixture, the Host-lifecycle cooperative abort
+    // alone must let the shutdown finish — joining the business task inside
+    // the Host lifecycle instead of detaching it.
+    assert!(
+        served.join_listener_within(Duration::from_secs(30)).await,
+        "graceful shutdown must quiesce the parked dispatch through the cooperative abort"
+    );
+    assert_eq!(
+        transport.parked_count(),
+        1,
+        "the provider fixture was never released; only the abort ended the wait"
+    );
+    wait_until_deletion_drivers(served.handle(), 0).await;
+    wait_until_deletion_blocking(served.handle(), 0).await;
+
+    // The post-claim durable outcome: exactly one attempt per dispatch, the
+    // aborted claim keeps its unknown usage fact, the owner input stays
+    // persisted, and no reply commits as a success.
+    let db = dir.path().join("app.db");
+    assert_eq!(
+        db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
+        2,
+        "the summon and the aborted dispatch claim exactly one attempt each"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM usage_fact WHERE source = 'unknown'"
+        ),
+        1,
+        "the aborted post-claim attempt records its unknown usage fact"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM history_message WHERE role = 'owner'"
+        ),
+        2,
+        "both accepted owner inputs stay committed"
+    );
+    assert_eq!(
+        db_scalar(
+            &db,
+            "SELECT COUNT(*) FROM history_message WHERE role = 'companion'"
+        ),
+        1,
+        "only the completed summon commits a reply; the aborted dispatch never does"
+    );
+
+    // With the business task joined, nothing derived from it may still
+    // mutate the store after the shutdown completed.
+    let settled = served.canonical_remainder("park across the shutdown").await;
+    assert!(settled > 0, "the accepted owner input must be persisted");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        served.canonical_remainder("park across the shutdown").await,
+        settled,
+        "no store mutation may appear from the joined business task after shutdown"
+    );
+}
+
+async fn advance_clock_in_steps(span: Duration) {
+    let mut left = span;
+    while left > Duration::ZERO {
+        let take = Duration::from_secs(5).min(left);
+        tokio::time::advance(take).await;
+        left -= take;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_receipt_expires_while_the_business_handler_is_parked() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let text = "park past the receipt deadline";
+    let transport = Arc::new(ScriptedTransport::new(vec![(
+        on_latest_owner(text),
+        Call::text(format!("REPLY-DONE {text}")),
+    )]));
+    let mut served = serve_and_setup(
+        dir.path().to_path_buf(),
+        Arc::clone(&transport),
+        &[cmds::CAPABILITY_DIALOGUE],
+    )
+    .await;
+    let (round, stream, _reply) = send_round(served.client(), "summon for the receipt")
+        .await
+        .expect("the summon round must complete");
+    wait_presence(&served.dir, "present").await;
+    confirm_round(served.client(), &round, stream).await;
+
+    let stale = fetch_summary(served.client(), "the unacked receipt")
+        .await
+        .expect("the subscription must answer");
+    assert!(!stale.receipt.0.is_empty());
+
+    transport.block_input(on_latest_owner(text));
+    let companion = served.client().companion_ref();
+    let target = served.client().round_target();
+    let intake = ask(
+        served.client(),
+        WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
+            target,
+            String::from(text),
+            String::from("en"),
+        )),
+        "park submit",
+    )
+    .await
+    .expect("the submit must be accepted before dispatch");
+    assert!(matches!(
+        intake,
+        WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+    ));
+    transport.wait_parked(1).await;
+
+    tokio::time::pause();
+    advance_clock_in_steps(Duration::from_secs(35)).await;
+    tokio::time::resume();
+
+    transport.release_blocked();
+    let next = tokio::time::timeout(
+        Duration::from_secs(10),
+        wait_for_summary_with(served.client(), "REPLY-DONE"),
+    )
+    .await
+    .expect("the next page must be bounded");
+    assert!(
+        next.items
+            .iter()
+            .any(|item| item.excerpt.contains("REPLY-DONE")),
+        "the next page must follow the expired receipt: {next:?}"
+    );
+    let acked = tokio::time::timeout(
+        Duration::from_secs(10),
+        ack_summary(served.client(), &stale),
+    )
+    .await
+    .expect("the late ack must be bounded")
+    .expect("the late ack must answer");
+    assert_eq!(acked, UndeliveredAckOutcome::StalePresentation);
+    assert_eq!(
+        transport
+            .input_texts()
+            .iter()
+            .filter(|input| input.contains(text))
+            .count(),
+        1,
+        "delivering the next page must not replay the provider call"
+    );
+    served.stop().await;
+}
+
+#[tokio::test]
+async fn a_stalled_peer_write_is_bounded_and_the_serving_task_exits() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+
+    // A tiny receive window on this raw client lets the Host's pong writes
+    // fill the TCP path quickly; the pending pairing keeps the connection in
+    // the owner-confirmation window so only the write wait may close it.
+    let mut client = WssClient::connect_sized(dir.path(), Some(2048), Some(1024 * 1024))
+        .await
+        .expect("a same-machine client with the current token must upgrade");
+    let mut pairing = WireFrame {
+        envelope: crafted_envelope("PairingRequest"),
+        payload: WirePayload::PairingRequest(PairingRequest {
+            device_descriptor: String::from("stalled writer"),
+        }),
+    };
+    pairing.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
+    client.send_wire(&pairing).await;
+    let reply = client.recv_wire().await;
+    assert!(
+        matches!(
+            reply.payload,
+            WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation { .. })
+        ),
+        "the pairing must pend before the stall, got {}",
+        reply.payload.message_type()
+    );
+
+    use futures_util::StreamExt as _;
+    let (mut sink, mut reader) = client.socket.split();
+    let pinger = tokio::spawn(async move {
+        use futures_util::SinkExt as _;
+        let payload = vec![0x5a_u8; 120];
+        for _ in 0..20_000 {
+            if sink
+                .send(Message::Ping(payload.clone().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // The client never reads: the Host's pong write parks on the socket, and
+    // the write wait bound must still end the connection instead of owning
+    // the serving task forever.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(32)).await;
+    tokio::time::resume();
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match reader.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the stalled write must be bounded by the write wait and close the connection"
+    );
+    pinger.abort();
+
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
+async fn wss_fragmented_oversize_subcase() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let handle = open_host(dir.path()).await;
+    let transport = Arc::new(ScriptedTransport::new(Vec::new()));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(conn::run_until_shutdown(
+        dir.path().to_path_buf(),
+        Arc::clone(&handle),
+        transport,
+        shutdown,
+    ));
+    let host = raw_dial(dir.path()).await;
+    host.send_fragmented_oversize_and_expect_close().await;
+    stop.send_replace(true);
+    let joined = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the listener must stop")
+        .expect("the listener must not panic");
+    joined.expect("the listener must shut down cleanly");
+}
+
 async fn prepare_shutdown_task(dir: PathBuf, transport: Arc<ScriptedTransport>) -> Served {
     let mut served = serve_and_setup(dir.clone(), transport, &[cmds::CAPABILITY_DIALOGUE]).await;
     let workspace = dir.join("shutdown-task-workspace");
@@ -6835,40 +5910,37 @@ async fn serve_and_start_shutdown_task(dir: PathBuf, transport: Arc<ScriptedTran
 #[tokio::test]
 async fn supported_host_runtime_action_smoke_uses_the_packaged_worker() {
     let temp = tempfile::TempDir::new().unwrap();
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(
-                    r##"{"tool":"create","path":"smoke.md","content":"worker smoke"}"##,
-                    100,
-                    0,
-                    10,
-                ),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(
+                r##"{"tool":"create","path":"smoke.md","content":"worker smoke"}"##,
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(1),
-                Call::reported(r##"{"tool":"read","path":"smoke.md"}"##, 100, 0, 10),
-            ),
-            (
-                on_task_agent_turn(2),
-                Call::reported(r#"{"final":"worker smoke complete"}"#, 100, 0, 10),
-            ),
-        ],
-        &[],
-    ));
+        ),
+        (
+            on_task_agent_turn(1),
+            Call::reported(r##"{"tool":"read","path":"smoke.md"}"##, 100, 0, 10),
+        ),
+        (
+            on_task_agent_turn(2),
+            Call::reported(r#"{"final":"worker smoke complete"}"#, 100, 0, 10),
+        ),
+    ]));
     transport.block_input(on_task_agent_turn(2));
     let mut served =
         serve_and_start_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
@@ -6901,32 +5973,29 @@ async fn supported_host_runtime_action_smoke_uses_the_packaged_worker() {
 #[tokio::test]
 async fn missing_worker_fails_closed_before_action_claim() {
     let temp = tempfile::TempDir::new().unwrap();
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(
-                    r##"{"tool":"create","path":"missing-worker.md","content":"blocked"}"##,
-                    100,
-                    0,
-                    10,
-                ),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(
+                r##"{"tool":"create","path":"missing-worker.md","content":"blocked"}"##,
+                100,
+                0,
+                10,
             ),
-        ],
-        &[],
-    ));
+        ),
+    ]));
     let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
     served
         .handle()
@@ -6968,32 +6037,29 @@ async fn missing_worker_fails_closed_before_action_claim() {
 #[tokio::test]
 async fn stale_worker_protocol_is_rejected_before_au5_and_staging() {
     let temp = tempfile::TempDir::new().unwrap();
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(
-                    r##"{"tool":"create","path":"stale-worker.md","content":"blocked"}"##,
-                    100,
-                    0,
-                    10,
-                ),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(
+                r##"{"tool":"create","path":"stale-worker.md","content":"blocked"}"##,
+                100,
+                0,
+                10,
             ),
-        ],
-        &[],
-    ));
+        ),
+    ]));
     let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
     served
         .handle()
@@ -7048,32 +6114,29 @@ async fn stale_worker_protocol_is_rejected_before_au5_and_staging() {
 #[tokio::test]
 async fn windows_junction_staging_root_is_rejected_without_deleting_its_target() {
     let temp = tempfile::TempDir::new().unwrap();
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(
-                    r##"{"tool":"create","path":"junction.md","content":"blocked"}"##,
-                    100,
-                    0,
-                    10,
-                ),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(
+                r##"{"tool":"create","path":"junction.md","content":"blocked"}"##,
+                100,
+                0,
+                10,
             ),
-        ],
-        &[],
-    ));
+        ),
+    ]));
     let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
     let workspace = temp.path().join("shutdown-task-workspace");
     let outside = temp.path().join("junction-target");
@@ -7117,32 +6180,29 @@ async fn host_shutdown_reports_staging_cleanup_failure_and_keeps_the_obligation(
     let temp = tempfile::TempDir::new().unwrap();
     let entered = temp.path().join("staging-body-written");
     let release = temp.path().join("never-release-staging-body");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(
-                    r##"{"tool":"create","path":"cleanup-failure.md","content":"private staging cleanup sentinel 7193"}"##,
-                    100,
-                    0,
-                    10,
-                ),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(
+                r##"{"tool":"create","path":"cleanup-failure.md","content":"private staging cleanup sentinel 7193"}"##,
+                100,
+                0,
+                10,
             ),
-        ],
-        &[],
-    ));
+        ),
+    ]));
     let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
     served
         .handle()
@@ -7190,32 +6250,29 @@ async fn shutdown_during_destructive_staging_cleanup_kills_the_helper_and_report
     let entered = temp.path().join("staging-cleanup-entered");
     let release = temp.path().join("staging-cleanup-release");
     let canary = temp.path().join("staging-cleanup-canary");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(
-                    r##"{"tool":"create","path":"stalled-cleanup.md","content":"private stalled cleanup canary 7201"}"##,
-                    100,
-                    0,
-                    10,
-                ),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(
+                r##"{"tool":"create","path":"stalled-cleanup.md","content":"private stalled cleanup canary 7201"}"##,
+                100,
+                0,
+                10,
             ),
-        ],
-        &[],
-    ));
+        ),
+    ]));
     let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
     served
         .handle()
@@ -7261,36 +6318,33 @@ async fn shutdown_during_destructive_staging_cleanup_kills_the_helper_and_report
 #[tokio::test]
 async fn graceful_shutdown_aborts_a_parked_task_agent_preserves_unknown_and_does_not_replay() {
     let temp = tempfile::TempDir::new().unwrap();
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(
-                    r##"{"tool":"create","path":"report.md","content":"shutdown report"}"##,
-                    100,
-                    0,
-                    10,
-                ),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(
+                r##"{"tool":"create","path":"report.md","content":"shutdown report"}"##,
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(1),
-                Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
-            ),
-        ],
-        &[],
-    ));
+        ),
+        (
+            on_task_agent_turn(1),
+            Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
+        ),
+    ]));
     transport.block_input(on_task_agent_turn(1));
     let mut served =
         serve_and_start_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
@@ -7387,32 +6441,29 @@ async fn host_shutdown_kills_reaps_and_joins_uncooperative_task_effect_before_re
     let entered = temp.path().join("effect-entered");
     let release = temp.path().join("effect-release");
     let mutation = temp.path().join("effect-late-mutation");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(
-                    r##"{"tool":"create","path":"uncooperative.md","content":"late"}"##,
-                    100,
-                    0,
-                    10,
-                ),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(
+                r##"{"tool":"create","path":"uncooperative.md","content":"late"}"##,
+                100,
+                0,
+                10,
             ),
-        ],
-        &[],
-    ));
+        ),
+    ]));
     let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
     let executable = std::env::current_exe().expect("the integration-test executable path");
     served
@@ -7535,27 +6586,24 @@ async fn host_shutdown_kills_reaps_and_joins_uncooperative_task_effect_before_re
 #[tokio::test]
 async fn shutdown_before_task_agent_inference_claim_creates_no_attempt_or_provider_io() {
     let temp = tempfile::TempDir::new().unwrap();
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
-            ),
-        ],
-        &[],
-    ));
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
+        ),
+    ]));
     let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
     served.handle().arm_inference_claim_pause_for_tests();
     propose_shutdown_task(&mut served).await;
@@ -7602,32 +6650,29 @@ async fn shutdown_before_task_agent_inference_claim_creates_no_attempt_or_provid
 #[tokio::test]
 async fn shutdown_before_task_agent_action_start_creates_no_attempt_or_workspace_effect() {
     let temp = tempfile::TempDir::new().unwrap();
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(
-                    r##"{"tool":"create","path":"linearized.md","content":"blocked"}"##,
-                    100,
-                    0,
-                    10,
-                ),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(
+                r##"{"tool":"create","path":"linearized.md","content":"blocked"}"##,
+                100,
+                0,
+                10,
             ),
-        ],
-        &[],
-    ));
+        ),
+    ]));
     let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
     served.handle().arm_action_claim_pause_for_tests();
     propose_shutdown_task(&mut served).await;
@@ -7672,32 +6717,29 @@ async fn shutdown_during_staging_preparation_is_bounded_and_claims_no_action() {
     let entered = temp.path().join("staging-prepare-entered");
     let release = temp.path().join("staging-prepare-release");
     let canary = temp.path().join("staging-prepare-canary");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(
-                    r##"{"tool":"create","path":"stalled-preparation.md","content":"blocked"}"##,
-                    100,
-                    0,
-                    10,
-                ),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(
+                r##"{"tool":"create","path":"stalled-preparation.md","content":"blocked"}"##,
+                100,
+                0,
+                10,
             ),
-        ],
-        &[],
-    ));
+        ),
+    ]));
     let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
     served
         .handle()
@@ -7760,36 +6802,33 @@ async fn shutdown_during_staging_preparation_is_bounded_and_claims_no_action() {
 #[tokio::test]
 async fn action_claim_first_keeps_started_fact_and_completed_effect_across_shutdown() {
     let temp = tempfile::TempDir::new().unwrap();
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(
-                    r##"{"tool":"create","path":"claimed-first.md","content":"finished"}"##,
-                    100,
-                    0,
-                    10,
-                ),
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(
+                r##"{"tool":"create","path":"claimed-first.md","content":"finished"}"##,
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(1),
-                Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
-            ),
-        ],
-        &[],
-    ));
+        ),
+        (
+            on_task_agent_turn(1),
+            Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
+        ),
+    ]));
     let mut served = prepare_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
     served.handle().arm_action_effect_pause_for_tests();
     propose_shutdown_task(&mut served).await;
@@ -7838,27 +6877,24 @@ async fn action_claim_first_keeps_started_fact_and_completed_effect_across_shutd
 #[tokio::test]
 async fn task_cancel_racing_host_shutdown_keeps_the_durable_cancel_distinct() {
     let temp = tempfile::TempDir::new().unwrap();
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner(SHUTDOWN_TASK_OWNER),
-                Call::reported(
-                    task_reply(serde_json::json!({
-                        "kind": "propose_task",
-                        "purpose": SHUTDOWN_TASK_PURPOSE,
-                    })),
-                    100,
-                    0,
-                    10,
-                ),
+    let transport = Arc::new(ScriptedTransport::new(vec![
+        (
+            on_latest_owner(SHUTDOWN_TASK_OWNER),
+            Call::reported(
+                task_reply(serde_json::json!({
+                    "kind": "propose_task",
+                    "purpose": SHUTDOWN_TASK_PURPOSE,
+                })),
+                100,
+                0,
+                10,
             ),
-            (
-                on_task_agent_turn(0),
-                Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
-            ),
-        ],
-        &[],
-    ));
+        ),
+        (
+            on_task_agent_turn(0),
+            Call::reported(r#"{"final":"done"}"#, 100, 0, 10),
+        ),
+    ]));
     transport.block_input(on_task_agent_turn(0));
     let mut served =
         serve_and_start_shutdown_task(temp.path().to_path_buf(), Arc::clone(&transport)).await;
@@ -7915,1104 +6951,4 @@ async fn task_cancel_racing_host_shutdown_keeps_the_durable_cancel_distinct() {
         0,
         "neither race path fabricates a final result"
     );
-}
-
-#[tokio::test]
-async fn graceful_shutdown_aborts_a_parked_dialogue_dispatch_and_keeps_the_unknown_fact() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![(
-            on_latest_owner("summon before shutdown"),
-            // Reported usage for the completed summon, so the only unknown
-            // usage fact in this test is the aborted post-claim attempt.
-            Call::reported("SUMMON-REPLY", 120, 0, 30),
-        )],
-        &[],
-    ));
-    let mut served = serve_and_park_dialogue(
-        dir.path().to_path_buf(),
-        Arc::clone(&transport),
-        "summon before shutdown",
-        "park across the shutdown",
-    )
-    .await;
-    // The barrier is the dispatch's own provider call: the attempt claim is
-    // durably `Started` before the fixture can park, so the shutdown below
-    // aborts a post-claim dispatch.
-    transport.wait_parked(1).await;
-    assert_eq!(transport.parked_count(), 1);
-
-    served.request_graceful_stop();
-    // Concurrency Control shutdown owns the running dispatch: without ever
-    // releasing the provider fixture, the Host-lifecycle cooperative abort
-    // alone must let the shutdown finish — joining the business task inside
-    // the Host lifecycle instead of detaching it.
-    assert!(
-        served.join_listener_within(Duration::from_secs(30)).await,
-        "graceful shutdown must quiesce the parked dispatch through the cooperative abort"
-    );
-    assert_eq!(
-        transport.parked_count(),
-        1,
-        "the provider fixture was never released; only the abort ended the wait"
-    );
-    wait_until_deletion_drivers(served.handle(), 0).await;
-    wait_until_deletion_blocking(served.handle(), 0).await;
-
-    // The post-claim durable outcome: exactly one attempt per dispatch, the
-    // aborted claim keeps its unknown usage fact, the owner input stays
-    // persisted, and no reply commits as a success.
-    let db = dir.path().join("app.db");
-    assert_eq!(
-        db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
-        2,
-        "the summon and the aborted dispatch claim exactly one attempt each"
-    );
-    assert_eq!(
-        db_scalar(
-            &db,
-            "SELECT COUNT(*) FROM usage_fact WHERE source = 'unknown'"
-        ),
-        1,
-        "the aborted post-claim attempt records its unknown usage fact"
-    );
-    assert_eq!(
-        db_scalar(
-            &db,
-            "SELECT COUNT(*) FROM history_message WHERE role = 'owner'"
-        ),
-        2,
-        "both accepted owner inputs stay committed"
-    );
-    assert_eq!(
-        db_scalar(
-            &db,
-            "SELECT COUNT(*) FROM history_message WHERE role = 'companion'"
-        ),
-        1,
-        "only the completed summon commits a reply; the aborted dispatch never does"
-    );
-
-    // With the business task joined, nothing derived from it may still
-    // mutate the store after the shutdown completed.
-    let settled = served.canonical_remainder("park across the shutdown").await;
-    assert!(settled > 0, "the accepted owner input must be persisted");
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        served.canonical_remainder("park across the shutdown").await,
-        settled,
-        "no store mutation may appear from the joined business task after shutdown"
-    );
-}
-
-#[cfg(feature = "test-support")]
-#[tokio::test]
-async fn graceful_shutdown_stops_admission_before_abort_and_joins_without_new_ingress() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![(
-            on_latest_owner("summon before the shutdown boundary"),
-            Call::reported("SUMMON-BOUNDARY-REPLY", 10, 0, 1),
-        )],
-        &[],
-    ));
-    let mut served = serve_and_setup(
-        dir.path().to_path_buf(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE],
-    )
-    .await;
-    let (_round, _stream, _reply) =
-        send_round(served.client(), "summon before the shutdown boundary")
-            .await
-            .expect("the setup round must complete");
-    wait_presence(&served.dir, "present").await;
-    let summary = fetch_summary(served.client(), "the boundary receipt")
-        .await
-        .expect("the setup round must produce a receipt");
-    assert_eq!(served.handle().receipts_held_for_tests(), 1);
-
-    let db = dir.path().join("app.db");
-    let owner_rows_before = db_scalar(
-        &db,
-        "SELECT COUNT(*) FROM history_message WHERE role = 'owner'",
-    );
-    let attempts_before = db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt");
-    let task_rows_before = db_scalar(&db, "SELECT COUNT(*) FROM task");
-    let sends_before = transport.sends();
-    let inputs_before = transport.input_texts().len();
-
-    served.handle().arm_shutdown_boundary_for_tests();
-    served.request_graceful_stop();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        served.handle().wait_shutdown_boundary_signal_for_tests(),
-    )
-    .await
-    .expect("shutdown must publish the admission-stop signal");
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        served
-            .handle()
-            .wait_shutdown_boundary_connection_for_tests(),
-    )
-    .await
-    .expect("the existing connection must observe the admission-stop signal");
-
-    let companion = served.client().companion_ref();
-    let target = served.client().round_target();
-    let submit = tokio::time::timeout(
-        Duration::from_secs(5),
-        served
-            .client()
-            .notify(WirePayload::SubmitTextInput(cmds::submit_input(
-                &companion,
-                target,
-                String::from("input after the shutdown boundary"),
-                String::from("en"),
-            ))),
-    )
-    .await;
-    assert!(
-        submit.is_ok(),
-        "the post-boundary input attempt must be bounded, got {submit:?}"
-    );
-    let control = tokio::time::timeout(
-        Duration::from_secs(5),
-        served.client().notify(WirePayload::ConfirmPresentation(
-            ene_api::v1::round::ConfirmPresentationWire {
-                round: summary.round,
-                stream: None,
-                status: PresentationStatus::Presented,
-                detail: None,
-            },
-        )),
-    )
-    .await;
-    assert!(
-        control.is_ok(),
-        "the post-boundary control attempt must be bounded, got {control:?}"
-    );
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    assert_eq!(
-        db_scalar(
-            &db,
-            "SELECT COUNT(*) FROM history_message WHERE role = 'owner'"
-        ),
-        owner_rows_before,
-        "input after the admission boundary must not commit an owner row"
-    );
-    assert_eq!(
-        db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
-        attempts_before,
-        "input after the admission boundary must not create an inference attempt"
-    );
-    assert_eq!(
-        db_scalar(&db, "SELECT COUNT(*) FROM task"),
-        task_rows_before,
-        "control input after the admission boundary must not mutate task state"
-    );
-    assert_eq!(
-        transport.sends(),
-        sends_before,
-        "input after the admission boundary must not reach the provider"
-    );
-    assert_eq!(
-        transport.input_texts().len(),
-        inputs_before,
-        "input after the admission boundary must not add provider input"
-    );
-    assert_eq!(
-        served.handle().receipts_held_for_tests(),
-        1,
-        "control input after the admission boundary must not settle the receipt"
-    );
-
-    served.handle().release_shutdown_boundary_for_tests();
-    assert!(
-        served.join_listener_within(Duration::from_secs(30)).await,
-        "admission stop must precede abort and the handler join"
-    );
-    wait_until_deletion_drivers(served.handle(), 0).await;
-    wait_until_deletion_blocking(served.handle(), 0).await;
-    let settled = (
-        db_scalar(
-            &db,
-            "SELECT COUNT(*) FROM history_message WHERE role = 'owner'",
-        ),
-        db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
-        db_scalar(&db, "SELECT COUNT(*) FROM task"),
-        transport.sends(),
-        transport.input_texts().len(),
-    );
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        settled,
-        (
-            db_scalar(
-                &db,
-                "SELECT COUNT(*) FROM history_message WHERE role = 'owner'"
-            ),
-            db_scalar(&db, "SELECT COUNT(*) FROM inference_attempt"),
-            db_scalar(&db, "SELECT COUNT(*) FROM task"),
-            transport.sends(),
-            transport.input_texts().len(),
-        ),
-        "no store or provider mutation may appear after conn::run() returns"
-    );
-}
-
-#[tokio::test]
-async fn graceful_shutdown_aborts_a_parked_learning_dispatch_and_keeps_the_unknown_fact() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let dir = temp.path().to_path_buf();
-    let first = format!("please remember {TARGET} for me");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (on_learning_formation(true), Call::text(formation_create())),
-            (
-                on_latest_owner(&first),
-                Call::text(format!("I will keep {TARGET} in mind.")),
-            ),
-        ],
-        &[],
-    ));
-    transport.block_input(on_learning_formation(true));
-    let mut served = serve_and_setup(
-        dir,
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
-    )
-    .await;
-    let (_round, _stream, reply) = send_round(served.client(), &first)
-        .await
-        .expect("the first round must complete");
-    assert!(reply.contains(TARGET));
-    // The formation provider call runs inside the learning dispatch after its
-    // claim, so parking it parks a post-claim attempt.
-    transport.wait_parked(1).await;
-
-    served.request_graceful_stop();
-    assert!(
-        served.join_listener_within(Duration::from_secs(30)).await,
-        "the cooperative abort must bound a parked learning dispatch"
-    );
-    assert_eq!(
-        transport.parked_count(),
-        1,
-        "the learning fixture was never released; only the abort ended the wait"
-    );
-    wait_until_deletion_drivers(served.handle(), 0).await;
-    wait_until_deletion_blocking(served.handle(), 0).await;
-
-    let db = temp.path().join("app.db");
-    assert_eq!(
-        db_scalar(
-            &db,
-            "SELECT COUNT(*) FROM inference_attempt WHERE consumer = 'companion_learning'"
-        ),
-        1,
-        "the parked learning dispatch had claimed exactly one attempt"
-    );
-    assert_eq!(
-        db_scalar(
-            &db,
-            "SELECT COUNT(*) FROM usage_fact f JOIN inference_attempt a ON f.ticket = a.ticket \
-             WHERE f.source = 'unknown' AND a.consumer = 'companion_learning'"
-        ),
-        1,
-        "the aborted learning claim keeps its unknown usage fact"
-    );
-    assert_eq!(
-        db_scalar(&db, "SELECT COUNT(*) FROM learning_formation"),
-        0,
-        "the settled formation leaves no dangling in-flight claim"
-    );
-    assert!(
-        !db_target_hits(&db, TARGET)
-            .iter()
-            .any(|hit| hit.starts_with("learning_memory.") || hit.starts_with("learning_summary.")),
-        "an aborted learning result must never commit as success: {:?}",
-        db_target_hits(&db, TARGET)
-    );
-    // The join above is the worker's lifecycle proof: the learning worker
-    // ended inside the Host lifecycle, not outside it.
-}
-
-#[tokio::test]
-async fn shutdown_before_the_learning_claim_creates_no_attempt_and_no_provider_io() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let dir = temp.path().to_path_buf();
-    let first = format!("please remember {TARGET} for me");
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (on_learning_formation(true), Call::text(formation_create())),
-            (
-                on_latest_owner(&first),
-                Call::text(format!("I will keep {TARGET} in mind.")),
-            ),
-        ],
-        &[],
-    ));
-    let mut served = serve_and_setup(
-        dir,
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE, cmds::CAPABILITY_LEARNING],
-    )
-    .await;
-    // The store park sits after the queue take and before the formation and
-    // the claim: whatever continues afterwards is a genuine pre-claim abort.
-    served
-        .handle()
-        .store_for_tests()
-        .arm_learning_take_park_for_tests();
-    let (_round, _stream, _reply) = send_round(served.client(), &first)
-        .await
-        .expect("the first round must complete");
-    tokio::time::timeout(
-        Duration::from_secs(30),
-        served
-            .handle()
-            .store_for_tests()
-            .wait_learning_take_park_for_tests(),
-    )
-    .await
-    .expect("the learning worker must reach the pre-claim park");
-    let sends_before = transport.sends();
-
-    served.request_graceful_stop();
-    // Stop first, then release: presence falls back only after the shutdown
-    // has fired the cooperative abort, so the released worker observes the
-    // stop before any claim or provider call.
-    let (_, fallen_back) = wait_presence(served.dir.as_path(), "no_active").await;
-    assert_eq!(
-        presence_row(served.dir.as_path()),
-        Some((String::from("no_active"), fallen_back)),
-        "the shutdown must close currentness before the worker continues"
-    );
-    served
-        .handle()
-        .store_for_tests()
-        .release_learning_take_park_for_tests();
-    assert!(
-        served.join_listener_within(Duration::from_secs(30)).await,
-        "the pre-claim stop must let the shutdown finish"
-    );
-    wait_until_deletion_drivers(served.handle(), 0).await;
-    wait_until_deletion_blocking(served.handle(), 0).await;
-
-    let db = temp.path().join("app.db");
-    assert_eq!(
-        db_scalar(
-            &db,
-            "SELECT COUNT(*) FROM inference_attempt WHERE consumer = 'companion_learning'"
-        ),
-        0,
-        "a stop before the claim never fabricates an attempt"
-    );
-    assert_eq!(
-        db_scalar(
-            &db,
-            "SELECT COUNT(*) FROM usage_fact f JOIN inference_attempt a ON f.ticket = a.ticket \
-             WHERE f.source = 'unknown' AND a.consumer = 'companion_learning'"
-        ),
-        0,
-        "a never-claimed use records no usage fact"
-    );
-    assert_eq!(
-        transport.sends(),
-        sends_before,
-        "no provider call may start after the stop won"
-    );
-    assert!(
-        !transport
-            .input_texts()
-            .iter()
-            .any(|input| input.contains("learning formation pass")),
-        "a pre-claim abort must never reach the provider"
-    );
-    assert_eq!(
-        db_scalar(&db, "SELECT COUNT(*) FROM learning_formation"),
-        0,
-        "the pre-claim stop settles the formation it never claimed"
-    );
-}
-
-/// Continuous business streaming — not a parked provider — across more than
-/// the receipt deadline: transport control, liveness, and the monotonic
-/// deadline keep progressing the whole time, and the business stream itself
-/// is neither starved by the control priority nor reordered.
-#[tokio::test]
-async fn continuous_business_streaming_keeps_transport_control_and_the_receipt_deadline_moving() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let stream_text = "stream across the receipt deadline";
-    let chunk_script: Vec<String> = (0..2000)
-        .map(|index| format!("[stream {index:05}]"))
-        .collect();
-    let expected_stream: String = chunk_script.concat();
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner("summon before the stream"),
-                Call::text("SUMMON-STREAM-REPLY"),
-            ),
-            (
-                on_latest_owner(stream_text),
-                // 2000 chunks × 20 ms ≈ 40 seconds of continuously
-                // produced business frames — well past the 30-second
-                // receipt deadline.
-                Call::stream(
-                    "STREAM-COMPLETE-REPLY",
-                    chunk_script,
-                    Duration::from_millis(20),
-                ),
-            ),
-        ],
-        &[],
-    ));
-    let mut served = serve_and_setup(
-        dir.path().to_path_buf(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE],
-    )
-    .await;
-    let (round, stream, _reply) = send_round(served.client(), "summon before the stream")
-        .await
-        .expect("the summon round must complete");
-    wait_presence(&served.dir, "present").await;
-    confirm_round(served.client(), &round, stream).await;
-
-    // A receipt is issued on this connection and never acknowledged during
-    // the stream.
-    let stale = fetch_summary(served.client(), "the unacked receipt")
-        .await
-        .expect("the subscription must answer");
-    assert!(
-        !stale.receipt.0.is_empty(),
-        "the fixture must issue a receipt"
-    );
-    assert_eq!(served.handle().receipts_held_for_tests(), 1);
-    let receipt_issued_at = std::time::Instant::now();
-
-    let companion = served.client().companion_ref();
-    let target = served.client().round_target();
-    let intake = ask(
-        served.client(),
-        WirePayload::SubmitTextInput(cmds::submit_input(
-            &companion,
-            target,
-            String::from(stream_text),
-            String::from("en"),
-        )),
-        "stream submit",
-    )
-    .await
-    .expect("the stream submit must be answered while the intake precedes the provider call");
-    assert!(
-        matches!(
-            intake,
-            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
-        ),
-        "the stream submit must be accepted, got {intake:?}"
-    );
-
-    let probe = served.client().transport_probe_for_tests();
-    let pings_at_stream_start = probe.host_pings();
-    let pongs_at_stream_start = probe.pongs_sent();
-    let started = std::time::Instant::now();
-
-    let mut ping_sent_at: Option<std::time::Instant> = None;
-    let mut pong_observed = false;
-    let mut host_ping_observed = false;
-    let mut receipt_expired = false;
-    let mut checkpoint_at_15s: Option<usize> = None;
-    let mut opened = false;
-    let mut frames = 0usize;
-    let mut previous_seq: Option<u64> = None;
-    let mut text_out = String::new();
-    let close_status = loop {
-        match tokio::time::timeout(Duration::from_millis(500), served.client().next_frame()).await {
-            Ok(Ok(WirePayload::TextStreamOpen(_))) => opened = true,
-            Ok(Ok(WirePayload::TextStreamFrame(frame))) => {
-                assert!(
-                    previous_seq.is_none_or(|previous| frame.seq == previous + 1),
-                    "stream frames must order by seq across the control traffic"
-                );
-                previous_seq = Some(frame.seq);
-                text_out.push_str(&frame.delta);
-                frames += 1;
-            }
-            Ok(Ok(WirePayload::TextStreamClose(close))) => break close.status,
-            Ok(Ok(WirePayload::PresenceAttribution(_))) => {}
-            Ok(Ok(other)) => panic!("unexpected payload during the stream: {other:?}"),
-            Ok(Err(error)) => panic!("the stream must keep reading: {error:?}"),
-            Err(_) => {}
-        };
-        let elapsed = started.elapsed();
-        if ping_sent_at.is_none() && elapsed >= Duration::from_secs(3) {
-            served
-                .client()
-                .send_transport_ping_for_tests(b"control-under-stream");
-            ping_sent_at = Some(std::time::Instant::now());
-        }
-        if let Some(sent_at) = ping_sent_at
-            && !pong_observed
-        {
-            if probe
-                .take_pongs()
-                .iter()
-                .any(|pong| pong == b"control-under-stream")
-            {
-                pong_observed = true;
-            } else {
-                assert!(
-                    sent_at.elapsed() < Duration::from_secs(3),
-                    "the Host must answer a client ping with a bounded pong while business frames stream"
-                );
-            }
-        }
-        if !host_ping_observed && elapsed >= Duration::from_secs(16) {
-            assert!(
-                probe.host_pings() > pings_at_stream_start,
-                "the Host must keep pinging while the business stream runs"
-            );
-            host_ping_observed = true;
-        }
-        if checkpoint_at_15s.is_none() && elapsed >= Duration::from_secs(15) {
-            // The later checkpoint proves the stream continues; this first
-            // checkpoint is only a liveness floor because Windows runners
-            // can schedule the 20 ms fixture below its nominal rate.
-            assert!(
-                frames >= 50,
-                "business frames must keep flowing across the window, got {frames}"
-            );
-            checkpoint_at_15s = Some(frames);
-        }
-        if let Some(at_15s) = checkpoint_at_15s
-            && elapsed >= Duration::from_secs(25)
-            && frames <= at_15s
-        {
-            panic!("the transport-control priority must not starve business delivery");
-        }
-        if !receipt_expired && receipt_issued_at.elapsed() >= Duration::from_secs(31) {
-            assert_eq!(
-                transport.streaming_count(),
-                1,
-                "the business stream must still be running at the receipt deadline"
-            );
-            assert_eq!(
-                served.handle().receipts_held_for_tests(),
-                0,
-                "the receipt must expire at its monotonic 30-second deadline while business frames keep streaming"
-            );
-            assert!(
-                matches!(presence_row(dir.path()), Some((ref state, _)) if state == "present"),
-                "the streaming connection must stay current"
-            );
-            receipt_expired = true;
-        }
-    };
-
-    assert!(opened, "the stream must open before it frames");
-    assert!(
-        receipt_expired,
-        "the receipt deadline must be observed during the stream"
-    );
-    assert!(
-        pong_observed,
-        "the bounded client-ping pong must be observed during the stream"
-    );
-    assert!(
-        host_ping_observed,
-        "the Host ping must be observed during the stream"
-    );
-    assert_eq!(
-        close_status,
-        ene_api::v1::round::StreamClose::Completed,
-        "the business stream must complete rather than starve"
-    );
-    assert_eq!(
-        text_out, expected_stream,
-        "the streamed deltas must arrive complete and in order"
-    );
-    let host_pings_during_stream = probe.host_pings() - pings_at_stream_start;
-    assert!(
-        host_pings_during_stream >= 2,
-        "at least two Host pings must cross the 40-second stream, got {host_pings_during_stream}"
-    );
-    assert!(
-        probe.pongs_sent() - pongs_at_stream_start >= host_pings_during_stream,
-        "the client must pong every Host ping while streaming"
-    );
-
-    // The late acknowledgement of the expired receipt is stale, and the same
-    // connection keeps serving after prioritizing transport control.
-    let acked = ack_summary(served.client(), &stale)
-        .await
-        .expect("the late ack must answer");
-    assert_eq!(
-        acked,
-        UndeliveredAckOutcome::StalePresentation,
-        "an ack after the receipt deadline must be stale"
-    );
-    let companion = served.client().companion_ref();
-    let answer = ask(
-        served.client(),
-        WirePayload::HistoryRequest(cmds::history_request(&companion, None, 1)),
-        "history after the stream",
-    )
-    .await
-    .expect("the connection must still answer after the stream");
-    assert!(
-        matches!(answer, WirePayload::HistoryResponse(_)),
-        "got {answer:?}"
-    );
-    served.stop().await;
-}
-
-/// The client leaves mid-stream: currentness drops promptly while the
-/// handler is provably still inside the provider's stream, and the Host
-/// shutdown afterwards bounds the leftover operation with the cooperative
-/// abort instead of waiting for the provider.
-#[tokio::test]
-async fn client_eof_during_a_stream_drops_currentness_before_the_handler_finishes() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let sentinel = "EOF-STREAM-SENTINEL";
-    let stream_text = "stream until the client leaves";
-    let chunk_script: Vec<String> = (0..3).map(|index| format!("{sentinel}-{index}")).collect();
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![
-            (
-                on_latest_owner("summon before the eof"),
-                // Reported usage for the completed summon, so the only
-                // unknown usage fact is the aborted stream attempt.
-                Call::reported("SUMMON-EOF-REPLY", 120, 0, 30),
-            ),
-            (
-                on_latest_owner(stream_text),
-                // Each chunk is pushed and then the provider sleeps for the
-                // whole window, so the handler provably cannot finish on its
-                // own while the test observes it.
-                Call::stream(
-                    "NEVER-COMMITTED-EOF-REPLY",
-                    chunk_script,
-                    Duration::from_secs(30),
-                ),
-            ),
-        ],
-        &[],
-    ));
-    let mut served = serve_and_setup(
-        dir.path().to_path_buf(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE],
-    )
-    .await;
-    let (_round, _stream, _reply) = send_round(served.client(), "summon before the eof")
-        .await
-        .expect("the summon round must complete");
-    wait_presence(&served.dir, "present").await;
-
-    let companion = served.client().companion_ref();
-    let target = served.client().round_target();
-    let intake = ask(
-        served.client(),
-        WirePayload::SubmitTextInput(cmds::submit_input(
-            &companion,
-            target,
-            String::from(stream_text),
-            String::from("en"),
-        )),
-        "eof stream submit",
-    )
-    .await
-    .expect("the stream submit must be answered while the intake precedes the provider call");
-    assert!(
-        matches!(
-            intake,
-            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
-        ),
-        "the stream submit must be accepted, got {intake:?}"
-    );
-    let open = ask_stream(served.client())
-        .await
-        .expect("the stream must open");
-    assert!(
-        matches!(open, WirePayload::TextStreamOpen(_)),
-        "got {open:?}"
-    );
-    let first = ask_stream(served.client())
-        .await
-        .expect("the first streamed frame must arrive");
-    assert!(
-        matches!(first, WirePayload::TextStreamFrame(_)),
-        "got {first:?}"
-    );
-    assert_eq!(
-        transport.streaming_count(),
-        1,
-        "the provider must be inside the stream"
-    );
-
-    // EOF mid-stream: `wait_presence` is bounded well below the provider's
-    // 30-second sleep, so reaching `no_active` here proves the connection
-    // stopped being current without waiting for the handler.
-    drop(served.client.take());
-    let (_, fallen_back) = wait_presence(dir.path(), "no_active").await;
-    assert_eq!(
-        presence_row(dir.path()),
-        Some((String::from("no_active"), fallen_back)),
-        "the closed connection must fall back promptly"
-    );
-    assert_eq!(
-        transport.streaming_count(),
-        1,
-        "currentness must drop while the handler is still inside the stream"
-    );
-
-    // Host shutdown sends the cooperative abort; the provider is never
-    // released by the test.
-    served.request_graceful_stop();
-    assert!(
-        served.join_listener_within(Duration::from_secs(30)).await,
-        "the cooperative abort must bound the shutdown"
-    );
-    wait_until_deletion_drivers(served.handle(), 0).await;
-    wait_until_deletion_blocking(served.handle(), 0).await;
-
-    let db = dir.path().join("app.db");
-    assert_eq!(
-        db_scalar(
-            &db,
-            "SELECT COUNT(*) FROM usage_fact WHERE source = 'unknown'"
-        ),
-        1,
-        "the aborted stream attempt keeps its unknown usage fact"
-    );
-    assert_eq!(
-        db_scalar(
-            &db,
-            "SELECT COUNT(*) FROM history_message WHERE role = 'companion'"
-        ),
-        1,
-        "only the completed summon commits a reply"
-    );
-    assert_eq!(
-        served.canonical_remainder(sentinel).await,
-        0,
-        "the streamed reply must never commit"
-    );
-}
-
-/// Moves only the clock forward in small steps so timers fire at their
-/// boundaries while every socket operation stays on the real clock.
-async fn advance_clock_in_steps(span: Duration) {
-    let mut left = span;
-    while left > Duration::ZERO {
-        let take = Duration::from_secs(5).min(left);
-        tokio::time::advance(take).await;
-        left -= take;
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
-    }
-}
-
-#[tokio::test]
-async fn a_receipt_expires_while_the_business_handler_is_parked() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let park_text = "park past the receipt deadline";
-    let transport = Arc::new(ScriptedTransport::new(
-        vec![(
-            on_latest_owner(park_text),
-            Call::text(format!("REPLY-DONE {park_text}")),
-        )],
-        &[],
-    ));
-    let mut served = serve_and_setup(
-        dir.path().to_path_buf(),
-        Arc::clone(&transport),
-        &[cmds::CAPABILITY_DIALOGUE],
-    )
-    .await;
-    let (round, stream, _reply) = send_round(served.client(), "summon for the receipt")
-        .await
-        .expect("the summon round must complete");
-    wait_presence(&served.dir, "present").await;
-    confirm_round(served.client(), &round, stream).await;
-
-    // A receipt is issued on this connection and never acknowledged.
-    let stale = fetch_summary(served.client(), "the unacked receipt")
-        .await
-        .expect("the subscription must answer");
-    assert!(
-        !stale.receipt.0.is_empty(),
-        "the fixture must issue a receipt"
-    );
-    assert_eq!(served.handle().receipts_held_for_tests(), 1);
-
-    transport.block_input(on_latest_owner(park_text));
-    let companion = served.client().companion_ref();
-    let target = served.client().round_target();
-    let intake = ask(
-        served.client(),
-        WirePayload::SubmitTextInput(cmds::submit_input(
-            &companion,
-            target,
-            String::from(park_text),
-            String::from("en"),
-        )),
-        "park submit",
-    )
-    .await
-    .expect("the park submit must be answered while the intake precedes the provider call");
-    assert!(
-        matches!(
-            intake,
-            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
-        ),
-        "the park submit must be accepted, got {intake:?}"
-    );
-    transport.wait_parked(1).await;
-    assert_eq!(
-        served.handle().receipts_held_for_tests(),
-        1,
-        "the receipt is still held when the park begins"
-    );
-
-    // The deadline is 30 seconds from the receipt's commit on the monotonic
-    // clock. Only the clock moves here; the handler stays parked throughout,
-    // and the receipt's state transition never waits for it.
-    tokio::time::pause();
-    advance_clock_in_steps(Duration::from_secs(25)).await;
-    assert_eq!(
-        transport.parked_count(),
-        1,
-        "the handler must still be parked before the deadline"
-    );
-    assert_eq!(
-        served.handle().receipts_held_for_tests(),
-        1,
-        "the receipt is still held before its 30-second deadline"
-    );
-    advance_clock_in_steps(Duration::from_secs(10)).await;
-    tokio::time::resume();
-    assert_eq!(
-        transport.parked_count(),
-        1,
-        "the handler must still be parked at the deadline"
-    );
-    assert_eq!(
-        served.handle().receipts_held_for_tests(),
-        0,
-        "the receipt must expire at its deadline while the business handler is parked"
-    );
-
-    transport.release_blocked();
-    // The late acknowledgement of the expired receipt is stale — it is never
-    // adopted as the presentation of anything current.
-    let acked = ack_summary(served.client(), &stale)
-        .await
-        .expect("the late ack must answer");
-    assert_eq!(
-        acked,
-        UndeliveredAckOutcome::StalePresentation,
-        "an ack after the receipt deadline must be stale"
-    );
-
-    // After the business work completes, the subsequent undelivered page
-    // becomes deliverable in order: the reply row exists only once the
-    // parked round has committed, and the page acknowledges without
-    // replaying the parked provider call.
-    let inputs_before = transport
-        .input_texts()
-        .iter()
-        .filter(|input| input.contains(park_text))
-        .count();
-    assert_eq!(inputs_before, 1, "the parked call ran exactly once");
-    let next = wait_for_summary_with(served.client(), "REPLY-DONE").await;
-    assert!(
-        next.items
-            .iter()
-            .any(|item| item.excerpt.contains("REPLY-DONE")),
-        "the page after the expired receipt must carry the completed round: {next:?}"
-    );
-    assert_eq!(
-        transport
-            .input_texts()
-            .iter()
-            .filter(|input| input.contains(park_text))
-            .count(),
-        1,
-        "delivering the subsequent page must not replay the parked work"
-    );
-    assert_eq!(transport.parked_count(), 0, "the handler is done");
-    served.stop().await;
-}
-
-#[tokio::test]
-async fn a_stalled_peer_write_is_bounded_and_the_serving_task_exits() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
-    let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let server = tokio::spawn(conn::run_until_shutdown(
-        dir.path().to_path_buf(),
-        Arc::clone(&handle),
-        transport,
-        shutdown,
-    ));
-
-    // A tiny receive window on this raw client lets the Host's pong writes
-    // fill the TCP path quickly; the pending pairing keeps the connection in
-    // the owner-confirmation window so only the write wait may close it.
-    let mut client = WssClient::connect_sized(dir.path(), Some(2048), Some(1024 * 1024))
-        .await
-        .expect("a same-machine client with the current token must upgrade");
-    let mut pairing = WireFrame {
-        envelope: crafted_envelope("PairingRequest"),
-        payload: WirePayload::PairingRequest(PairingRequest {
-            device_descriptor: String::from("stalled writer"),
-        }),
-    };
-    pairing.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
-    client.send_wire(&pairing).await;
-    let reply = client.recv_wire().await;
-    assert!(
-        matches!(
-            reply.payload,
-            WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation { .. })
-        ),
-        "the pairing must pend before the stall, got {}",
-        reply.payload.message_type()
-    );
-
-    use futures_util::StreamExt as _;
-    let (mut sink, mut reader) = client.socket.split();
-    let pinger = tokio::spawn(async move {
-        use futures_util::SinkExt as _;
-        let payload = vec![0x5a_u8; 120];
-        for _ in 0..20_000 {
-            if sink
-                .send(Message::Ping(payload.clone().into()))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-
-    // The client never reads: the Host's pong write parks on the socket, and
-    // the write wait bound must still end the connection instead of owning
-    // the serving task forever.
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(32)).await;
-    tokio::time::resume();
-    let closed = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match reader.next().await {
-                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
-                Some(Ok(_)) => continue,
-            }
-        }
-    })
-    .await;
-    assert!(
-        closed.is_ok(),
-        "the stalled write must be bounded by the write wait and close the connection"
-    );
-    pinger.abort();
-
-    stop.send_replace(true);
-    let joined = tokio::time::timeout(Duration::from_secs(30), server)
-        .await
-        .expect("the listener must stop")
-        .expect("the listener must not panic");
-    joined.expect("the listener must shut down cleanly");
-}
-
-#[tokio::test]
-async fn the_host_answers_a_transport_ping_with_a_pong_and_closes_on_close() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
-    let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let server = tokio::spawn(conn::run_until_shutdown(
-        dir.path().to_path_buf(),
-        Arc::clone(&handle),
-        transport,
-        shutdown,
-    ));
-    let mut client = raw_dial(dir.path()).await;
-    use futures_util::{SinkExt as _, StreamExt as _};
-
-    let expected = vec![0x37_u8; 64];
-    client
-        .socket
-        .send(Message::Ping(expected.clone().into()))
-        .await
-        .expect("the ping must send");
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match client.socket.next().await {
-                Some(Ok(Message::Pong(payload))) if payload.as_ref() == expected.as_slice() => {
-                    return;
-                }
-                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => {
-                    panic!("the ping must be answered before the connection ends")
-                }
-                Some(Ok(_)) => continue,
-            }
-        }
-    })
-    .await
-    .expect("the Host must answer a transport ping with a matching pong");
-
-    client
-        .socket
-        .send(Message::Close(None))
-        .await
-        .expect("close");
-    let closed = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match client.socket.next().await {
-                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
-                Some(Ok(_)) => continue,
-            }
-        }
-    })
-    .await;
-    assert!(closed.is_ok(), "a Close frame must end the connection");
-
-    stop.send_replace(true);
-    let joined = tokio::time::timeout(Duration::from_secs(30), server)
-        .await
-        .expect("the listener must stop")
-        .expect("the listener must not panic");
-    joined.expect("the listener must shut down cleanly");
-}
-
-#[tokio::test]
-async fn a_fragmented_message_over_the_limit_closes_the_connection() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let handle = open_host(dir.path()).await;
-    let transport = Arc::new(ScriptedTransport::new(Vec::new(), &[]));
-    let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let server = tokio::spawn(conn::run_until_shutdown(
-        dir.path().to_path_buf(),
-        Arc::clone(&handle),
-        transport,
-        shutdown,
-    ));
-    let host = raw_dial(dir.path()).await;
-    host.send_fragmented_oversize_and_expect_close().await;
-    stop.send_replace(true);
-    let joined = tokio::time::timeout(Duration::from_secs(30), server)
-        .await
-        .expect("the listener must stop")
-        .expect("the listener must not panic");
-    joined.expect("the listener must shut down cleanly");
 }

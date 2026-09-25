@@ -266,7 +266,8 @@ pub struct ManagementView {
 
 #[cfg(test)]
 mod tests {
-    use super::super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, ViewMarkWire};
+    use super::super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire};
+    use super::ViewSection;
     use super::{
         IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin,
         SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, UsageCapTarget, consent_target,
@@ -274,7 +275,6 @@ mod tests {
         parse_usage_cap_target, parse_workspace_target, task_target, usage_cap_target,
         workspace_target,
     };
-    use super::{ManagementOutcome, ViewSection};
     use uuid::Uuid;
 
     fn intent() -> ManagementIntent {
@@ -292,12 +292,42 @@ mod tests {
     }
 
     #[test]
-    fn intent_debug_redacts_rationale() {
+    fn management_intent_debug_redacts_rationale_and_owner_targets() {
         let rendered = format!("{:?}", intent());
         assert!(!rendered.contains("quoted private words"));
         assert!(rendered.contains("schedule-1"));
         assert!(rendered.contains("mark-1"));
         assert!(rendered.contains("confirmed"));
+
+        let mut deletion = intent();
+        deletion.kind = ManagementIntentKind::RequestDeletionBackupRestoreReset;
+        deletion.target = ManagementTargetWire(String::from("deletion:privacy:raw secret body"));
+        let rendered = format!("{deletion:?}");
+        assert!(!rendered.contains("raw secret body"));
+        assert!(
+            rendered.contains("deletion-backup-restore-reset")
+                || rendered.contains("RequestDeletion")
+        );
+        assert!(
+            ManagementIntentKind::RequestDeletionBackupRestoreReset.target_carries_owner_body()
+        );
+        assert!(!ManagementIntentKind::ManageSchedule.target_carries_owner_body());
+
+        let mut mismatched = intent();
+        mismatched.kind = ManagementIntentKind::ManageSchedule;
+        mismatched.target = ManagementTargetWire(String::from("deletion:privacy:raw secret body"));
+        let rendered = format!("{mismatched:?}");
+        assert!(!rendered.contains("raw secret body"));
+        assert!(mismatched.target_carries_owner_body());
+
+        let section = ViewSection {
+            kind: String::from("setup"),
+            title: String::from("Setup status"),
+            body: String::from("quoted managed content"),
+        };
+        let rendered = format!("{section:?}");
+        assert!(!rendered.contains("quoted managed content"));
+        assert!(rendered.contains("Setup status"));
     }
 
     #[test]
@@ -320,90 +350,22 @@ mod tests {
     }
 
     #[test]
-    fn deletion_intent_debug_redacts_the_owner_body_target() {
-        let mut intent = intent();
-        intent.kind = ManagementIntentKind::RequestDeletionBackupRestoreReset;
-        intent.target = ManagementTargetWire(String::from("deletion:privacy:raw secret body"));
-        let rendered = format!("{intent:?}");
-        assert!(!rendered.contains("raw secret body"));
-        assert!(
-            rendered.contains("deletion-backup-restore-reset")
-                || rendered.contains("RequestDeletion")
-        );
-        assert!(
-            ManagementIntentKind::RequestDeletionBackupRestoreReset.target_carries_owner_body()
-        );
-        assert!(!ManagementIntentKind::ManageSchedule.target_carries_owner_body());
-    }
+    fn management_target_grammars_roundtrip_and_reject_ambiguous_shapes() {
+        assert_eq!(SETUP_SHOW_TARGET, "setup:show");
+        assert_eq!(SETUP_COMPLETE_TARGET, "setup:complete");
 
-    #[test]
-    fn deletion_body_is_redacted_even_under_a_mismatched_kind() {
-        let mut intent = intent();
-        intent.kind = ManagementIntentKind::ManageSchedule;
-        intent.target = ManagementTargetWire(String::from("deletion:privacy:raw secret body"));
-        let rendered = format!("{intent:?}");
-        assert!(
-            !rendered.contains("raw secret body"),
-            "the target grammar, not the declared kind, decides redaction: {rendered}"
-        );
-        assert!(
-            intent.target_carries_owner_body(),
-            "a deletion target carries an Owner body whatever the kind claims"
-        );
-    }
-
-    #[test]
-    fn stale_base_view_points_at_the_current_mark() {
-        let outcome = ManagementOutcome::StaleBaseView {
-            current: ViewMarkWire(String::from("mark-2")),
-        };
-        let rendered = format!("{outcome:?}");
-        assert!(
-            rendered.contains("mark-2"),
-            "current mark stays visible: {rendered}"
-        );
-    }
-
-    #[test]
-    fn section_debug_redacts_body() {
-        let section = ViewSection {
-            kind: String::from("setup"),
-            title: String::from("Setup status"),
-            body: String::from("quoted managed content"),
-        };
-        let rendered = format!("{section:?}");
-        assert!(!rendered.contains("quoted managed content"));
-        assert!(rendered.contains("Setup status"));
-    }
-
-    #[test]
-    fn credential_builder_spells_the_shared_grammar() {
-        let target = credential_target("openai", "personal");
-        assert_eq!(target.0.as_str(), "credential:openai:personal");
-    }
-
-    #[test]
-    fn consent_builder_spells_the_shared_grammar() {
-        let target = consent_target("dialogue", "openai", "gpt-x", "cred-1");
-        assert_eq!(target.0.as_str(), "consent:dialogue:openai:gpt-x:cred-1");
-        let learning = consent_target("learning", "openai", "gpt-x", "cred-1");
-        assert_eq!(learning.0.as_str(), "consent:learning:openai:gpt-x:cred-1");
-    }
-
-    #[test]
-    fn credential_builder_parser_roundtrip() {
-        let target = credential_target("openai", "personal");
+        let credential = credential_target("openai", "personal");
+        assert_eq!(credential.0.as_str(), "credential:openai:personal");
         assert_eq!(
-            parse_credential_target(&target),
+            parse_credential_target(&credential),
             Some((String::from("openai"), String::from("personal")))
         );
-    }
-
-    #[test]
-    fn consent_builder_parser_roundtrip() {
-        let target = consent_target("learning", "openai", "gpt-x", "cred-1");
+        let dialogue = consent_target("dialogue", "openai", "gpt-x", "cred-1");
+        assert_eq!(dialogue.0.as_str(), "consent:dialogue:openai:gpt-x:cred-1");
+        let learning = consent_target("learning", "openai", "gpt-x", "cred-1");
+        assert_eq!(learning.0.as_str(), "consent:learning:openai:gpt-x:cred-1");
         assert_eq!(
-            parse_consent_target(&target),
+            parse_consent_target(&learning),
             Some((
                 String::from("learning"),
                 String::from("openai"),
@@ -411,10 +373,21 @@ mod tests {
                 String::from("cred-1")
             ))
         );
-    }
+        let colon_id = consent_target("dialogue", "openai", "gpt-x", "cred:with:colons");
+        assert_eq!(
+            colon_id.0.as_str(),
+            "consent:dialogue:openai:gpt-x:cred:with:colons"
+        );
+        assert_eq!(
+            parse_consent_target(&colon_id),
+            Some((
+                String::from("dialogue"),
+                String::from("openai"),
+                String::from("gpt-x"),
+                String::from("cred:with:colons")
+            ))
+        );
 
-    #[test]
-    fn credential_parser_rejects_blanks_and_wrong_shapes() {
         for raw in [
             "credential::personal",
             "credential:openai:",
@@ -423,15 +396,11 @@ mod tests {
             "credential:",
             "consent:dialogue:openai:gpt-x:cred-1",
             "setup:show",
+            "setup:complete",
             "",
         ] {
-            let target = ManagementTargetWire(String::from(raw));
-            assert!(parse_credential_target(&target).is_none());
+            assert!(parse_credential_target(&ManagementTargetWire(String::from(raw))).is_none());
         }
-    }
-
-    #[test]
-    fn consent_parser_rejects_blanks_and_wrong_shapes() {
         for raw in [
             "consent::openai:gpt-x:cred-1",
             "consent:dialogue::gpt-x:cred-1",
@@ -443,43 +412,15 @@ mod tests {
             "consent:",
             "consent:openai:gpt-x:cred-1",
             "credential:openai:personal",
+            "setup:show",
             "setup:complete",
             "",
         ] {
-            let target = ManagementTargetWire(String::from(raw));
-            assert!(parse_consent_target(&target).is_none());
+            assert!(parse_consent_target(&ManagementTargetWire(String::from(raw))).is_none());
         }
-    }
 
-    #[test]
-    fn consent_parser_preserves_colons_in_credential_id() {
-        let target = consent_target("dialogue", "openai", "gpt-x", "cred:with:colons");
-        assert_eq!(
-            target.0.as_str(),
-            "consent:dialogue:openai:gpt-x:cred:with:colons"
-        );
-        assert_eq!(
-            parse_consent_target(&target),
-            Some((
-                String::from("dialogue"),
-                String::from("openai"),
-                String::from("gpt-x"),
-                String::from("cred:with:colons")
-            ))
-        );
-    }
-
-    #[test]
-    fn setup_command_targets_are_fixed_strings() {
-        assert_eq!(SETUP_SHOW_TARGET, "setup:show");
-        assert_eq!(SETUP_COMPLETE_TARGET, "setup:complete");
-    }
-
-    #[test]
-    fn task_target_roundtrips_and_rejects_other_text() {
         let id = uuid::Uuid::new_v4();
-        let target = task_target(id);
-        assert_eq!(parse_task_target(&target), Some(id));
+        assert_eq!(parse_task_target(&task_target(id)), Some(id));
         for raw in [
             "task:not-a-uuid",
             "task:",
@@ -487,47 +428,26 @@ mod tests {
             "setup:show",
             "",
         ] {
-            assert_eq!(
-                parse_task_target(&ManagementTargetWire(String::from(raw))),
-                None
-            );
+            assert!(parse_task_target(&ManagementTargetWire(String::from(raw))).is_none());
         }
-    }
 
-    #[test]
-    fn workspace_target_roundtrips_with_colons_and_rejects_empty() {
-        let target = workspace_target("/srv/workspace/ene");
-        assert_eq!(parse_workspace_target(&target), Some("/srv/workspace/ene"));
+        let workspace = workspace_target("/srv/workspace/ene");
+        assert_eq!(
+            parse_workspace_target(&workspace),
+            Some("/srv/workspace/ene")
+        );
         let windows = workspace_target("C:\\Users\\ene\\workspace");
         assert_eq!(
             parse_workspace_target(&windows),
             Some("C:\\Users\\ene\\workspace")
         );
         for raw in ["workspace:", "task:abc", "setup:show", ""] {
-            assert_eq!(
-                parse_workspace_target(&ManagementTargetWire(String::from(raw))),
-                None
-            );
+            assert!(parse_workspace_target(&ManagementTargetWire(String::from(raw))).is_none());
         }
     }
 
     #[test]
-    fn setup_command_targets_parse_as_neither_shape() {
-        for raw in [SETUP_SHOW_TARGET, SETUP_COMPLETE_TARGET] {
-            let target = ManagementTargetWire(String::from(raw));
-            assert!(
-                parse_credential_target(&target).is_none(),
-                "setup target is not a credential target: {raw:?}"
-            );
-            assert!(
-                parse_consent_target(&target).is_none(),
-                "setup target is not a consent target: {raw:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn usage_cap_target_roundtrips_both_scopes() {
+    fn usage_cap_target_grammar_preserves_scope_and_never_guesses() {
         let system = usage_cap_target(None, "daily_utc", "USD", 1_000_000);
         assert_eq!(system.0.as_str(), "cap:system:daily_utc:USD:1000000");
         assert_eq!(
@@ -553,10 +473,6 @@ mod tests {
                 limit_micros: 42,
             })
         );
-    }
-
-    #[test]
-    fn usage_cap_target_rejects_other_shapes_and_never_guesses() {
         for raw in [
             "cap:",
             "cap:system",

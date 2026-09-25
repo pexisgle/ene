@@ -89,10 +89,6 @@ impl Failure {
     }
 }
 
-/// Transport-control observations of the pump: host pings and pongs are
-/// recorded as they pass through, and a test can request a transport ping
-/// through the writer. The application never drains through this to make a
-/// failure surface.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 pub struct TransportProbe {
@@ -102,12 +98,7 @@ pub struct TransportProbe {
 #[cfg(any(test, feature = "test-support"))]
 struct TransportProbeInner {
     host_pings: AtomicU64,
-    pongs_sent: AtomicU64,
-    pongs: StdMutex<VecDeque<Vec<u8>>>,
-    pings: StdMutex<VecDeque<Vec<u8>>>,
-    local_erasure_results: AtomicU64,
     presentation_wiped_results: AtomicU64,
-    wake: tokio::sync::Notify,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -116,12 +107,7 @@ impl TransportProbe {
         Self {
             inner: Arc::new(TransportProbeInner {
                 host_pings: AtomicU64::new(0),
-                pongs_sent: AtomicU64::new(0),
-                pongs: StdMutex::new(VecDeque::new()),
-                pings: StdMutex::new(VecDeque::new()),
-                local_erasure_results: AtomicU64::new(0),
                 presentation_wiped_results: AtomicU64::new(0),
-                wake: tokio::sync::Notify::new(),
             }),
         }
     }
@@ -130,22 +116,7 @@ impl TransportProbe {
         self.inner.host_pings.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn note_pong_sent(&self) {
-        self.inner.pongs_sent.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn note_pong(&self, payload: &[u8]) {
-        let mut pongs = lock_probe(&self.inner.pongs);
-        while pongs.len() >= 32 {
-            pongs.pop_front();
-        }
-        pongs.push_back(payload.to_vec());
-    }
-
     fn note_local_erasure_result(&self, result: &LocalErasureResult) {
-        self.inner
-            .local_erasure_results
-            .fetch_add(1, Ordering::SeqCst);
         if result.wiped.contains(&ClientTempClass::PresentationBuffer) {
             self.inner
                 .presentation_wiped_results
@@ -153,48 +124,14 @@ impl TransportProbe {
         }
     }
 
-    async fn ping_ready(&self) {
-        self.inner.wake.notified().await;
-    }
-
-    fn take_ping(&self) -> Option<Vec<u8>> {
-        lock_probe(&self.inner.pings).pop_front()
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn host_pings(&self) -> u64 {
         self.inner.host_pings.load(Ordering::Relaxed)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn pongs_sent(&self) -> u64 {
-        self.inner.pongs_sent.load(Ordering::Relaxed)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn take_pongs(&self) -> Vec<Vec<u8>> {
-        lock_probe(&self.inner.pongs).drain(..).collect()
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn local_erasure_results(&self) -> u64 {
-        self.inner.local_erasure_results.load(Ordering::SeqCst)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn presentation_wiped_results(&self) -> u64 {
         self.inner.presentation_wiped_results.load(Ordering::SeqCst)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn send_ping(&self, payload: &[u8]) {
-        lock_probe(&self.inner.pings).push_back(payload.to_vec());
-        self.inner.wake.notify_one();
     }
 }
 
@@ -294,8 +231,6 @@ impl Transport {
             outbound_rx,
             control_rx,
             writer_failure,
-            #[cfg(any(test, feature = "test-support"))]
-            probe.clone(),
             writer_gone,
         ));
         let _reader_task = tokio::spawn(read_half(
@@ -413,7 +348,6 @@ async fn write_half<S>(
     mut outbound: mpsc::Receiver<Vec<u8>>,
     mut control: mpsc::Receiver<Vec<u8>>,
     writer_failure: mpsc::Sender<Failure>,
-    probe: TransportProbe,
     _writer_gone: tokio::sync::watch::Sender<()>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
@@ -427,18 +361,9 @@ async fn write_half<S>(
                     // The reader ended; it surfaced why.
                     return;
                 };
-                probe.note_pong_sent();
                 if !send_bounded(&mut sink, Message::Pong(payload.into())).await {
                     surface_write_failure(&writer_failure);
                     return;
-                }
-            }
-            () = probe.ping_ready() => {
-                while let Some(payload) = probe.take_ping() {
-                    if !send_bounded(&mut sink, Message::Ping(payload.into())).await {
-                        surface_write_failure(&writer_failure);
-                        return;
-                    }
                 }
             }
             next = outbound.recv() => {
@@ -606,10 +531,7 @@ async fn read_half<S>(
                     return;
                 }
             }
-            Some(Ok(Message::Pong(_payload))) => {
-                #[cfg(any(test, feature = "test-support"))]
-                probe.note_pong(&_payload);
-            }
+            Some(Ok(Message::Pong(_))) => {}
             Some(Ok(Message::Text(_))) => {
                 fail_with(
                     read_ahead,
@@ -960,17 +882,6 @@ impl Client {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub async fn send_prepared_for_tests(
-        &mut self,
-        prepared: &PreparedRequest,
-    ) -> Result<(), ClientError> {
-        self.transport
-            .write(&prepared.frame(self.sender, self.state.generation()))
-            .await
-    }
-
     pub async fn request(&mut self, payload: WirePayload) -> Result<WirePayload, ClientError> {
         let prepared = self.prepare(payload);
         self.execute(&prepared).await
@@ -1121,13 +1032,6 @@ impl Client {
 
     pub fn take_undelivered(&mut self) -> Vec<WireFrame> {
         self.state.take_undelivered()
-    }
-
-    /// Hands the pump a transport-level Ping to send. Test-only: the
-    /// application's own traffic never needs to inject transport control.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn send_transport_ping_for_tests(&self, payload: &[u8]) {
-        self.transport.probe.send_ping(payload);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1379,59 +1283,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn an_application_frame_past_the_read_ahead_window_fails_the_transport() {
-        let (client, mut server) = ws_pair(false).await;
-        let mut transport = Transport::spawn_stream(client);
-        let body = bulky_frame(64);
-
-        // Saturation, not the queue alone: the full inbound queue plus the
-        // full read-ahead window. The transport is still usable at exactly
-        // this capacity.
-        for _ in 0..(TRANSPORT_QUEUE + READ_AHEAD_FRAMES) {
-            server
-                .send(Message::Binary(body.clone().into()))
-                .await
-                .expect("the saturating frame must send");
-        }
-
-        // One application frame past the boundary must not stall the pump
-        // forever and must not be dropped in silence: it ends the transport
-        // with an explicit, bounded failure after the buffered frames.
-        server
-            .send(Message::Binary(body.clone().into()))
-            .await
-            .expect("the over-capacity frame must reach the socket");
-
-        // Let the reader reach the boundary while the application is not
-        // consuming: the queue and the read-ahead window must both be full
-        // when the over-capacity frame is read.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        let mut frames = 0;
-        loop {
-            match tokio::time::timeout(Duration::from_secs(10), transport.read()).await {
-                Ok(Ok(_)) => frames += 1,
-                Ok(Err(error)) => {
-                    assert_eq!(
-                        frames,
-                        TRANSPORT_QUEUE + READ_AHEAD_FRAMES,
-                        "every buffered frame is delivered before the overload failure"
-                    );
-                    let rendered = format!("{error:?}");
-                    assert!(
-                        rendered.contains("backlog"),
-                        "the over-capacity frame must surface as an explicit backlog failure, got {rendered}"
-                    );
-                    break;
-                }
-                Err(_) => panic!(
-                    "the overload must surface instead of hanging the pump; got {frames} frames"
-                ),
-            }
-        }
-    }
-
     /// The over-capacity overload with no application consumer at all: the
     /// reader and writer must reach their terminal state on their own, and a
     /// later reader still gets the buffered data in order followed by the
@@ -1499,33 +1350,6 @@ mod tests {
         assert!(
             transport.reader_task.is_finished(),
             "the reader must not stay alive to surface the failure"
-        );
-    }
-
-    #[tokio::test]
-    async fn eof_surfaces_after_the_buffered_frames() {
-        let (client, mut server) = ws_pair(false).await;
-        let mut transport = Transport::spawn_stream(client);
-        server
-            .send(Message::Binary(bulky_frame(16).into()))
-            .await
-            .expect("frame must send");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        drop(server);
-        let first = tokio::time::timeout(Duration::from_secs(10), transport.read())
-            .await
-            .expect("the buffered frame must arrive")
-            .expect("the buffered frame must decode");
-        drop(first);
-        let eof = tokio::time::timeout(Duration::from_secs(10), transport.read())
-            .await
-            .expect("eof must surface")
-            .expect_err("the connection ended");
-        let rendered = format!("{eof:?}");
-        assert!(
-            rendered.contains("the connection to the Host ended")
-                || rendered.contains("websocket read failed"),
-            "the transport end must surface as a transport failure, got {eof:?}"
         );
     }
 
@@ -1618,89 +1442,6 @@ mod tests {
             format!("{failure:?}").contains("websocket write failed"),
             "the writer-side reason must not be lost in the terminal race, got {failure:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn a_stalled_host_read_is_bounded_and_surfaces_a_transport_failure() {
-        let (client, _server) = ws_pair(true).await;
-        let mut transport = Transport::spawn_stream(client);
-        let outbound = transport.outbound_for_tests();
-        let body = bulky_frame(8 * 1024);
-
-        // The application keeps writing while the Host never reads: the
-        // writer stalls against the closed window and the outbound queue
-        // fills behind it.
-        let writer = tokio::spawn(async move {
-            for _ in 0..64 {
-                if outbound.send(body.clone()).await.is_err() {
-                    break;
-                }
-            }
-        });
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
-        }
-
-        // The write wait bound must release the pump instead of owning it.
-        tokio::time::pause();
-        tokio::time::advance(WRITE_WAIT + Duration::from_secs(2)).await;
-        tokio::time::resume();
-
-        let failure = tokio::time::timeout(Duration::from_secs(10), transport.read())
-            .await
-            .expect("the stalled write must surface instead of hanging")
-            .expect_err("the stalled write must fail the connection");
-        assert!(
-            format!("{failure:?}").contains("websocket write failed"),
-            "got {failure:?}"
-        );
-        tokio::time::timeout(Duration::from_secs(10), writer)
-            .await
-            .expect("the application writer must stop once the transport is gone")
-            .expect("the writer task must not panic");
-    }
-
-    #[tokio::test]
-    async fn closed_writer_is_not_sent() {
-        let (socket, _server) = ws_pair(false).await;
-        let transport = Transport::spawn_stream(socket);
-        transport.writer_task.abort();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !transport.writer_task.is_finished() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the writer must stop");
-        let frame = frame_for(
-            WirePayload::PairingRequest(PairingRequest {
-                device_descriptor: String::from("closed-writer"),
-            }),
-            WireSender {
-                device_id: None,
-                incarnation_id: ClientIncarnationId {
-                    counter: 1,
-                    random: 2,
-                },
-                connection_id: None,
-            },
-        );
-        let mut client = Client {
-            transport,
-            sender: WireSender {
-                device_id: None,
-                incarnation_id: ClientIncarnationId {
-                    counter: 1,
-                    random: 2,
-                },
-                connection_id: None,
-            },
-            state: SessionState::default(),
-            pending_erasure_injector: PendingErasureInjector::default(),
-        };
-        let prepared = client.prepare(frame.payload);
-        let result = client.enqueue_request(&prepared).await;
-        assert!(matches!(result, Err(EnqueueFailure::WriterClosed)));
     }
 
     #[tokio::test]

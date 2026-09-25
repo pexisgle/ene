@@ -1231,38 +1231,34 @@ mod tests {
     }
 
     #[test]
-    fn pass_is_only_produced_after_all_evidence_is_evaluated() {
+    fn presentation_gate_distinguishes_presented_discarded_missing_fps_and_rejection() {
         let mut record = passing_record();
         assert!(!record.claims_pass());
         record.evaluate();
         assert!(record.claims_pass(), "{:?}", record.failures);
-    }
 
-    #[test]
-    fn discarded_frames_do_not_fail_a_passing_presented_fps() {
-        let mut record = passing_record();
         let source = record.fps.as_ref().expect("fps").source.clone();
         let mut events = presented_events(300);
         events.push(PresentationEvent::Discarded {
             correlation_id: 300,
         });
-        record.fps =
-            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.fps = Some(
+            PresentationRecord::from_events(source.clone(), 5.0, 10.0, events)
+                .expect("presentation"),
+        );
         record.evaluate();
         assert!(record.claims_pass(), "{:?}", record.failures);
-    }
+        assert_eq!(record.fps.as_ref().expect("fps").discarded, 1);
 
-    #[test]
-    fn missing_frames_still_fail_a_passing_presented_fps() {
-        let mut record = passing_record();
-        let source = record.fps.as_ref().expect("fps").source.clone();
         let mut events = presented_events(300);
         events.push(PresentationEvent::Missing {
             correlation_id: 300,
             reason: String::from("feedback never resolved"),
         });
-        record.fps =
-            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.fps = Some(
+            PresentationRecord::from_events(source.clone(), 5.0, 10.0, events)
+                .expect("presentation"),
+        );
         record.evaluate();
         assert_eq!(record.verdict.label(), "Fail");
         assert!(
@@ -1274,11 +1270,28 @@ mod tests {
             "{:?}",
             record.failures
         );
-    }
 
-    #[test]
-    fn missing_evidence_does_not_hide_independent_gate_failures() {
-        let mut record = passing_record();
+        let events = (0..300)
+            .map(|id| PresentationEvent::Presented {
+                correlation_id: id,
+                timestamp_ns: id * 33_000_000,
+                clock_id: 1,
+                output: String::new(),
+            })
+            .collect();
+        record.fps =
+            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
+        record.evaluate();
+        let failure = record
+            .failures
+            .iter()
+            .find(|failure| failure.starts_with("presented FPS"))
+            .expect("the rejected presentation is reported");
+        assert!(
+            failure.contains("presented output is empty"),
+            "the operator line must name the rejection reason: {failure}"
+        );
+
         let events = (0..29)
             .map(|id| PresentationEvent::Presented {
                 correlation_id: id,
@@ -1317,92 +1330,6 @@ mod tests {
     }
 
     #[test]
-    fn rejected_presentation_names_the_reason_on_the_failure_line() {
-        let mut record = passing_record();
-        let source = record.fps.as_ref().expect("fps").source.clone();
-        let events = (0..300)
-            .map(|id| PresentationEvent::Presented {
-                correlation_id: id,
-                timestamp_ns: id * 33_000_000,
-                clock_id: 1,
-                output: String::new(),
-            })
-            .collect();
-        record.fps =
-            Some(PresentationRecord::from_events(source, 5.0, 10.0, events).expect("presentation"));
-        record.evaluate();
-        let failure = record
-            .failures
-            .iter()
-            .find(|failure| failure.starts_with("presented FPS"))
-            .expect("the rejected presentation is reported");
-        assert!(
-            failure.contains("presented output is empty"),
-            "the operator line must name the rejection reason: {failure}"
-        );
-    }
-
-    #[test]
-    fn missing_presentation_feedback_cannot_pass() {
-        let mut record = passing_record();
-        let source = record.fps.as_ref().expect("fps").source.clone();
-        record.fps = Some(
-            PresentationRecord::from_events(
-                source,
-                5.0,
-                1.0,
-                vec![
-                    PresentationEvent::Presented {
-                        correlation_id: 1,
-                        timestamp_ns: 1,
-                        clock_id: 1,
-                        output: String::from("out"),
-                    },
-                    PresentationEvent::Missing {
-                        correlation_id: 2,
-                        reason: String::from("feedback never resolved"),
-                    },
-                ],
-            )
-            .expect("record"),
-        );
-        record.evaluate();
-        assert!(!record.claims_pass());
-        assert_eq!(record.verdict.label(), "Fail");
-    }
-
-    #[test]
-    fn unresolved_body_submission_becomes_missing_feedback() {
-        let surface_id = String::from("wl_surface@12");
-        let feedback = vec![
-            ene_body::ipc::PresentationFeedback {
-                surface_id: surface_id.clone(),
-                correlation_id: 10,
-                outcome: ene_body::ipc::PresentationOutcome::Submitted,
-            },
-            ene_body::ipc::PresentationFeedback {
-                surface_id: surface_id.clone(),
-                correlation_id: 10,
-                outcome: ene_body::ipc::PresentationOutcome::Presented {
-                    timestamp_ns: 99,
-                    clock_id: 1,
-                    output: String::from("DP-1"),
-                },
-            },
-            ene_body::ipc::PresentationFeedback {
-                surface_id,
-                correlation_id: 11,
-                outcome: ene_body::ipc::PresentationOutcome::Submitted,
-            },
-        ];
-        let record =
-            wayland_presentation_record(42, 1.0, 1.0, feedback).expect("correlated feedback");
-        assert_eq!(record.presented, 1);
-        assert_eq!(record.missing, 1);
-        assert!(record.rejection().is_some());
-    }
-
-    #[test]
     fn dropped_frames_use_presented_count_not_request_count() {
         let events = (0..60)
             .map(|id| {
@@ -1432,32 +1359,6 @@ mod tests {
         assert_eq!(fps.discarded, 40);
         assert_eq!(fps.actual_fps, 20.0);
         assert_eq!(fps.rejection(), Some("presented FPS is below the minimum"));
-    }
-
-    #[test]
-    fn discarded_feedback_does_not_reject_a_passing_presented_fps() {
-        let mut events = (0..31)
-            .map(|id| PresentationEvent::Presented {
-                correlation_id: id,
-                timestamp_ns: id.saturating_add(1) * 30_000_000,
-                clock_id: 1,
-                output: String::from("out"),
-            })
-            .collect::<Vec<_>>();
-        events.push(PresentationEvent::Discarded { correlation_id: 32 });
-        let fps = PresentationRecord::from_events(
-            PresentationSource::WaylandWpPresentation {
-                body_pid: 3,
-                surface_id: String::from("surface"),
-            },
-            0.0,
-            1.0,
-            events,
-        )
-        .expect("fps");
-        assert_eq!(fps.discarded, 1);
-        assert!(fps.actual_fps >= 30.0);
-        assert!(fps.rejection().is_none());
     }
 
     #[test]

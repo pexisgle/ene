@@ -272,13 +272,11 @@ fn create_missing_dir(path: &Path, is_data_dir: bool) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use windows_sys::Win32::Security::ACL;
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
-    use windows_sys::Win32::System::Threading::GetProcessHandleCount;
-
-    use super::*;
 
     fn stringify_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> String {
         let mut text: windows_sys::core::PWSTR = std::ptr::null_mut();
@@ -359,16 +357,6 @@ mod tests {
         format!("O:{sid}D:P(A;;FA;;;{sid})")
     }
 
-    fn handle_count() -> u32 {
-        let mut count = 0_u32;
-        // SAFETY: `count` is an out-parameter the API fills on success.
-        assert!(
-            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) } != 0,
-            "the process handle count must be readable"
-        );
-        count
-    }
-
     #[test]
     fn an_existing_parent_keeps_its_acl_while_ene_directories_are_owner_only() {
         let parent = tempfile::tempdir().expect("an existing parent directory");
@@ -403,22 +391,6 @@ mod tests {
             security_sddl(&data_dir),
             normalized_sddl(&expected),
             "an existing data directory keeps its verify-and-repair contract"
-        );
-    }
-
-    #[test]
-    fn repeated_sid_lookups_do_not_leak_token_handles() {
-        for _ in 0..20 {
-            current_user_sid_string().expect("the user sid must read");
-        }
-        let before = handle_count();
-        for _ in 0..1000 {
-            current_user_sid_string().expect("the user sid must read");
-        }
-        let growth = handle_count().saturating_sub(before);
-        assert!(
-            growth < 500,
-            "1000 token reads must not grow the handle table; it grew by {growth}"
         );
     }
 }

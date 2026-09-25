@@ -1255,7 +1255,7 @@ impl TaskEffectRuntime {
         *crate::lock_unpoison(&self.test_staging_pause) = pause;
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(all(test, feature = "test-support"))]
     pub(crate) fn set_test_cleanup_pause(
         &self,
         pause: Option<crate::staging_cleanup::StagingCleanupPause>,

@@ -98,6 +98,11 @@ pub async fn pair_and_seat(desktop: &mut DesktopRuntime, handle: &Arc<HostHandle
     }
 }
 
+pub async fn say(desktop: &mut DesktopRuntime, text: &str) {
+    desktop.composer_mut().set_draft(text.to_owned());
+    desktop.send_text().await.expect("chat turn must complete");
+}
+
 pub async fn complete_setup(desktop: &mut DesktopRuntime, secret: &str, model: &str) {
     desktop.set_secret(secret.to_string());
     desktop

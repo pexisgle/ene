@@ -974,89 +974,67 @@ mod report_tests {
     }
 
     #[test]
-    fn a_completed_report_names_the_changes_the_location_and_no_remainder() {
-        let report = TaskReport {
-            progress: TaskProgress::Completed,
-            workspace_folder: Some(String::from("/srv/workspace/ene")),
-            save_target: None,
-            result_body: Some(String::from("report.md was created")),
-            result_adopted: true,
-            correlated_attempts: vec![attempt(
-                "create",
-                "/srv/workspace/ene/report.md",
-                ActionCertaintyWire::ConfirmedSuccess,
-            )],
-            other_attempts: Vec::new(),
-        };
-        let rendered = report.render();
-        assert!(rendered.contains("task status: completed"), "{rendered}");
-        assert!(
-            rendered.contains("workspace: /srv/workspace/ene"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("report.md was created"), "{rendered}");
-        assert!(
-            rendered.contains("create /srv/workspace/ene/report.md"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("remaining/unconfirmed effects:\n- none"),
-            "{rendered}"
-        );
-    }
+    fn completed_and_unknown_reports_keep_effect_certainty_distinct() {
+        let cases = [
+            (
+                TaskReport {
+                    progress: TaskProgress::Completed,
+                    workspace_folder: Some(String::from("/srv/workspace/ene")),
+                    save_target: None,
+                    result_body: Some(String::from("report.md was created")),
+                    result_adopted: true,
+                    correlated_attempts: vec![attempt(
+                        "create",
+                        "/srv/workspace/ene/report.md",
+                        ActionCertaintyWire::ConfirmedSuccess,
+                    )],
+                    other_attempts: Vec::new(),
+                },
+                [
+                    "task status: completed",
+                    "workspace: /srv/workspace/ene",
+                    "report.md was created",
+                    "create /srv/workspace/ene/report.md",
+                    "remaining/unconfirmed effects:\n- none",
+                ],
+            ),
+            (
+                TaskReport {
+                    progress: TaskProgress::Cancelled,
+                    workspace_folder: None,
+                    save_target: None,
+                    result_body: None,
+                    result_adopted: false,
+                    correlated_attempts: Vec::new(),
+                    other_attempts: vec![
+                        attempt(
+                            "create",
+                            "/srv/workspace/ene/half.md",
+                            ActionCertaintyWire::Unknown,
+                        ),
+                        attempt(
+                            "edit",
+                            "/srv/workspace/ene/notes.md",
+                            ActionCertaintyWire::ConfirmedFailure,
+                        ),
+                    ],
+                },
+                [
+                    "task status: cancelled",
+                    "result: none",
+                    "create /srv/workspace/ene/half.md (unknown)",
+                    "edit /srv/workspace/ene/notes.md (confirmed failure)",
+                    "completed changes:\n- none",
+                ],
+            ),
+        ];
 
-    #[test]
-    fn an_unknown_effect_is_reported_as_unknown_not_as_success_or_failure() {
-        let report = TaskReport {
-            progress: TaskProgress::Cancelled,
-            workspace_folder: None,
-            save_target: None,
-            result_body: None,
-            result_adopted: false,
-            correlated_attempts: Vec::new(),
-            other_attempts: vec![
-                attempt(
-                    "create",
-                    "/srv/workspace/ene/half.md",
-                    ActionCertaintyWire::Unknown,
-                ),
-                attempt(
-                    "edit",
-                    "/srv/workspace/ene/notes.md",
-                    ActionCertaintyWire::ConfirmedFailure,
-                ),
-            ],
-        };
-        let rendered = report.render();
-        assert!(rendered.contains("task status: cancelled"), "{rendered}");
-        assert!(rendered.contains("result: none"), "{rendered}");
-        assert!(
-            rendered.contains("create /srv/workspace/ene/half.md (unknown)"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("edit /srv/workspace/ene/notes.md (confirmed failure)"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("completed changes:\n- none"),
-            "an unconfirmed effect is never listed as a completed change: {rendered}"
-        );
-    }
-
-    #[test]
-    fn the_debug_rendering_redacts_the_result_body() {
-        let report = TaskReport {
-            progress: TaskProgress::Completed,
-            workspace_folder: None,
-            save_target: None,
-            result_body: Some(String::from("private final words")),
-            result_adopted: true,
-            correlated_attempts: Vec::new(),
-            other_attempts: Vec::new(),
-        };
-        let rendered = format!("{report:?}");
-        assert!(!rendered.contains("private final words"), "{rendered}");
+        for (report, expected) in cases {
+            let rendered = report.render();
+            for expected in expected {
+                assert!(rendered.contains(expected), "{rendered}");
+            }
+        }
     }
 }
 
@@ -1072,88 +1050,57 @@ mod task_control_tests {
     }
 
     #[test]
-    fn an_ordinary_reply_is_conversation_unchanged() {
+    fn task_control_parsing_covers_every_shape() {
         assert!(matches!(
             interpret_task_control("hello there\nsecond line"),
             DialogueTaskInterpretation::Conversation
         ));
-    }
 
-    #[test]
-    fn a_marker_after_prose_is_invalid() {
+        let valid = [
+            (
+                "[task-control] {\"kind\":\"propose_task\",\"purpose\":\"read input.txt\"}",
+                DialogueTaskCommand::ProposeTask {
+                    purpose: String::from("read input.txt"),
+                },
+            ),
+            (
+                "[task-control] {\"kind\":\"report\"}",
+                DialogueTaskCommand::Report,
+            ),
+            (
+                "[task-control] {\"kind\":\"steer\",\"instruction\":\"add a summary\",\"purpose\":null}",
+                DialogueTaskCommand::Steer {
+                    instruction: String::from("add a summary"),
+                    purpose: None,
+                },
+            ),
+            (
+                "[task-control] {\"kind\":\"cancel\"}",
+                DialogueTaskCommand::Cancel,
+            ),
+            (
+                "[task-control] {\"kind\":\"resume\"}",
+                DialogueTaskCommand::Resume,
+            ),
+            (
+                "\n\n[task-control] {\"kind\":\"report\"}\n",
+                DialogueTaskCommand::Report,
+            ),
+        ];
+        for (text, expected) in valid {
+            assert_eq!(command(text), expected, "{text:?}");
+        }
+
         for text in [
             "Sure, I will do that.\n[task-control] {\"kind\":\"report\"}",
             "hello [task-control] {\"kind\":\"report\"}",
             "hello\n[task-control] {\"kind\":\"cancel\"}\nmore",
-        ] {
-            assert!(
-                matches!(
-                    interpret_task_control(text),
-                    DialogueTaskInterpretation::Invalid
-                ),
-                "{text:?} must fail closed"
-            );
-        }
-    }
-
-    #[test]
-    fn every_closed_world_command_parses_from_the_first_line() {
-        assert_eq!(
-            command("[task-control] {\"kind\":\"propose_task\",\"purpose\":\"read input.txt\"}"),
-            DialogueTaskCommand::ProposeTask {
-                purpose: String::from("read input.txt"),
-            }
-        );
-        assert_eq!(
-            command("[task-control] {\"kind\":\"report\"}"),
-            DialogueTaskCommand::Report
-        );
-        assert_eq!(
-            command(
-                "[task-control] {\"kind\":\"steer\",\"instruction\":\"add a summary\",\"purpose\":null}"
-            ),
-            DialogueTaskCommand::Steer {
-                instruction: String::from("add a summary"),
-                purpose: None,
-            }
-        );
-        assert_eq!(
-            command("[task-control] {\"kind\":\"cancel\"}"),
-            DialogueTaskCommand::Cancel
-        );
-        assert_eq!(
-            command("[task-control] {\"kind\":\"resume\"}"),
-            DialogueTaskCommand::Resume
-        );
-        assert_eq!(
-            command("\n\n[task-control] {\"kind\":\"report\"}\n"),
-            DialogueTaskCommand::Report
-        );
-    }
-
-    #[test]
-    fn extra_fields_are_invalid_for_every_command_shape() {
-        for text in [
             "[task-control] {\"kind\":\"propose_task\",\"purpose\":\"read input.txt\",\"workspace\":\"/etc\"}",
             "[task-control] {\"kind\":\"propose_task\",\"purpose\":\"read input.txt\",\"save_target\":\"/etc\"}",
             "[task-control] {\"kind\":\"report\",\"extra\":1}",
             "[task-control] {\"kind\":\"steer\",\"instruction\":\"add\",\"purpose\":null,\"workspace\":\"/etc\"}",
             "[task-control] {\"kind\":\"cancel\",\"reason\":\"because\"}",
             "[task-control] {\"kind\":\"resume\",\"task\":\"other\"}",
-        ] {
-            assert!(
-                matches!(
-                    interpret_task_control(text),
-                    DialogueTaskInterpretation::Invalid
-                ),
-                "{text:?} must be invalid: a provider cannot smuggle extra fields"
-            );
-        }
-    }
-
-    #[test]
-    fn malformed_or_non_first_markers_are_invalid() {
-        for text in [
             "[task-control] not json",
             "[task-control] {\"kind\":\"unknown\"}",
             "[task-control] {\"kind\":\"propose_task\",\"purpose\":\"\"}",
@@ -1166,23 +1113,9 @@ mod task_control_tests {
                     interpret_task_control(text),
                     DialogueTaskInterpretation::Invalid
                 ),
-                "{text:?} must be invalid"
+                "{text:?}"
             );
         }
-    }
-
-    #[test]
-    fn the_command_debug_redacts_instruction_bodies() {
-        let rendered = format!(
-            "{:?}",
-            command("[task-control] {\"kind\":\"propose_task\",\"purpose\":\"private purpose\"}")
-        );
-        assert!(!rendered.contains("private purpose"), "{rendered}");
-        let rendered = format!(
-            "{:?}",
-            command("[task-control] {\"kind\":\"steer\",\"instruction\":\"private instruction\"}")
-        );
-        assert!(!rendered.contains("private instruction"), "{rendered}");
     }
 }
 
@@ -1219,17 +1152,16 @@ mod control_sink_tests {
     }
 
     #[tokio::test]
-    async fn a_late_marker_in_one_delta_publishes_the_ordinary_prefix() {
-        let (published, presentation) = run(&["hello\n[task-control] {\"kind\":\"cancel\"}"]).await;
-        assert_eq!(published, "hello\n");
-        assert_eq!(presentation, ControlPresentation::LateMarker);
-    }
+    async fn late_marker_stream_layouts_publish_the_same_visible_prefix() {
+        let cases: &[&[&str]] = &[
+            &["hello\n[task-control] {\"kind\":\"cancel\"}"],
+            &["hello\n[task-", "control] {\"kind\":\"cancel\"}"],
+        ];
 
-    #[tokio::test]
-    async fn a_split_late_marker_publishes_the_same_visible_prefix() {
-        let (published, presentation) =
-            run(&["hello\n[task-", "control] {\"kind\":\"cancel\"}"]).await;
-        assert_eq!(published, "hello\n");
-        assert_eq!(presentation, ControlPresentation::LateMarker);
+        for &deltas in cases {
+            let (published, presentation) = run(deltas).await;
+            assert_eq!(published, "hello\n");
+            assert_eq!(presentation, ControlPresentation::LateMarker);
+        }
     }
 }

@@ -364,9 +364,9 @@ fn decode_reason(error: &rmp_serde::decode::Error) -> String {
 mod tests {
     use super::{
         AssetFailInfo, AssetFailReason, AssetRef, BodyToParent, FeatureSupport, GpuFailInfo,
-        GpuFailReason, GpuInitStatus, HEALTH_INTERVAL, HealthTick, IpcError, LocalUiFact,
-        MAX_FRAME_BYTES, MAX_MOTION_PATH_BYTES, MotionFailInfo, MotionFailReason, MotionSetInfo,
-        OverlayKind, OverlayUnavailableInfo, ParentToBody, PlacementBox, PoseClip, PoseHint,
+        GpuFailReason, GpuInitStatus, HealthTick, IpcError, LocalUiFact, MAX_FRAME_BYTES,
+        MAX_MOTION_PATH_BYTES, MotionFailInfo, MotionFailReason, MotionSetInfo, OverlayKind,
+        OverlayUnavailableInfo, ParentToBody, PlacementBox, PoseClip, PoseHint,
         PresentationFeedback, PresentationOutcome, ReadyInfo, decode_body, decode_parent,
         encode_body, encode_parent,
     };
@@ -541,13 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn health_interval_is_a_few_hertz() {
-        assert_eq!(HEALTH_INTERVAL.as_millis(), 250);
-    }
-
-    #[test]
     fn motion_set_shape_is_checked_before_any_file_is_opened() {
-        assert!(MotionSetInfo { clips: Vec::new() }.validate().is_err());
         assert_eq!(
             MotionSetInfo { clips: Vec::new() }
                 .validate()

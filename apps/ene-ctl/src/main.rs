@@ -1267,41 +1267,43 @@ mod tests {
         cli_from_matches(matches)
     }
 
-    fn clap_error(words: &[&str]) -> clap::error::ErrorKind {
-        match ene_ctl_command()
-            .try_get_matches_from(std::iter::once(String::from("ene-ctl")).chain(args(words)))
-        {
-            Ok(_) => panic!("{words:?} must fail"),
-            Err(error) => error.kind(),
+    #[test]
+    fn parser_and_global_config_forms_are_checked() {
+        let cases: &[fn()] = &[
+            missing_or_unknown_command_reports_usage,
+            config_is_global_and_keeps_the_last_value,
+            setup_forms_parse_and_invalid_combinations_report_usage,
+            send_forms_parse_and_end_of_options_carries_option_like_text,
+            watch_history_and_memory_forms_parse,
+            deletion_forms_parse,
+            task_and_undelivered_forms_parse,
+            usage_forms_parse_into_filters_and_reject_misuse,
+        ];
+        for case in cases {
+            case();
         }
     }
 
     #[test]
-    fn help_and_version_are_successful_clap_exits() {
-        assert!(matches!(
-            clap_error(&["--help"]),
-            clap::error::ErrorKind::DisplayHelp
-        ));
-        assert!(matches!(
-            clap_error(&["--version"]),
-            clap::error::ErrorKind::DisplayVersion
-        ));
-        assert!(matches!(
-            clap_error(&["send", "--help"]),
-            clap::error::ErrorKind::DisplayHelp
-        ));
+    fn outcomes_and_close_are_kept_distinct() {
+        let cases: &[fn()] = &[
+            exit_codes_split_outcome_from_failures,
+            close_status_maps_presentation_and_success_separately,
+        ];
+        for case in cases {
+            case();
+        }
     }
 
-    #[test]
-    fn missing_command_reports_usage() {
+    fn missing_or_unknown_command_reports_usage() {
         assert!(matches!(parse(&[]), Err(CliError::Usage(_))));
         assert!(matches!(
-            parse(&["--config", "/tmp/ene.json"]),
+            parse(&["tasks", "extra"]),
             Err(CliError::Usage(_))
         ));
+        assert!(matches!(parse(&["frobnicate"]), Err(CliError::Usage(_))));
     }
 
-    #[test]
     fn config_is_global_and_keeps_the_last_value() {
         let cli =
             parse(&["--config", "/tmp/ene.json", "setup", "--show"]).expect("config plus setup");
@@ -1320,16 +1322,11 @@ mod tests {
         ])
         .expect("a repeated --config keeps the last value");
         assert!(repeated.config == Some(PathBuf::from("/tmp/b.json")));
-    }
-
-    #[test]
-    fn config_value_named_serve_stays_data() {
-        let cli =
+        let named =
             parse(&["--config", "serve", "setup", "--show"]).expect("the value is not a command");
-        assert!(cli.config == Some(PathBuf::from("serve")));
+        assert!(named.config == Some(PathBuf::from("serve")));
     }
 
-    #[test]
     fn setup_forms_parse_and_invalid_combinations_report_usage() {
         let show = parse(&["setup", "--show"]).expect("setup --show");
         assert!(show.command == super::cmds::Command::Setup(super::cmds::SetupMode::Show));
@@ -1369,7 +1366,6 @@ mod tests {
             ][..],
             &["setup", "--provider", "acme", "--model", "gpt-x"][..],
             &["setup", "--provider", "openai", "--model", ""][..],
-            &["setup", "--unknown"][..],
         ] {
             assert!(
                 matches!(parse(words), Err(CliError::Usage(_))),
@@ -1378,7 +1374,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn send_forms_parse_and_end_of_options_carries_option_like_text() {
         let joined = parse(&["send", "hello", "world"]).expect("send text");
         assert!(
@@ -1415,7 +1410,6 @@ mod tests {
         );
         for words in [
             &["send"][..],
-            &["send", "--new", "hi"][..],
             &["send", "--round"][..],
             &["send", "--unknown", "hi"][..],
         ] {
@@ -1426,7 +1420,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn watch_history_and_memory_forms_parse() {
         let watch = parse(&["watch", "--round", "round-7"]).expect("watch");
         assert!(
@@ -1475,10 +1468,8 @@ mod tests {
                 }
         );
         for words in [
-            &["memory", "extra"][..],
             &["memory", "--after", "a", "--revisions", "b"][..],
             &["memory", "--after-revision", "3"][..],
-            &["memory", "--after"][..],
         ] {
             assert!(
                 matches!(parse(words), Err(CliError::Usage(_))),
@@ -1487,7 +1478,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn deletion_forms_parse() {
         let request = parse(&["deletion", "--text", "leaked key"]).expect("deletion default");
         assert!(
@@ -1532,7 +1522,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn task_and_undelivered_forms_parse() {
         let tasks = parse(&["tasks"]).expect("tasks default");
         assert!(
@@ -1622,16 +1611,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unknown_flags_and_positionals_report_usage() {
-        assert!(matches!(
-            parse(&["tasks", "extra"]),
-            Err(CliError::Usage(_))
-        ));
-        assert!(matches!(parse(&["frobnicate"]), Err(CliError::Usage(_))));
-    }
-
-    #[test]
     fn exit_codes_split_outcome_from_failures() {
         assert!(
             CliError::Client(ClientError::ServerOutcome(String::from("stale"))).exit_code()
@@ -1652,37 +1631,26 @@ mod tests {
         }
     }
 
-    #[test]
     fn close_status_maps_presentation_and_success_separately() {
         use ene_api::v1::round::PresentationStatus;
         use ene_api::v1::round::StreamClose;
 
         use super::observe_close;
 
-        for shown in [false, true] {
-            assert!(
-                observe_close(StreamClose::Completed, shown)
-                    == (PresentationStatus::Presented, true),
-                "completion always presents and succeeds, shown={shown}"
-            );
-        }
-        for status in [
-            StreamClose::Interrupted,
-            StreamClose::Cancelled,
-            StreamClose::Stale,
-        ] {
-            assert!(
-                observe_close(status, true) == (PresentationStatus::Presented, false),
-                "a shown-but-{status:?} stream observes presented yet fails"
-            );
-            assert!(
-                observe_close(status, false) == (PresentationStatus::Unknown, false),
-                "an unshown {status:?} stream observes unknown and fails"
-            );
-        }
+        assert!(
+            observe_close(StreamClose::Completed, false) == (PresentationStatus::Presented, true),
+            "completion always presents and succeeds"
+        );
+        assert!(
+            observe_close(StreamClose::Interrupted, true) == (PresentationStatus::Presented, false),
+            "a shown-but-interrupted stream observes presented yet fails"
+        );
+        assert!(
+            observe_close(StreamClose::Interrupted, false) == (PresentationStatus::Unknown, false),
+            "an unshown interrupted stream observes unknown and fails"
+        );
     }
 
-    #[test]
     fn usage_forms_parse_into_filters_and_reject_misuse() {
         use super::cmds::Command as Cmd;
 

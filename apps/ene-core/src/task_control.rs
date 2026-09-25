@@ -148,78 +148,6 @@ impl TrustedTaskPremises {
     }
 }
 
-#[cfg(test)]
-pub(crate) struct TestTaskControlGate {
-    entered: tokio::sync::Semaphore,
-    release: tokio::sync::Semaphore,
-}
-
-#[cfg(test)]
-impl Default for TestTaskControlGate {
-    fn default() -> Self {
-        Self {
-            entered: tokio::sync::Semaphore::new(0),
-            release: tokio::sync::Semaphore::new(0),
-        }
-    }
-}
-
-#[cfg(test)]
-impl TestTaskControlGate {
-    pub(crate) async fn pause(&self) {
-        self.entered.add_permits(1);
-        let permit = self.release.acquire().await.expect("gate stays open");
-        permit.forget();
-    }
-
-    #[expect(dead_code, reason = "test synchronization gate")]
-    pub(crate) async fn wait_entered(&self) {
-        let permit = self.entered.acquire().await.expect("gate is entered");
-        permit.forget();
-    }
-
-    #[expect(dead_code, reason = "test synchronization gate")]
-    pub(crate) fn release(&self) {
-        self.release.add_permits(1);
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct TestResumeGate {
-    entered: tokio::sync::Semaphore,
-    release: tokio::sync::Semaphore,
-}
-
-#[cfg(test)]
-impl Default for TestResumeGate {
-    fn default() -> Self {
-        Self {
-            entered: tokio::sync::Semaphore::new(0),
-            release: tokio::sync::Semaphore::new(0),
-        }
-    }
-}
-
-#[cfg(test)]
-impl TestResumeGate {
-    pub(crate) async fn pause(&self) {
-        self.entered.add_permits(1);
-        let permit = self.release.acquire().await.expect("gate stays open");
-        permit.forget();
-    }
-
-    #[expect(dead_code, reason = "test gate hook")]
-    pub(crate) async fn wait_entered(&self) {
-        let permit = self.entered.acquire().await.expect("gate is entered");
-        permit.forget();
-    }
-
-    #[expect(dead_code, reason = "test gate hook")]
-    pub(crate) fn release(&self) {
-        self.release.add_permits(1);
-    }
-}
-
 pub(crate) struct HostTaskControl<'a> {
     handle: &'a HostHandle,
     companion: CompanionId,
@@ -462,12 +390,6 @@ impl<'a> HostTaskControl<'a> {
 
 impl DialogueTaskControlPort for HostTaskControl<'_> {
     async fn apply(&self, command: DialogueTaskCommand, origin: RawId) -> DialogueTaskControlReply {
-        #[cfg(test)]
-        if !matches!(command, DialogueTaskCommand::Report)
-            && let Some(gate) = self.handle.test_task_control_gate()
-        {
-            gate.pause().await;
-        }
         match command {
             DialogueTaskCommand::ProposeTask { purpose } => self.propose(purpose, origin).await,
             DialogueTaskCommand::Report => self.report().await,
@@ -654,13 +576,6 @@ impl HostHandle {
     ) -> Result<Option<TaskResumeOutcome>, TaskTechnicalError> {
         let _scope = self.task_executions.commit_scope().await;
         let launch_possible = self.task_launcher().is_some();
-        #[cfg(test)]
-        {
-            let gate = crate::lock_unpoison(&self.resume_gate).clone();
-            if let Some(gate) = gate {
-                gate.pause().await;
-            }
-        }
         let task = premise.expected.task;
         let store = self.store.clone();
         let registry = std::sync::Arc::clone(&self.task_executions);

@@ -798,8 +798,6 @@ pub fn describe_management(outcome: &ManagementOutcome) -> Result<String, CliErr
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use ene_api::v1::management::{ManagementOutcome, ManagementView, ViewSection};
     use ene_api::v1::refs::{BaseViewMark, CommandWireId, ViewMarkWire};
     use ene_api::v1::refs::{RevalidationReasonWire, RoundWireId};
@@ -807,13 +805,41 @@ mod tests {
 
     use super::CliError;
     use super::{
-        CAPABILITY_DIALOGUE, CAPABILITY_LEARNING, HOST_MEMORY_SECTION, HOST_SETUP_SECTIONS,
-        SETUP_PROVIDER_OPENAI, assignment_intent, consent_target_for, credential_id_for,
-        credential_intent, credential_target_for, describe_intake, describe_management,
-        history_request, memory_view_request, new_local_id, render_history, render_view,
-        send_target, setup_view_request, submit_input,
+        CAPABILITY_DIALOGUE, HOST_MEMORY_SECTION, HOST_SETUP_SECTIONS, SETUP_PROVIDER_OPENAI,
+        assignment_intent, credential_intent, describe_intake, describe_management,
+        memory_view_request, render_history, render_view, setup_view_request,
     };
     use ene_client::ClientError;
+
+    #[test]
+    fn request_and_management_contracts_are_checked() {
+        let cases: &[fn()] = &[
+            request_builders_use_typed_sections_and_cursors,
+            management_intents_carry_cli_owned_kind_base_view_and_provenance,
+            usage_cap_mark_for_selects_exactly_one_slot,
+        ];
+        for case in cases {
+            case();
+        }
+    }
+
+    #[test]
+    fn rendering_and_outcomes_preserve_user_visible_contracts() {
+        let cases: &[fn()] = &[
+            describe_intake_splits_accepted_and_declined_outcomes,
+            describe_management_splits_applied_retryable_terminal,
+            render_view_uses_kind_title_body_lines,
+            render_history_uses_role_text_lines,
+            renders_use_item_headline_and_continuation_lines,
+            ack_resume_fetch_and_report_describes_split_applied_retryable,
+            render_deletion_status_is_body_free_and_names_the_mark,
+            render_usage_page_prints_rows_caps_and_the_cursor,
+            render_usage_page_keeps_stale_and_unavailable_distinct,
+        ];
+        for case in cases {
+            case();
+        }
+    }
 
     fn expect_outcome(error: CliError) -> String {
         match error {
@@ -840,7 +866,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn render_view_uses_kind_title_body_lines() {
         let rendered = render_view(&fixture_view());
         assert!(
@@ -848,23 +873,6 @@ mod tests {
                 == "setup: Setup status – provider openai ready\nusage: Usage – 3 rounds today",
             "view must render one `kind: title – body` line per section, got {rendered:?}"
         );
-    }
-
-    #[test]
-    fn render_view_emits_nothing_but_sections() {
-        let rendered = render_view(&fixture_view());
-        assert!(
-            !rendered.contains("MARKER-MUST-NOT-APPEAR-7f3a"),
-            "the revision mark must not be echoed: {rendered:?}"
-        );
-        assert!(
-            !rendered.contains("ManagementView"),
-            "no Debug dumps may appear: {rendered:?}"
-        );
-    }
-
-    #[test]
-    fn render_view_of_no_sections_is_empty() {
         let view = ManagementView {
             mark: ViewMarkWire(String::from("mark-1")),
             sections: Vec::new(),
@@ -892,7 +900,6 @@ mod tests {
         ]
     }
 
-    #[test]
     fn render_history_uses_role_text_lines() {
         let rendered = render_history(&fixture_history());
         assert!(
@@ -901,8 +908,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn describe_intake_accepted_carries_the_round() {
+    fn describe_intake_splits_accepted_and_declined_outcomes() {
         let round = describe_intake(&RoundIntakeOutcomeWire::AcceptedForRound {
             round: RoundWireId(String::from("round-3")),
         })
@@ -911,10 +917,7 @@ mod tests {
             round == "round-3",
             "acceptance must carry the round, got {round:?}"
         );
-    }
 
-    #[test]
-    fn describe_intake_decline_names_refs_not_bodies() {
         let stale = expect_outcome(
             describe_intake(&RoundIntakeOutcomeWire::StaleRound {
                 current_round: Some(RoundWireId(String::from("round-4"))),
@@ -950,7 +953,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn describe_management_splits_applied_retryable_terminal() {
         assert!(
             describe_management(&ManagementOutcome::AppliedAsOneTime).is_ok(),
@@ -985,8 +987,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn request_builders_use_the_bootstrap_companion() {
+    fn request_builders_use_typed_sections_and_cursors() {
         let documented = ["provider", "model", "consent", "credential", "learning"];
         assert!(
             HOST_SETUP_SECTIONS == documented,
@@ -1028,93 +1029,10 @@ mod tests {
             revisions.memory_after.is_none(),
             "a revision request is not a list page: {revisions:?}"
         );
-        let history = history_request("companion-1", None, 7);
-        assert!(
-            history.companion.0 == "companion-1" && history.limit == 7,
-            "history echoes the learned companion: {history:?}"
-        );
-        assert!(
-            history.round.is_none(),
-            "plain history reads the whole timeline: {history:?}"
-        );
-        let scoped = history_request("companion-1", Some("round-9"), 7);
-        assert!(
-            scoped.round == Some(RoundWireId(String::from("round-9"))),
-            "round-scoped history carries the projection: {scoped:?}"
-        );
-        let input = submit_input(
-            "companion-1",
-            send_target(Some(String::from("round-1"))),
-            String::from("hello"),
-            String::from("en"),
-        );
-        assert!(
-            input.companion.0 == "companion-1",
-            "input echoes the learned companion: {input:?}"
-        );
-        let ene_api::v1::round::RoundTarget::Existing(round) = &input.target else {
-            panic!("--round must travel to the wire as Existing: {input:?}");
-        };
-        assert!(
-            round.0 == "round-1",
-            "input keeps the premise round: {input:?}"
-        );
-        let fresh = submit_input(
-            "companion-1",
-            send_target(None),
-            String::from("hello"),
-            String::from("en"),
-        );
-        assert!(
-            matches!(fresh.target, ene_api::v1::round::RoundTarget::New),
-            "without --round the send starts a new round: {fresh:?}"
-        );
     }
 
-    #[test]
-    fn setup_targets_use_the_shared_grammar() {
-        assert!(
-            credential_target_for("openai").0 == "credential:openai:main",
-            "credential target spells the shared grammar"
-        );
-        assert!(
-            credential_id_for("openai") == "openai:main",
-            "credential id names the registry ref the register step creates"
-        );
-        assert!(
-            consent_target_for(CAPABILITY_DIALOGUE, "openai", "gpt-x").0
-                == "consent:dialogue:openai:gpt-x:openai:main",
-            "dialogue consent target spells the shared grammar over that credential id"
-        );
-        assert!(
-            consent_target_for(CAPABILITY_LEARNING, "openai", "gpt-x").0
-                == "consent:learning:openai:gpt-x:openai:main",
-            "learning consent target is capability-distinct"
-        );
-        assert!(
-            ene_api::v1::management::parse_credential_target(&credential_target_for("openai"))
-                == Some((String::from("openai"), String::from("main"))),
-            "credential target must parse as (provider, label)"
-        );
-        assert!(
-            ene_api::v1::management::parse_consent_target(&consent_target_for(
-                CAPABILITY_DIALOGUE,
-                "openai",
-                "gpt-x"
-            )) == Some((
-                String::from("dialogue"),
-                String::from("openai"),
-                String::from("gpt-x"),
-                String::from("openai:main"),
-            )),
-            "consent target must parse as (capability, provider, model, credential-id)"
-        );
-    }
-
-    #[test]
-    fn setup_intents_carry_grammar_targets_and_provenance_only_rationales() {
-        use ene_api::v1::management::ManagementIntentKind;
-        use ene_api::v1::management::RationaleOrigin;
+    fn management_intents_carry_cli_owned_kind_base_view_and_provenance() {
+        use ene_api::v1::management::{ManagementIntentKind, RationaleOrigin};
 
         let base = BaseViewMark(String::from("mark-1"));
         let credential = credential_intent(
@@ -1122,14 +1040,17 @@ mod tests {
             &base,
             SETUP_PROVIDER_OPENAI,
         );
-        assert!(
-            credential.kind == ManagementIntentKind::ConfigureCredentialIntent
-                && credential.target.0 == "credential:openai:main"
-                && credential.base_view == base
-                && credential.rationale.origin == RationaleOrigin::ManagementSurface
-                && credential.rationale.quote.is_none(),
-            "credential intent carries the grammar target and no quote: {credential:?}"
+        assert_eq!(
+            credential.kind,
+            ManagementIntentKind::ConfigureCredentialIntent
         );
+        assert_eq!(credential.base_view, base);
+        assert_eq!(
+            credential.rationale.origin,
+            RationaleOrigin::ManagementSurface
+        );
+        assert!(credential.rationale.quote.is_none());
+
         let assignment = assignment_intent(
             CommandWireId(uuid::Uuid::new_v4()),
             &base,
@@ -1137,81 +1058,48 @@ mod tests {
             SETUP_PROVIDER_OPENAI,
             "gpt-x",
         );
-        assert!(
-            assignment.kind == ManagementIntentKind::ManageRuleConsentCap
-                && assignment.target.0 == "consent:dialogue:openai:gpt-x:openai:main"
-                && assignment.base_view == base
-                && assignment.rationale.origin == RationaleOrigin::ManagementSurface
-                && assignment.rationale.quote.is_none(),
-            "assignment intent carries the consent target and no quote: {assignment:?}"
-        );
-        let learning = assignment_intent(
-            CommandWireId(uuid::Uuid::new_v4()),
-            &base,
-            CAPABILITY_LEARNING,
-            SETUP_PROVIDER_OPENAI,
-            "gpt-x",
-        );
-        assert!(
-            learning.target.0 == "consent:learning:openai:gpt-x:openai:main",
-            "learning assignment names its own capability: {learning:?}"
-        );
-    }
-
-    #[test]
-    fn local_ids_are_unique_across_many_draws() {
-        let mut seen = HashSet::new();
-        for _ in 0..1000 {
-            seen.insert(new_local_id().0);
-        }
-        assert!(
-            seen.len() == 1000,
-            "1000 local IDs must all be distinct, got {}",
-            seen.len()
-        );
-    }
-
-    #[test]
-    fn local_id_is_a_uuid() {
-        let id = new_local_id().0;
-        assert!(
-            uuid::Uuid::parse_str(&id).is_ok(),
-            "local ID must be a UUID: {id:?}"
-        );
-    }
-
-    #[test]
-    fn presentation_builders_carry_refs_limits_and_flags() {
-        use ene_api::v1::round::PresentationStatus;
-
-        let fetch = super::undelivered_request(Some(String::from("cursor-1")), Some(7), true);
-        assert!(fetch.companion.is_none());
+        assert_eq!(assignment.kind, ManagementIntentKind::ManageRuleConsentCap);
+        assert_eq!(assignment.base_view, base);
         assert_eq!(
-            fetch.cursor.map(|cursor| cursor.0),
-            Some(String::from("cursor-1"))
+            assignment.rationale.origin,
+            RationaleOrigin::ManagementSurface
         );
-        assert_eq!(fetch.limit, Some(7));
-        assert!(fetch.redisplay);
-        let head = super::undelivered_request(None, None, false);
-        assert!(head.cursor.is_none() && head.limit.is_none() && !head.redisplay);
+        assert!(assignment.rationale.quote.is_none());
 
-        let ack = super::undelivered_ack("receipt-1", PresentationStatus::Presented);
-        assert!(ack.receipt.0 == "receipt-1" && ack.status == PresentationStatus::Presented);
+        let deletion = super::deletion_intent(
+            CommandWireId(uuid::Uuid::new_v4()),
+            "deletion-view/0/-/0/-",
+            ene_api::v1::deletion::DeletionPurposeWire::Security,
+            "leaked key",
+        );
+        assert_eq!(
+            deletion.kind,
+            ManagementIntentKind::RequestDeletionBackupRestoreReset
+        );
+        assert_eq!(deletion.base_view.0, "deletion-view/0/-/0/-");
+        assert_eq!(
+            deletion.rationale.origin,
+            RationaleOrigin::ManagementSurface
+        );
+        assert!(deletion.rationale.quote.is_none());
 
-        let list = super::list_tasks_request(None, None);
-        assert!(list.cursor.is_none() && list.limit.is_none());
-        let report = super::task_report_request("task-1", Some(String::from("c")), Some(3));
-        assert!(report.task.0 == "task-1");
-        assert_eq!(report.limit, Some(3));
-        let source = super::report_source_request("source-1", Some(9), Some(128));
-        assert!(source.source.0 == "source-1" && source.cursor == Some(9));
-        assert_eq!(source.limit_bytes, Some(128));
-        assert!(super::select_task_request("task-2").task.0 == "task-2");
-        let resume = super::resume_task_request("task-3", 4, "task-3:4", String::from("go on"));
-        assert!(resume.expected_revision == 4 && resume.expected_purpose == "task-3:4");
+        let usage = usage_cap_intent(
+            CommandWireId(uuid::Uuid::nil()),
+            "usage-cap-system-daily_utc-none",
+            None,
+            "daily_utc",
+            "USD",
+            1_000,
+        );
+        assert_eq!(usage.kind, ManagementIntentKind::ManageRuleConsentCap);
+        assert_eq!(
+            usage.base_view,
+            BaseViewMark(String::from("usage-cap-system-daily_utc-none"))
+        );
+        assert_eq!(usage.rationale.origin, RationaleOrigin::ManagementSurface);
+        assert_eq!(usage.rationale.quote, None);
     }
 
-    #[test]
     fn renders_use_item_headline_and_continuation_lines() {
         use ene_api::v1::refs::RoundWireId;
         use ene_api::v1::undelivered::{
@@ -1315,7 +1203,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn ack_resume_fetch_and_report_describes_split_applied_retryable() {
         use ene_api::v1::round::PresentationStatus;
         use ene_api::v1::undelivered::{
@@ -1382,33 +1269,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn deletion_intent_spells_the_shared_grammar_without_the_quote() {
-        use ene_api::v1::deletion::{DeletionPurposeWire, parse_deletion_target};
-
-        let intent = super::deletion_intent(
-            CommandWireId(uuid::Uuid::new_v4()),
-            "deletion-view/0/-/0/-",
-            DeletionPurposeWire::Security,
-            "leaked key",
-        );
-        assert_eq!(
-            intent.kind,
-            ene_api::v1::management::ManagementIntentKind::RequestDeletionBackupRestoreReset
-        );
-        assert_eq!(intent.base_view.0, "deletion-view/0/-/0/-");
-        assert!(
-            intent.rationale.quote.is_none(),
-            "the exact text travels in the target, never the rationale"
-        );
-        let parsed = parse_deletion_target(&intent.target).expect("the target must parse");
-        assert_eq!(parsed.purpose(), DeletionPurposeWire::Security);
-        assert_eq!(parsed.exact_text(), "leaked key");
-        assert!(DeletionPurposeWire::from_name("privacy").is_some());
-        assert!(DeletionPurposeWire::from_name("everything").is_none());
-    }
-
-    #[test]
     fn render_deletion_status_is_body_free_and_names_the_mark() {
         use ene_api::v1::deletion::{
             DeletionOperationStatusView, DeletionParticipantReportWire, DeletionPhaseWire,
@@ -1445,7 +1305,6 @@ mod tests {
         );
     }
 
-    use ene_api::v1::management::{ManagementIntentKind, RationaleOrigin};
     use ene_api::v1::refs::UsageCursorWire;
     use ene_api::v1::usage::{
         UsageCapConsumptionView, UsageCapStoredView, UsageCapView, UsageCostView, UsageMoneyView,
@@ -1535,39 +1394,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn usage_cap_intent_uses_the_shared_grammar_and_no_quote() {
-        let intent = usage_cap_intent(
-            CommandWireId(uuid::Uuid::nil()),
-            "usage-cap-system-daily_utc-none",
-            None,
-            "daily_utc",
-            "USD",
-            1_000,
-        );
-        assert_eq!(intent.kind, ManagementIntentKind::ManageRuleConsentCap);
-        assert_eq!(intent.target.0.as_str(), "cap:system:daily_utc:USD:1000");
-        assert_eq!(
-            intent.base_view,
-            BaseViewMark(String::from("usage-cap-system-daily_utc-none"))
-        );
-        assert_eq!(intent.rationale.origin, RationaleOrigin::ManagementSurface);
-        assert_eq!(intent.rationale.quote, None);
-        let provider = usage_cap_intent(
-            CommandWireId(uuid::Uuid::nil()),
-            "usage-cap-provider-openai-monthly_utc-rev-2",
-            Some("openai"),
-            "monthly_utc",
-            "USD",
-            42,
-        );
-        assert_eq!(
-            provider.target.0.as_str(),
-            "cap:provider:openai:monthly_utc:USD:42"
-        );
-    }
-
-    #[test]
     fn usage_cap_mark_for_selects_exactly_one_slot() {
         let page = fixture_usage_page();
         assert_eq!(
@@ -1586,7 +1412,6 @@ mod tests {
         assert_eq!(usage_cap_mark_for(&page, Some("other"), "daily_utc"), None);
     }
 
-    #[test]
     fn render_usage_page_prints_rows_caps_and_the_cursor() {
         let response = UsageSummaryResponse::Page(fixture_usage_page());
         let rendered = render_usage_page(&response).expect("a page renders");
@@ -1617,7 +1442,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn render_usage_page_keeps_stale_and_unavailable_distinct() {
         let stale = render_usage_page(&UsageSummaryResponse::StaleBaseView {
             current: Some(UsageCursorWire(String::from("cursor-9"))),

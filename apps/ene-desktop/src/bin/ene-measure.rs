@@ -522,45 +522,51 @@ mod tests {
     }
 
     #[test]
-    fn terminal_feedback_after_the_window_end_still_counts() {
-        let trace = write_trace(&[
-            line(5_000_000_000, 7, PresentationOutcome::Submitted),
-            line(
-                12_000_000_000,
-                7,
-                PresentationOutcome::Presented {
-                    timestamp_ns: 9_000_000_000,
-                    clock_id: 1,
-                    output: String::from("DP-1"),
-                },
+    fn trace_window_terminal_and_missing_cases_are_table_driven() {
+        let cases = [
+            (
+                vec![
+                    line(5_000_000_000, 7, PresentationOutcome::Submitted),
+                    line(
+                        12_000_000_000,
+                        7,
+                        PresentationOutcome::Presented {
+                            timestamp_ns: 9_000_000_000,
+                            clock_id: 1,
+                            output: String::from("DP-1"),
+                        },
+                    ),
+                ],
+                2,
+                Some((1, 0, 0)),
             ),
-        ]);
-        let feedback =
-            read_wayland_feedback(trace.path(), 0, 1_000, 0.0, 10.0).expect("read trace");
-        let record = wayland_presentation_record(1, 0.0, 10.0, feedback).expect("record");
-        assert_eq!(record.presented, 1);
-        assert_eq!(record.missing, 0);
-        assert_eq!(record.discarded, 0);
-    }
+            (
+                vec![line(5_000_000_000, 9, PresentationOutcome::Submitted)],
+                1,
+                Some((0, 1, 0)),
+            ),
+            (
+                vec![
+                    line(500_000_000, 1, PresentationOutcome::Submitted),
+                    line(20_000_000_000, 2, PresentationOutcome::Submitted),
+                ],
+                0,
+                None,
+            ),
+        ];
 
-    #[test]
-    fn unresolved_submission_inside_the_window_is_missing() {
-        let trace = write_trace(&[line(5_000_000_000, 9, PresentationOutcome::Submitted)]);
-        let feedback =
-            read_wayland_feedback(trace.path(), 0, 1_000, 0.0, 10.0).expect("read trace");
-        let record = wayland_presentation_record(1, 0.0, 10.0, feedback).expect("record");
-        assert_eq!(record.presented, 0);
-        assert_eq!(record.missing, 1);
-    }
-
-    #[test]
-    fn submissions_outside_the_window_are_ignored() {
-        let trace = write_trace(&[
-            line(500_000_000, 1, PresentationOutcome::Submitted),
-            line(20_000_000_000, 2, PresentationOutcome::Submitted),
-        ]);
-        let feedback =
-            read_wayland_feedback(trace.path(), 0, 1_000, 0.0, 10.0).expect("read trace");
-        assert!(feedback.is_empty());
+        for (lines, expected_feedback, expected_record) in cases {
+            let trace = write_trace(&lines);
+            let feedback =
+                read_wayland_feedback(trace.path(), 0, 1_000, 0.0, 10.0).expect("read trace");
+            assert_eq!(feedback.len(), expected_feedback);
+            if let Some((presented, missing, discarded)) = expected_record {
+                let record = wayland_presentation_record(1, 0.0, 10.0, feedback).expect("record");
+                assert_eq!(
+                    (record.presented, record.missing, record.discarded),
+                    (presented, missing, discarded)
+                );
+            }
+        }
     }
 }

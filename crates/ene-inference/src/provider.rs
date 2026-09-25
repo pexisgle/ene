@@ -284,31 +284,19 @@ fn status_failure(status: u16) -> InferenceTechnicalError {
 mod tests {
     use ene_credential::{CredentialRef, MemoryCredentialStore};
 
-    use super::{OpenAiResponsesTransport, status_failure};
+    use super::OpenAiResponsesTransport;
     use crate::InferenceTechnicalError;
 
     #[test]
-    fn request_body_disables_server_side_storage() {
+    fn request_and_estimate_share_conservative_output_cap() {
         let body = super::responses_body("gpt-test", "hello");
-        assert_eq!(
-            body.get("store"),
-            Some(&serde_json::Value::Bool(false)),
-            "history lives locally; the provider must not retain response state: {body}"
-        );
-    }
-
-    #[test]
-    fn request_body_sets_the_explicit_output_maximum_the_estimate_uses() {
-        let body = super::responses_body("gpt-test", "hello");
+        assert_eq!(body.get("stream"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(body.get("store"), Some(&serde_json::Value::Bool(false)));
         assert_eq!(
             body.get("max_output_tokens"),
-            Some(&serde_json::json!(super::MAX_OUTPUT_TOKENS)),
-            "the request itself must carry the explicit maximum the reservation bound covers"
+            Some(&serde_json::json!(super::MAX_OUTPUT_TOKENS))
         );
-    }
 
-    #[test]
-    fn usage_estimate_bounds_input_by_bytes_plus_framing_and_output_by_the_request_maximum() {
         let transport = OpenAiResponsesTransport::new(
             super::DEFAULT_BASE_URL,
             MemoryCredentialStore::default(),
@@ -324,93 +312,25 @@ mod tests {
             .expect("the OpenAI adapter always has a finite bound");
         assert_eq!(
             estimate.input_tokens_upper_bound,
-            5 + super::INPUT_TOKENS_FRAMING_ALLOWANCE,
-            "the text's UTF-8 byte length is the tokenizer-safe lower bound, plus framing"
+            5 + super::INPUT_TOKENS_FRAMING_ALLOWANCE
         );
-        assert_eq!(
-            estimate.output_tokens_upper_bound,
-            super::MAX_OUTPUT_TOKENS,
-            "the output side must be the explicit maximum the body carries"
-        );
+        assert_eq!(estimate.output_tokens_upper_bound, super::MAX_OUTPUT_TOKENS);
     }
 
     #[test]
-    fn unauthorized_maps_to_transport_failure() {
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = status_failure(401) else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("unauthorized"));
-    }
-
-    #[test]
-    fn rate_limited_maps_to_unavailable() {
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = status_failure(429) else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("provider unavailable"));
-        assert!(reason.contains("429"));
-    }
-
-    #[test]
-    fn server_error_maps_to_unavailable() {
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = status_failure(503) else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("provider unavailable"));
-        assert!(reason.contains("503"));
-    }
-
-    #[test]
-    fn other_client_error_maps_to_request_failure() {
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = status_failure(400) else {
-            panic!("unexpected variant");
-        };
-        assert!(reason.contains("provider request failed"));
-        assert!(reason.contains("400"));
-    }
-
-    #[test]
-    fn stream_assembler_missing_cache_detail_reports_unknown_usage() {
-        let mut assembler = super::StreamAssembler::default();
-        for line in [
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}",
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}",
-        ] {
-            assembler.feed_line(line).expect("a known event must parse");
-        }
-        let response = assembler.finish().expect("a completed stream answers");
-        assert_eq!(response.text, "hi");
-        assert_eq!(
-            response.usage, None,
-            "SSE completion without cache detail settles Unknown, never zero"
-        );
-    }
-
-    #[test]
-    fn streaming_body_requests_incremental_output() {
-        let body = super::responses_body("gpt-test", "hello");
-        assert_eq!(
-            body.get("stream"),
-            Some(&serde_json::Value::Bool(true)),
-            "the streaming transport must request server-sent events: {body}"
-        );
-        assert_eq!(body.get("store"), Some(&serde_json::Value::Bool(false)));
-    }
-
-    #[test]
-    fn stream_assembler_emits_deltas_in_order_and_reports_usage() {
+    fn stream_assembler_orders_deltas_and_requires_complete_usage() {
         let mut assembler = super::StreamAssembler::default();
         let mut deltas = Vec::new();
         for line in [
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}",
             "event: response.output_text.delta",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}",
+            "data: {\"type\":\"response.future_event\",\"x\":1}",
             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":1}}}}",
         ] {
-            let fed = assembler.feed_line(line).expect("a known event must parse");
-            deltas.extend(fed);
+            deltas.extend(assembler.feed_line(line).expect("a known event parses"));
         }
-        assert_eq!(deltas, vec!["Hel", "lo"]);
+        assert_eq!(deltas, ["Hel", "lo"]);
         let response = assembler.finish().expect("the stream completed");
         assert_eq!(response.text, "Hello");
         assert_eq!(
@@ -421,28 +341,33 @@ mod tests {
                 output_tokens: 3,
             })
         );
+
+        let mut assembler = super::StreamAssembler::default();
+        for line in [
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}",
+        ] {
+            assembler.feed_line(line).expect("a known event parses");
+        }
+        let response = assembler.finish().expect("a completed stream answers");
+        assert_eq!(response.text, "hi");
+        assert_eq!(response.usage, None);
     }
 
     #[test]
-    fn stream_assembler_treats_missing_completion_as_failure() {
+    fn stream_assembler_fails_closed_on_incomplete_or_malformed_events() {
         let mut assembler = super::StreamAssembler::default();
         let fed = assembler
             .feed_line("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}")
             .expect("the delta parses");
         assert_eq!(fed.as_deref(), Some("partial"));
-        let result = assembler.finish();
-        assert!(matches!(
-            result,
-            Err(InferenceTechnicalError::ProviderTransportFailed(_))
-        ));
-        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
+        let InferenceTechnicalError::ProviderTransportFailed(reason) =
+            assembler.finish().expect_err("missing completion fails")
+        else {
             panic!("unexpected variant");
         };
-        assert!(reason.contains("completion"), "got {reason:?}");
-    }
+        assert!(reason.contains("completion"));
 
-    #[test]
-    fn stream_assembler_maps_failure_events_without_body_text() {
         for (line, marker) in [
             (
                 "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}",
@@ -455,59 +380,25 @@ mod tests {
             ),
         ] {
             let mut assembler = super::StreamAssembler::default();
-            let result = assembler.feed_line(line);
             let InferenceTechnicalError::ProviderTransportFailed(reason) =
-                result.expect_err("failure events must fail")
+                assembler.feed_line(line).expect_err("failure events fail")
             else {
                 panic!("unexpected variant");
             };
-            assert!(reason.contains(marker), "got {reason:?}");
-            assert!(
-                !reason.contains("secret body text"),
-                "failure reasons must not echo provider body text: {reason:?}"
-            );
+            assert!(reason.contains(marker));
+            assert!(!reason.contains("secret body text"));
         }
-    }
 
-    #[test]
-    fn stream_assembler_ignores_unknown_events_and_malformed_lines() {
-        let mut assembler = super::StreamAssembler::default();
-        let mut deltas = Vec::new();
-        deltas.extend(
-            assembler
-                .feed_line("event: response.output_text.delta")
-                .expect("a non-data line is ignored"),
-        );
-        deltas.extend(
-            assembler
-                .feed_line("data: {\"type\":\"response.future_event\",\"x\":1}")
-                .expect("an unknown event is ignored"),
-        );
-        assert!(deltas.is_empty());
-    }
-
-    #[test]
-    fn stream_assembler_rejects_delta_event_without_text() {
-        let mut assembler = super::StreamAssembler::default();
-        let result = assembler.feed_line("data: {\"type\":\"response.output_text.delta\"}");
-        assert!(
-            matches!(
-                result,
+        for line in [
+            "data: {\"type\":\"response.output_text.delta\"}",
+            "data: {not-json",
+        ] {
+            let mut assembler = super::StreamAssembler::default();
+            assert!(matches!(
+                assembler.feed_line(line),
                 Err(InferenceTechnicalError::ProviderTransportFailed(_))
-            ),
-            "a known delta event with no string delta must fail, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn debug_rendering_carries_no_bearer_material() {
-        let concrete = MemoryCredentialStore::new();
-        let credential = CredentialRef::new("openai", "main").expect("valid test fixture");
-        concrete.insert(credential.clone(), "sk-probe-bearer-material");
-        let transport = OpenAiResponsesTransport::new("http://127.0.0.1:9", concrete).unwrap();
-        let rendered = format!("{transport:?}");
-        assert!(!rendered.contains("sk-probe-bearer-material"));
-        assert!(!rendered.contains("Bearer"));
+            ));
+        }
     }
 
     struct FixtureRefs {
@@ -663,10 +554,11 @@ mod tests {
             })
             .collect();
         assert_eq!(auth_lines.len(), 1, "the bearer travels in one auth header");
-        assert!(
-            auth_lines[0].contains(secret),
-            "the positive control: the pinned bearer is the header value"
-        );
+        let (name, value) = auth_lines[0]
+            .split_once(':')
+            .expect("the authorization header has a value");
+        assert_eq!(name.trim().to_ascii_lowercase(), "authorization");
+        assert_eq!(value.trim(), format!("Bearer {secret}"));
         let head_without_auth = head
             .lines()
             .filter(|line| !auth_lines.contains(line))

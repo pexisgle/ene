@@ -260,8 +260,6 @@ async fn local_demand(
     command: DemandLocalErasureCommand,
     step: LocalStep,
 ) -> ParticipantCompletionFact {
-    #[cfg(any(test, feature = "test-support"))]
-    store.test_parks.erasure_mutation.pause_if_armed().await;
     let condition = command.condition();
     let owner = command.participant();
     let held =

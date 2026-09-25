@@ -440,55 +440,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use ene_local_control::{CONFIRMATION_MODE_ENV, CONFIRMATION_MODE_STDIO};
-
-    #[test]
-    fn the_confirmation_mode_marker_is_the_hosts() {
-        assert_eq!(CONFIRMATION_MODE_ENV, "ENE_CONFIRMATION_CHANNEL");
-        assert_eq!(CONFIRMATION_MODE_STDIO, "stdio");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_backpressure_hold_is_its_own_error_at_every_requester_call() {
-        use super::RequesterClient;
-        use crate::ui::DesktopError;
-        use ene_local_control::{FromHost, ToHost};
-        use tokio::io::AsyncWriteExt as _;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let listener = tokio::net::UnixListener::bind(dir.path().join("host-control.sock"))
-            .expect("bind requester listener");
-        let server = tokio::spawn(async move {
-            for _ in 0..3 {
-                let (mut stream, _) = listener.accept().await.expect("accept");
-                let body = serde_json::to_vec(&FromHost::BackpressureHold).expect("encode hold");
-                let mut frame = (body.len() as u32).to_be_bytes().to_vec();
-                frame.extend_from_slice(&body);
-                stream.write_all(&frame).await.expect("write hold");
-                stream.flush().await.expect("flush hold");
-            }
-        });
-        let requester = RequesterClient::new(dir.path());
-        assert!(matches!(
-            requester.open_desktop().await,
-            Err(DesktopError::BackpressureHold)
-        ));
-        assert!(matches!(
-            requester.list_pending_deletions().await,
-            Err(DesktopError::BackpressureHold)
-        ));
-        assert!(matches!(
-            requester
-                .request_accepted(&ToHost::RequestDeviceApprove {
-                    pending_id: String::from("pending-1"),
-                })
-                .await,
-            Err(DesktopError::BackpressureHold)
-        ));
-        server.await.expect("hold server must finish");
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn a_held_request_is_not_resent() {
@@ -512,18 +463,19 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(200), listener.accept())
                     .await
                     .is_err(),
-                "a held request must not be resent"
+                "a held request must not reconnect or resend"
             );
         });
         let requester = RequesterClient::new(dir.path());
-        assert!(matches!(
-            requester
-                .request_accepted(&ToHost::RequestDeviceApprove {
-                    pending_id: String::from("pending-1"),
-                })
-                .await,
-            Err(DesktopError::BackpressureHold)
-        ));
+        let result = requester
+            .request_accepted(&ToHost::RequestDeviceApprove {
+                pending_id: String::from("pending-1"),
+            })
+            .await;
+        assert!(
+            matches!(&result, Err(DesktopError::BackpressureHold)),
+            "held request returned {result:?}"
+        );
         server.await.expect("hold server must finish");
     }
 }

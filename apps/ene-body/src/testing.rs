@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
-pub const FIXTURE_BONES: [&str; 15] = [
+const FIXTURE_BONES: [&str; 15] = [
     "hips",
     "spine",
     "head",
@@ -41,7 +41,7 @@ pub struct MotionFixture {
     pub duration_secs: f32,
 }
 
-pub fn generated_vrm_glb() -> Result<Vec<u8>, FixtureError> {
+fn generated_vrm_glb() -> Result<Vec<u8>, FixtureError> {
     let mut encoded_png = std::io::Cursor::new(Vec::new());
     image::RgbaImage::from_pixel(1, 1, image::Rgba([80, 160, 240, 255]))
         .write_to(&mut encoded_png, image::ImageFormat::Png)?;
@@ -140,7 +140,7 @@ pub fn generated_vrm_glb() -> Result<Vec<u8>, FixtureError> {
     glb(&document, &binary)
 }
 
-pub fn generated_vrma_glb(motion: MotionFixture) -> Result<Vec<u8>, FixtureError> {
+fn generated_vrma_glb(motion: MotionFixture) -> Result<Vec<u8>, FixtureError> {
     let animated = bone_index(motion.bone)?;
     let nodes = FIXTURE_BONES
         .iter()

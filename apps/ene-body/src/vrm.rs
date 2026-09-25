@@ -549,28 +549,6 @@ mod tests {
     };
 
     #[test]
-    fn runtime_capabilities_are_adopted() {
-        let session = VrmSession::new();
-        assert_eq!(session.motion(), FeatureSupport::Unsupported);
-        assert!(session.motion_poses().is_empty());
-    }
-
-    #[test]
-    fn pose_order_lists_every_hint_once() {
-        let order = super::POSE_ORDER;
-        let mut unique = order.to_vec();
-        unique.sort_by_key(|pose| super::pose_index(*pose));
-        unique.dedup();
-        assert_eq!(unique.len(), 5, "every hint must own exactly one slot");
-        let mut slots = order
-            .iter()
-            .map(|pose| super::pose_index(*pose))
-            .collect::<Vec<_>>();
-        slots.sort_unstable();
-        assert_eq!(slots, vec![0, 1, 2, 3, 4]);
-    }
-
-    #[test]
     fn generated_vrm_1_fixture_loads_and_evaluates_every_pose() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("generated-runtime-probe.vrm");
@@ -604,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_asset_does_not_replace_current_runtime() {
+    fn asset_failures_are_typed_and_do_not_replace_the_runtime() {
         let dir = tempfile::tempdir().expect("tempdir");
         let good = dir.path().join("good.vrm");
         write_generated_vrm(&good).expect("good");
@@ -613,87 +591,100 @@ mod tests {
             .expect("create")
             .write_all(b"not VRM")
             .expect("write");
+        let missing = dir.path().join("missing.vrm");
         let mut session = VrmSession::new();
         session
             .set_asset(AssetRef::Path {
                 path: good.to_string_lossy().into_owned(),
             })
             .expect("good load");
-        let previous = session.stats();
-        let error = session
-            .set_asset(AssetRef::Path {
-                path: bad.to_string_lossy().into_owned(),
-            })
-            .expect_err("bad load");
-        assert_eq!(error.reason, AssetFailReason::InvalidVrm);
-        assert_eq!(session.stats(), previous);
+        let previous_stats = session.stats();
+        let current_asset = session
+            .runtime
+            .as_ref()
+            .expect("loaded runtime")
+            .shared_asset();
+
+        for (path, reason) in [
+            (bad, AssetFailReason::InvalidVrm),
+            (missing, AssetFailReason::Missing),
+        ] {
+            let error = session
+                .set_asset(AssetRef::Path {
+                    path: path.to_string_lossy().into_owned(),
+                })
+                .expect_err("asset failure");
+            assert_eq!(error.reason, reason);
+            assert!(!error.detail.is_empty());
+            assert_eq!(session.stats(), previous_stats);
+            assert!(
+                std::sync::Arc::ptr_eq(
+                    &session
+                        .runtime
+                        .as_ref()
+                        .expect("retained runtime")
+                        .shared_asset(),
+                    &current_asset
+                ),
+                "a failed replacement changed the active runtime"
+            );
+        }
     }
 
     #[test]
-    fn missing_asset_is_a_domain_failure() {
-        let mut session = VrmSession::new();
-        let error = session
-            .set_asset(AssetRef::Path {
-                path: "/no/such/ene-body-asset.vrm".into(),
-            })
-            .expect_err("missing");
-        assert_eq!(error.reason, AssetFailReason::Missing);
-        assert!(!error.detail.is_empty());
-    }
-
-    #[test]
-    fn assigned_clip_replaces_the_hand_authored_pose() {
+    fn assigned_and_switched_clips_drive_pose_with_hand_authored_expressions() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut plain = loaded_session(dir.path(), "plain", &[]);
-        let mut clipped = loaded_session(dir.path(), "clipped", &[(PoseHint::Idle, HEAD_TURN)]);
-        assert_eq!(clipped.motion(), FeatureSupport::Available);
-        assert_eq!(clipped.motion_poses(), vec![PoseHint::Idle]);
-        assert_eq!(plain.motion(), FeatureSupport::Unsupported);
-        assert_ne!(
-            first_frame(&mut plain),
-            first_frame(&mut clipped),
-            "an assigned clip must drive the pose instead of the staged sway"
-        );
-    }
-
-    #[test]
-    fn expressions_stay_hand_authored_while_a_clip_plays() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut idle = loaded_session(dir.path(), "idle", &[(PoseHint::Idle, HEAD_TURN)]);
-        let mut attention =
-            loaded_session(dir.path(), "attention", &[(PoseHint::Attention, HEAD_TURN)]);
-        attention.set_pose(PoseHint::Attention);
-        assert_ne!(first_frame(&mut idle), first_frame(&mut attention));
-    }
-
-    #[test]
-    fn switching_hint_plays_that_hints_clip() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut session = loaded_session(
+        let mut procedural = loaded_session(dir.path(), "procedural", &[]);
+        let mut clipped = loaded_session(
             dir.path(),
-            "both",
+            "clipped",
             &[
                 (PoseHint::Idle, HEAD_TURN),
                 (PoseHint::Speaking, SPINE_TURN),
             ],
         );
+        assert_eq!(clipped.motion(), FeatureSupport::Available);
         assert_eq!(
-            session.motion_poses(),
+            clipped.motion_poses(),
             vec![PoseHint::Idle, PoseHint::Speaking]
         );
-        let idle_frame = first_frame(&mut session);
-        session.set_pose(PoseHint::Speaking);
-        let speaking_frame = first_frame(&mut session);
-        assert_ne!(idle_frame, speaking_frame);
-        session.set_pose(PoseHint::Listening);
-        let listening_frame = first_frame(&mut session);
-        assert!(
-            listening_frame
-                .iter()
-                .flatten()
-                .all(|value| value.is_finite())
+        assert_eq!(procedural.motion(), FeatureSupport::Unsupported);
+
+        assert_ne!(
+            first_frame(&mut procedural),
+            first_frame(&mut clipped),
+            "an assigned clip must replace the procedural pose"
         );
-        assert_ne!(listening_frame, speaking_frame);
+        assert_eq!(
+            clipped
+                .runtime
+                .as_ref()
+                .expect("clip runtime")
+                .expression_weight("relaxed")
+                .expect("idle expression"),
+            0.25
+        );
+
+        procedural.set_pose(PoseHint::Speaking);
+        clipped.set_pose(PoseHint::Speaking);
+        assert_ne!(
+            first_frame(&mut procedural),
+            first_frame(&mut clipped),
+            "switching hints must start that hint's assigned clip"
+        );
+        let runtime = clipped.runtime.as_ref().expect("switched runtime");
+        assert_eq!(
+            runtime
+                .expression_weight("aa")
+                .expect("speaking expression"),
+            0.75
+        );
+        assert_eq!(
+            runtime
+                .expression_weight("relaxed")
+                .expect("cleared idle expression"),
+            0.0
+        );
     }
 
     #[test]

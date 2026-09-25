@@ -92,19 +92,13 @@ mod tests {
     use super::{AuthProof, PairingProvisionSecret};
 
     #[test]
-    fn auth_proof_debug_redacts_the_proof() {
+    fn secret_bearing_handshake_debug_is_redacted() {
         let proof = AuthProof {
             proof: String::from("ownership-proof-abc"),
         };
         let rendered = format!("{proof:?}");
-        assert!(
-            !rendered.contains("ownership-proof-abc"),
-            "Debug must not carry the proof: {rendered}"
-        );
-    }
+        assert!(!rendered.contains("ownership-proof-abc"));
 
-    #[test]
-    fn pairing_provision_secret_debug_is_redacted() {
         let secret = PairingProvisionSecret::new(String::from("provision-secret-marker"));
         let rendered = format!("{secret:?}");
         assert!(!rendered.contains("provision-secret-marker"));
