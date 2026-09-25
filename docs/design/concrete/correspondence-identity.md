@@ -282,6 +282,9 @@ enum BackupTaskSource {
     RunNow { schedule: ScheduleId, instruction: OwnerInstructionSourceRef },
 }
 
+// 通常 Task の Run now の指示本文は TaskContextOrigin が参照し、Schedule / 版の
+// 帰属は normal_schedule_run_now が保持する。同じ指示は Backup 専用 Run now と共用しない。
+
 struct TaskRef {
     task: TaskId,
     revision: TaskRevision,
