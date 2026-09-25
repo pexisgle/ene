@@ -1413,6 +1413,7 @@ version = "0.1.0"
 dependencies = [
  "ene-permission",
  "ene-primitive",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
