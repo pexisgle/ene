@@ -1,11 +1,13 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::attempt::{ActionCertainty, EffectGrounds, OperationKind, RealTargetRef};
+
+const STAGING_OWNERSHIP_MARKER: &str = ".ene-action-staging-owner";
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -17,6 +19,8 @@ pub struct WorkspaceEffectStagingPause {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct WorkspaceEffectOptions {
     pub staging_directory: Option<PathBuf>,
+    pub staging_ownership_token: Option<String>,
+    pub staging_identity: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
     pub pause_after_staging: Option<WorkspaceEffectStagingPause>,
 }
@@ -213,6 +217,20 @@ impl WorkspaceRoot {
         Ok(())
     }
 
+    fn staging_binding_matches(
+        &self,
+        path: &Path,
+        ownership_token: Option<&str>,
+        identity: Option<&str>,
+    ) -> bool {
+        let (Some(ownership_token), Some(identity)) = (ownership_token, identity) else {
+            return false;
+        };
+        self.validate_staging_directory(path).is_ok()
+            && staging_identity_token(path).as_deref() == Some(identity)
+            && read_staging_ownership_marker(path).as_deref() == Some(ownership_token)
+    }
+
     #[must_use]
     pub(crate) fn execute(
         &self,
@@ -329,28 +347,34 @@ impl WorkspaceRoot {
             return refused();
         };
         let temporary_directory = options.staging_directory.as_deref().unwrap_or(parent);
-        if options.staging_directory.is_some()
-            && self
-                .validate_staging_directory(temporary_directory)
-                .is_err()
-        {
+        let uses_owned_staging = options.staging_directory.is_some();
+        let binding_matches = || {
+            self.staging_binding_matches(
+                temporary_directory,
+                options.staging_ownership_token.as_deref(),
+                options.staging_identity.as_deref(),
+            )
+        };
+        if uses_owned_staging && !binding_matches() {
             return refused();
         }
         let mut temporary = match NamedTempFile::new_in(temporary_directory) {
             Ok(temporary) => temporary,
             Err(_) => return refused(),
         };
+        // Revalidate after creation and before writing any target-bearing bytes.
+        // If the pathname was replaced, the replacement can receive at most an
+        // empty temporary file; sensitive content only enters the prepared object.
+        if uses_owned_staging && !binding_matches() {
+            return refused();
+        }
         {
             let file = temporary.as_file_mut();
             if file.write_all(bytes).is_err() || file.sync_all().is_err() {
                 return refused();
             }
         }
-        if options.staging_directory.is_some()
-            && self
-                .validate_staging_directory(temporary_directory)
-                .is_err()
-        {
+        if uses_owned_staging && !binding_matches() {
             return refused();
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -520,6 +544,93 @@ fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
     }
 }
 
+fn read_staging_ownership_marker(path: &Path) -> Option<String> {
+    let marker = path.join(STAGING_OWNERSHIP_MARKER);
+    let metadata = fs::symlink_metadata(&marker).ok()?;
+    if metadata_is_reparse(&metadata) || !metadata.is_file() {
+        return None;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options.open(marker).ok()?;
+    let mut token = String::new();
+    file.read_to_string(&mut token).ok()?;
+    (!token.is_empty()).then_some(token)
+}
+
+#[cfg(unix)]
+fn staging_identity_token(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if metadata_is_reparse(&metadata) || !metadata.is_dir() {
+        return None;
+    }
+    Some(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn staging_identity_token(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        GetFileInformationByHandle, OPEN_EXISTING,
+    };
+
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.push(0);
+    // SAFETY: wide is NUL-terminated and the returned handle is closed below.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    // SAFETY: information is a writable output buffer for the owned handle.
+    let mut information = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    // SAFETY: handle remains live for the query.
+    let queried = unsafe { GetFileInformationByHandle(handle, &mut information) };
+    // SAFETY: handle is owned and is closed exactly once here.
+    unsafe { CloseHandle(handle) };
+    if queried == 0
+        || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+    {
+        return None;
+    }
+    Some(format!(
+        "windows:{}:{}",
+        information.dwVolumeSerialNumber,
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow)
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn staging_identity_token(_path: &Path) -> Option<String> {
+    None
+}
+
 #[cfg(windows)]
 fn staging_tree_contains_reparse(path: &Path) -> Result<bool, String> {
     let mut pending = vec![path.to_path_buf()];
@@ -680,7 +791,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{ActionOutput, ListEntry, ListEntryKind, TargetRejection, WorkspaceRoot};
+    use super::{
+        ActionOutput, ListEntry, ListEntryKind, TargetRejection, WorkspaceEffectOptions,
+        WorkspaceRoot,
+    };
     use crate::attempt::OperationKind;
 
     fn workspace() -> (tempfile::TempDir, WorkspaceRoot) {
@@ -935,6 +1049,54 @@ mod tests {
         assert_eq!(
             fs::read(directory.path().join("report.md")).expect("edited file"),
             b"# edited"
+        );
+    }
+
+
+    #[test]
+    fn owned_staging_binding_rejects_a_replacement_before_body_write() {
+        let (directory, root) = workspace();
+        let staging_root = directory.path().join(".ene-action-staging");
+        let staging = staging_root.join("attempt");
+        fs::create_dir_all(&staging).expect("owned staging");
+        let token = "owned-staging-token";
+        fs::write(staging.join(super::STAGING_OWNERSHIP_MARKER), token)
+            .expect("owned marker");
+        let identity = super::staging_identity_token(&staging).expect("owned identity");
+        let moved = staging_root.join("moved");
+        fs::rename(&staging, &moved).expect("rename owned staging");
+        fs::create_dir(&staging).expect("replacement staging");
+        fs::write(staging.join(super::STAGING_OWNERSHIP_MARKER), token)
+            .expect("replacement marker");
+        let target = root
+            .resolve("bound.md", OperationKind::Create)
+            .expect("create target");
+        let options = WorkspaceEffectOptions {
+            staging_directory: Some(staging.clone()),
+            staging_ownership_token: Some(token.to_owned()),
+            staging_identity: Some(identity),
+            #[cfg(any(test, feature = "test-support"))]
+            pause_after_staging: None,
+        };
+
+        let effect = root.execute_with_options(
+            &target,
+            OperationKind::Create,
+            Some(b"target-bearing content"),
+            &options,
+        );
+
+        assert_eq!(effect.certainty, crate::attempt::ActionCertainty::ConfirmedFailure);
+        assert!(!directory.path().join("bound.md").exists());
+        assert_eq!(
+            fs::read_dir(&staging).expect("replacement staging").count(),
+            1,
+            "replacement receives only its marker, never target-bearing temp content"
+        );
+        assert_eq!(
+            fs::read_dir(&moved).expect("owned staging").count(),
+            1,
+            "the owned object is left for its supervisor cleanup"
         );
     }
 
