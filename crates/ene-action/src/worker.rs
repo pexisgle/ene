@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const WORKSPACE_EFFECT_PROTOCOL_GENERATION: u32 = 1;
+pub const WORKSPACE_EFFECT_PROTOCOL_GENERATION: u32 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceEffectHandshake {
@@ -25,6 +25,8 @@ pub struct WorkspaceEffectRequest {
     pub operation: String,
     pub content: Option<Vec<u8>>,
     pub staging_directory: Option<String>,
+    pub staging_ownership_token: Option<String>,
+    pub staging_identity: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
     pub test_pause_after_staging: Option<WorkspaceEffectStagingPause>,
 }
@@ -68,6 +70,8 @@ pub fn execute_workspace_effect(
     let target = RealTargetRef::from_canonical_path(request.target);
     let options = WorkspaceEffectOptions {
         staging_directory: request.staging_directory.as_deref().map(PathBuf::from),
+        staging_ownership_token: request.staging_ownership_token,
+        staging_identity: request.staging_identity,
         #[cfg(any(test, feature = "test-support"))]
         pause_after_staging: request.test_pause_after_staging,
     };
