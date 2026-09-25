@@ -78,6 +78,17 @@ in completed changes.
   state still requires a single writer, lock, CAS, or transaction where
   concurrent writers could lose updates.
 
+## Test suite design and maintenance
+
+* Add a test only for a distinct contract, boundary, failure mode, or regression that no existing test owns. Before adding it, locate the nearest owner and state which unique assertion the new test contributes.
+* Keep pure local invariants in focused unit tests. Use integration and end-to-end tests for composition, durability, authority, WSS, process isolation, and native boundaries; do not duplicate a lower-layer suite at every layer.
+* Use table-driven cases when only input or presentation varies within the same contract. Keep separate declarations for independent races, protocol directions, lifecycle phases, and technical-versus-domain outcomes.
+* Merge tests only when their setup and contract are the same and every unique assertion moves to the surviving test; moving subcases without reducing coverage is not a reduction.
+* Every test must verify an observable oracle: a typed result, durable state, side-effect presence or absence, cleanup, or boundary rejection. Do not use an internal counter or a test-only hook as the sole proof unless that counter is itself the contract.
+* Keep test-only support narrowly feature- or test-gated, and remove gates, injectors, fixtures, and other scaffolding when no retained test needs them.
+* Count executable test attributes rather than textual matches: comments and lint reasons may contain `#[test]`, and variants such as `#[tokio::test(start_paused = true)]` are executable tests too.
+* For a broad test-suite reduction, use a fresh independent review after each change. Do not declare the suite minimal until three consecutive independent reviews find no safe merge or deletion candidate.
+
 ## Agent workflow
 
 * Prefer narrow symbol queries over bulk-reading source files.
