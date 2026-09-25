@@ -380,6 +380,21 @@ impl TaskEffectRuntime {
         let staging_path = staging
             .as_ref()
             .map(|staging| staging.preparation.path.clone());
+        let (staging_ownership_token, staging_identity) = match staging.as_ref() {
+            Some(staging) => {
+                let identity = crate::lock_unpoison(&handle.staging_obligation)
+                    .as_ref()
+                    .and_then(|obligation| obligation.identity.clone())
+                    .ok_or_else(|| WorkspaceActionHostError::EffectUnavailable {
+                        reason: String::from("prepared staging identity unavailable"),
+                    })?;
+                (
+                    Some(staging.preparation.ownership_token.clone()),
+                    Some(identity),
+                )
+            }
+            None => (None, None),
+        };
         let request = WorkspaceEffectRequest {
             root: started.root().as_path().to_string_lossy().into_owned(),
             target: started.target().as_path().to_owned(),
@@ -388,6 +403,8 @@ impl TaskEffectRuntime {
             staging_directory: staging_path
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned()),
+            staging_ownership_token,
+            staging_identity,
             #[cfg(feature = "test-support")]
             test_pause_after_staging: None,
         };
@@ -1086,10 +1103,26 @@ impl TaskEffectRuntime {
             WORKER_HANDSHAKE_TIMEOUT,
             send_staging_helper_request(&mut runtime, request),
         )
-        .await
-        .map_err(|_| String::from("staging obligation cleanup timed out"))?;
+        .await;
+        // Always kill and reap the unregistered retry helper before returning,
+        // including timeout and protocol/I/O error paths.
         let stopped = hard_stop_staging_control(&runtime.control).await;
-        let response = result?;
+        let response = match result {
+            Ok(Ok(response)) => response,
+            Ok(Err(reason)) => {
+                return match stopped {
+                    Ok(()) => Err(reason),
+                    Err(stop_reason) => Err(format!("{reason}; {stop_reason}")),
+                };
+            }
+            Err(_) => {
+                let reason = String::from("staging obligation cleanup timed out");
+                return match stopped {
+                    Ok(()) => Err(reason),
+                    Err(stop_reason) => Err(format!("{reason}; {stop_reason}")),
+                };
+            }
+        };
         stopped?;
         match response {
             StagingHelperResponse::CleanupComplete { removed } => Ok(removed),
@@ -2006,7 +2039,7 @@ mod supervisor_tests {
         assert!(matches!(
             result,
             Err(WorkspaceActionHostError::WorkerProtocolMismatch {
-                expected: 1,
+                expected: 2,
                 actual: Some(0)
             })
         ));
