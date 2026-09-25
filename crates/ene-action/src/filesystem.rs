@@ -514,10 +514,11 @@ fn rename_windows_file_by_handle(
     use std::mem::size_of;
     use std::os::windows::ffi::OsStrExt as _;
     use std::os::windows::io::AsRawHandle as _;
-    use windows_sys::Win32::Foundation::HANDLE;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_RENAME_INFORMATION, FileRenameInformation, NtSetInformationFile,
     };
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
     let parent = open_bound_directory(destination.parent().ok_or(())?).ok_or(())?;
     let name = destination
@@ -526,13 +527,10 @@ fn rename_windows_file_by_handle(
         .encode_wide()
         .collect::<Vec<_>>();
     let name_bytes = name.len().checked_mul(size_of::<u16>()).ok_or(())?;
-    // Windows expects the buffer to end after the variable-length FileName.
-    // Use the actual field offset instead of size_of::<FILE_RENAME_INFO>(), which
-    // includes tail padding after FileName[1] on 64-bit targets.
-    let header_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let header_bytes = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
     let total_bytes = header_bytes.checked_add(name_bytes).ok_or(())?;
     let mut buffer = vec![0u64; total_bytes.div_ceil(size_of::<u64>()).max(1)];
-    let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
     // SAFETY: the aligned buffer is large enough for the fixed header plus UTF-16 name.
     unsafe {
         (*information).Anonymous.ReplaceIfExists = replace;
@@ -544,17 +542,19 @@ fn rename_windows_file_by_handle(
             name.len(),
         );
     }
-    // SAFETY: file was opened with DELETE access and all backing buffers/handles stay live.
-    (unsafe {
-        SetFileInformationByHandle(
+    let mut status = IO_STATUS_BLOCK::default();
+    // SAFETY: file was opened with DELETE access, parent is a live directory
+    // handle, and all backing buffers remain live for the native call.
+    let result = unsafe {
+        NtSetInformationFile(
             file.as_raw_handle() as HANDLE,
-            FileRenameInfo,
+            &mut status,
             information.cast(),
             u32::try_from(total_bytes).map_err(|_| ())?,
+            FileRenameInformation,
         )
-    } != 0)
-        .then_some(())
-        .ok_or(())
+    };
+    (result >= 0).then_some(()).ok_or(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
