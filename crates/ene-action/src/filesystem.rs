@@ -23,6 +23,8 @@ pub(crate) struct WorkspaceEffectOptions {
     pub staging_identity: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
     pub pause_after_staging: Option<WorkspaceEffectStagingPause>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub pause_after_verification: Option<WorkspaceEffectStagingPause>,
 }
 
 static STAGING_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -154,6 +156,26 @@ fn staging_directory_identity_token(directory: &fs::File) -> Option<String> {
     Some(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
 }
 
+/// The volume an open handle lives on, read from the handle rather than a name.
+#[cfg(windows)]
+fn volume_serial_of_handle(handle: &fs::File) -> Option<u32> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    // SAFETY: information is a writable output buffer and handle owns a live handle.
+    let mut information = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    // SAFETY: the handle remains live throughout the call.
+    if unsafe { GetFileInformationByHandle(handle.as_raw_handle() as HANDLE, &mut information) }
+        == 0
+    {
+        return None;
+    }
+    Some(information.dwVolumeSerialNumber)
+}
+
 #[cfg(windows)]
 fn staging_directory_identity_token(directory: &fs::File) -> Option<String> {
     use std::os::windows::io::AsRawHandle as _;
@@ -253,6 +275,188 @@ fn create_bound_temp(directory: &fs::File, name: &std::ffi::OsStr) -> Option<fs:
 
 #[cfg(not(any(unix, windows)))]
 fn create_bound_temp(_directory: &fs::File, _name: &std::ffi::OsStr) -> Option<fs::File> {
+    None
+}
+
+/// Opens a directory to read its children through, following no link. It asks for
+/// no right to add or remove entries, so observing a directory does not require
+/// write access to it. It does ask for read access, which searching alone would not
+/// have needed, so a read inside a directory that may be searched but not read is
+/// now refused where reading the file directly would have succeeded. That
+/// narrowing is a consequence of holding the parent, not a choice; `O_PATH` would
+/// avoid it and did not work here, which is noted in #1747.
+#[cfg(unix)]
+fn open_bound_directory_for_read(path: &Path) -> Option<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+        .ok()
+}
+
+#[cfg(windows)]
+fn open_bound_directory_for_read(path: &Path) -> Option<fs::File> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::{FromRawHandle as _, RawHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        SYNCHRONIZE,
+    };
+
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.push(0);
+    // SAFETY: wide is NUL-terminated; a successful handle is transferred to File.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    // SAFETY: CreateFileW returned a newly owned handle.
+    let file = unsafe { fs::File::from_raw_handle(handle as RawHandle) };
+    let metadata = file.metadata().ok()?;
+    use std::os::windows::fs::MetadataExt as _;
+    (metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        && metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0)
+        .then_some(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_bound_directory_for_read(_path: &Path) -> Option<fs::File> {
+    None
+}
+
+#[cfg(unix)]
+fn open_bound_child(directory: &fs::File, name: &std::ffi::OsStr) -> Option<fs::File> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name = std::ffi::CString::new(name.as_bytes()).ok()?;
+    // SAFETY: directory is live and name is a NUL-terminated relative filename.
+    // O_NONBLOCK is a no-op for a regular file and stops a FIFO leaf from
+    // parking the worker before the caller's type check can run.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    (fd >= 0).then(|| {
+        // SAFETY: a non-negative openat result is a newly owned descriptor.
+        unsafe { fs::File::from_raw_fd(fd) }
+    })
+}
+
+#[cfg(windows)]
+fn open_bound_child(directory: &fs::File, name: &std::ffi::OsStr) -> Option<fs::File> {
+    open_windows_relative_file(directory, name, false)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_bound_child(_directory: &fs::File, _name: &std::ffi::OsStr) -> Option<fs::File> {
+    None
+}
+
+/// Opens an existing child directory relative to a verified directory handle.
+/// It needs its own opener because the Windows file open refuses directories.
+#[cfg(unix)]
+fn open_bound_directory_child(directory: &fs::File, name: &std::ffi::OsStr) -> Option<fs::File> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name = std::ffi::CString::new(name.as_bytes()).ok()?;
+    // SAFETY: directory is live and name is a NUL-terminated relative filename.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    (fd >= 0).then(|| {
+        // SAFETY: a non-negative openat result is a newly owned descriptor.
+        unsafe { fs::File::from_raw_fd(fd) }
+    })
+}
+
+#[cfg(windows)]
+fn open_bound_directory_child(directory: &fs::File, name: &std::ffi::OsStr) -> Option<fs::File> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, RawHandle};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtOpenFile,
+    };
+    use windows_sys::Win32::Foundation::{HANDLE, OBJ_DONT_REPARSE, UNICODE_STRING};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let mut buffer = name.encode_wide().collect::<Vec<_>>();
+    let byte_length = buffer.len().checked_mul(size_of::<u16>())?;
+    let length = u16::try_from(byte_length).ok()?;
+    buffer.push(0);
+    let maximum_length = u16::try_from(byte_length + size_of::<u16>()).ok()?;
+    let unicode = UNICODE_STRING {
+        Length: length,
+        MaximumLength: maximum_length,
+        Buffer: buffer.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: directory.as_raw_handle() as HANDLE,
+        ObjectName: &raw const unicode,
+        Attributes: OBJ_DONT_REPARSE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut status = IO_STATUS_BLOCK::default();
+    // SAFETY: the pointer-backed structs and the directory handle stay live for
+    // the call, and a non-null result is a newly owned handle transferred below.
+    let result = unsafe {
+        NtOpenFile(
+            &mut handle,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &raw const attributes,
+            &mut status,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        )
+    };
+    if result < 0 || handle.is_null() {
+        return None;
+    }
+    // SAFETY: NtOpenFile returned a newly owned handle.
+    let file = unsafe { fs::File::from_raw_handle(handle as RawHandle) };
+    let Ok(metadata) = file.metadata() else {
+        return None;
+    };
+    use std::os::windows::fs::MetadataExt as _;
+    (metadata.file_attributes() & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+        == FILE_ATTRIBUTE_DIRECTORY)
+        .then_some(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_bound_directory_child(_directory: &fs::File, _name: &std::ffi::OsStr) -> Option<fs::File> {
     None
 }
 
@@ -772,17 +976,8 @@ impl WorkspaceRoot {
         options: &WorkspaceEffectOptions,
     ) -> ObservedEffect {
         match operation {
-            OperationKind::List => self.list_directory(target),
-            OperationKind::Read => {
-                let destination = Path::new(target.as_path());
-                if !self.verified_existing_metadata(destination, false) {
-                    return refused();
-                }
-                match fs::read(destination) {
-                    Ok(bytes) => confirmed(ActionOutput::Bytes(bytes)),
-                    Err(_) => refused(),
-                }
-            }
+            OperationKind::List => self.list_directory(target, options),
+            OperationKind::Read => self.read_file(target, options),
             OperationKind::Create => {
                 let Some(bytes) = content else {
                     return refused();
@@ -798,56 +993,109 @@ impl WorkspaceRoot {
         }
     }
 
-    fn list_directory(&self, target: &RealTargetRef) -> ObservedEffect {
+    /// Reads through a handle opened relative to the target's parent, so once that
+    /// handle exists the name can no longer redirect the read. The leaf name is
+    /// still resolved by name when the handle is opened, which is the residual
+    /// recorded in #1747.
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        expect(
+            unused_variables,
+            reason = "the only consumer of options is the test-only verification pause"
+        )
+    )]
+    fn read_file(
+        &self,
+        target: &RealTargetRef,
+        options: &WorkspaceEffectOptions,
+    ) -> ObservedEffect {
+        let destination = Path::new(target.as_path());
+        if !self.verified_existing_metadata(destination, false) {
+            return refused();
+        }
+        let Some((parent, name)) = bound_parent_and_name(destination) else {
+            return refused();
+        };
+        let Some(parent) = open_bound_directory_for_read(parent) else {
+            return refused();
+        };
+        let Some(mut file) = open_bound_child(&parent, name.as_ref()) else {
+            return refused();
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(pause) = options.pause_after_verification.as_ref()
+            && pause.wait().is_err()
+        {
+            return refused();
+        }
+
+        // The handle was opened without following a link, so a regular file here
+        // is the verified entity rather than something the name points at now.
+        let Ok(metadata) = file.metadata() else {
+            return refused();
+        };
+        if !metadata.is_file() || !self.handle_within_boundary(destination, &file) {
+            return refused();
+        }
+        let mut bytes = Vec::new();
+        match file.read_to_end(&mut bytes) {
+            Ok(_) => confirmed(ActionOutput::Bytes(bytes)),
+            Err(_) => refused(),
+        }
+    }
+
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        expect(
+            unused_variables,
+            reason = "the only consumer of options is the test-only verification pause"
+        )
+    )]
+    fn list_directory(
+        &self,
+        target: &RealTargetRef,
+        options: &WorkspaceEffectOptions,
+    ) -> ObservedEffect {
         let destination = Path::new(target.as_path());
         if !self.verified_existing_metadata(destination, true) {
             return refused();
         }
-        let Ok(entries) = fs::read_dir(destination) else {
+        let Some((parent, name)) = bound_parent_and_name(destination) else {
             return refused();
         };
-        let mut listing = Vec::new();
-        for entry in entries {
-            let Ok(entry) = entry else {
-                return refused();
-            };
-            let Some(kind) = self.listable_child(&entry.path()) else {
-                continue;
-            };
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            listing.push(ListEntry { name, kind });
+        // Enumerate through the handle rather than resolving the path a second
+        // time: once this handle exists, a directory swapped in under the name
+        // cannot supply the entries. The name is still resolved once, here, to
+        // obtain the handle, which is the residual recorded in #1747.
+        let Some(directory) = open_bound_directory_for_read(parent)
+            .and_then(|parent| open_bound_directory_child(&parent, &name))
+        else {
+            return refused();
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(pause) = options.pause_after_verification.as_ref()
+            && pause.wait().is_err()
+        {
+            return refused();
         }
+        // The verification above described the name, not this handle, so the
+        // entity boundary is re-proved on the handle actually enumerated.
+        if !self.handle_within_boundary(destination, &directory) {
+            return refused();
+        }
+        let Some(entries) = bound_directory_listing(self, &directory, destination) else {
+            return refused();
+        };
+        let mut listing: Vec<ListEntry> = entries
+            .into_iter()
+            .filter_map(|(name, kind)| {
+                name.to_str()
+                    .map(str::to_owned)
+                    .map(|name| ListEntry { name, kind })
+            })
+            .collect();
         listing.sort_by(|left, right| left.name.cmp(&right.name));
         confirmed(ActionOutput::Listing(listing))
-    }
-
-    fn listable_child(&self, path: &Path) -> Option<ListEntryKind> {
-        let metadata = fs::symlink_metadata(path).ok()?;
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() {
-            return None;
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                return None;
-            }
-        }
-        let kind = if file_type.is_file() {
-            ListEntryKind::File
-        } else if file_type.is_dir() {
-            ListEntryKind::Directory
-        } else {
-            return None;
-        };
-        if !self.boundary_holds(path, &metadata) {
-            return None;
-        }
-        Some(kind)
     }
 
     fn write_atomically(
@@ -1003,6 +1251,37 @@ impl WorkspaceRoot {
             _ => false,
         }
     }
+
+    /// Whether a handle this root has bound lies inside the workspace boundary.
+    ///
+    /// This is the check that matters after binding: the name a handle was opened
+    /// from says nothing about the handle, and for the workspace root the name and
+    /// the target are the same string, so a name-based check is a tautology there.
+    #[cfg(windows)]
+    fn handle_within_boundary(&self, _target: &Path, handle: &fs::File) -> bool {
+        // Both volumes must be readable, or nothing was compared: two failed reads
+        // compare equal, and reporting the handle as inside the boundary then
+        // asserts a boundary that was never measured. Design requires a closed
+        // failure here (interface-boundaries.md:1405).
+        match (
+            volume_serial_of_handle(handle),
+            Self::volume_serial_of(&self.root),
+        ) {
+            (Some(handle_volume), Some(root_volume)) => handle_volume == root_volume,
+            _ => false,
+        }
+    }
+
+    #[cfg(unix)]
+    fn handle_within_boundary(&self, target: &Path, handle: &fs::File) -> bool {
+        let Ok(metadata) = handle.metadata() else {
+            return false;
+        };
+        self.boundary_holds(target, &metadata)
+    }
+
+    /// The volume a path lives on, as opposed to the volume an open handle lives
+    /// on. Used where only a name is available.
 
     #[cfg(windows)]
     fn volume_serial_of(path: &Path) -> Option<u32> {
@@ -1180,10 +1459,19 @@ impl core::fmt::Debug for ObservedEffect {
 
 #[cfg(any(test, feature = "test-support"))]
 impl WorkspaceEffectStagingPause {
+    /// Waits for the release marker, for a bounded time.
+    ///
+    /// An unbounded wait turns a swap thread that failed to release into a hung
+    /// test rather than a reported failure, and nothing outside this module could
+    /// observe which side went wrong.
     fn wait(&self) -> Result<(), ()> {
         std::fs::write(&self.entered, b"staged").map_err(|_| ())?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while !self.release.exists() {
-            std::thread::yield_now();
+            if std::time::Instant::now() >= deadline {
+                return Err(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         Ok(())
     }
@@ -1211,6 +1499,348 @@ fn unverified() -> ObservedEffect {
         grounds: EffectGrounds::OutcomeUnverified,
         output: None,
     }
+}
+
+/// Splits a verified target into the parent directory handle source and the leaf
+/// name, so the leaf can be opened relative to that directory instead of being
+/// resolved from the name a second time. A filesystem root has no parent and so
+/// no leaf to open, which the fallible accessors already exclude.
+fn bound_parent_and_name(target: &Path) -> Option<(&Path, std::ffi::OsString)> {
+    Some((target.parent()?, target.file_name()?.to_os_string()))
+}
+
+/// Lists the entries of a directory *through its handle*, so the names and kinds
+/// reported belong to the entity the handle names rather than to whatever the
+/// path resolves to when the listing is taken. Anything that is neither a regular
+/// file nor a directory is omitted, as a symlink or reparse point is.
+#[cfg(unix)]
+fn bound_directory_listing(
+    root: &WorkspaceRoot,
+    directory: &fs::File,
+    destination: &Path,
+) -> Option<Vec<(std::ffi::OsString, ListEntryKind)>> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    // A private copy of the descriptor keeps the caller's handle usable and lets
+    // the stream be closed without closing the verified target. `F_DUPFD_CLOEXEC`
+    // rather than `dup`, which would leave the copy inheritable across an exec for
+    // the duration of the enumeration.
+    // SAFETY: fcntl returns a newly owned descriptor, or -1.
+    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return None;
+    }
+    // SAFETY: fdopendir takes ownership of `duplicate`.
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        // SAFETY: fdopendir left the descriptor ours to release.
+        unsafe { libc::close(duplicate) };
+        return None;
+    }
+    let mut listing = Vec::new();
+    let failed;
+    loop {
+        // A null result is either the end of the stream or an error, and a
+        // truncated listing must not be reported as a complete one.
+        // SAFETY: the errno slot belongs to this thread, so clearing it needs no
+        // further invariant.
+        unsafe { *libc::__errno_location() = 0 };
+        // SAFETY: `stream` is a live DIR for the whole loop.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            // SAFETY: as above.
+            failed = unsafe { *libc::__errno_location() } != 0;
+            break;
+        }
+        // SAFETY: a non-null readdir result points at a live entry until the next
+        // call, and its name is NUL-terminated within the entry.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        let name = std::ffi::OsStr::from_bytes(name);
+        if let Some(kind) = classify_child(root, directory, destination, name) {
+            listing.push((name.to_os_string(), kind));
+        }
+    }
+    // SAFETY: `stream` is a live DIR that has not been closed.
+    unsafe { libc::closedir(stream) };
+    (!failed).then_some(listing)
+}
+
+/// Classifies a child by a lookup relative to the directory handle, so the kind
+/// cannot be taken from an entity the directory name has since come to mean.
+#[cfg(unix)]
+fn bound_child_kind(directory: &fs::File, name: &std::ffi::OsStr) -> Option<ChildKind> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name = std::ffi::CString::new(name.as_bytes()).ok()?;
+    // SAFETY: directory is live, name is NUL-terminated, and metadata is writable
+    // for the duration of the call.
+    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: as above; the name is relative to the directory handle, so this
+    // lookup cannot be redirected by a replacement of the directory itself.
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            &mut metadata,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return None;
+    }
+    let device = metadata.st_dev;
+    match metadata.st_mode & libc::S_IFMT {
+        libc::S_IFDIR => Some(ChildKind::Directory(device)),
+        libc::S_IFREG => Some(ChildKind::File(device)),
+        _ => None,
+    }
+}
+
+/// A child's kind plus the device it lives on, so the workspace boundary can be
+/// decided from the entity rather than from a path.
+#[cfg(unix)]
+enum ChildKind {
+    File(u64),
+    Directory(u64),
+}
+
+#[cfg(unix)]
+impl ChildKind {
+    fn device(&self) -> u64 {
+        match self {
+            Self::File(device) | Self::Directory(device) => *device,
+        }
+    }
+
+    fn kind(&self) -> ListEntryKind {
+        match self {
+            Self::File(_) => ListEntryKind::File,
+            Self::Directory(_) => ListEntryKind::Directory,
+        }
+    }
+}
+
+/// The point past which a growing enumeration buffer is refused rather than grown.
+#[cfg(windows)]
+const MAX_ENUMERATION_BUFFER: usize = 8 * 1024 * 1024;
+
+/// The starting enumeration buffer, in `u64` elements.
+///
+/// Deliberately small -- about four entries -- so that an ordinary directory needs
+/// several calls and the resume path is exercised by an ordinary test. An entry
+/// too large for the buffer is not a problem: the OS either reports it or returns
+/// success having written nothing, and both are answered by growing.
+#[cfg(windows)]
+const INITIAL_ENUMERATION_BUFFER: usize = 64;
+
+/// Doubles the enumeration buffer, or refuses when it is already at the cap.
+#[cfg(windows)]
+fn grow_enumeration_buffer(buffer: &mut Vec<u64>) -> Option<()> {
+    let bytes = buffer.len().checked_mul(size_of::<u64>())?;
+    if bytes >= MAX_ENUMERATION_BUFFER {
+        return None;
+    }
+    buffer.resize(bytes * 2 / size_of::<u64>(), 0);
+    Some(())
+}
+
+/// Lists a directory through its handle on Windows.
+///
+/// `GetFileInformationByHandleEx` writes as many whole entries as fit and advances
+/// the enumeration position on the handle, so the walk continues until the OS
+/// reports that no files remain. A call that writes no structure at all leaves the
+/// position unmoved, so it is answered by growing and calling again rather than
+/// by reading the buffer again.
+///
+/// A directory holding more entries than `MAX_ENUMERATION_BUFFER` allows is
+/// refused rather than reported in part. At the longest names a filesystem
+/// permits that is roughly sixty thousand entries.
+#[cfg(windows)]
+fn bound_directory_listing(
+    _root: &WorkspaceRoot,
+    directory: &fs::File,
+    _destination: &Path,
+) -> Option<Vec<(std::ffi::OsString, ListEntryKind)>> {
+    use std::mem::{offset_of, size_of};
+    use std::os::windows::ffi::OsStringExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::{
+        ERROR_MORE_DATA, ERROR_NO_MORE_FILES, GetLastError, HANDLE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_BOTH_DIR_INFO, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+        GetFileInformationByHandleEx,
+    };
+
+    let handle = directory.as_raw_handle() as HANDLE;
+    // `u64` rather than `u8` because the entries are read as an eight-byte-aligned
+    // structure, which a `u8` buffer does not promise.
+    let mut buffer = vec![0u64; INITIAL_ENUMERATION_BUFFER];
+    let mut listing = Vec::new();
+    let mut restart = true;
+    loop {
+        let capacity = u32::try_from(buffer.len().checked_mul(size_of::<u64>())?).ok()?;
+        // Clearing the first header before each call is what makes "the call wrote
+        // nothing" distinguishable from "the call wrote an entry": this API reports
+        // no byte count, so the buffer itself has to carry the answer.
+        buffer[..size_of::<FILE_ID_BOTH_DIR_INFO>() / size_of::<u64>()].fill(0);
+        // SAFETY: the buffer is writable for `capacity` bytes and the handle stays
+        // live for the call.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                if restart {
+                    FileIdBothDirectoryRestartInfo
+                } else {
+                    FileIdBothDirectoryInfo
+                },
+                buffer.as_mut_ptr().cast(),
+                capacity,
+            )
+        };
+        if ok == 0 {
+            // Only the OS can say the enumeration is finished. A short buffer means
+            // more entries remain, so grow and resume from the position the previous
+            // call left; anything else ends the listing without a complete answer.
+            // SAFETY: reading the thread's last error needs no invariant.
+            return match unsafe { GetLastError() } {
+                ERROR_MORE_DATA => {
+                    grow_enumeration_buffer(&mut buffer)?;
+                    // The position lives on the handle, so the non-restart class
+                    // resumes rather than repeats.
+                    restart = false;
+                    continue;
+                }
+                ERROR_NO_MORE_FILES => Some(listing),
+                _ => None,
+            };
+        }
+        // The first successful call restarts the enumeration; every call after it
+        // must resume, or the same entries arrive again for ever.
+        restart = false;
+        let capacity = capacity as usize;
+        // SAFETY: `buffer` is live and is not resized until after the last read of
+        // this view, and `u64` gives it the eight-byte base alignment the entries
+        // require.
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast(), capacity) };
+        let mut offset = 0usize;
+        let mut empty = false;
+        loop {
+            // SAFETY: the buffer is at least one whole entry long, so this reference
+            // is in bounds even when the call wrote nothing -- in that case it reads
+            // the header cleared above rather than whatever the previous call left.
+            // `offset + size_of` is checked before the next dereference, and the
+            // base and every non-final `NextEntryOffset` are eight-byte aligned as
+            // the layout requires.
+            let entry = unsafe { &*bytes.as_ptr().add(offset).cast::<FILE_ID_BOTH_DIR_INFO>() };
+            if entry.NextEntryOffset == 0 && entry.FileNameLength == 0 {
+                // The call succeeded having written no structure, so the position did
+                // not move and another read of this buffer would find the same
+                // header. Break so the grown buffer is offered to the OS again; the
+                // cap turns a directory that never fits into a refusal.
+                empty = true;
+                break;
+            }
+            let start = offset.checked_add(offset_of!(FILE_ID_BOTH_DIR_INFO, FileName))?;
+            let end = start.checked_add(entry.FileNameLength as usize)?;
+            if end > capacity {
+                return None;
+            }
+            if let Some(kind) = listable_attributes(entry.FileAttributes) {
+                // SAFETY: `bytes[start..end]` is in bounds, holds whole UTF-16 units
+                // because the length is a byte count the OS produced, and is
+                // non-empty; the name sits on the entry's own eight-byte boundary,
+                // so the reference is aligned as `u16` requires.
+                let name = std::ffi::OsString::from_wide(unsafe {
+                    std::slice::from_raw_parts(
+                        bytes[start..end].as_ptr().cast::<u16>(),
+                        (end - start) / size_of::<u16>(),
+                    )
+                });
+                // This is the native enumeration layer, which reports the two self
+                // and parent links; they are not children of the directory.
+                if !matches!(name.to_str(), Some("." | "..")) {
+                    listing.push((name, kind));
+                }
+            }
+            if entry.NextEntryOffset == 0 {
+                // The last entry in THIS buffer, not the last entry in the
+                // directory: the walk continues until the OS reports no more files,
+                // so stopping here would report a truncated listing as complete.
+                break;
+            }
+            offset = offset.checked_add(entry.NextEntryOffset as usize)?;
+            if offset.checked_add(size_of::<FILE_ID_BOTH_DIR_INFO>())? > capacity {
+                return None;
+            }
+        }
+        if empty {
+            // Grow and re-offer, so the view above is never read after the
+            // reallocation a growth performs.
+            grow_enumeration_buffer(&mut buffer)?;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn listable_attributes(attributes: u32) -> Option<ListEntryKind> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return None;
+    }
+    if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        Some(ListEntryKind::Directory)
+    } else {
+        Some(ListEntryKind::File)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn bound_directory_listing(
+    _root: &WorkspaceRoot,
+    _directory: &fs::File,
+    _destination: &Path,
+) -> Option<Vec<(std::ffi::OsString, ListEntryKind)>> {
+    None
+}
+
+/// Classifies one child of a bound directory, reporting `None` for anything that
+/// is not a plain file or directory inside the workspace's own filesystem. The
+/// device and mount checks are what keep a bind mount or a user-mountable
+/// filesystem from being reported as workspace content.
+#[cfg(unix)]
+fn classify_child(
+    root: &WorkspaceRoot,
+    directory: &fs::File,
+    destination: &Path,
+    name: &std::ffi::OsStr,
+) -> Option<ListEntryKind> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let child = bound_child_kind(directory, name)?;
+    // The device comes from the handle-relative lookup, and the mount test is a
+    // comparison of path strings, so neither re-resolves the child by name.
+    if child.device() != fs::metadata(&root.root).ok()?.dev() {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mounts = linux_mount_points().ok()?;
+        if crosses_linux_mount(&root.root, &destination.join(name), &mounts) {
+            return None;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = destination;
+    Some(child.kind())
 }
 
 fn canonical_target(path: PathBuf) -> Result<RealTargetRef, TargetRejection> {
@@ -1533,6 +2163,8 @@ mod tests {
             staging_identity: Some(identity),
             #[cfg(any(test, feature = "test-support"))]
             pause_after_staging: None,
+            #[cfg(any(test, feature = "test-support"))]
+            pause_after_verification: None,
         };
 
         let effect = root.execute_with_options(
@@ -1685,6 +2317,183 @@ mod tests {
             assert!(!rendered.contains(secret));
             assert!(rendered.contains(marker));
         }
+    }
+
+    /// Design requires that a name replaced after verification cannot become a
+    /// path to acting on a different entity, and that a read is refused along
+    /// with a write when identity cannot be preserved
+    /// (`concurrency-control.md:471`). Resolving the name a second time after
+    /// verification would hand back the replacement's bytes as a confirmed
+    /// success, so the read must return the verified entity's own content.
+    #[test]
+    fn a_read_returns_the_verified_entity_after_the_name_is_replaced() {
+        let (directory, root) = workspace();
+        let target_path = directory.path().join("read.md");
+        fs::write(&target_path, b"verified content").expect("fixture write");
+        let target = root
+            .resolve("read.md", OperationKind::Read)
+            .expect("read target");
+
+        let pause_dir = tempdir().expect("pause directory");
+        let pause = super::WorkspaceEffectStagingPause {
+            entered: pause_dir.path().join("entered"),
+            release: pause_dir.path().join("release"),
+        };
+        let options = WorkspaceEffectOptions {
+            pause_after_verification: Some(pause.clone()),
+            ..WorkspaceEffectOptions::default()
+        };
+        let replacement = directory.path().join("replacement.md");
+        let release = pause_dir.path().join("release");
+        let swap = std::thread::spawn(move || {
+            let reached = wait_for(&pause.entered);
+            // The swap outcome is a value, not an `expect`: a thread that panicked
+            // before releasing would leave the effect spinning in the pause and
+            // hang the test rather than fail it.
+            let outcome = reached.then(|| {
+                fs::write(&replacement, b"replacement content")
+                    .and_then(|()| std::fs::rename(&replacement, &target_path))
+                    .map_err(|error| error.to_string())
+            });
+            let released = std::fs::write(&release, b"go").map_err(|error| error.to_string());
+            (outcome, released)
+        });
+
+        let effect = root.execute_with_options(&target, OperationKind::Read, None, &options);
+        let (outcome, released) = swap.join().expect("the swap thread finishes");
+        assert!(released.is_ok(), "the pause must be released: {released:?}");
+        let swapped = outcome.expect("the read must reach the post-bind point");
+        assert!(
+            swapped.is_ok(),
+            "the name must be replaceable for this test to mean anything: {swapped:?}"
+        );
+
+        assert_eq!(
+            effect.certainty,
+            crate::attempt::ActionCertainty::ConfirmedSuccess,
+            "the verified entity is still readable, so this is not a refusal"
+        );
+        assert_eq!(
+            effect.output,
+            Some(ActionOutput::Bytes(b"verified content".to_vec())),
+            "a read must return the entity the handle was bound to, not the name's new occupant"
+        );
+    }
+
+    /// The same rule covers enumeration: the entries must come from the verified
+    /// directory itself, so a directory that replaced the name after
+    /// verification cannot supply them under a confirmed success.
+    #[test]
+    fn a_listing_reports_the_verified_directory_after_the_name_is_replaced() {
+        let (directory, root) = workspace();
+        let root_path = directory.path().to_path_buf();
+        fs::write(root_path.join("original.txt"), b"original").expect("fixture write");
+        let target = root.resolve("", OperationKind::List).expect("list target");
+
+        let substituted = tempdir().expect("substitute directory");
+        fs::write(substituted.path().join("substituted.txt"), b"substituted")
+            .expect("fixture write");
+
+        let pause_dir = tempdir().expect("pause directory");
+        let pause = super::WorkspaceEffectStagingPause {
+            entered: pause_dir.path().join("entered"),
+            release: pause_dir.path().join("release"),
+        };
+        let options = WorkspaceEffectOptions {
+            pause_after_verification: Some(pause.clone()),
+            ..WorkspaceEffectOptions::default()
+        };
+        let displaced = root_path.with_extension("displaced");
+        let moved = root_path.clone();
+        let release = pause_dir.path().join("release");
+        let swap = std::thread::spawn(move || {
+            let reached = wait_for(&pause.entered);
+            let outcome = if reached {
+                fs::rename(&moved, &displaced)
+                    .and_then(|()| fs::rename(substituted.path(), &moved))
+                    .map_err(|error| error.to_string())
+            } else {
+                Ok(())
+            };
+            // The release is the last thing the thread does and its own failure is
+            // a value, not an `expect`: a thread that panicked without releasing
+            // would leave the effect spinning in the pause and hang the test.
+            let released = std::fs::write(&release, b"go").map_err(|error| error.to_string());
+            (reached, outcome, released, displaced)
+        });
+
+        let effect = root.execute_with_options(&target, OperationKind::List, None, &options);
+        let (reached, outcome, released, displaced) =
+            swap.join().expect("the swap thread finishes");
+        assert!(released.is_ok(), "the pause must be released: {released:?}");
+        assert!(
+            reached,
+            "the listing must reach the post-bind point for this test to mean anything"
+        );
+        assert!(
+            outcome.is_ok(),
+            "the directory must be replaceable for this test to mean anything: {outcome:?}"
+        );
+        // Leave the workspace where the swap found it, so its TempDir can clean
+        // up. Cleanup is best effort: the test's oracle is the listing above.
+        drop(fs::remove_dir_all(&root_path));
+        drop(fs::rename(&displaced, &root_path));
+
+        assert_eq!(
+            effect.certainty,
+            crate::attempt::ActionCertainty::ConfirmedSuccess,
+            "the verified directory is still readable through its handle, so this is not a refusal"
+        );
+        assert_eq!(
+            effect.output,
+            Some(ActionOutput::Listing(vec![ListEntry {
+                name: String::from("original.txt"),
+                kind: ListEntryKind::File,
+            }])),
+            "a listing must enumerate the directory the handle was bound to, not the name's new occupant"
+        );
+    }
+
+    /// Waits for a pause marker with a bound, so a test can never hang on a
+    /// mis-ordered effect.
+    fn wait_for(marker: &std::path::Path) -> bool {
+        for _ in 0..2_000_000 {
+            if marker.exists() {
+                return true;
+            }
+            std::thread::yield_now();
+        }
+        false
+    }
+
+    /// A directory larger than one enumeration buffer must be reported whole.
+    /// The Windows enumeration reads the directory in buffers and the OS decides
+    /// where a buffer ends, so a full buffer is not the end of the directory:
+    /// stopping there reported a truncated listing as a complete one, and a
+    /// buffer big enough for any plausible directory would have left the resume
+    /// path untested. Forty entries need ten Windows buffers at the size used
+    /// here, so that path is exercised on every Windows run; on unix the stream
+    /// buffers internally and the test simply requires all forty back.
+    #[test]
+    fn a_listing_reports_every_child_of_a_directory_larger_than_one_buffer() {
+        let (directory, root) = workspace();
+        let expected: Vec<ListEntry> = (0..40)
+            .map(|index| ListEntry {
+                name: format!("entry-{index:03}"),
+                kind: ListEntryKind::File,
+            })
+            .collect();
+        for entry in &expected {
+            fs::write(directory.path().join(&entry.name), b"x").expect("fixture write");
+        }
+        let target = root.resolve("", OperationKind::List).expect("list target");
+
+        let effect = root.execute(&target, OperationKind::List, None);
+        assert_eq!(
+            effect.certainty,
+            crate::attempt::ActionCertainty::ConfirmedSuccess
+        );
+        assert_eq!(effect.output, Some(ActionOutput::Listing(expected)));
     }
 
     #[test]
@@ -1887,15 +2696,16 @@ mod tests {
         let Some(ActionOutput::Listing(entries)) = effect.output else {
             panic!("a listing observes entries");
         };
-        assert!(
-            entries
-                .iter()
-                .all(|entry| entry.name != "escape.txt" && entry.name != "escape-dir"),
-            "reparse/junction entries are excluded, never followed: {entries:?}"
-        );
-        assert!(
-            entries.iter().any(|entry| entry.name == "regular.txt"),
-            "regular files remain listable: {entries:?}"
+        // An exact listing, not a pair of membership checks: the native
+        // enumeration reports the self and parent links, and a weaker assertion
+        // would have let them through unnoticed.
+        assert_eq!(
+            entries,
+            vec![ListEntry {
+                name: String::from("regular.txt"),
+                kind: ListEntryKind::File,
+            }],
+            "a listing is the direct children, excluding reparse/junction entries"
         );
     }
 }

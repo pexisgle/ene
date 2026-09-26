@@ -74,6 +74,8 @@ pub fn execute_workspace_effect(
         staging_identity: request.staging_identity,
         #[cfg(any(test, feature = "test-support"))]
         pause_after_staging: request.test_pause_after_staging,
+        #[cfg(any(test, feature = "test-support"))]
+        pause_after_verification: None,
     };
     let effect =
         root.execute_with_options(&target, operation, request.content.as_deref(), &options);
