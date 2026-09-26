@@ -4861,8 +4861,9 @@ async fn wss_unknown_wire_subcase() {
         ),
     }
 
-    // Each protocol refusal is terminal for its connection, so each gets its own.
-    // A same-major, different-minor envelope never reaches a handshake step.
+    // Each case gets its own connection so a refusal never interferes with the
+    // next. The advertised list is the current version, so this refusal can only
+    // come from the envelope-version gate, never from the handshake list check.
     let mut host = raw_dial(dir.path()).await;
     let mut minor_envelope = crafted_envelope("CapabilityAdvertise");
     minor_envelope.protocol = ProtocolVersion { major: 1, minor: 1 };
@@ -4871,7 +4872,7 @@ async fn wss_unknown_wire_subcase() {
             minor_envelope,
             serde_json::json!({
                 "CapabilityAdvertise": {
-                    "supported_protocol": [{ "major": 1, "minor": 1 }],
+                    "supported_protocol": [{ "major": 1, "minor": 0 }],
                     "platform": "test",
                 },
             }),
