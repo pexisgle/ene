@@ -42,14 +42,20 @@ use ene_api::v1::usage::{
 };
 use ene_core::conn;
 use ene_core::serve::{CoreError, CredStore, HostHandle};
-use ene_credential::{CredentialRef, CredentialSetRepository as _, MemoryCredentialStore};
+use ene_credential::{
+    CredentialRef, CredentialScrubber, CredentialSetRepository as _, CredentialSetRevision,
+    MemoryCredentialStore, SecretScrubber as _,
+};
 use ene_ctl::client::{Client, ClientError, ConnectProgress, PendingPairingClient};
 use ene_ctl::cmds;
 use ene_inference::cost::UsageEstimate;
 use ene_inference::{ProviderRequest, ProviderResponse, ProviderTransport, RawUsage};
 use ene_preservation::{ConfirmTargetedDeletionOutcome, DeletionOperationRef};
 use ene_primitive::{RawId, WallClockWithTz};
-use ene_task::{CancelTaskCommand, TaskCancelOutcome, TaskId};
+use ene_task::{
+    CancelTaskCommand, DelegationId, TaskAgentResultArrival, TaskCancelOutcome, TaskId,
+    TaskRepository as _, TaskResultArrivalOutcome, TaskResultId, TaskResultScrubPremise,
+};
 use rusqlite::OptionalExtension as _;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -3719,6 +3725,34 @@ fn transient_task_delegation_holds(db: &Path) -> i64 {
 }
 
 #[expect(clippy::expect_used, reason = "test fixture helper")]
+fn transient_sole_result_identity(db: &Path) -> (uuid::Uuid, uuid::Uuid, String) {
+    let conn = rusqlite::Connection::open(db).expect("the state database opens");
+    conn.busy_timeout(Duration::from_secs(30))
+        .expect("a busy timeout must set");
+    let (result, delegation, body): (String, String, String) = conn
+        .query_row(
+            "SELECT result_id, delegation_id, body FROM task_result ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the result identity must read");
+    (
+        uuid::Uuid::parse_str(&result).expect("the stored result id must be a UUID"),
+        uuid::Uuid::parse_str(&delegation).expect("the stored delegation id must be a UUID"),
+        body,
+    )
+}
+
+#[expect(clippy::expect_used, reason = "test fixture helper")]
+fn transient_result_row_count(db: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(db).expect("the state database opens");
+    conn.busy_timeout(Duration::from_secs(30))
+        .expect("a busy timeout must set");
+    conn.query_row("SELECT COUNT(*) FROM task_result", [], |row| row.get(0))
+        .expect("the result count probe must run")
+}
+
+#[expect(clippy::expect_used, reason = "test fixture helper")]
 fn transient_sole_result_body(db: &Path) -> String {
     let conn = rusqlite::Connection::open(db).expect("the state database opens");
     conn.busy_timeout(Duration::from_secs(30))
@@ -3887,7 +3921,47 @@ async fn stage6_task_result_commits_under_the_credential_set_current_at_its_scru
         db_target_hits(&dir.join("app.db"), ROTATED_SECRET)
     );
     assert!(db_target_hits(&dir.join("app.db"), SECRET).is_empty());
-    served.server.abort();
+
+    served.stop().await;
+    let (result_uuid, delegation_uuid, stored_body) =
+        transient_sole_result_identity(&dir.join("app.db"));
+    let store = ene_store::Store::open(&dir.join("app.db"))
+        .await
+        .expect("the state database opens for the retry fixture");
+    let cred_store = (served.cred_store)();
+    let scrubber = CredentialScrubber {
+        refs: &store,
+        store: &cred_store,
+    };
+    let stale_scrub = scrubber
+        .scrub(&stored_body)
+        .await
+        .expect("the stored body re-scrubs")
+        .with_oldest_premise(CredentialSetRevision::from_u64(0));
+    let replay = store
+        .record_task_result_arrival(TaskAgentResultArrival {
+            delegation: DelegationId::from_raw(RawId::from_uuid(delegation_uuid)),
+            result: TaskResultId::from_raw(RawId::from_uuid(result_uuid)),
+            body: TaskResultScrubPremise::from_scrubbed(stale_scrub),
+        })
+        .await;
+    let replay = replay.expect(
+        "a same-ID retry must answer with the recorded row even under a later credential set",
+    );
+    let TaskResultArrivalOutcome::Recorded(record) = replay else {
+        panic!("a same-ID retry must not report a stale credential set: {replay:?}");
+    };
+    assert_eq!(record.result.as_raw(), RawId::from_uuid(result_uuid));
+    assert_eq!(
+        record.delegation.as_raw(),
+        RawId::from_uuid(delegation_uuid)
+    );
+    assert_eq!(record.body.text(), stored_body);
+    assert_eq!(
+        transient_result_row_count(&dir.join("app.db")),
+        1,
+        "the same-ID retry must not insert a second result row"
+    );
 }
 
 fn crafted_envelope(message_type: &str) -> WireEnvelope {

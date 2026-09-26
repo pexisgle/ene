@@ -1420,6 +1420,24 @@ fn compose_result(
     })
 }
 
+fn current_result_body(
+    conn: &Connection,
+    arrival: &TaskAgentResultArrival,
+) -> Result<String, TaskTechnicalError> {
+    let held = crate::preservation::held_use(
+        conn,
+        crate::preservation::USE_KIND_TASK_DELEGATION,
+        arrival.delegation.as_raw(),
+    )
+    .map_err(task_unavailable)?;
+    if held {
+        Ok(String::from(crate::erasure::ERASED_MARKER))
+    } else {
+        crate::preservation::redact_covered_text(conn, arrival.body.body())
+            .map_err(task_unavailable)
+    }
+}
+
 fn record_task_result_arrival_sync(
     conn: &Mutex<Connection>,
     arrival: TaskAgentResultArrival,
@@ -1430,22 +1448,6 @@ fn record_task_result_arrival_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(task_unavailable)?;
-    let current = crate::credential::current_set_revision(&tx).map_err(task_unavailable)?;
-    if current != arrival.body.credential_set() {
-        return Ok(TaskResultArrivalOutcome::StaleCredentialSet { current });
-    }
-    let held = crate::preservation::held_use(
-        &tx,
-        crate::preservation::USE_KIND_TASK_DELEGATION,
-        arrival.delegation.as_raw(),
-    )
-    .map_err(task_unavailable)?;
-    let body_text = if held {
-        String::from(crate::erasure::ERASED_MARKER)
-    } else {
-        crate::preservation::redact_covered_text(&tx, arrival.body.body())
-            .map_err(task_unavailable)?
-    };
     let correspondence = delegation_correspondence(&tx, &delegation_text)?;
     let Some((task_text, revision_raw)) = correspondence else {
         return Err(task_unavailable(
@@ -1463,6 +1465,7 @@ fn record_task_result_arrival_sync(
         .optional()
         .map_err(task_unavailable)?;
     if let Some(raw) = existing {
+        let body_text = current_result_body(&tx, &arrival)?;
         let same_fingerprint = decode_id(&raw.task).map_err(task_unavailable)? == delegation_task
             && decode_revision(raw.task_revision)? == delegation_revision
             && decode_id(&raw.delegation).map_err(task_unavailable)? == arrival.delegation.as_raw()
@@ -1476,6 +1479,11 @@ fn record_task_result_arrival_sync(
         tx.commit().map_err(task_unavailable)?;
         return Ok(TaskResultArrivalOutcome::Recorded(record));
     }
+    let current = crate::credential::current_set_revision(&tx).map_err(task_unavailable)?;
+    if current != arrival.body.credential_set() {
+        return Ok(TaskResultArrivalOutcome::StaleCredentialSet { current });
+    }
+    let body_text = current_result_body(&tx, &arrival)?;
     let sealed: bool = tx
         .query_row(SQL_DELEGATION_IS_SEALED, params![delegation_text], |row| {
             row.get::<_, bool>(0)

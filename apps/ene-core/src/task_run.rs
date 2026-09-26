@@ -7,8 +7,8 @@ use ene_task::{
     TaskAgentActionExchange, TaskAgentInference, TaskAgentNotSent, TaskAgentObservation,
     TaskAgentObservationId, TaskAgentObservationPremise, TaskAgentTurnOutcome,
     TaskAgentTurnPremise, TaskInstructionSource, TaskProgress, TaskRef, TaskRepository as _,
-    TaskResultArrivalOutcome, TaskResultRecord, TaskResultScrubPremise, orchestrate_result_arrival,
-    orchestrate_task_agent_turn,
+    TaskResultArrivalOutcome, TaskResultId, TaskResultRecord, TaskResultScrubPremise,
+    orchestrate_result_arrival, orchestrate_task_agent_turn,
 };
 use std::sync::Arc;
 
@@ -583,6 +583,7 @@ async fn finalize_result_body(
     body: &str,
 ) -> Result<TaskResultArrivalOutcome, TaskAgentRunError> {
     let mut attempts = 0_u32;
+    let result = TaskResultId::generate();
     loop {
         attempts += 1;
         let scrubbed =
@@ -595,6 +596,7 @@ async fn finalize_result_body(
         let arrival = orchestrate_result_arrival(
             store,
             delegation,
+            result,
             TaskResultScrubPremise::from_scrubbed(scrubbed),
         )
         .await?;
