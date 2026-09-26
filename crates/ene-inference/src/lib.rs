@@ -831,7 +831,6 @@ mod fake {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum FakeFailure {
-        Transport(String),
         ResponseLost,
     }
 
@@ -882,9 +881,6 @@ mod fake {
             Box::pin(async move {
                 let result = if let Some(fail) = &self.fail {
                     Err(match fail {
-                        FakeFailure::Transport(reason) => {
-                            InferenceTechnicalError::ProviderTransportFailed(reason.clone())
-                        }
                         FakeFailure::ResponseLost => InferenceTechnicalError::ResponseLost,
                     })
                 } else {
