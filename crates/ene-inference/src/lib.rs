@@ -50,6 +50,7 @@ pub enum NotSentReason {
     DataUseHeld,
     UsageCapReached,
     UsageCapIndeterminate,
+    CredentialRotated,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -255,6 +256,7 @@ pub struct AdmissionRequest {
     candidate: InferenceUseCandidate,
     consent: ConsentRecord,
     credential: CredentialRef,
+    credential_version: Option<u64>,
     task_agent: Option<TaskAgentAttemptPremise>,
     data_use: Vec<RawId>,
 }
@@ -273,6 +275,7 @@ impl AdmissionRequest {
                         ticket: InferenceTicketId(RawId::new()),
                         consent: (self.consent.id, self.consent.rev),
                         credential: self.credential,
+                        credential_version: self.credential_version,
                         candidate: self.candidate,
                         task_agent: self.task_agent,
                         data_use: self.data_use,
@@ -401,6 +404,14 @@ async fn prepare_admission(
     let Some(credential) = credential else {
         return Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete));
     };
+    // Capture which published version this admission is bound to, so dispatch can
+    // name the cause when the version moved, and can fail a send whose credential
+    // has since gone away rather than discovering it inside the transport.
+    let credential_version = credential_store.published_version(&credential).map_err(
+        |CredentialTechnicalError::StorageUnavailable { reason }| {
+            InferenceTechnicalError::StorageUnavailable { reason }
+        },
+    )?;
     let candidate = InferenceUseCandidate {
         consumer,
         capability,
@@ -412,6 +423,7 @@ async fn prepare_admission(
         candidate,
         consent: record,
         credential,
+        credential_version,
         task_agent,
         data_use,
     })))
@@ -422,6 +434,7 @@ pub struct AuthorizedInference {
     ticket: InferenceTicketId,
     consent: (String, ConsentRevision),
     credential: CredentialRef,
+    credential_version: Option<u64>,
     candidate: InferenceUseCandidate,
     task_agent: Option<TaskAgentAttemptPremise>,
     data_use: Vec<RawId>,
@@ -592,13 +605,23 @@ pub async fn dispatch_authorized(
     prompt: ScrubbedText,
     sink: &mut (dyn DeltaSink + Send),
     abort: Option<&DispatchAbort>,
+    credential_store: &impl CredentialStore,
     consent: &impl ConsentRepository,
     attempts: &impl InferenceAttemptRepository,
     usage: &impl UsageRepository,
     transport: &impl ProviderTransport,
 ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
     dispatch_authorized_inner(
-        authorized, prompt, sink, abort, None, consent, attempts, usage, transport,
+        authorized,
+        prompt,
+        sink,
+        abort,
+        None,
+        credential_store,
+        consent,
+        attempts,
+        usage,
+        transport,
     )
     .await
 }
@@ -613,6 +636,7 @@ pub async fn dispatch_authorized_with_claim_scope(
     sink: &mut (dyn DeltaSink + Send),
     abort: Option<&DispatchAbort>,
     acquire_claim_scope: Box<dyn FnOnce() -> InferenceClaimFuture + Send>,
+    credential_store: &impl CredentialStore,
     consent: &impl ConsentRepository,
     attempts: &impl InferenceAttemptRepository,
     usage: &impl UsageRepository,
@@ -624,6 +648,7 @@ pub async fn dispatch_authorized_with_claim_scope(
         sink,
         abort,
         Some(acquire_claim_scope),
+        credential_store,
         consent,
         attempts,
         usage,
@@ -642,6 +667,7 @@ async fn dispatch_authorized_inner(
     sink: &mut (dyn DeltaSink + Send),
     abort: Option<&DispatchAbort>,
     acquire_claim_scope: Option<Box<dyn FnOnce() -> InferenceClaimFuture + Send>>,
+    credential_store: &impl CredentialStore,
     consent: &impl ConsentRepository,
     attempts: &impl InferenceAttemptRepository,
     usage: &impl UsageRepository,
@@ -664,6 +690,7 @@ async fn dispatch_authorized_inner(
     );
     let credential_set = prompt.credential_set();
     let credential = authorized.credential;
+    let admitted_credential_version = authorized.credential_version;
     let task_agent = authorized.task_agent;
     let data_use = authorized.data_use;
     let pricing = match PricingCatalog::first_party()
@@ -688,6 +715,21 @@ async fn dispatch_authorized_inner(
     } else {
         None
     };
+    // If the credential rotated after this dispatch was admitted, the value the
+    // transport would read now is one the consent, permission and cost checks
+    // never saw. Refuse before the claim so the refusal stays a pre-claim
+    // NotSent: no attempt row and no usage reservation are created for a send
+    // that is provably 0 bytes.
+    let current_credential_version = credential_store
+        .published_version(&request.credential)
+        .map_err(|CredentialTechnicalError::StorageUnavailable { reason }| {
+            InferenceTechnicalError::StorageUnavailable { reason }
+        })?;
+    if current_credential_version != admitted_credential_version {
+        return Ok(InferenceDispatchOutcome::NotSent(
+            NotSentReason::CredentialRotated,
+        ));
+    }
     match attempts
         .begin_inference_attempt(InferenceAttempt {
             ticket,
@@ -911,17 +953,18 @@ mod dispatch_tests {
 
     use super::fake::{FakeFailure, FakeProviderTransport};
     use super::{
-        AttemptBeginOutcome, AuthorizedInference, DeltaSink, DiscardSink, DispatchAbort,
+        Admission, AttemptBeginOutcome, AuthorizedInference, DeltaSink, DiscardSink, DispatchAbort,
         InferenceAttempt, InferenceAttemptRecord, InferenceAttemptRepository,
         InferenceDispatchOutcome, InferenceResultArrival, InferenceTechnicalError,
-        InferenceTicketId, MAX_INPUT_CHARS, NotSentReason, ProviderRequest, ProviderResponse,
-        ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageEstimate, UsageFact,
-        UsageRepository, UsageSource, dispatch_authorized, unknown_usage,
+        InferenceTicketId, MAX_INPUT_CHARS, NotSentReason, PreparedAdmission, ProviderRequest,
+        ProviderResponse, ProviderTransport, RawUsage, TaskAgentAttemptPremise, UsageEstimate,
+        UsageFact, UsageRepository, UsageSource, dispatch_authorized, prepare_dialogue_admission,
+        unknown_usage,
     };
     use ene_credential::{CredentialRef, CredentialSetRevision, ScrubbedText};
     use ene_permission::{
         CapabilityKind, ConsentRecord, ConsentRepository, ConsentRevision, ConsumerKind,
-        InferenceUseCandidate, PermissionTechnicalError, PurposeKind,
+        EvaluationTracker, InferenceUseCandidate, PermissionTechnicalError, PurposeKind,
     };
     use ene_primitive::{RawId, RevisionInner};
 
@@ -1211,6 +1254,18 @@ mod dispatch_tests {
         }
     }
 
+    struct OneRef(ene_credential::CredentialRef);
+
+    impl ene_credential::CredentialRefRepository for OneRef {
+        #[expect(clippy::unused_async_trait_impl, reason = "fixture repository port")]
+        async fn list_refs(
+            &self,
+        ) -> Result<Vec<ene_credential::CredentialRef>, ene_credential::CredentialTechnicalError>
+        {
+            Ok(vec![self.0.clone()])
+        }
+    }
+
     struct ScrubRefs(ene_credential::CredentialSetRevision);
 
     impl ene_credential::CredentialRefRepository for ScrubRefs {
@@ -1250,12 +1305,25 @@ mod dispatch_tests {
         scrub_fixture(&text.into(), CredentialSetRevision::initial()).await
     }
 
+    /// A store holding the credential `authorized()` admits against. Each call
+    /// builds a fresh one so no test can contaminate another through shared
+    /// interior state.
+    fn creds() -> ene_credential::MemoryCredentialStore {
+        let store = ene_credential::MemoryCredentialStore::new();
+        store.insert(
+            CredentialRef::new("acme", "main").expect("valid test fixture"),
+            "test-bearer",
+        );
+        store
+    }
+
     fn authorized() -> AuthorizedInference {
         let consent = record(1);
         AuthorizedInference {
             ticket: InferenceTicketId(RawId::new()),
             consent: (consent.id, consent.rev),
             credential: CredentialRef::new("acme", "main").expect("valid test fixture"),
+            credential_version: None,
             candidate: InferenceUseCandidate {
                 consumer: ConsumerKind::CompanionDialogue,
                 capability: CapabilityKind::Dialogue,
@@ -1284,6 +1352,7 @@ mod dispatch_tests {
             ticket: InferenceTicketId(RawId::new()),
             consent: (consent.id, consent.rev),
             credential: CredentialRef::new("acme", "main").expect("valid test fixture"),
+            credential_version: None,
             candidate: InferenceUseCandidate {
                 consumer: ConsumerKind::TaskAgent,
                 capability: CapabilityKind::Dialogue,
@@ -1303,6 +1372,141 @@ mod dispatch_tests {
         authorized
     }
 
+    /// Admission must record the version the store actually has, not a constant.
+    /// If that capture were dropped or hardcoded, every versioned send would be
+    /// refused while this suite stayed green, so the capture and the positive
+    /// case are both pinned here: the admitted object carries the store's
+    /// version, and an unrotated dispatch still sends.
+    #[tokio::test]
+    async fn admission_captures_the_stores_published_version() {
+        use ene_credential::{
+            CredentialStore as _, MemoryVersionedStore, VersionedCredentialStore,
+        };
+
+        let cred = CredentialRef::new("acme", "main").expect("valid test fixture");
+        let store = MemoryVersionedStore::new();
+        store
+            .put_version(&cred, 7, "value")
+            .expect("candidate version");
+        store.activate(store.prepare_snapshot(&cred, 7).expect("snapshot"));
+        let published = store
+            .published_version(&cred)
+            .expect("the store reports its version");
+
+        let prepared = prepare_dialogue_admission(
+            &FixedConsent(Some(record(1))),
+            &OneRef(cred.clone()),
+            &store,
+            Vec::new(),
+        )
+        .await
+        .expect("admission prepares");
+        let PreparedAdmission::Ready(request) = prepared else {
+            panic!("a stored credential must admit, got {prepared:?}");
+        };
+        let mut tracker = EvaluationTracker::default();
+        let Admission::Admitted(authorized) = request.authorize(&mut tracker) else {
+            panic!("the fixture must authorize the admitted request");
+        };
+        assert_eq!(
+            authorized.credential_version, published,
+            "the admitted object must carry the version the store published"
+        );
+
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let outcome = dispatch_authorized(
+            *authorized,
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &store,
+            &FixedConsent(Some(record(1))),
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        assert!(
+            matches!(outcome, InferenceDispatchOutcome::Completed { .. }),
+            "an unrotated versioned credential must still send, got {outcome:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the provider must be contacted when nothing rotated"
+        );
+    }
+
+    /// A rotation between admission and the provider call must stop the send.
+    /// Authenticating with the new value would use a secret the consent,
+    /// permission and cost checks never saw, so the dispatch reports a distinct
+    /// not-sent outcome and the provider is never contacted at all.
+    #[tokio::test]
+    async fn a_rotation_after_admission_refuses_the_send() {
+        use ene_credential::{
+            CredentialStore as _, MemoryVersionedStore, VersionedCredentialStore,
+        };
+
+        let cred = CredentialRef::new("acme", "main").expect("valid test fixture");
+        let store = MemoryVersionedStore::new();
+        for version in [1_u64, 2] {
+            store
+                .put_version(&cred, version, "value")
+                .expect("candidate version");
+        }
+        store.activate(store.prepare_snapshot(&cred, 1).expect("snapshot"));
+
+        let mut authorized = authorized();
+        authorized.credential = cred.clone();
+        authorized.credential_version = store
+            .published_version(&cred)
+            .expect("the store reports its published version");
+
+        // The rotation lands after the admission captured its version.
+        store.activate(store.prepare_snapshot(&cred, 2).expect("snapshot"));
+
+        let attempts = CapturedAttempts(Mutex::new(Vec::new()));
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport = CountingTransport(std::sync::Arc::clone(&calls));
+        let outcome = dispatch_authorized(
+            authorized,
+            prompt("hello").await,
+            &mut DiscardSink,
+            None,
+            &store,
+            &FixedConsent(Some(record(1))),
+            &attempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+
+        assert_eq!(
+            outcome,
+            InferenceDispatchOutcome::NotSent(NotSentReason::CredentialRotated),
+            "a rotated credential must refuse the send rather than authenticate with the new value"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provider must not be contacted under a rotated credential"
+        );
+        assert!(
+            attempts.0.lock().expect("attempt capture lock").is_empty(),
+            "a pre-claim refusal must not create an attempt row"
+        );
+        assert!(
+            usage.0.lock().expect("usage capture lock").is_empty(),
+            "a pre-claim refusal must not record usage or leave a reservation"
+        );
+    }
+
     #[tokio::test]
     async fn claimed_attempt_carries_route_pricing_and_estimate() {
         let consent = FixedConsent(Some(record(1)));
@@ -1315,6 +1519,7 @@ mod dispatch_tests {
             prompt("hello").await,
             &mut DiscardSink,
             None,
+            &creds(),
             &consent,
             &attempts,
             &usage,
@@ -1353,6 +1558,7 @@ mod dispatch_tests {
             prompt("hello").await,
             &mut DiscardSink,
             None,
+            &creds(),
             &consent,
             &attempts,
             &usage,
@@ -1373,6 +1579,7 @@ mod dispatch_tests {
             prompt("hello").await,
             &mut DiscardSink,
             None,
+            &creds(),
             &consent,
             &attempts,
             &usage,
@@ -1461,6 +1668,7 @@ mod dispatch_tests {
                 prompt(input).await,
                 &mut DiscardSink,
                 None,
+                &creds(),
                 &consent,
                 &attempts,
                 &usage,
@@ -1506,6 +1714,7 @@ mod dispatch_tests {
                 prompt("hello").await,
                 &mut DiscardSink,
                 None,
+                &creds(),
                 &consent,
                 &StartedAttempts,
                 &usage,
@@ -1556,6 +1765,7 @@ mod dispatch_tests {
                 prompt("hello").await,
                 &mut DiscardSink,
                 None,
+                &creds(),
                 &consent,
                 &StartedAttempts,
                 &usage,
@@ -1596,6 +1806,7 @@ mod dispatch_tests {
             prompt("hello").await,
             &mut DiscardSink,
             None,
+            &creds(),
             &consent,
             &StartedAttempts,
             &usage,
@@ -1627,6 +1838,7 @@ mod dispatch_tests {
             prompt("delegated work").await,
             &mut DiscardSink,
             None,
+            &creds(),
             &consent,
             &attempts,
             &usage,
@@ -1659,6 +1871,7 @@ mod dispatch_tests {
             prompt("hello").await,
             &mut DiscardSink,
             None,
+            &creds(),
             &consent,
             &attempts,
             &usage,
@@ -1737,6 +1950,7 @@ mod dispatch_tests {
             prompt("hello").await,
             &mut DiscardSink,
             Some(&abort),
+            &creds(),
             &consent,
             &attempts,
             &usage,
@@ -1774,11 +1988,13 @@ mod dispatch_tests {
         let ticket = authorized_input.ticket;
         let mut sink = DiscardSink;
 
+        let cred_store = creds();
         let mut dispatch = Box::pin(dispatch_authorized(
             authorized_input,
             prompt("hello").await,
             &mut sink,
             Some(&abort),
+            &cred_store,
             &consent,
             &StartedAttempts,
             &usage,
@@ -1814,6 +2030,7 @@ mod dispatch_tests {
             prompt("hello").await,
             &mut DiscardSink,
             Some(&abort),
+            &creds(),
             &consent,
             &attempts,
             &usage,
@@ -1840,11 +2057,13 @@ mod dispatch_tests {
         let dropped = std::sync::Arc::clone(&transport.dropped);
         let mut sink = DiscardSink;
 
+        let cred_store = creds();
         let mut dispatch = Box::pin(dispatch_authorized(
             authorized(),
             prompt("hello").await,
             &mut sink,
             Some(&abort),
+            &cred_store,
             &consent,
             &StartedAttempts,
             &usage,

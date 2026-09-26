@@ -106,6 +106,7 @@ pub enum TaskAgentNotSent {
     DataUseHeld,
     UsageCapReached,
     UsageCapIndeterminate,
+    CredentialRotated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

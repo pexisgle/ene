@@ -35,6 +35,15 @@ pub trait CredentialStore: Send + Sync {
         f: impl FnOnce(&str) -> R,
     ) -> Result<R, CredentialTechnicalError>;
 
+    /// The version of the value a send would read right now, or `None` for a
+    /// store that has no version concept. Callers compare this across an
+    /// admission boundary to notice a rotation; they never treat `None` as a
+    /// version number.
+    fn published_version(
+        &self,
+        cred: &CredentialRef,
+    ) -> Result<Option<u64>, CredentialTechnicalError>;
+
     fn contains(&self, cred: &CredentialRef) -> bool;
 }
 
@@ -92,6 +101,19 @@ impl ActiveVersions {
             });
         };
         Ok(f(secret.as_str()))
+    }
+
+    pub(crate) fn published_version(
+        &self,
+        cred: &CredentialRef,
+    ) -> Result<Option<u64>, CredentialTechnicalError> {
+        let active = lock_or_recover(&self.0);
+        let Some((version, _)) = active.get(cred) else {
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("{}: no published version is active", cred.id()),
+            });
+        };
+        Ok(Some(*version))
     }
 
     pub(crate) fn contains(&self, cred: &CredentialRef) -> bool {
@@ -243,6 +265,13 @@ impl CredentialStore for MemoryVersionedStore {
         self.active.with_bearer(cred, f)
     }
 
+    fn published_version(
+        &self,
+        cred: &CredentialRef,
+    ) -> Result<Option<u64>, CredentialTechnicalError> {
+        self.active.published_version(cred)
+    }
+
     fn contains(&self, cred: &CredentialRef) -> bool {
         self.active.contains(cred)
     }
@@ -308,6 +337,21 @@ impl CredentialStore for MemoryCredentialStore {
         Ok(f(secret.as_str()))
     }
 
+    fn published_version(
+        &self,
+        cred: &CredentialRef,
+    ) -> Result<Option<u64>, CredentialTechnicalError> {
+        let entries = lock_or_recover(&self.entries);
+        if entries.contains_key(cred) {
+            Ok(None)
+        } else {
+            let id = cred.id();
+            Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("unknown credential {id}"),
+            })
+        }
+    }
+
     fn contains(&self, cred: &CredentialRef) -> bool {
         lock_or_recover(&self.entries).contains_key(cred)
     }
@@ -367,6 +411,19 @@ impl CredentialStore for EnvCredentialStore {
             });
         };
         Ok(f(secret.as_str()))
+    }
+
+    fn published_version(
+        &self,
+        cred: &CredentialRef,
+    ) -> Result<Option<u64>, CredentialTechnicalError> {
+        if self.pinned(cred.provider()).is_some() {
+            Ok(None)
+        } else {
+            Err(CredentialTechnicalError::StorageUnavailable {
+                reason: "env credential missing".to_owned(),
+            })
+        }
     }
 
     fn contains(&self, cred: &CredentialRef) -> bool {

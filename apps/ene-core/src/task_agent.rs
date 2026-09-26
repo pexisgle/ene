@@ -176,6 +176,7 @@ fn mirror_not_sent(reason: NotSentReason) -> TaskAgentInferenceOutcome {
         NotSentReason::DataUseHeld => Outcome::NotSent(NotSent::DataUseHeld),
         NotSentReason::UsageCapReached => Outcome::NotSent(NotSent::UsageCapReached),
         NotSentReason::UsageCapIndeterminate => Outcome::NotSent(NotSent::UsageCapIndeterminate),
+        NotSentReason::CredentialRotated => Outcome::NotSent(NotSent::CredentialRotated),
     }
 }
 

@@ -170,6 +170,7 @@ fn admission_reason(reason: NotSentReason) -> &'static str {
         NotSentReason::DataUseHeld => "unknown-reason",
         NotSentReason::UsageCapReached => "unknown-reason",
         NotSentReason::UsageCapIndeterminate => "unknown-reason",
+        NotSentReason::CredentialRotated => "unknown-reason",
     }
 }
 
@@ -1038,6 +1039,7 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
             prompt,
             sink,
             abort,
+            self.cred_store,
             self.store,
             self.store,
             self.store,
@@ -1060,6 +1062,7 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
             sink,
             abort,
             acquire_claim_scope,
+            self.cred_store,
             self.store,
             self.store,
             self.store,
