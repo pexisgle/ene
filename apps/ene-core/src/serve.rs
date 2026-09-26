@@ -126,6 +126,18 @@ impl CredentialStore for CredStore {
         }
     }
 
+    fn published_version(
+        &self,
+        cred: &CredentialRef,
+    ) -> Result<Option<u64>, CredentialTechnicalError> {
+        match self {
+            Self::Env(inner) => inner.published_version(cred),
+            Self::Memory(inner) => inner.published_version(cred),
+            Self::Os(inner) => inner.published_version(cred),
+            Self::MemoryVersioned(inner) => inner.published_version(cred),
+        }
+    }
+
     fn contains(&self, cred: &CredentialRef) -> bool {
         match self {
             Self::Env(inner) => inner.contains(cred),

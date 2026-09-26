@@ -16,6 +16,13 @@ impl CredentialStore for ServingCredentials {
         self.0.cred_store.with_bearer(cred, f)
     }
 
+    fn published_version(
+        &self,
+        cred: &CredentialRef,
+    ) -> Result<Option<u64>, CredentialTechnicalError> {
+        self.0.cred_store.published_version(cred)
+    }
+
     fn contains(&self, cred: &CredentialRef) -> bool {
         self.0.cred_store.contains(cred)
     }

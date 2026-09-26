@@ -141,6 +141,13 @@ impl CredentialStore for OsCredentialStore {
         self.active.with_bearer(cred, f)
     }
 
+    fn published_version(
+        &self,
+        cred: &CredentialRef,
+    ) -> Result<Option<u64>, CredentialTechnicalError> {
+        self.active.published_version(cred)
+    }
+
     fn contains(&self, cred: &CredentialRef) -> bool {
         self.active.contains(cred)
     }
