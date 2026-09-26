@@ -4826,8 +4826,7 @@ async fn wss_unknown_wire_subcase() {
             serde_json::json!({
                 "SubmitTextInput": {
                     "companion": "default",
-                    "round": null,
-                    "fresh": false,
+                    "target": "New",
                     "body": {
                         "text": "local_id deliberately absent",
                         "lang": "en",
@@ -4861,6 +4860,36 @@ async fn wss_unknown_wire_subcase() {
             other.message_type()
         ),
     }
+
+    // A same-major, different-minor client is refused: the Host admits only an
+    // exact major+minor match and never interprets a neighbouring version.
+    let mut minor_envelope = crafted_envelope("CapabilityAdvertise");
+    minor_envelope.protocol = ProtocolVersion { major: 1, minor: 1 };
+    let minor_reply = host
+        .send_raw_payload(
+            minor_envelope,
+            serde_json::json!({
+                "CapabilityAdvertise": {
+                    "device_id": null,
+                    "client_descriptor": "minor-mismatch",
+                    "platform": "test",
+                    "supported_protocol": [{ "major": 1, "minor": 1 }],
+                },
+            }),
+        )
+        .await;
+    let refusal = host.recv_wire().await;
+    assert_eq!(refusal.envelope.correlation.reply_to, Some(minor_reply));
+    let WirePayload::IncompatibleProtocol(notice) = refusal.payload else {
+        panic!("a minor-only mismatch must be refused as incompatible, got {refusal:?}");
+    };
+    assert_eq!(notice.host_max, ProtocolVersion::V1);
+    assert_eq!(notice.client_max, ProtocolVersion { major: 1, minor: 1 });
+    assert!(
+        notice.hint.contains("protocol 1.0"),
+        "the hint must name both components, got {:?}",
+        notice.hint
+    );
 
     stop.send_replace(true);
     let joined = tokio::time::timeout(Duration::from_secs(30), server)

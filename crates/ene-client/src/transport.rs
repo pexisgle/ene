@@ -53,6 +53,10 @@ const READ_AHEAD_FRAMES: usize = 8;
 /// connection because the sink may be left mid-frame.
 const WRITE_WAIT: Duration = Duration::from_secs(30);
 const ENQUEUE_WAIT: Duration = Duration::from_secs(15);
+/// An enqueued request whose reply never arrives must not own the caller
+/// forever. A Host that stops answering yields an unknown outcome, never a
+/// silent hang and never an automatic re-execution of the request.
+const RESPONSE_WAIT: Duration = Duration::from_secs(60);
 
 type WsClient =
     tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
@@ -701,7 +705,7 @@ impl PendingPairingClient {
             pending_id: _,
             pairing_message_id,
         } = self;
-        let provision_frame = transport.read_known("pairing provision").await?;
+        let provision_frame = transport.read_handshake("pairing provision").await?;
         require_reply_to(&provision_frame, pairing_message_id, "pairing provision")?;
         let WirePayload::PairingProvision(provision) = provision_frame.payload else {
             return Err(ClientError::ServerRejected(format!(
@@ -842,6 +846,13 @@ impl Client {
     }
 
     pub async fn resolve_request(
+        &mut self,
+        pending: EnqueuedRequest,
+    ) -> Result<WirePayload, ResponseWaitFailure> {
+        bounded_response_wait(RESPONSE_WAIT, self.resolve_request_within(pending)).await
+    }
+
+    async fn resolve_request_within(
         &mut self,
         pending: EnqueuedRequest,
     ) -> Result<WirePayload, ResponseWaitFailure> {
@@ -1086,12 +1097,7 @@ async fn finish_connect(
         .payload
     {
         WirePayload::NegotiatedConnection(negotiated) => {
-            if !negotiated.version.shares_major_with(&ProtocolVersion::V1) {
-                return Err(ClientError::ServerRejected(format!(
-                    "negotiated incompatible version {}.{}; expected major 1",
-                    negotiated.version.major, negotiated.version.minor
-                )));
-            }
+            require_current_version(negotiated.version)?;
         }
         WirePayload::IncompatibleProtocol(notice) => {
             return Err(incompatible_protocol_error(&notice));
@@ -1142,6 +1148,32 @@ async fn finish_connect(
         )));
     }
     Ok(session)
+}
+
+async fn bounded_response_wait<F>(
+    bound: Duration,
+    wait: F,
+) -> Result<WirePayload, ResponseWaitFailure>
+where
+    F: std::future::Future<Output = Result<WirePayload, ResponseWaitFailure>>,
+{
+    match tokio::time::timeout(bound, wait).await {
+        Ok(answer) => answer,
+        Err(_) => Err(ResponseWaitFailure::TimedOut),
+    }
+}
+
+fn require_current_version(negotiated: ProtocolVersion) -> Result<(), ClientError> {
+    if negotiated.matches_current(&ProtocolVersion::V1) {
+        return Ok(());
+    }
+    Err(ClientError::ServerRejected(format!(
+        "negotiated incompatible version {}.{}; expected {}.{}",
+        negotiated.major,
+        negotiated.minor,
+        ProtocolVersion::V1.major,
+        ProtocolVersion::V1.minor
+    )))
 }
 
 pub(crate) fn incompatible_protocol_error(notice: &IncompatibleProtocol) -> ClientError {
@@ -1441,6 +1473,43 @@ mod tests {
         assert!(
             format!("{failure:?}").contains("websocket write failed"),
             "the writer-side reason must not be lost in the terminal race, got {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_request_wait_ends_as_the_typed_timeout_outcome() {
+        let unanswered = bounded_response_wait(
+            Duration::from_millis(20),
+            std::future::pending::<Result<WirePayload, ResponseWaitFailure>>(),
+        )
+        .await;
+        assert!(
+            matches!(unanswered, Err(ResponseWaitFailure::TimedOut)),
+            "an unanswered request must end as the typed timeout, got {unanswered:?}"
+        );
+
+        let answered: Result<WirePayload, ResponseWaitFailure> = Ok(WirePayload::DisconnectNotice(
+            ene_api::v1::handshake::DisconnectNotice {
+                reason: String::from("host closed"),
+            },
+        ));
+        assert!(
+            matches!(
+                bounded_response_wait(Duration::from_secs(60), async { answered }).await,
+                Ok(WirePayload::DisconnectNotice(_))
+            ),
+            "a reply inside the bound must be returned unchanged"
+        );
+
+        let technical = bounded_response_wait(Duration::from_secs(60), async {
+            Err(ResponseWaitFailure::Client(ClientError::Transport(
+                String::from("gone"),
+            )))
+        })
+        .await;
+        assert!(
+            matches!(technical, Err(ResponseWaitFailure::Client(_))),
+            "a technical failure inside the bound must not become a timeout"
         );
     }
 

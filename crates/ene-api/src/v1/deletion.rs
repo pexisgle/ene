@@ -10,6 +10,7 @@ pub const DELETION_EXACT_TEXT_MAX_BYTES: usize = 1024;
 pub const DELETION_STATUS_CURSOR_PREFIX: &str = "deletion-status:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum DeletionPurposeWire {
     Privacy,
     Security,
@@ -85,18 +86,21 @@ impl core::fmt::Debug for DeletionTargetRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeletionStatusRequest {
     pub cursor: Option<DeletionStatusCursorWire>,
     pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum DeletionStatusResponse {
     Page(DeletionStatusPage),
     Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeletionStatusPage {
     pub mark: ViewMarkWire,
     pub operations: Vec<DeletionOperationStatusView>,
@@ -104,6 +108,7 @@ pub struct DeletionStatusPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeletionOperationStatusView {
     pub operation: DeletionOperationWireRef,
     pub phase: DeletionPhaseWire,
@@ -115,6 +120,7 @@ pub struct DeletionOperationStatusView {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum DeletionPhaseWire {
     Active,
     Held,
@@ -135,6 +141,7 @@ impl DeletionPhaseWire {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum DeletionHoldWire {
     Unavailable,
     GenerationExhausted,
@@ -151,12 +158,14 @@ impl DeletionHoldWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum DeletionParticipantReportWire {
     NotReported,
     Reported(Vec<DeletionParticipantStatusWire>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeletionParticipantStatusWire {
     pub owner: String,
     pub progress: String,
@@ -166,17 +175,20 @@ pub struct DeletionParticipantStatusWire {
 string_wire_ref!(DeletionDemandWireId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ClientTempClass {
     PresentationBuffer,
     InputDraft,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum DeletionTargetWire {
     WipeClass { class: ClientTempClass },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeletionDemand {
     pub demand: DeletionDemandWireId,
     pub operation: DeletionOperationWireRef,
@@ -185,6 +197,7 @@ pub struct DeletionDemand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocalErasureResult {
     pub demand: DeletionDemandWireId,
     pub operation: DeletionOperationWireRef,

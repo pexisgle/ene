@@ -4,12 +4,14 @@ use super::refs::RevalidationReasonWire;
 use super::refs::{ClientLocalId, CompanionWireRef, RoundWireId, StreamWireId, TextLangWire};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum RoundTarget {
     New,
     Existing(RoundWireId),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubmitTextInput {
     pub companion: CompanionWireRef,
     pub target: RoundTarget,
@@ -30,6 +32,7 @@ impl core::fmt::Debug for SubmitTextInput {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TextBodyWire {
     pub text: String,
     pub lang: TextLangWire,
@@ -46,6 +49,7 @@ impl core::fmt::Debug for TextBodyWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum RoundIntakeOutcomeWire {
     AcceptedForRound {
         round: RoundWireId,
@@ -61,6 +65,7 @@ pub enum RoundIntakeOutcomeWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TextStreamOpen {
     pub stream: StreamWireId,
     pub round: RoundWireId,
@@ -68,6 +73,7 @@ pub struct TextStreamOpen {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TextStreamFrameWire {
     pub stream: StreamWireId,
     pub seq: u64,
@@ -88,6 +94,7 @@ impl core::fmt::Debug for TextStreamFrameWire {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum StreamClose {
     Completed,
     Interrupted,
@@ -96,12 +103,14 @@ pub enum StreamClose {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TextStreamClose {
     pub stream: StreamWireId,
     pub status: StreamClose,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfirmPresentationWire {
     pub round: RoundWireId,
     pub stream: Option<StreamWireId>,
@@ -122,6 +131,7 @@ impl core::fmt::Debug for ConfirmPresentationWire {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum PresentationStatus {
     Presented,
     Unknown,
@@ -129,12 +139,14 @@ pub enum PresentationStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum HistoryRole {
     Owner,
     Companion,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryItem {
     pub round: RoundWireId,
     pub role: HistoryRole,
@@ -157,6 +169,7 @@ impl core::fmt::Debug for HistoryItem {
 pub const HISTORY_LIMIT_MAX: u64 = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryRequest {
     pub companion: CompanionWireRef,
     pub since: Option<String>,
@@ -165,6 +178,7 @@ pub struct HistoryRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum HistoryResponse {
     Items(Vec<HistoryItem>),
     InvalidRequest,

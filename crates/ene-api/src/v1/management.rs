@@ -138,6 +138,7 @@ pub fn parse_consent_target(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ManagementIntentKind {
     StopCompanion,
     DeleteCompanion,
@@ -160,6 +161,7 @@ impl ManagementIntentKind {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManagementIntent {
     pub intent_id: CommandWireId,
     pub kind: ManagementIntentKind,
@@ -201,6 +203,7 @@ impl core::fmt::Debug for ManagementIntent {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IntentRationaleWire {
     pub origin: RationaleOrigin,
     pub quote: Option<String>,
@@ -217,12 +220,14 @@ impl core::fmt::Debug for IntentRationaleWire {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum RationaleOrigin {
     Conversation,
     ManagementSurface,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ManagementOutcome {
     AppliedAsOneTime,
     StoredAsRuleView { revision: ViewMarkWire },
@@ -233,6 +238,7 @@ pub enum ManagementOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManagementViewRequest {
     pub sections: Vec<String>,
     pub memory_after: Option<String>,
@@ -241,6 +247,7 @@ pub struct ManagementViewRequest {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ViewSection {
     pub kind: String,
     pub title: String,
@@ -259,6 +266,7 @@ impl core::fmt::Debug for ViewSection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManagementView {
     pub mark: ViewMarkWire,
     pub sections: Vec<ViewSection>,

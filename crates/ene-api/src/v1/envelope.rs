@@ -7,6 +7,7 @@ use super::refs::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProtocolVersion {
     pub major: u16,
     pub minor: u16,
@@ -16,12 +17,13 @@ impl ProtocolVersion {
     pub const V1: Self = Self { major: 1, minor: 0 };
 
     #[must_use]
-    pub fn shares_major_with(&self, other: &Self) -> bool {
-        self.major == other.major
+    pub fn matches_current(&self, other: &Self) -> bool {
+        self.major == other.major && self.minor == other.minor
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WireCorrelation {
     pub request_id: Option<RequestWireId>,
     pub command_id: Option<CommandWireId>,
@@ -29,6 +31,7 @@ pub struct WireCorrelation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WireSender {
     pub device_id: Option<DeviceWireId>,
     pub incarnation_id: ClientIncarnationId,
@@ -36,12 +39,14 @@ pub struct WireSender {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservedMarks {
     pub presence_generation_view: Option<u64>,
     pub round_view: Option<RoundWireId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WireEnvelope {
     pub protocol: ProtocolVersion,
     pub message_id: WireMessageId,

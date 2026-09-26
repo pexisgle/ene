@@ -99,7 +99,7 @@ impl HostHandle {
         let negotiable = advertise
             .supported_protocol
             .iter()
-            .any(|candidate| candidate.shares_major_with(&ProtocolVersion::V1));
+            .any(|candidate| candidate.matches_current(&ProtocolVersion::V1));
         if !negotiable {
             let client_max = advertise
                 .supported_protocol
