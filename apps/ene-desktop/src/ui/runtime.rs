@@ -13,7 +13,7 @@ use ene_body::ipc::{
 use ene_client::{Client, PendingPairingClient};
 use ene_local_control::{ControlOp, ControlOutcome, FromConfirmation};
 
-use crate::body_supervise::{BodyStatus, BodySupervisor};
+use crate::body_supervise::{BodyStatus, BodySuperviseError, BodySupervisor};
 use crate::control::ConfirmationClient;
 use crate::erasure::{self, GuiOwned};
 use crate::host_launch;
@@ -245,12 +245,23 @@ impl DesktopRuntime {
         commands.push(ParentToBody::PoseHint(PoseHint::Idle));
         commands.push(ParentToBody::Show);
         for command in commands {
-            if self.body.send_projection(&command).is_err() {
-                self.body_status = BodyStatus::Exited;
+            if !self.project_body_command(&command) {
                 break;
             }
         }
         self.body_hidden = self.body_status != BodyStatus::Spawned;
+    }
+
+    fn project_body_command(&mut self, command: &ParentToBody) -> bool {
+        match self.body.send_projection(command) {
+            Ok(()) => true,
+            Err(BodySuperviseError::Backpressure) => false,
+            Err(_) => {
+                self.body_status = BodyStatus::Exited;
+                self.body_pose_deadline = None;
+                false
+            }
+        }
     }
 
     #[must_use]
@@ -271,14 +282,14 @@ impl DesktopRuntime {
         self.body_pose_deadline = matches!(pose, PoseHint::Speaking | PoseHint::Attention)
             .then(|| Instant::now() + Duration::from_secs(2));
         if self.body_status == BodyStatus::Spawned {
-            let _result = self.body.send_projection(&ParentToBody::PoseHint(pose));
+            self.project_body_command(&ParentToBody::PoseHint(pose));
         }
     }
 
     pub fn show_body(&mut self) {
         if self.body_status == BodyStatus::Spawned
             && self.body.available()
-            && self.body.send_projection(&ParentToBody::Show).is_ok()
+            && self.project_body_command(&ParentToBody::Show)
         {
             self.body_hidden = false;
         }
@@ -287,7 +298,7 @@ impl DesktopRuntime {
     pub fn hide_body(&mut self) {
         if self.body_status == BodyStatus::Spawned
             && self.body.available()
-            && self.body.send_projection(&ParentToBody::Hide).is_ok()
+            && self.project_body_command(&ParentToBody::Hide)
         {
             self.body_hidden = true;
         }
