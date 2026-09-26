@@ -818,7 +818,8 @@ fn not_sent_for_deny(code: DenyCode) -> NotSentReason {
     }
 }
 
-pub mod fake {
+#[cfg(test)]
+mod fake {
     use std::future::Future;
     use std::pin::Pin;
 
@@ -830,7 +831,6 @@ pub mod fake {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum FakeFailure {
-        Transport(String),
         ResponseLost,
     }
 
@@ -881,9 +881,6 @@ pub mod fake {
             Box::pin(async move {
                 let result = if let Some(fail) = &self.fail {
                     Err(match fail {
-                        FakeFailure::Transport(reason) => {
-                            InferenceTechnicalError::ProviderTransportFailed(reason.clone())
-                        }
                         FakeFailure::ResponseLost => InferenceTechnicalError::ResponseLost,
                     })
                 } else {
