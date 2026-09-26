@@ -24,6 +24,7 @@ uuid_wire_id!(ConnectionWireId);
 uuid_wire_id!(DeviceWireId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientIncarnationId {
     pub counter: u64,
     pub random: u64,

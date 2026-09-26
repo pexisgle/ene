@@ -126,13 +126,13 @@ fn pairing_and_authentication_frames_preserve_identity_and_nonce() -> Result<(),
     let error =
         crate::transport::incompatible_protocol_error(&ene_api::v1::reject::IncompatibleProtocol {
             host_max: ProtocolVersion::V1,
-            client_max: ProtocolVersion { major: 9, minor: 3 },
-            hint: String::from("use a client release sharing the host's protocol major 1"),
+            client_max: ProtocolVersion { major: 1, minor: 3 },
+            hint: String::from("use a client release matching the host's protocol 1.0"),
         });
     let crate::ClientError::ServerRejected(message) = error else {
-        panic!("a major mismatch is a terminal refusal");
+        panic!("a minor-only mismatch is a terminal refusal");
     };
-    for expected in ["host max 1.0", "client max 9.3", "protocol major 1"] {
+    for expected in ["host max 1.0", "client max 1.3", "protocol 1.0"] {
         assert!(
             message.contains(expected),
             "the refusal must carry {expected:?}: {message}"

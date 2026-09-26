@@ -113,8 +113,8 @@ pub(crate) fn incompatible_protocol(
 
 fn upgrade_hint(host_max: ProtocolVersion) -> String {
     format!(
-        "use a client release sharing the host's protocol major {}",
-        host_max.major
+        "use a client release matching the host's protocol {}.{}",
+        host_max.major, host_max.minor
     )
 }
 

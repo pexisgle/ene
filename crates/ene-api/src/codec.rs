@@ -8,6 +8,7 @@ const MESSAGE_TYPE_TOKEN_CHARS: usize = 64;
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WireFrame {
     pub envelope: WireEnvelope,
     pub payload: WirePayload,
@@ -126,13 +127,25 @@ pub fn decode_frame(body: &[u8]) -> Result<DecodedFrame, CodecError> {
             },
         });
     }
+    // The externally tagged payload map admits a trailing key only through the
+    // probe: serde's newtype variant path never inspects it, so the rule is
+    // enforced here rather than left to a container attribute that cannot see it.
+    if probe.payload.trailing_keys {
+        return Ok(DecodedFrame::Unsupported {
+            envelope: probe.envelope,
+            reason: UnsupportedReason::UnknownFieldValue {
+                message_type: bound_token(&probe.payload.key),
+            },
+        });
+    }
     match rmp_serde::from_slice::<WireFrame>(body) {
         Ok(frame) => Ok(DecodedFrame::Known(frame)),
         Err(error) => {
             let message_type = bound_token(&probe.payload.key);
             let reason = match &error {
                 rmp_serde::decode::Error::Syntax(message)
-                    if message.starts_with("unknown variant") =>
+                    if message.starts_with("unknown variant")
+                        || message.starts_with("unknown field") =>
                 {
                     Some(UnsupportedReason::UnknownFieldValue { message_type })
                 }
@@ -164,6 +177,7 @@ struct FrameProbe {
 
 struct PayloadProbe {
     key: String,
+    trailing_keys: bool,
 }
 
 impl<'de> Deserialize<'de> for PayloadProbe {
@@ -186,6 +200,7 @@ impl<'de> Deserialize<'de> for PayloadProbe {
             {
                 Ok(PayloadProbe {
                     key: value.to_owned(),
+                    trailing_keys: false,
                 })
             }
 
@@ -199,10 +214,12 @@ impl<'de> Deserialize<'de> for PayloadProbe {
                     .next_key()?
                     .ok_or_else(|| de::Error::custom("payload map carries no message type key"))?;
                 map.next_value::<de::IgnoredAny>()?;
+                let mut trailing_keys = false;
                 while map.next_key::<de::IgnoredAny>()?.is_some() {
                     map.next_value::<de::IgnoredAny>()?;
+                    trailing_keys = true;
                 }
-                Ok(PayloadProbe { key })
+                Ok(PayloadProbe { key, trailing_keys })
             }
         }
 
@@ -231,6 +248,7 @@ mod tests {
     use crate::v1::reject::RejectKind;
     use crate::v1::round::{RoundTarget, SubmitTextInput, TextBodyWire};
     use serde::Serialize;
+    use std::collections::BTreeMap;
 
     fn sample_frame() -> WireFrame {
         let sender = WireSender {
@@ -294,7 +312,7 @@ mod tests {
     #[derive(Serialize)]
     struct PartialSubmit {
         companion: CompanionWireRef,
-        round: Option<crate::v1::refs::RoundWireId>,
+        target: crate::v1::round::RoundTarget,
         body: TextBodyWire,
     }
 
@@ -336,6 +354,123 @@ mod tests {
             decode_frame(&body),
             Err(CodecError::DecodeFailed { .. })
         ));
+    }
+
+    #[test]
+    fn an_unknown_field_in_a_known_payload_is_rejected_rather_than_ignored() {
+        #[derive(Serialize)]
+        struct SubmitWithExtra {
+            companion: CompanionWireRef,
+            target: crate::v1::round::RoundTarget,
+            local_id: crate::v1::refs::ClientLocalId,
+            body: TextBodyWire,
+            future_optional: u32,
+        }
+
+        #[derive(Serialize)]
+        enum Payload {
+            SubmitTextInput(SubmitWithExtra),
+        }
+
+        #[derive(Serialize)]
+        struct Frame {
+            envelope: WireEnvelope,
+            payload: Payload,
+        }
+
+        let well_formed = SubmitWithExtra {
+            companion: CompanionWireRef(String::from("companion-1")),
+            target: crate::v1::round::RoundTarget::New,
+            local_id: crate::v1::refs::ClientLocalId(String::from("local-1")),
+            body: TextBodyWire {
+                text: String::from("hello"),
+                lang: TextLangWire(String::from("en")),
+            },
+            future_optional: 2,
+        };
+        let body = rmp_serde::to_vec_named(&Frame {
+            envelope: envelope_of("SubmitTextInput"),
+            payload: Payload::SubmitTextInput(well_formed),
+        })
+        .expect("the crafted frame encodes");
+        let DecodedFrame::Unsupported { reason, .. } =
+            decode_frame(&body).expect("the crafted frame decodes to a typed rejection")
+        else {
+            panic!(
+                "an unknown field must reject the frame instead of decoding it as the old shape"
+            );
+        };
+        assert_eq!(
+            reason,
+            super::UnsupportedReason::UnknownFieldValue {
+                message_type: String::from("SubmitTextInput"),
+            }
+        );
+        assert_eq!(reason.reject_kind(), RejectKind::UnsupportedFieldValue);
+    }
+
+    #[test]
+    fn a_trailing_key_in_the_payload_map_is_rejected_not_ignored() {
+        #[derive(Serialize)]
+        struct TrailingPayload {
+            envelope: WireEnvelope,
+            payload: BTreeMap<String, PayloadBody>,
+        }
+
+        #[derive(Serialize)]
+        enum PayloadBody {
+            SubmitTextInput(TrailingSubmit),
+        }
+
+        #[derive(Serialize)]
+        struct TrailingSubmit {
+            companion: CompanionWireRef,
+            target: crate::v1::round::RoundTarget,
+            local_id: crate::v1::refs::ClientLocalId,
+            body: TextBodyWire,
+        }
+
+        let mut payload = BTreeMap::new();
+        payload.insert(
+            String::from("SubmitTextInput"),
+            PayloadBody::SubmitTextInput(TrailingSubmit {
+                companion: CompanionWireRef(String::from("companion-1")),
+                target: crate::v1::round::RoundTarget::New,
+                local_id: crate::v1::refs::ClientLocalId(String::from("local-1")),
+                body: TextBodyWire {
+                    text: String::from("hello"),
+                    lang: TextLangWire(String::from("en")),
+                },
+            }),
+        );
+        payload.insert(
+            String::from("future_payload"),
+            PayloadBody::SubmitTextInput(TrailingSubmit {
+                companion: CompanionWireRef(String::from("companion-1")),
+                target: crate::v1::round::RoundTarget::New,
+                local_id: crate::v1::refs::ClientLocalId(String::from("local-2")),
+                body: TextBodyWire {
+                    text: String::from("second key"),
+                    lang: TextLangWire(String::from("en")),
+                },
+            }),
+        );
+        let body = rmp_serde::to_vec_named(&TrailingPayload {
+            envelope: envelope_of("SubmitTextInput"),
+            payload,
+        })
+        .expect("the crafted frame encodes");
+        let DecodedFrame::Unsupported { reason, .. } =
+            decode_frame(&body).expect("the crafted frame decodes to a typed rejection")
+        else {
+            panic!("a trailing payload key must reject the frame instead of being ignored");
+        };
+        assert_eq!(
+            reason,
+            super::UnsupportedReason::UnknownFieldValue {
+                message_type: String::from("SubmitTextInput"),
+            }
+        );
     }
 
     #[test]
@@ -389,7 +524,7 @@ mod tests {
                     envelope: envelope_of("FuturePing"),
                     payload: CraftedPayload::SubmitTextInput(PartialSubmit {
                         companion: CompanionWireRef(String::from("companion-1")),
-                        round: None,
+                        target: crate::v1::round::RoundTarget::New,
                         body: TextBodyWire {
                             text: String::from("body never inspected"),
                             lang: TextLangWire(String::from("en")),
@@ -419,7 +554,7 @@ mod tests {
                     envelope: envelope_of("SubmitTextInput"),
                     payload: CraftedPayload::SubmitTextInput(PartialSubmit {
                         companion: CompanionWireRef(String::from("companion-1")),
-                        round: None,
+                        target: crate::v1::round::RoundTarget::New,
                         body: TextBodyWire {
                             text: String::from("local_id deliberately absent"),
                             lang: TextLangWire(String::from("en")),
@@ -453,7 +588,7 @@ mod tests {
                 envelope: envelope_of(&long),
                 payload: CraftedPayload::SubmitTextInput(PartialSubmit {
                     companion: CompanionWireRef(String::from("companion-1")),
-                    round: None,
+                    target: crate::v1::round::RoundTarget::New,
                     body: TextBodyWire {
                         text: String::from("payload type is known"),
                         lang: TextLangWire(String::from("en")),

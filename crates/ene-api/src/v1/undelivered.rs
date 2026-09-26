@@ -17,6 +17,7 @@ pub const MAX_SOURCE_LIMIT_BYTES: u32 = 16384;
 pub const DEFAULT_SOURCE_LIMIT_BYTES: u32 = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UndeliveredSourceView {
     pub kind: String,
     pub subject: String,
@@ -24,6 +25,7 @@ pub struct UndeliveredSourceView {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UndeliveredItemView {
     pub reference: UndeliveredWireRef,
     pub source: UndeliveredSourceView,
@@ -44,6 +46,7 @@ impl core::fmt::Debug for UndeliveredItemView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskReportView {
     pub task: TaskWireRef,
     pub revision: u64,
@@ -52,6 +55,7 @@ pub struct TaskReportView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UndeliveredSummary {
     pub receipt: PresentationReceiptWireRef,
     pub round: RoundWireId,
@@ -63,6 +67,7 @@ pub struct UndeliveredSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UndeliveredRequest {
     pub companion: Option<CompanionWireRef>,
     pub cursor: Option<PageCursorWire>,
@@ -72,6 +77,7 @@ pub struct UndeliveredRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum UndeliveredResponse {
     Summary(UndeliveredSummary),
     Unavailable,
@@ -82,12 +88,14 @@ pub enum UndeliveredResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UndeliveredAck {
     pub receipt: PresentationReceiptWireRef,
     pub status: PresentationStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum UndeliveredAckOutcome {
     Presented { presented: u32 },
     AlreadyPresented,
@@ -101,12 +109,14 @@ pub enum UndeliveredAckOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListTasks {
     pub cursor: Option<PageCursorWire>,
     pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskListItem {
     pub task: TaskWireRef,
     pub revision: u64,
@@ -116,12 +126,14 @@ pub struct TaskListItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskListPage {
     pub tasks: Vec<TaskListItem>,
     pub next_cursor: Option<PageCursorWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum TaskListResponse {
     Page(TaskListPage),
     StaleBaseView { current: Option<PageCursorWire> },
@@ -129,6 +141,7 @@ pub enum TaskListResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GetTaskReport {
     pub task: TaskWireRef,
     pub cursor: Option<PageCursorWire>,
@@ -136,6 +149,7 @@ pub struct GetTaskReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskReportRowView {
     pub kind: String,
     pub id: String,
@@ -144,6 +158,7 @@ pub struct TaskReportRowView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskReportPage {
     pub task: TaskWireRef,
     pub revision: u64,
@@ -155,6 +170,7 @@ pub struct TaskReportPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum TaskReportResponse {
     Page(TaskReportPage),
     UnknownRef,
@@ -163,6 +179,7 @@ pub enum TaskReportResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GetReportSource {
     pub source: ReportSourceWireRef,
     pub cursor: Option<u64>,
@@ -170,6 +187,7 @@ pub struct GetReportSource {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReportSourcePageView {
     pub text: String,
     pub total_bytes: u64,
@@ -188,6 +206,7 @@ impl core::fmt::Debug for ReportSourcePageView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ReportSourceResponse {
     Page(ReportSourcePageView),
     UnknownRef,
@@ -195,11 +214,13 @@ pub enum ReportSourceResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SelectTask {
     pub task: TaskWireRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskSelected {
     pub task: TaskWireRef,
     pub revision: u64,
@@ -209,6 +230,7 @@ pub struct TaskSelected {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum SelectTaskResponse {
     Selected(TaskSelected),
     UnknownRef,
@@ -216,6 +238,7 @@ pub enum SelectTaskResponse {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResumeTask {
     pub task: TaskWireRef,
     pub expected_revision: u64,
@@ -236,6 +259,7 @@ impl core::fmt::Debug for ResumeTask {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ResumeTaskOutcomeWire {
     Resumed {
         task: TaskWireRef,

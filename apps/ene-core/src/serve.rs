@@ -907,7 +907,7 @@ impl HostHandle {
                     ),
                 );
             }
-            (None, got) if !got.shares_major_with(&ProtocolVersion::V1) => {
+            (None, got) if !got.matches_current(&ProtocolVersion::V1) => {
                 return emit_end(sink, incompatible_protocol(frame.envelope(), &live, got));
             }
             _ => {}

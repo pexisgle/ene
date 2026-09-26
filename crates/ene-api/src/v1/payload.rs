@@ -25,6 +25,7 @@ use super::undelivered::{
 use super::usage::{UsageSummaryRequest, UsageSummaryResponse};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BodyStateHint {
     pub asset_ref: String,
     pub pose_hint: String,

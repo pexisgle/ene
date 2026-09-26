@@ -5,17 +5,20 @@ use super::envelope::ProtocolVersion;
 use super::refs::DeviceWireId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PairingRequest {
     pub device_descriptor: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum PairingResult {
     PendingOwnerConfirmation { pending_id: String },
     Denied { reason: String },
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
 pub struct PairingProvisionSecret(String);
 
 impl PairingProvisionSecret {
@@ -37,17 +40,20 @@ impl core::fmt::Debug for PairingProvisionSecret {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PairingProvision {
     pub device_id: DeviceWireId,
     pub pairing_secret: PairingProvisionSecret,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthChallenge {
     pub nonce: String,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthProof {
     pub proof: String,
 }
@@ -62,6 +68,7 @@ impl core::fmt::Debug for AuthProof {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum AuthResult {
     Accepted {
         connection_id: super::refs::ConnectionWireId,
@@ -72,17 +79,20 @@ pub enum AuthResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapabilityAdvertise {
     pub supported_protocol: Vec<ProtocolVersion>,
     pub platform: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NegotiatedConnection {
     pub version: ProtocolVersion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DisconnectNotice {
     pub reason: String,
 }

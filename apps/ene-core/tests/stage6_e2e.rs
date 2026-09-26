@@ -4826,8 +4826,7 @@ async fn wss_unknown_wire_subcase() {
             serde_json::json!({
                 "SubmitTextInput": {
                     "companion": "default",
-                    "round": null,
-                    "fresh": false,
+                    "target": "New",
                     "body": {
                         "text": "local_id deliberately absent",
                         "lang": "en",
@@ -4861,6 +4860,63 @@ async fn wss_unknown_wire_subcase() {
             other.message_type()
         ),
     }
+
+    // Each case gets its own connection so a refusal never interferes with the
+    // next. The advertised list is the current version, so this refusal can only
+    // come from the envelope-version gate, never from the handshake list check.
+    let mut host = raw_dial(dir.path()).await;
+    let mut minor_envelope = crafted_envelope("CapabilityAdvertise");
+    minor_envelope.protocol = ProtocolVersion { major: 1, minor: 1 };
+    let minor_reply = host
+        .send_raw_payload(
+            minor_envelope,
+            serde_json::json!({
+                "CapabilityAdvertise": {
+                    "supported_protocol": [{ "major": 1, "minor": 0 }],
+                    "platform": "test",
+                },
+            }),
+        )
+        .await;
+    let refusal = host.recv_wire().await;
+    assert_eq!(refusal.envelope.correlation.reply_to, Some(minor_reply));
+    let WirePayload::IncompatibleProtocol(notice) = refusal.payload else {
+        panic!("a minor-only mismatch must be refused as incompatible, got {refusal:?}");
+    };
+    assert_eq!(notice.host_max, ProtocolVersion::V1);
+    assert_eq!(notice.client_max, ProtocolVersion { major: 1, minor: 1 });
+    assert!(
+        notice.hint.contains("protocol 1.0"),
+        "the hint must name both components, got {:?}",
+        notice.hint
+    );
+
+    // The envelope version is current, but the advertised list names only a
+    // neighbouring version: the handshake must still refuse, so a client cannot
+    // reach negotiation by pinning a matching envelope around a mismatched list.
+    let mut host = raw_dial(dir.path()).await;
+    let unlisted_reply = host
+        .send_raw_payload(
+            crafted_envelope("CapabilityAdvertise"),
+            serde_json::json!({
+                "CapabilityAdvertise": {
+                    "supported_protocol": [{ "major": 1, "minor": 1 }],
+                    "platform": "test",
+                },
+            }),
+        )
+        .await;
+    let unlisted = host.recv_wire().await;
+    assert_eq!(unlisted.envelope.correlation.reply_to, Some(unlisted_reply));
+    let WirePayload::IncompatibleProtocol(list_notice) = unlisted.payload else {
+        panic!("an advertised list without the current version must be refused, got {unlisted:?}");
+    };
+    assert_eq!(list_notice.host_max, ProtocolVersion::V1);
+    assert_eq!(
+        list_notice.client_max,
+        ProtocolVersion { major: 1, minor: 1 },
+        "the refusal must name the highest advertised version"
+    );
 
     stop.send_replace(true);
     let joined = tokio::time::timeout(Duration::from_secs(30), server)

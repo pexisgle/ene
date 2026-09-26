@@ -6,6 +6,7 @@ pub const USAGE_PAGE_LIMIT_MAX: u32 = 50;
 pub const USAGE_PAGE_LIMIT_DEFAULT: u32 = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageSummaryRequest {
     pub from: Option<String>,
     pub to: Option<String>,
@@ -19,12 +20,14 @@ pub struct UsageSummaryRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageMoneyView {
     pub currency: String,
     pub micros: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageTokenUsageView {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
@@ -32,6 +35,7 @@ pub struct UsageTokenUsageView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageCostView {
     pub input: UsageMoneyView,
     pub cached_input: UsageMoneyView,
@@ -40,6 +44,7 @@ pub struct UsageCostView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageSummaryRowView {
     pub provider: String,
     pub model: String,
@@ -53,6 +58,7 @@ pub struct UsageSummaryRowView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageCapView {
     pub mark: ViewMarkWire,
     pub provider: Option<String>,
@@ -61,12 +67,14 @@ pub struct UsageCapView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageCapStoredView {
     pub limit: UsageMoneyView,
     pub consumption: UsageCapConsumptionView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum UsageCapConsumptionView {
     Known {
         reserved: UsageMoneyView,
@@ -80,6 +88,7 @@ pub enum UsageCapConsumptionView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageSummaryPage {
     pub rows: Vec<UsageSummaryRowView>,
     pub next_cursor: Option<UsageCursorWire>,
@@ -88,6 +97,7 @@ pub struct UsageSummaryPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum UsageSummaryResponse {
     Page(UsageSummaryPage),
     StaleBaseView { current: Option<UsageCursorWire> },
@@ -115,9 +125,15 @@ mod tests {
         assert_eq!(USAGE_PAGE_LIMIT_MAX, 50);
         assert_eq!(USAGE_PAGE_LIMIT_DEFAULT, 50);
 
-        let decoded: UsageSummaryRequest =
-            serde_json::from_str(r#"{"cursor":null,"future_optional":{"revision":2}}"#)
-                .expect("optional and unknown fields are accepted");
+        assert!(
+            serde_json::from_str::<UsageSummaryRequest>(
+                r#"{"cursor":null,"future_optional":{"revision":2}}"#
+            )
+            .is_err(),
+            "an unknown field must be rejected rather than ignored"
+        );
+        let decoded: UsageSummaryRequest = serde_json::from_str(r#"{"cursor":null}"#)
+            .expect("a defined optional field may be omitted");
         assert_eq!(decoded.from, None);
         assert_eq!(decoded.to, None);
         assert_eq!(decoded.provider, None);
