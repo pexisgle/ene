@@ -2926,12 +2926,13 @@ async fn stage6_registered_secret_absent_from_every_first_party_surface() {
     select_workspace(served.client(), &workspace)
         .await
         .expect("workspace must select");
-    let (round, stream, _reply) = send_round(
+    let (round, stream, reply) = send_round(
         served.client(),
         &format!("please remember the passphrase {SECRET}"),
     )
     .await
     .expect("the secret round must complete");
+    assert_absent("round stream", &reply, SECRET);
     confirm_round(served.client(), &round, stream).await;
     let (round, stream, _) =
         send_round(served.client(), "please read input.txt and write report.md")

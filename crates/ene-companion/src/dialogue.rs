@@ -211,116 +211,38 @@ enum ControlPresentation {
     LateMarker,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ControlMode {
-    Undecided,
-    Ordinary,
-    Directive,
-    LateMarker,
-}
-
-struct ControlHoldingSink<'a> {
-    inner: &'a mut (dyn DeltaSink + Send),
+struct ControlHoldingSink {
     buffer: String,
-    mode: ControlMode,
 }
 
-impl<'a> ControlHoldingSink<'a> {
-    fn new(inner: &'a mut (dyn DeltaSink + Send)) -> Self {
+impl ControlHoldingSink {
+    fn new() -> Self {
         Self {
-            inner,
             buffer: String::new(),
-            mode: ControlMode::Undecided,
         }
     }
 
-    async fn push_raw(&mut self, text: &str) -> DeltaFlow {
-        self.inner.push_delta(text).await
+    async fn push(&mut self, delta: &str) -> DeltaFlow {
+        self.buffer.push_str(delta);
+        DeltaFlow::Continue
     }
 
-    async fn flush_ordinary(&mut self) -> DeltaFlow {
-        if let Some(position) = self.buffer.find(TASK_CONTROL_MARKER) {
-            let prefix = self.buffer[..position].to_owned();
-            self.buffer.clear();
-            self.mode = ControlMode::LateMarker;
-            if prefix.is_empty() {
-                return DeltaFlow::Continue;
-            }
-            return self.push_raw(&prefix).await;
-        }
-        let max_hold = (TASK_CONTROL_MARKER.len() - 1).min(self.buffer.len());
-        let mut hold = 0;
-        for length in (1..=max_hold).rev() {
-            let start = self.buffer.len() - length;
-            if self.buffer.is_char_boundary(start)
-                && TASK_CONTROL_MARKER.starts_with(&self.buffer[start..])
-            {
-                hold = length;
-                break;
-            }
-        }
-        let publish_len = self.buffer.len() - hold;
-        if publish_len == 0 {
-            return DeltaFlow::Continue;
-        }
-        let publish: String = self.buffer.drain(..publish_len).collect();
-        self.push_raw(&publish).await
-    }
-
-    async fn decide_undecided(&mut self) -> DeltaFlow {
+    fn presentation(&self) -> ControlPresentation {
         let Some(start) = self
             .buffer
             .find(|character: char| !character.is_whitespace())
         else {
-            return DeltaFlow::Continue;
+            return ControlPresentation::Ordinary;
         };
-        if let Some(position) = self.buffer.find(TASK_CONTROL_MARKER) {
-            if position == start {
-                self.mode = ControlMode::Directive;
-                self.buffer.clear();
-                return DeltaFlow::Continue;
-            }
-            return self.flush_ordinary().await;
-        }
-        let candidate = &self.buffer[start..];
-        if candidate.len() < TASK_CONTROL_MARKER.len() && TASK_CONTROL_MARKER.starts_with(candidate)
-        {
-            return DeltaFlow::Continue;
-        }
-        self.mode = ControlMode::Ordinary;
-        self.flush_ordinary().await
-    }
-
-    async fn push(&mut self, delta: &str) -> DeltaFlow {
-        match self.mode {
-            ControlMode::Directive | ControlMode::LateMarker => DeltaFlow::Continue,
-            ControlMode::Ordinary => {
-                self.buffer.push_str(delta);
-                self.flush_ordinary().await
-            }
-            ControlMode::Undecided => {
-                self.buffer.push_str(delta);
-                self.decide_undecided().await
-            }
-        }
-    }
-
-    async fn finalize(&mut self) -> ControlPresentation {
-        match self.mode {
-            ControlMode::Directive => ControlPresentation::Directive,
-            ControlMode::LateMarker => ControlPresentation::LateMarker,
-            ControlMode::Undecided | ControlMode::Ordinary => {
-                if !self.buffer.is_empty() {
-                    let text = core::mem::take(&mut self.buffer);
-                    let _ = self.push_raw(&text).await;
-                }
-                ControlPresentation::Ordinary
-            }
+        match self.buffer.find(TASK_CONTROL_MARKER) {
+            Some(position) if position == start => ControlPresentation::Directive,
+            Some(_) => ControlPresentation::LateMarker,
+            None => ControlPresentation::Ordinary,
         }
     }
 }
 
-impl DeltaSink for ControlHoldingSink<'_> {
+impl DeltaSink for ControlHoldingSink {
     fn push_delta<'a>(
         &'a mut self,
         delta: &'a str,
@@ -353,7 +275,7 @@ pub async fn finish_turn(
         let (id, rev) = authorized.consent_premise();
         (id.to_owned(), rev)
     };
-    let mut holder = ControlHoldingSink::new(sink);
+    let mut holder = ControlHoldingSink::new();
     match inference
         .dispatch(authorized, prompt.into_prompt(), &mut holder, abort)
         .await
@@ -368,10 +290,17 @@ pub async fn finish_turn(
             if !is_current() {
                 return DialogueOutcome::Interrupted;
             }
-            let presentation = holder.finalize().await;
+            let presentation = holder.presentation();
             let (reply_text, reply_credential_set) = match presentation {
                 ControlPresentation::LateMarker => return DialogueOutcome::Interrupted,
-                ControlPresentation::Ordinary => (text.text().to_owned(), text.credential_set()),
+                ControlPresentation::Ordinary => {
+                    if !text.text().is_empty()
+                        && let DeltaFlow::Abort(_) = sink.push_delta(text.text()).await
+                    {
+                        return DialogueOutcome::Interrupted;
+                    }
+                    (text.text().to_owned(), text.credential_set())
+                }
                 ControlPresentation::Directive => {
                     let tail = match interpret_task_control(text.text()) {
                         DialogueTaskInterpretation::Command { command } => {
@@ -392,7 +321,7 @@ pub async fn finish_turn(
                     let Ok(scrubbed) = scrubber.scrub(&tail).await else {
                         return DialogueOutcome::Interrupted;
                     };
-                    if let DeltaFlow::Abort(_) = holder.push_raw(scrubbed.text()).await {
+                    if let DeltaFlow::Abort(_) = sink.push_delta(scrubbed.text()).await {
                         return DialogueOutcome::Interrupted;
                     }
                     (scrubbed.text().to_owned(), scrubbed.credential_set())
@@ -1122,46 +1051,31 @@ mod task_control_tests {
 #[cfg(test)]
 mod control_sink_tests {
     use super::{ControlHoldingSink, ControlPresentation};
-    use ene_inference::{DeltaFlow, DeltaSink};
 
-    #[derive(Default)]
-    struct RecordingSink {
-        published: String,
-    }
-
-    impl DeltaSink for RecordingSink {
-        fn push_delta<'a>(
-            &'a mut self,
-            delta: &'a str,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DeltaFlow> + Send + 'a>> {
-            Box::pin(async move {
-                self.published.push_str(delta);
-                DeltaFlow::Continue
-            })
-        }
-    }
-
-    async fn run(deltas: &[&str]) -> (String, ControlPresentation) {
-        let mut recorder = RecordingSink::default();
-        let mut holder = ControlHoldingSink::new(&mut recorder);
+    async fn presentation(deltas: &[&str]) -> ControlPresentation {
+        let mut holder = ControlHoldingSink::new();
         for delta in deltas {
-            assert_eq!(holder.push(delta).await, DeltaFlow::Continue);
+            let _ = holder.push(delta).await;
         }
-        let presentation = holder.finalize().await;
-        (recorder.published, presentation)
+        holder.presentation()
     }
 
     #[tokio::test]
-    async fn late_marker_stream_layouts_publish_the_same_visible_prefix() {
-        let cases: &[&[&str]] = &[
-            &["hello\n[task-control] {\"kind\":\"cancel\"}"],
-            &["hello\n[task-", "control] {\"kind\":\"cancel\"}"],
+    async fn control_markers_are_classified_before_sanitized_emission() {
+        let cases: &[(&[&str], ControlPresentation)] = &[
+            (&["hello"], ControlPresentation::Ordinary),
+            (
+                &["\n[task-", "control] {\"kind\":\"cancel\"}"],
+                ControlPresentation::Directive,
+            ),
+            (
+                &["hello\n[task-control] {\"kind\":\"cancel\"}"],
+                ControlPresentation::LateMarker,
+            ),
         ];
 
-        for &deltas in cases {
-            let (published, presentation) = run(deltas).await;
-            assert_eq!(published, "hello\n");
-            assert_eq!(presentation, ControlPresentation::LateMarker);
+        for (deltas, expected) in cases {
+            assert_eq!(presentation(deltas).await, *expected);
         }
     }
 }
