@@ -4861,8 +4861,9 @@ async fn wss_unknown_wire_subcase() {
         ),
     }
 
-    // A same-major, different-minor client is refused: the Host admits only an
-    // exact major+minor match and never interprets a neighbouring version.
+    // Each protocol refusal is terminal for its connection, so each gets its own.
+    // A same-major, different-minor envelope never reaches a handshake step.
+    let mut host = raw_dial(dir.path()).await;
     let mut minor_envelope = crafted_envelope("CapabilityAdvertise");
     minor_envelope.protocol = ProtocolVersion { major: 1, minor: 1 };
     let minor_reply = host
@@ -4870,10 +4871,8 @@ async fn wss_unknown_wire_subcase() {
             minor_envelope,
             serde_json::json!({
                 "CapabilityAdvertise": {
-                    "device_id": null,
-                    "client_descriptor": "minor-mismatch",
-                    "platform": "test",
                     "supported_protocol": [{ "major": 1, "minor": 1 }],
+                    "platform": "test",
                 },
             }),
         )
@@ -4889,6 +4888,33 @@ async fn wss_unknown_wire_subcase() {
         notice.hint.contains("protocol 1.0"),
         "the hint must name both components, got {:?}",
         notice.hint
+    );
+
+    // The envelope version is current, but the advertised list names only a
+    // neighbouring version: the handshake must still refuse, so a client cannot
+    // reach negotiation by pinning a matching envelope around a mismatched list.
+    let mut host = raw_dial(dir.path()).await;
+    let unlisted_reply = host
+        .send_raw_payload(
+            crafted_envelope("CapabilityAdvertise"),
+            serde_json::json!({
+                "CapabilityAdvertise": {
+                    "supported_protocol": [{ "major": 1, "minor": 1 }],
+                    "platform": "test",
+                },
+            }),
+        )
+        .await;
+    let unlisted = host.recv_wire().await;
+    assert_eq!(unlisted.envelope.correlation.reply_to, Some(unlisted_reply));
+    let WirePayload::IncompatibleProtocol(list_notice) = unlisted.payload else {
+        panic!("an advertised list without the current version must be refused, got {unlisted:?}");
+    };
+    assert_eq!(list_notice.host_max, ProtocolVersion::V1);
+    assert_eq!(
+        list_notice.client_max,
+        ProtocolVersion { major: 1, minor: 1 },
+        "the refusal must name the highest advertised version"
     );
 
     stop.send_replace(true);

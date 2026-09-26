@@ -705,7 +705,10 @@ impl PendingPairingClient {
             pending_id: _,
             pairing_message_id,
         } = self;
-        let provision_frame = transport.read_handshake("pairing provision").await?;
+        // The provision frame is the Host delivering the owner's approval, not a
+        // reply to a request just sent, so it waits for the human rather than a
+        // handshake bound.
+        let provision_frame = transport.read_known("pairing provision").await?;
         require_reply_to(&provision_frame, pairing_message_id, "pairing provision")?;
         let WirePayload::PairingProvision(provision) = provision_frame.payload else {
             return Err(ClientError::ServerRejected(format!(
@@ -1474,6 +1477,30 @@ mod tests {
             format!("{failure:?}").contains("websocket write failed"),
             "the writer-side reason must not be lost in the terminal race, got {failure:?}"
         );
+    }
+
+    #[test]
+    fn the_negotiated_version_must_match_major_and_minor_exactly() {
+        assert!(
+            require_current_version(ProtocolVersion::V1).is_ok(),
+            "the current version is admitted"
+        );
+        for refused in [
+            ProtocolVersion { major: 1, minor: 1 },
+            ProtocolVersion { major: 1, minor: 9 },
+            ProtocolVersion { major: 2, minor: 0 },
+            ProtocolVersion { major: 9, minor: 3 },
+        ] {
+            let error = require_current_version(refused)
+                .expect_err("a differing major or minor must be refused");
+            let ClientError::ServerRejected(message) = error else {
+                panic!("a version mismatch must be a terminal refusal");
+            };
+            assert!(
+                message.contains("expected 1.0"),
+                "the refusal must name the exact current version: {message}"
+            );
+        }
     }
 
     #[tokio::test]
