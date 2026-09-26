@@ -31,7 +31,18 @@ async fn read_until<R, F>(
             .await
             .expect("body read timed out")
             .expect("body read failed");
-        assert!(count > 0, "{closed}");
+        if count == 0 {
+            // End of stream still leaves whatever the peer already wrote sitting
+            // in the buffer, and readiness can report the close before the last
+            // chunk is drained, so decode the remainder before calling it closed.
+            if let Ok((event, used)) = decode_body(frame) {
+                frame.drain(..used);
+                if predicate(&event) {
+                    return;
+                }
+            }
+            panic!("{closed}");
+        }
         frame.extend_from_slice(&chunk[..count]);
     }
 }
